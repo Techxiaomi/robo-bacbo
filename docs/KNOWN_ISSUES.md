@@ -36,7 +36,9 @@ Risco residual: uma falha de rede exatamente após o executor enfileirar a ordem
 
 ### BUG-002 — `STANDBY` pode impedir novas entradas indefinidamente
 
-Novos auto-traders nascem em `STANDBY`. O snapshot não contém transição clara para `OPERANDO`, embora novas entradas exijam `OPERANDO`.
+Status: **mitigado no patch BUG-002**.
+
+Auto-Traders ativos permanecem em `STANDBY` enquanto aguardam evidência de conexão com a mesa. Ao receber o primeiro resultado de rodada válido e autenticado em `/receber-sinal`, o Node persiste `status_operacao = 'OPERANDO'` e atualiza o estado em memória. Traders desligados ou em estados como `META_ATINGIDA` não são promovidos.
 
 ### BUG-003 — Edição/toggle do auto-trader reseta `saldo_atual`
 

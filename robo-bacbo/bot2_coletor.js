@@ -621,6 +621,29 @@ app.get("/api/auditoria-ordens/:trader_id", async (req, res) => {
 // ==========================================
 // 7. MEMÓRIA E WEBHOOK TITÃ (COM LOGS COMPLETOS)
 // ==========================================
+
+async function ativarAutoTradersAguardandoMesa() {
+    const aguardandoMesa = AUTO_TRADERS_MEMORIA.filter(
+        trader => trader.ativo && trader.status_operacao === 'STANDBY'
+    );
+
+    if (aguardandoMesa.length === 0) return;
+
+    const ids = aguardandoMesa.map(trader => trader.id);
+    const placeholders = ids.map(() => '?').join(',');
+
+    await dbPool.query(
+        `UPDATE auto_traders SET status_operacao = 'OPERANDO' WHERE ativo = true AND status_operacao = 'STANDBY' AND id IN (${placeholders})`,
+        ids
+    );
+
+    aguardandoMesa.forEach(trader => {
+        trader.status_operacao = 'OPERANDO';
+    });
+
+    console.log(`🟢 ${aguardandoMesa.length} Auto-Trader(s) sincronizado(s) com a mesa e liberado(s) para OPERANDO.`);
+}
+
 async function carregarSistemasParaMemoria() {
     try {
         const [linhasEst] = await dbPool.query('SELECT * FROM estrategias WHERE ativo = true');
@@ -695,6 +718,12 @@ app.post("/receber-sinal", async (req, res) => {
         else if (rawVenc.includes("TIE") || rawVenc === "T" || rawVenc === "EMPATE") vencedor = "Tie";
 
         if (!vencedor) return;
+
+        try {
+            await ativarAutoTradersAguardandoMesa();
+        } catch (e) {
+            console.error("⚠️ Falha ao promover Auto-Trader de STANDBY para OPERANDO:", e.message);
+        }
 
         let p1 = (dados.dados_jogador && dados.dados_jogador.length > 0) ? parseInt(dados.dados_jogador[0]) : 0; 
         let p2 = (dados.dados_jogador && dados.dados_jogador.length > 1) ? parseInt(dados.dados_jogador[1]) : 0; 
