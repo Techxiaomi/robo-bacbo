@@ -30,3 +30,5 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - Criação de um novo Auto-Trader continua inicializando os dois saldos; recalibração futura deverá ser uma ação explícita.
 - BUG-004: `interrupcao_fluxo` agora inicia uma nova `idSessaoContinua` antes de registrar o primeiro giro após uma pausa superior a 60 segundos.
 - A separação de sessão reaproveita a checagem `mesmaSessao` já existente e não altera ordens pendentes, stake, Gale ou frontend.
+- BUG-005A: resultados finalizados de estratégias agora são persistidos em `historico_resultados` como `GREEN`, `TIE` ou `RED`, incluindo nível, multiplicador de empate e horário da rodada.
+- `historico_disparos_robos` permanece fora deste patch até que o fluxo de robôs consiga identificar de forma confiável quais robôs efetivamente receberam cada sinal.

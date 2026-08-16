@@ -660,6 +660,24 @@ function rotacionarSessaoAposInterrupcao(dados) {
     return true;
 }
 
+function nivelHistoricoResultado(galeAtual) {
+    if (galeAtual === 1) return 'GALE1';
+    if (galeAtual === 2) return 'GALE2';
+    return 'DIRETO';
+}
+
+async function registrarHistoricoResultadoEstrategia(est, tipoResultado, galeAtual, multiplicador, timestampColeta) {
+    const timestampMs = Number(timestampColeta);
+    const timestampSegundos = Number.isFinite(timestampMs) && timestampMs > 0
+        ? timestampMs / 1000
+        : Date.now() / 1000;
+
+    await dbPool.query(
+        `INSERT INTO historico_resultados (estrategia_id, tipo_resultado, nivel, multiplicador, data_hora) VALUES (?, ?, ?, ?, FROM_UNIXTIME(?))`,
+        [est.id, tipoResultado, nivelHistoricoResultado(galeAtual), multiplicador || '', timestampSegundos]
+    );
+}
+
 async function carregarSistemasParaMemoria() {
     try {
         const [linhasEst] = await dbPool.query('SELECT * FROM estrategias WHERE ativo = true');
@@ -781,6 +799,12 @@ app.post("/receber-sinal", async (req, res) => {
                         if (!est.stats.ties[tL][mult]) est.stats.ties[tL][mult]=0; est.stats.ties[tL][mult]++; 
                     }
                     
+                    try {
+                        await registrarHistoricoResultadoEstrategia(est, isTie ? 'TIE' : 'GREEN', st.galeAtual, isTie ? mult : '', dados.timestamp_coleta);
+                    } catch (e) {
+                        console.error(`Falha ao persistir historico da estrategia ${est.id}:`, e.message);
+                    }
+
                     if (est.quarentena_restante <= 0) {
                         for (let trader of AUTO_TRADERS_MEMORIA) {
                             let cf = trader.config;
@@ -833,6 +857,12 @@ app.post("/receber-sinal", async (req, res) => {
                         }
                     } else {
                         est.stats.red++;
+
+                        try {
+                            await registrarHistoricoResultadoEstrategia(est, 'RED', st.galeAtual, '', dados.timestamp_coleta);
+                        } catch (e) {
+                            console.error(`Falha ao persistir historico da estrategia ${est.id}:`, e.message);
+                        }
                         if (est.quarentena_restante <= 0) {
                             for (let trader of AUTO_TRADERS_MEMORIA) {
                                 let cf = trader.config;

@@ -56,7 +56,11 @@ Quando o Python sinaliza `interrupcao_fluxo = true`, o Node rotaciona `idSessaoC
 
 ### BUG-005 — Tabelas de histórico são consultadas sem persistência correspondente visível
 
-`historico_resultados` e `historico_disparos_robos` são usados nas estatísticas, mas não foram localizados INSERTs de todos os eventos esperados neste snapshot.
+Status: **parcialmente mitigado no patch BUG-005A**.
+
+`historico_resultados` passa a receber um registro quando cada sinal de estratégia é finalizado como `GREEN`, `TIE` ou `RED`, com nível `DIRETO`/`GALE1`/`GALE2`, multiplicador do empate quando aplicável e horário da rodada. Não são gravados registros intermediários a cada Gale, evitando duplicar um mesmo sinal.
+
+`historico_disparos_robos` permanece pendente: o backend atual não mantém uma associação confiável entre um sinal e os robôs que efetivamente o receberam. Essa persistência será tratada junto ao fluxo de robôs/Telegram do BUG-007, em vez de fabricar estatísticas de destinatários.
 
 ### BUG-006 — Stop Win / Stop Loss / Trailing / horário estão configuráveis no painel sem enforcement localizado
 
