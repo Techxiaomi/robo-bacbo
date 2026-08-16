@@ -1772,6 +1772,507 @@
         socketWeb.on('atualizar_robos', () => { if (document.getElementById('modal-robo').style.display !== 'flex') carregarRobos(); });
 
         // 🌟 AUTO TRADER FUNÇÕES (FRONTEND)
+        // ==========================================
+        // ROBÔS / CANAIS — CRUD E SINTONIZAÇÃO
+        // ==========================================
+        function escaparHtmlRobo(valor) {
+            return String(valor ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        }
+
+        function boolRobo(valor) {
+            return valor === true || valor === 1 || valor === '1';
+        }
+
+        function mudarAbaRobo(aba) {
+            document.querySelectorAll('#modal-robo .robo-nav-btn').forEach(btn => btn.classList.remove('ativo'));
+            document.querySelectorAll('#modal-robo .robo-tab-content').forEach(content => content.classList.remove('ativo'));
+
+            const btn = document.getElementById('btn-robo-tab-' + aba);
+            const content = document.getElementById('robo-tab-' + aba);
+            if (btn) btn.classList.add('ativo');
+            if (content) content.classList.add('ativo');
+        }
+
+        function toggleFormIA(check) {
+            const box = document.getElementById('form-ia-campos');
+            if (!box) return;
+            const ativo = !!check.checked;
+            box.style.opacity = ativo ? '1' : '0.5';
+            box.style.pointerEvents = ativo ? 'auto' : 'none';
+        }
+
+        function toggleFormCooldown(check) {
+            const box = document.getElementById('form-cd-campos');
+            if (!box) return;
+            const ativo = !!check.checked;
+            box.style.opacity = ativo ? '1' : '0.5';
+            box.style.pointerEvents = ativo ? 'auto' : 'none';
+            toggleTipoCooldown();
+        }
+
+        function toggleTipoCooldown() {
+            const tipo = document.getElementById('robo-cd-tipo')?.value || 'CONSERVADOR';
+            const boxReds = document.getElementById('box-cd-reds');
+            const boxIntervalo = document.getElementById('box-cd-intervalo');
+            const mostrarAcumulo = tipo === 'DINAMICO';
+            if (boxReds) boxReds.style.display = mostrarAcumulo ? 'flex' : 'none';
+            if (boxIntervalo) boxIntervalo.style.display = mostrarAcumulo ? 'flex' : 'none';
+        }
+
+        function adicionarLinhaDestinatario(nome = '', chatId = '') {
+            const tbody = document.getElementById('corpo-tabela-destinatarios');
+            if (!tbody) return;
+
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td><input type="text" class="dest-robo-nome" value="${escaparHtmlRobo(nome)}" placeholder="Cliente"></td>
+                <td><input type="text" class="dest-robo-chat" value="${escaparHtmlRobo(chatId)}" placeholder="Chat ID"></td>
+                <td style="text-align:center;">
+                    <button type="button" class="btn" style="background:#ff7777; padding:2px 7px; height:28px;" onclick="this.closest('tr').remove()">🗑️</button>
+                </td>
+            `;
+            tbody.appendChild(tr);
+        }
+
+        function coletarDestinatariosRobo() {
+            return Array.from(document.querySelectorAll('#corpo-tabela-destinatarios tr'))
+                .map(tr => ({
+                    nome_cliente: tr.querySelector('.dest-robo-nome')?.value.trim() || 'Cliente',
+                    chat_id: tr.querySelector('.dest-robo-chat')?.value.trim() || ''
+                }))
+                .filter(d => d.chat_id !== '');
+        }
+
+        function idsSelecionadosRobo(classe) {
+            return Array.from(document.querySelectorAll(`.${classe}:checked`)).map(el => el.value);
+        }
+
+        function renderizarSintonizadorRobo(config = {}) {
+            const origensAtivas = Array.isArray(config.origens) ? config.origens.map(String) : [];
+            const excecoesAtivas = Array.isArray(config.excecoes) ? config.excecoes.map(String) : [];
+            const avulsosAtivos = Array.isArray(config.avulsos) ? config.avulsos.map(String) : [];
+
+            const boxOrigens = document.getElementById('robo-lista-origens');
+            const boxExcecoes = document.getElementById('robo-lista-excecoes');
+            const boxAvulsos = document.getElementById('robo-lista-avulsos');
+
+            if (boxOrigens) {
+                boxOrigens.innerHTML = origensGlobais.length
+                    ? origensGlobais.map(o => {
+                        const nome = String(o.nome || '');
+                        return `<label class="check-item"><input type="checkbox" class="chk-robo-origem" value="${escaparHtmlRobo(nome)}" ${origensAtivas.includes(nome) ? 'checked' : ''}> <span>${escaparHtmlRobo(nome)}</span></label>`;
+                    }).join('')
+                    : '<span style="color:#666;">Nenhuma origem cadastrada.</span>';
+            }
+
+            const manuais = estrategiasGlobais.filter(e => !(e.is_dinamico === true || e.is_dinamico === 1));
+            const gerarPadroes = (classe, ativos) => manuais.length
+                ? manuais.map(e => {
+                    const id = String(e.id);
+                    const nome = `${e.nome || id} — ${e.origem || ''}`;
+                    return `<label class="check-item"><input type="checkbox" class="${classe}" value="${escaparHtmlRobo(id)}" ${ativos.includes(id) ? 'checked' : ''}> <span>${escaparHtmlRobo(nome)}</span></label>`;
+                }).join('')
+                : '<span style="color:#666;">Nenhum padrão manual cadastrado.</span>';
+
+            if (boxExcecoes) boxExcecoes.innerHTML = gerarPadroes('chk-robo-excecao', excecoesAtivas);
+            if (boxAvulsos) boxAvulsos.innerHTML = gerarPadroes('chk-robo-avulso', avulsosAtivos);
+        }
+
+        function preencherCampoRobo(id, valor) {
+            const el = document.getElementById(id);
+            if (el) el.value = valor ?? '';
+        }
+
+        function preencherCheckRobo(id, valor) {
+            const el = document.getElementById(id);
+            if (el) el.checked = !!valor;
+        }
+
+        function abrirFormularioRobo() {
+            roboEditandoId = null;
+            document.getElementById('titulo-robo').innerText = '🤖 Cadastrar Hub de Sinais';
+
+            preencherCampoRobo('robo-nome', '');
+            preencherCampoRobo('robo-tag', '');
+            preencherCampoRobo('robo-cor', '#007bff');
+            preencherCampoRobo('robo-token', '');
+            preencherCampoRobo('robo-min-assert', 0);
+            preencherCampoRobo('robo-stop-red', 0);
+            preencherCheckRobo('robo-ativo', true);
+            preencherCheckRobo('robo-envia-tel', true);
+            preencherCheckRobo('robo-envia-web', true);
+            preencherCheckRobo('robo-mostrar-nome', true);
+            preencherCheckRobo('robo-mostrar-padrao', true);
+            preencherCheckRobo('robo-mostrar-assertividade', true);
+            preencherCheckRobo('robo-detalhar-empates', true);
+            preencherCampoRobo('robo-cabecalho', '');
+            preencherCampoRobo('robo-rodape', '');
+
+            document.getElementById('corpo-tabela-destinatarios').innerHTML = '';
+            adicionarLinhaDestinatario('', '');
+
+            preencherCheckRobo('robo-ia-ativo', false);
+            preencherCampoRobo('robo-ia-range', 1000);
+            preencherCampoRobo('robo-ia-trigger', 150);
+            preencherCampoRobo('robo-ia-tam-min', 3);
+            preencherCampoRobo('robo-ia-tam-max', 5);
+            preencherCampoRobo('robo-ia-assert', 95);
+            preencherCampoRobo('robo-ia-ocorr', 10);
+            preencherCampoRobo('robo-ia-gales', 2);
+            preencherCheckRobo('robo-ia-prot', true);
+            preencherCampoRobo('robo-ia-blacklist', '');
+            preencherCampoRobo('robo-ia-shadow', 0);
+            preencherCampoRobo('robo-ia-max', 4);
+            preencherCampoRobo('robo-ia-drop-reds', 1);
+            preencherCampoRobo('robo-ia-drop-assert', 85);
+            preencherCampoRobo('robo-ia-ttl', 4);
+            preencherCheckRobo('robo-ia-aviso-tel', true);
+            preencherCampoRobo('robo-ia-aviso-texto', '🤖 Novo Padrão Detectado!');
+
+            preencherCheckRobo('robo-cd-ativo', false);
+            preencherCampoRobo('robo-cd-tipo', 'CONSERVADOR');
+            preencherCampoRobo('robo-cd-reds', 2);
+            preencherCampoRobo('robo-cd-intervalo', 30);
+            preencherCampoRobo('robo-cd-pausa', 15);
+            preencherCheckRobo('robo-cd-aviso-tel', true);
+            preencherCampoRobo('robo-cd-aviso-texto', '⚠️ EM PROTEÇÃO ⚠️ Retorna em {minutos} minutos.');
+
+            renderizarSintonizadorRobo({});
+            toggleFormIA(document.getElementById('robo-ia-ativo'));
+            toggleFormCooldown(document.getElementById('robo-cd-ativo'));
+            mudarAbaRobo('geral');
+            document.getElementById('modal-robo').style.display = 'flex';
+        }
+
+        function fecharFormularioRobo() {
+            document.getElementById('modal-robo').style.display = 'none';
+        }
+
+        function prepararEdicaoRobo(id) {
+            const robo = robosGlobais.find(r => Number(r.id) === Number(id));
+            if (!robo) return;
+
+            roboEditandoId = robo.id;
+            const cf = robo.config || {};
+            const ia = cf.auto_tuning || {};
+            const cd = cf.cooldown || {};
+
+            document.getElementById('titulo-robo').innerText = '✏️ Editar Hub de Sinais';
+            preencherCampoRobo('robo-nome', robo.nome || '');
+            preencherCampoRobo('robo-tag', robo.tag_visual || '');
+            preencherCampoRobo('robo-cor', robo.cor_hex || '#007bff');
+            preencherCampoRobo('robo-token', robo.telegram_token || '');
+            preencherCampoRobo('robo-min-assert', robo.min_assertividade ?? 0);
+            preencherCampoRobo('robo-stop-red', robo.stop_reds_seguidos ?? 0);
+            preencherCheckRobo('robo-ativo', boolRobo(robo.ativo));
+            preencherCheckRobo('robo-envia-tel', boolRobo(robo.enviar_telegram));
+            preencherCheckRobo('robo-envia-web', boolRobo(robo.enviar_web));
+            preencherCheckRobo('robo-mostrar-nome', cf.mostrar_nome !== false);
+            preencherCheckRobo('robo-mostrar-padrao', cf.mostrar_padrao !== false);
+            preencherCheckRobo('robo-mostrar-assertividade', cf.mostrar_assertividade !== false);
+            preencherCheckRobo('robo-detalhar-empates', cf.detalhar_empates !== false);
+            preencherCampoRobo('robo-cabecalho', cf.cabecalho || '');
+            preencherCampoRobo('robo-rodape', cf.rodape || '');
+
+            const tbody = document.getElementById('corpo-tabela-destinatarios');
+            tbody.innerHTML = '';
+            (robo.destinatarios || []).forEach(d => adicionarLinhaDestinatario(d.nome_cliente || '', d.chat_id || ''));
+            if ((robo.destinatarios || []).length === 0) adicionarLinhaDestinatario('', '');
+
+            preencherCheckRobo('robo-ia-ativo', !!ia.ativo);
+            preencherCampoRobo('robo-ia-range', ia.range ?? 1000);
+            preencherCampoRobo('robo-ia-trigger', ia.trigger ?? 150);
+            preencherCampoRobo('robo-ia-tam-min', ia.tam_min ?? 3);
+            preencherCampoRobo('robo-ia-tam-max', ia.tam_max ?? 5);
+            preencherCampoRobo('robo-ia-assert', ia.assert_min ?? 95);
+            preencherCampoRobo('robo-ia-ocorr', ia.ocorr_min ?? 10);
+            preencherCampoRobo('robo-ia-gales', ia.gales ?? 2);
+            preencherCheckRobo('robo-ia-prot', ia.proteger_empate !== false);
+            preencherCampoRobo('robo-ia-blacklist', ia.blacklist || '');
+            preencherCampoRobo('robo-ia-shadow', ia.shadow_giros ?? 0);
+            preencherCampoRobo('robo-ia-max', ia.max_padroes ?? 4);
+            preencherCampoRobo('robo-ia-drop-reds', ia.drop_reds ?? 1);
+            preencherCampoRobo('robo-ia-drop-assert', ia.drop_assert ?? 85);
+            preencherCampoRobo('robo-ia-ttl', ia.ttl_horas ?? 4);
+            preencherCheckRobo('robo-ia-aviso-tel', ia.aviso_telegram !== false);
+            preencherCampoRobo('robo-ia-aviso-texto', ia.aviso_texto || '🤖 Novo Padrão Detectado!');
+
+            preencherCheckRobo('robo-cd-ativo', !!cd.ativo);
+            preencherCampoRobo('robo-cd-tipo', cd.tipo || 'CONSERVADOR');
+            preencherCampoRobo('robo-cd-reds', cd.reds ?? 2);
+            preencherCampoRobo('robo-cd-intervalo', cd.intervalo_min ?? 30);
+            preencherCampoRobo('robo-cd-pausa', cd.pausa_min ?? 15);
+            preencherCheckRobo('robo-cd-aviso-tel', cd.aviso_telegram !== false);
+            preencherCampoRobo('robo-cd-aviso-texto', cd.aviso_texto || '⚠️ EM PROTEÇÃO ⚠️ Retorna em {minutos} minutos.');
+
+            renderizarSintonizadorRobo(cf);
+            toggleFormIA(document.getElementById('robo-ia-ativo'));
+            toggleFormCooldown(document.getElementById('robo-cd-ativo'));
+            mudarAbaRobo('geral');
+            document.getElementById('modal-robo').style.display = 'flex';
+        }
+
+        function construirPayloadRobo(roboBase = null, ativoOverride = null) {
+            const cfBase = roboBase?.config || {};
+            const iaBase = cfBase.auto_tuning || {};
+            const cdBase = cfBase.cooldown || {};
+
+            const config = {
+                ...cfBase,
+                origens: idsSelecionadosRobo('chk-robo-origem'),
+                excecoes: idsSelecionadosRobo('chk-robo-excecao'),
+                avulsos: idsSelecionadosRobo('chk-robo-avulso'),
+                mostrar_nome: document.getElementById('robo-mostrar-nome').checked,
+                mostrar_padrao: document.getElementById('robo-mostrar-padrao').checked,
+                mostrar_assertividade: document.getElementById('robo-mostrar-assertividade').checked,
+                detalhar_empates: document.getElementById('robo-detalhar-empates').checked,
+                cabecalho: document.getElementById('robo-cabecalho').value.trim(),
+                rodape: document.getElementById('robo-rodape').value.trim(),
+                auto_tuning: {
+                    ...iaBase,
+                    ativo: document.getElementById('robo-ia-ativo').checked,
+                    range: parseInt(document.getElementById('robo-ia-range').value) || 1000,
+                    trigger: parseInt(document.getElementById('robo-ia-trigger').value) || 150,
+                    tam_min: parseInt(document.getElementById('robo-ia-tam-min').value) || 3,
+                    tam_max: parseInt(document.getElementById('robo-ia-tam-max').value) || 5,
+                    assert_min: parseFloat(document.getElementById('robo-ia-assert').value) || 95,
+                    ocorr_min: parseInt(document.getElementById('robo-ia-ocorr').value) || 10,
+                    gales: parseInt(document.getElementById('robo-ia-gales').value) || 0,
+                    proteger_empate: document.getElementById('robo-ia-prot').checked,
+                    blacklist: document.getElementById('robo-ia-blacklist').value.trim(),
+                    shadow_giros: parseInt(document.getElementById('robo-ia-shadow').value) || 0,
+                    max_padroes: parseInt(document.getElementById('robo-ia-max').value) || 4,
+                    drop_reds: parseInt(document.getElementById('robo-ia-drop-reds').value) || 1,
+                    drop_assert: parseFloat(document.getElementById('robo-ia-drop-assert').value) || 85,
+                    ttl_horas: parseFloat(document.getElementById('robo-ia-ttl').value) || 4,
+                    aviso_telegram: document.getElementById('robo-ia-aviso-tel').checked,
+                    aviso_texto: document.getElementById('robo-ia-aviso-texto').value
+                },
+                cooldown: {
+                    ...cdBase,
+                    ativo: document.getElementById('robo-cd-ativo').checked,
+                    tipo: document.getElementById('robo-cd-tipo').value,
+                    reds: parseInt(document.getElementById('robo-cd-reds').value) || 2,
+                    intervalo_min: parseInt(document.getElementById('robo-cd-intervalo').value) || 30,
+                    pausa_min: parseInt(document.getElementById('robo-cd-pausa').value) || 15,
+                    aviso_telegram: document.getElementById('robo-cd-aviso-tel').checked,
+                    aviso_texto: document.getElementById('robo-cd-aviso-texto').value
+                }
+            };
+
+            return {
+                nome: document.getElementById('robo-nome').value.trim(),
+                tag: document.getElementById('robo-tag').value.trim(),
+                cor: document.getElementById('robo-cor').value || '#007bff',
+                telegram_token: document.getElementById('robo-token').value.trim(),
+                telegram_chat_id: roboBase?.telegram_chat_id || '',
+                enviar_telegram: document.getElementById('robo-envia-tel').checked,
+                enviar_web: document.getElementById('robo-envia-web').checked,
+                min_assert: Math.min(100, Math.max(0, parseFloat(document.getElementById('robo-min-assert').value) || 0)),
+                stop_reds: Math.max(0, parseInt(document.getElementById('robo-stop-red').value) || 0),
+                ativo: ativoOverride === null ? document.getElementById('robo-ativo').checked : !!ativoOverride,
+                config,
+                destinatarios: coletarDestinatariosRobo()
+            };
+        }
+
+        async function salvarRobo() {
+            const roboBase = roboEditandoId === null ? null : robosGlobais.find(r => Number(r.id) === Number(roboEditandoId));
+            const payload = construirPayloadRobo(roboBase);
+
+            if (!payload.nome) return alert('Preencha o Nome do Robô / Sala.');
+            if (payload.enviar_telegram && !payload.telegram_token) {
+                return alert('Informe o Token do Bot ou desative "Enviar para Telegram".');
+            }
+
+            try {
+                const url = roboEditandoId === null ? '/api/robo' : `/api/robo/${roboEditandoId}`;
+                const method = roboEditandoId === null ? 'POST' : 'PUT';
+                const res = await fetch(url, {
+                    method,
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(payload)
+                });
+
+                if (!res.ok) return alert('Erro ao salvar o robô.');
+                fecharFormularioRobo();
+                await carregarRobos();
+            } catch (e) {
+                alert('Erro de conexão ao salvar o robô.');
+            }
+        }
+
+        async function excluirRobo(id) {
+            if (!confirm('Excluir permanentemente este Robô / Canal?')) return;
+            try {
+                const res = await fetch(`/api/robo/${id}`, { method: 'DELETE' });
+                if (!res.ok) return alert('Erro ao excluir o robô.');
+                await carregarRobos();
+            } catch (e) {
+                alert('Erro de conexão ao excluir o robô.');
+            }
+        }
+
+        async function toggleRoboRapido(id, check) {
+            const robo = robosGlobais.find(r => Number(r.id) === Number(id));
+            if (!robo) return;
+
+            const novoAtivo = !!check.checked;
+            const payload = {
+                nome: robo.nome || '',
+                tag: robo.tag_visual || '',
+                cor: robo.cor_hex || '#007bff',
+                telegram_token: robo.telegram_token || '',
+                telegram_chat_id: robo.telegram_chat_id || '',
+                enviar_telegram: boolRobo(robo.enviar_telegram),
+                enviar_web: boolRobo(robo.enviar_web),
+                min_assert: Number(robo.min_assertividade) || 0,
+                stop_reds: Number(robo.stop_reds_seguidos) || 0,
+                ativo: novoAtivo,
+                config: robo.config || {},
+                destinatarios: robo.destinatarios || []
+            };
+
+            try {
+                const res = await fetch(`/api/robo/${id}`, {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(payload)
+                });
+                if (!res.ok) throw new Error('Falha ao atualizar');
+                await carregarRobos();
+            } catch (e) {
+                check.checked = !novoAtivo;
+            }
+        }
+
+        function resumoRobo24h(robo) {
+            const s = robo?.detalhes?.['24h'];
+            if (!s) return { total: 0, greens: 0, reds: 0, assert: '0.0' };
+
+            let ties = 0;
+            ['direto', 'gale1', 'gale2'].forEach(nivel => {
+                Object.values(s.ties?.[nivel] || {}).forEach(q => ties += Number(q) || 0);
+            });
+            const greens = (Number(s.green_direto) || 0) + (Number(s.gale1) || 0) + (Number(s.gale2) || 0) + ties;
+            const reds = Number(s.red) || 0;
+            const total = greens + reds;
+            return { total, greens, reds, assert: total ? ((greens / total) * 100).toFixed(1) : '0.0' };
+        }
+
+        function renderizarCardsRobos() {
+            const div = document.getElementById('lista-robos');
+            if (!div) return;
+            div.innerHTML = '';
+
+            if (!Array.isArray(robosGlobais) || robosGlobais.length === 0) {
+                div.innerHTML = '<p style="color:#666; text-align:center; padding:20px; grid-column:span 2; background:#1a1a1a; border:1px dashed #333; border-radius:8px;">Nenhum Robô / Canal cadastrado.</p>';
+                return;
+            }
+
+            robosGlobais.forEach(robo => {
+                const cf = robo.config || {};
+                const stats = resumoRobo24h(robo);
+                const ativo = boolRobo(robo.ativo);
+                const web = boolRobo(robo.enviar_web);
+                const tel = boolRobo(robo.enviar_telegram);
+                const emStandby = Number(robo.em_standby_ate || 0) > Date.now();
+                const qtdDest = Array.isArray(robo.destinatarios) ? robo.destinatarios.length : 0;
+                const origens = Array.isArray(cf.origens) ? cf.origens : [];
+                const avulsos = Array.isArray(cf.avulsos) ? cf.avulsos : [];
+                const excecoes = Array.isArray(cf.excecoes) ? cf.excecoes : [];
+
+                const tagsOrigem = origens.length
+                    ? origens.map(o => `<span class="badge" style="margin-right:4px;">${escaparHtmlRobo(o)}</span>`).join('')
+                    : '<span style="color:#666; font-size:11px;">Nenhuma origem incluída</span>';
+
+                const status = !ativo
+                    ? '<span style="color:#ff7777; font-size:11px; font-weight:bold;">🔴 DESLIGADO</span>'
+                    : emStandby
+                        ? '<span style="color:#ffc107; font-size:11px; font-weight:bold;">🛡️ EM PROTEÇÃO</span>'
+                        : '<span style="color:#28a745; font-size:11px; font-weight:bold;">🟢 ATIVO</span>';
+
+                div.innerHTML += `
+                    <div class="card" style="border-left:4px solid ${escaparHtmlRobo(robo.cor_hex || '#007bff')}; ${ativo ? '' : 'opacity:0.6;'}">
+                        <div style="display:flex; justify-content:space-between; gap:10px; align-items:flex-start;">
+                            <div>
+                                <h3 style="margin:0 0 5px 0; font-size:16px;">🤖 ${escaparHtmlRobo(robo.nome || 'Robô')} ${robo.tag_visual ? `<span class="robo-tag-badge" style="background:${escaparHtmlRobo(robo.cor_hex || '#007bff')};">${escaparHtmlRobo(robo.tag_visual)}</span>` : ''}</h3>
+                                ${status}
+                            </div>
+                            <div style="display:flex; align-items:center; gap:8px;">
+                                <label class="switch" title="Ativar/Desativar"><input type="checkbox" ${ativo ? 'checked' : ''} onchange="toggleRoboRapido(${Number(robo.id)}, this)"><span class="slider"></span></label>
+                                <button class="btn" style="background:transparent; color:#ffc107; padding:2px; height:auto;" onclick="prepararEdicaoRobo(${Number(robo.id)})">✏️</button>
+                                <button class="btn" style="background:transparent; color:#ff7777; padding:2px; height:auto;" onclick="excluirRobo(${Number(robo.id)})">🗑️</button>
+                            </div>
+                        </div>
+
+                        <div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap; font-size:11px;">
+                            <span style="background:#111; padding:4px 7px; border-radius:4px;">💻 Web: <strong>${web ? 'ON' : 'OFF'}</strong></span>
+                            <span style="background:#111; padding:4px 7px; border-radius:4px;">📱 Telegram: <strong>${tel ? 'ON' : 'OFF'}</strong></span>
+                            <span style="background:#111; padding:4px 7px; border-radius:4px;">👥 Destinatários: <strong>${qtdDest}</strong></span>
+                            <span style="background:#111; padding:4px 7px; border-radius:4px;">⚡ IA: <strong>${Number(robo.qtd_padroes_ia || 0)}</strong></span>
+                        </div>
+
+                        <div style="margin-top:12px;">
+                            <div style="font-size:10px; color:#888; text-transform:uppercase; margin-bottom:5px;">Sintonização</div>
+                            <div>${tagsOrigem}</div>
+                            <div style="font-size:10px; color:#888; margin-top:6px;">Avulsos: ${avulsos.length} • Exceções: ${excecoes.length}</div>
+                        </div>
+
+                        <div style="margin-top:12px; padding-top:10px; border-top:1px dashed #333; display:flex; justify-content:space-between; font-size:11px;">
+                            <span>24h: <strong>${stats.total}</strong> sinais</span>
+                            <span style="color:#28a745;">✅ ${stats.greens}</span>
+                            <span style="color:#ff7777;">❌ ${stats.reds}</span>
+                            <span>🎯 ${stats.assert}%</span>
+                        </div>
+                    </div>
+                `;
+            });
+        }
+
+        function atualizarFiltrosRoboUI() {
+            const sintonizador = document.getElementById('sintonizador-web');
+            const filtroDash = document.getElementById('select-robo-dash');
+            const valorSint = sintonizador?.value || 'TODOS';
+            const valorDash = filtroDash?.value || 'TODOS';
+
+            if (sintonizador) {
+                const disponiveisWeb = robosGlobais.filter(r => boolRobo(r.ativo) && boolRobo(r.enviar_web));
+                sintonizador.innerHTML = '<option value="TODOS">Todos os Robôs</option>' +
+                    disponiveisWeb.map(r => `<option value="${Number(r.id)}">${escaparHtmlRobo(r.nome || ('Robô ' + r.id))}</option>`).join('');
+                sintonizador.value = Array.from(sintonizador.options).some(o => o.value === valorSint) ? valorSint : 'TODOS';
+            }
+
+            if (filtroDash) {
+                filtroDash.innerHTML = '<option value="TODOS">🤖 Todos os Robôs</option>' +
+                    robosGlobais.map(r => `<option value="${Number(r.id)}">${escaparHtmlRobo(r.nome || ('Robô ' + r.id))}</option>`).join('');
+                filtroDash.value = Array.from(filtroDash.options).some(o => o.value === valorDash) ? valorDash : 'TODOS';
+            }
+
+            filtrarSintonizador();
+        }
+
+        function filtrarSintonizador() {
+            const filtro = document.getElementById('sintonizador-web')?.value || 'TODOS';
+            const badge = document.getElementById('badge-streak-robo');
+            if (!badge) return;
+
+            if (filtro === 'TODOS') {
+                badge.style.display = 'none';
+                return;
+            }
+
+            const robo = robosGlobais.find(r => String(r.id) === String(filtro));
+            const streak = Number(robo?.greens_consecutivos || 0);
+            badge.innerText = `🔥 ${streak} Green${streak === 1 ? '' : 's'} Seguido${streak === 1 ? '' : 's'}`;
+            badge.style.display = 'inline-block';
+        }
+
         function mudarAbaAT(aba) { document.querySelectorAll('#modal-autotrader .robo-nav-btn').forEach(btn => btn.classList.remove('ativo')); document.querySelectorAll('#modal-autotrader .robo-tab-content').forEach(content => content.classList.remove('ativo')); document.getElementById('btn-at-tab-' + aba).classList.add('ativo'); document.getElementById('at-tab-' + aba).classList.add('ativo'); }
         
         function addFicha(valor) { let input = document.getElementById('at-stake'); let atual = parseFloat(input.value) || 0; input.value = (atual + valor).toFixed(2); }

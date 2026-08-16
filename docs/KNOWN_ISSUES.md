@@ -72,7 +72,13 @@ Stop Win, Stop Loss e trailing permanecem pendentes. O Python atual não envia `
 
 ### BUG-007 — Telegram e filtros de robôs parecem incompletos
 
-Há CRUD/configuração, mas não foi localizada chamada à API Telegram nem fluxo completo de disparo no backend fornecido.
+Status: **parcialmente mitigado no patch BUG-007A**.
+
+O HTML do módulo de Robôs já possuía formulário, campos, sintonizador e chamadas como `abrirFormularioRobo()`, `salvarRobo()`, `renderizarCardsRobos()` e `atualizarFiltrosRoboUI()`, mas essas funções não estavam definidas no frontend atual. O BUG-007A restaura o CRUD visual, destinatários, checklists de origens/exceções/avulsos, edição, toggle, cards e filtros usando exclusivamente as rotas `/api/robos` e `/api/robo` já existentes.
+
+Configurações desconhecidas existentes em `config_json` são preservadas durante a edição; os blocos `auto_tuning` e `cooldown` são apenas serializados pelo formulário e ainda não ganham enforcement neste patch.
+
+Pendente para BUG-007B/007C: vincular os robôs elegíveis ao ciclo real do sinal (`robosInscritos`), persistir `historico_disparos_robos`, emitir `alerta_painel` com os robôs realmente selecionados e, somente depois, implementar/validar o envio Telegram. O BUG-007A não faz chamadas externas ao Telegram.
 
 ### BUG-008 — Sincronização de saldo da corretora estava incompleta
 
