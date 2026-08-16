@@ -74,6 +74,16 @@ Stop Win, Stop Loss e trailing permanecem pendentes. O Python atual não envia `
 
 Há CRUD/configuração, mas não foi localizada chamada à API Telegram nem fluxo completo de disparo no backend fornecido.
 
+### BUG-008 — Sincronização de saldo da corretora estava incompleta
+
+Status: **parcialmente mitigado no patch BUG-008A**.
+
+O executor passa a poder ler o saldo real diretamente da página usando o seletor CSS explícito `CASINO_BALANCE_SELECTOR`. A leitura ocorre periodicamente no mesmo thread do Playwright, procura o seletor na página principal e nos frames, valida formatos monetários e envia mensagens autenticadas de saldo ao Node somente quando o valor muda ou em heartbeat. Sem seletor configurado ou sem valor válido, nenhum saldo é inferido.
+
+O Node valida `saldo_atual` como número finito e não-negativo antes de persistir o valor nos Auto-Traders ativos. `saldoGlobalCorretora` passa a iniciar como desconhecido (`null`) em vez de zero.
+
+Ainda é necessário identificar e validar operacionalmente o seletor CSS real da casa utilizada. Stop Win/Stop Loss permanecem fora de enforcement até essa leitura ser confirmada em operação. A criação/recalibração explícita de `saldo_inicial` também continua sendo uma etapa separada antes de concluir o BUG-006B.
+
 ### OBS-001 — Exceções críticas são frequentemente silenciadas
 
 Há vários `catch(e){}` e `except: pass`, inclusive em persistência, HTTP e automação. Isso dificulta distinguir falha de regra de negócio de falha técnica.

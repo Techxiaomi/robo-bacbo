@@ -34,3 +34,5 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - `historico_disparos_robos` permanece fora deste patch até que o fluxo de robôs consiga identificar de forma confiável quais robôs efetivamente receberam cada sinal.
 - BUG-006A: `hora_inicio`/`hora_fim` agora bloqueiam a abertura de novas sequências do Auto-Trader fora da janela configurada, incluindo janelas que atravessam a meia-noite.
 - Gales de sequências já iniciadas continuam até o desfecho; Stop Win, Stop Loss e trailing ficam pendentes até existir saldo sincronizado e regra explícita de trailing.
+- BUG-008A: o executor pode sincronizar o saldo real da página por `CASINO_BALANCE_SELECTOR`, com parsing monetário, polling controlado e mensagens autenticadas ao Node.
+- O Node rejeita saldos inválidos e `saldoGlobalCorretora` passa a distinguir saldo desconhecido (`null`) de saldo real zero; nenhum saldo é inferido quando o seletor não está configurado.
