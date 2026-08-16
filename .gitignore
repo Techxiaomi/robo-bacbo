@@ -1,0 +1,39 @@
+# Segredos e ambiente local
+.env
+.env.*
+!.env.example
+
+# Sessões autenticadas / cookies / storage state
+sessao_salva.json
+**/sessao_salva.json
+*.storage-state.json
+*.cookies.json
+
+# Dependências
+node_modules/
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+
+# Logs, caches e arquivos temporários
+*.log
+logs/
+.cache/
+.pytest_cache/
+coverage/
+.nyc_output/
+
+# IDE / SO
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Chaves e certificados
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json

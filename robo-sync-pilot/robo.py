@@ -1,0 +1,362 @@
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+from flask import Flask, request, jsonify
+import threading
+import queue
+import time
+import re
+import json
+import requests
+import logging
+import os
+from env_loader import load_env_file
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(BASE_DIR, ".."))
+load_env_file(os.path.join(PROJECT_ROOT, ".env"))
+
+# ====================================================================
+# CONFIGURAÇÕES GERAIS E CONTROLE DE VERSÃO
+# ====================================================================
+VERSAO_ROBO = "v1.5"
+NOME_ATUALIZACAO = "Motor Completo + Anti-Duplicidade (Strict Mode Bypass)"
+
+URL_CASSINO = os.getenv("CASINO_GAME_URL", "")
+ARQUIVO_SESSAO = os.getenv("SESSION_STATE_FILE", os.path.join(BASE_DIR, "sessao_salva.json"))
+
+USUARIO_CASSINO = os.getenv("CASINO_USER", "")
+SENHA_CASSINO = os.getenv("CASINO_PASSWORD", "")
+WEBHOOK_JS = os.getenv("NODE_WEBHOOK_URL", "http://127.0.0.1:3000/receber-sinal")
+
+# ====================================================================
+# SERVIDOR FLASK (O "Ouvido" do Robô para receber ordens do Node.js)
+# ====================================================================
+fila_apostas = queue.Queue()
+app = Flask(__name__)
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR) # Oculta os logs técnicos do Flask no terminal
+
+@app.route('/apostar', methods=['POST'])
+def receber_aposta():
+    """Recebe a ordem do Node.js e coloca na fila do Playwright"""
+    dados = request.json
+    fila_apostas.put(dados)
+    print(f"\n📥 ORDEM RECEBIDA DO NODE.JS: Apostar R$ {dados.get('valor')} no alvo {dados.get('alvo')}")
+    return jsonify({"status": "Aposta na fila de execucao!", "dados": dados}), 200
+
+def iniciar_servidor_flask():
+    app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
+
+# Inicia o Flask em segundo plano para não travar o robô principal
+threading.Thread(target=iniciar_servidor_flask, daemon=True).start()
+
+ultimo_tempo_rodada = 0
+
+# ====================================================================
+# FUNÇÕES CORE DO ROBÔ (Navegação, Login e Apostas)
+# ====================================================================
+def exibir_painel_versao():
+    print("="*60)
+    print(f"🤖 ROBÔ BAC BO EVOLUTION - MOTOR DE EXECUÇÃO")
+    print(f"🏷️ VERSÃO: {VERSAO_ROBO} | {NOME_ATUALIZACAO}")
+    print(f"🎧 Escutando ordens de aposta na porta 5000...")
+    print("="*60)
+
+def aplicar_stealth(page):
+    try:
+        from playwright_stealth import stealth_sync
+        stealth_sync(page)
+    except Exception:
+        page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        page.add_init_script("window.navigator.chrome = { runtime: {} };")
+
+def fechar_popups(page):
+    print("🧹 Limpando pop-ups da tela (Cookies e Maioridade)...")
+    page.wait_for_timeout(2000) 
+    try:
+        btn_cookie = page.locator("button", has_text=re.compile(r"Aceitar todos", re.IGNORECASE))
+        for i in range(btn_cookie.count()):
+            if btn_cookie.nth(i).is_visible():
+                btn_cookie.nth(i).click(force=True)
+                page.wait_for_timeout(1000)
+                break
+    except: pass
+    try:
+        btn_sim = page.locator("button", has_text=re.compile(r"^Sim$", re.IGNORECASE))
+        if btn_sim.count() == 0: 
+            btn_sim = page.locator("button", has_text=re.compile(r"Sim", re.IGNORECASE))
+        for i in range(btn_sim.count()):
+            if btn_sim.nth(i).is_visible():
+                btn_sim.nth(i).click(force=True)
+                page.wait_for_timeout(1000)
+                break
+    except: pass
+
+def renovar_sessao_automaticamente(page, context):
+    print("\n🔄 Iniciando protocolo de Auto-Login invisível...")
+    try:
+        page.goto(os.getenv("CASINO_HOME_URL", ""), timeout=60000)
+        fechar_popups(page)
+        
+        botoes_entrar = page.locator("button", has_text=re.compile(r"Entrar", re.IGNORECASE))
+        login_aberto = False
+        for i in range(botoes_entrar.count()):
+            btn = botoes_entrar.nth(i)
+            if btn.is_visible():
+                try:
+                    btn.click(force=True)
+                    page.wait_for_timeout(2500)
+                    if page.locator("input[name='email']").is_visible():
+                        login_aberto = True
+                        break
+                except: pass
+                
+        if not login_aberto:
+            return False
+            
+        page.locator("input[name='email']").fill(USUARIO_CASSINO)
+        page.wait_for_timeout(500)
+        page.locator("input[name='password']").fill(SENHA_CASSINO)
+        page.wait_for_timeout(500)
+        
+        botao_confirmar = page.locator("button#legitimuz-action-send-analisys")
+        if botao_confirmar.is_visible():
+            botao_confirmar.click(force=True)
+        else:
+            page.locator("input[name='password']").press("Enter")
+            
+        page.wait_for_timeout(6000)
+        context.storage_state(path=ARQUIVO_SESSAO)
+        print("✅ Auto-Login concluído com sucesso!")
+        return True
+    except: return False
+
+def executar_aposta_na_tela(page, aposta):
+    """Cérebro de Apostas com Bypass do Strict Mode (adicionado .first)."""
+    try:
+        alvo_bruto = aposta.get("alvo")
+        valor_total = int(aposta.get("valor", 0))
+
+        mapa_alvos = {
+            "PlayerWon": "bacbo-bet-spot-Player",
+            "BankerWon": "bacbo-bet-spot-Banker",
+            "Tie": "bacbo-bet-spot-Tie"
+        }
+        seletor_alvo = mapa_alvos.get(alvo_bruto)
+        
+        if not seletor_alvo:
+            print(f"❌ Erro: Alvo '{alvo_bruto}' não mapeado.")
+            return
+
+        frame_jogo = None
+        for frame in page.frames:
+            if "evolution" in frame.url.lower() or "evocdn" in frame.url.lower() or "game" in frame.url.lower():
+                frame_jogo = frame
+                if frame.locator("div[data-role='chip']").count() > 0:
+                    break
+                
+        if not frame_jogo:
+            print("❌ Erro: Iframe da mesa não encontrado! A tela pode estar carregando.")
+            return
+
+        fichas_disponiveis = [5000, 2500, 500, 125, 25, 10, 5]
+        valor_restante = valor_total
+        cliques_necessarios = []
+
+        for ficha in fichas_disponiveis:
+            qtd = valor_restante // ficha
+            if qtd > 0:
+                cliques_necessarios.append((ficha, qtd))
+                valor_restante %= ficha
+
+        if valor_restante > 0 and not cliques_necessarios:
+            print(f"⚠️ Aposta ignorada: R$ {valor_total} é menor que a ficha mínima da mesa.")
+            return
+
+        sucesso_total = True
+
+        for ficha, qtd in cliques_necessarios:
+            seletor_ficha = f"div[data-role='chip'][data-value='{ficha}']"
+            
+            try:
+                # CORREÇÃO AQUI: Adicionado o .first para pegar apenas a primeira ficha da tela
+                ficha_elemento = frame_jogo.locator(seletor_ficha).first
+                
+                # Aguarda a primeira ficha ficar visível
+                ficha_elemento.wait_for(state="visible", timeout=3000)
+                
+                # Clica na ficha selecionada
+                ficha_elemento.click(force=True)
+                page.wait_for_timeout(200) # Pausa humanizada
+                
+                # CORREÇÃO AQUI: Adicionado o .first para pegar apenas o primeiro alvo da tela
+                alvo_elemento = frame_jogo.locator(f"[data-role='{seletor_alvo}']").first
+                for _ in range(qtd):
+                    alvo_elemento.click(force=True)
+                    page.wait_for_timeout(150) # Pausa humanizada entre cliques
+                    
+            except PlaywrightTimeoutError:
+                sucesso_total = False
+                print(f"⚠️ Tempo esgotado: A ficha de {ficha} não apareceu. (As apostas fecharam?)")
+            except Exception as e:
+                sucesso_total = False
+                print(f"⚠️ Falha inesperada ao clicar na mesa: {e}")
+
+        # Mensagem final de sucesso
+        if sucesso_total:
+            valor_final_apostado = valor_total - valor_restante
+            print(f"🎯 SUCESSO! Aposta de R$ {valor_final_apostado} no {alvo_bruto} confirmada com clique duplo!")
+        else:
+            print("❌ Aposta abortada ou incompleta devido a bloqueios na mesa.")
+
+    except Exception as e:
+        print(f"❌ Erro grave na engine de aposta: {e}")
+
+def processar_resultado(dados):
+    global ultimo_tempo_rodada
+    try:
+        game_info = dados.get("args", {}).get("game", {})
+        status_atual = game_info.get("stage")
+
+        if status_atual == "Resolved":
+            resultado_bruto = game_info.get("result", "")
+            resultado = "Tie" if "Tie" in resultado_bruto else resultado_bruto
+            
+            tempo_atual = time.time()
+            valores_dados = {1: 0, 2: 0, 3: 0, 4: 0}
+            for d in game_info.get("dice", []):
+                valores_dados[d.get("id")] = d.get("value", 0)
+            
+            soma_jogador = valores_dados[1] + valores_dados[3]
+            soma_banca = valores_dados[2] + valores_dados[4]
+
+            houve_interrupcao = ultimo_tempo_rodada > 0 and (tempo_atual - ultimo_tempo_rodada) > 60
+            ultimo_tempo_rodada = tempo_atual
+
+            payload = {
+                "vencedor": resultado,
+                "resultado_bruto": resultado_bruto,
+                "pontos_jogador": soma_jogador,
+                "pontos_banca": soma_banca,
+                "dados_jogador": [valores_dados[1], valores_dados[3]],
+                "dados_banca": [valores_dados[2], valores_dados[4]],
+                "interrupcao_fluxo": houve_interrupcao,
+                "timestamp_coleta": int(tempo_atual * 1000)
+            }
+
+            try: requests.post(WEBHOOK_JS, json=payload, timeout=2)
+            except: pass
+
+            print("\n====================================")
+            if houve_interrupcao: print("⚠️ [ALERTA] Interrupção de Sequência (> 60s)")
+            traducao = {"PlayerWon": "🔵 JOGADOR", "BankerWon": "🔴 BANCA", "Tie": "🟡 EMPATE"}
+            print(f"🔥 Vencedor: {traducao.get(resultado, resultado)}")
+            print(f"🔵 Jogador : {soma_jogador:02d} | 🔴 Banca: {soma_banca:02d}")
+            print("====================================\n")
+            
+    except Exception:
+        pass
+
+def iniciar_robo_blindado():
+    with sync_playwright() as p:
+        args_camuflagem = [
+            '--disable-blink-features=AutomationControlled',
+            '--disable-infobars', '--no-sandbox', '--disable-dev-shm-usage',
+            '--disable-extensions', '--window-size=1366,768'
+        ]
+
+        # Modo de operação: Invisível
+        browser = p.chromium.launch(headless=True, args=args_camuflagem)
+        
+        if os.path.exists(ARQUIVO_SESSAO):
+            context = browser.new_context(
+                storage_state=ARQUIVO_SESSAO,
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                permissions=[] 
+            )
+        else:
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                permissions=[] 
+            )
+        
+        page = context.new_page()
+        aplicar_stealth(page)
+        status_conexao = {"ativa": True, "ws_conectado": False}
+
+        def on_web_socket(ws):
+            if "evolution" in ws.url.lower() or "evocdn" in ws.url.lower() or "game" in ws.url.lower():
+                status_conexao["ativa"] = True
+                status_conexao["ws_conectado"] = True
+                ws.on("framereceived", capturar_frame)
+                ws.on("close", lambda ws: status_conexao.update({"ativa": False, "ws_conectado": False}))
+
+        def capturar_frame(texto):
+            try:
+                if not texto or not isinstance(texto, str): return
+                texto_limpo = re.sub(r'^\d+', '', texto)
+                if not texto_limpo: return
+                dados = json.loads(texto_limpo)
+                if dados.get("type") == "bacbo.playerState":
+                    processar_resultado(dados)
+            except: pass
+
+        page.on("websocket", on_web_socket)
+
+        while True:
+            try:
+                status_conexao["ws_conectado"] = False
+                page.goto(URL_CASSINO, wait_until="domcontentloaded", timeout=60000)
+                fechar_popups(page)
+                
+                sucesso_login = False
+                for _ in range(15):
+                    if status_conexao["ws_conectado"]:
+                        sucesso_login = True
+                        break
+                    page.wait_for_timeout(1000)
+                
+                if not sucesso_login:
+                    recuperado = renovar_sessao_automaticamente(page, context)
+                    if recuperado: continue 
+                    else:
+                        page.wait_for_timeout(60000)
+                        continue
+
+                print("✅ Acesso validado! Tudo pronto.")
+                
+                tempo_passado = 0
+                while tempo_passado < (2 * 60 * 60 * 1000): # Reinicia a cada 2 horas
+                    if not status_conexao["ativa"]: break
+                    
+                    # CÉREBRO DE EXECUÇÃO: Checa a fila de apostas frequentemente
+                    for _ in range(20): 
+                        if not fila_apostas.empty():
+                            ordem = fila_apostas.get()
+                            executar_aposta_na_tela(page, ordem)
+                        page.wait_for_timeout(500)
+                    
+                    # Clica no botão 'Continuar' caso a mesa fique inativa para você
+                    for frame in page.frames:
+                        if "evolution" in frame.url.lower() or "evocdn" in frame.url.lower() or "game" in frame.url.lower():
+                            try:
+                                btn = frame.get_by_text(re.compile(r"continuar|continue", re.IGNORECASE))
+                                if btn.count() > 0 and btn.first.is_visible(): btn.first.click(force=True)
+                            except: pass
+                    
+                    tempo_passado += 10000
+                
+            except PlaywrightTimeoutError:
+                time.sleep(10)
+            except Exception as e:
+                time.sleep(15)
+
+if __name__ == "__main__":
+    exibir_painel_versao()
+    while True:
+        try:
+            iniciar_robo_blindado()
+        except KeyboardInterrupt:
+            print("\n👋 Robô desligado com sucesso.")
+            break
+        except Exception as e:
+            time.sleep(15)
