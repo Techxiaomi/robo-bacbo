@@ -28,7 +28,11 @@ O objeto retornado espalha os campos do registro (`...r`), o que inclui `telegra
 
 ### BUG-001 — Ordem pode ser registrada sem confirmação do executor
 
-Nas entradas iniciais e gales, a chamada HTTP ao Python pode falhar enquanto o Node continua atualizando contadores/auditoria. O fluxo precisa aguardar e validar a resposta do executor.
+Status: **mitigado no patch BUG-001**.
+
+O Node passa a aguardar a resposta do executor, rejeitar timeout/erro HTTP/confirmação divergente e só então contabilizar a entrada direta ou criar a nova ordem `PENDENTE` de Gale. A ordem anterior de um Gale continua sendo encerrada pelo resultado já observado da mesa.
+
+Risco residual: uma falha de rede exatamente após o executor enfileirar a ordem e antes da resposta chegar ao Node ainda pode gerar uma confirmação ambígua. Eliminar completamente esse caso exige um identificador idempotente de ordem compartilhado entre Node e Python.
 
 ### BUG-002 — `STANDBY` pode impedir novas entradas indefinidamente
 
