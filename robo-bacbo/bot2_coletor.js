@@ -752,31 +752,7 @@ app.post("/receber-sinal", async (req, res) => {
             return res.status(401).json({ erro: "Nao autorizado" });
         }
 
-        res.json({ recebido: true });
         const dados = req.body || {};
-
-        if (dados.saldo_atual !== undefined && dados.saldo_atual !== null) {
-            const saldoRecebido = Number(dados.saldo_atual);
-
-            if (Number.isFinite(saldoRecebido) && saldoRecebido >= 0) {
-                saldoGlobalCorretora = saldoRecebido;
-
-                try {
-                    await dbPool.query(
-                        'UPDATE auto_traders SET saldo_atual=? WHERE ativo=true',
-                        [saldoGlobalCorretora]
-                    );
-
-                    for (let trader of AUTO_TRADERS_MEMORIA) {
-                        if (trader.ativo) trader.saldo_atual = saldoGlobalCorretora;
-                    }
-                } catch (e) {
-                    console.error("⚠️ Falha ao persistir saldo sincronizado dos Auto-Traders:", e.message);
-                }
-            } else {
-                console.warn("⚠️ saldo_atual inválido recebido do executor; atualização ignorada.");
-            }
-        }
 
         let rawVenc = String(dados.vencedor || dados.resultado || dados.winner || "").toUpperCase().trim();
         let vencedor = "";
@@ -784,7 +760,35 @@ app.post("/receber-sinal", async (req, res) => {
         else if (rawVenc.includes("BANKER") || rawVenc === "B" || rawVenc === "VERMELHO") vencedor = "Banker";
         else if (rawVenc.includes("TIE") || rawVenc === "T" || rawVenc === "EMPATE") vencedor = "Tie";
 
-        if (!vencedor) return;
+        const temSaldo = dados.saldo_atual !== undefined && dados.saldo_atual !== null;
+
+        if (temSaldo) {
+            const saldoRecebido = Number(dados.saldo_atual);
+
+            if (!Number.isFinite(saldoRecebido) || saldoRecebido < 0) {
+                console.warn("⚠️ saldo_atual inválido recebido do executor; atualização ignorada.");
+                if (!vencedor) return res.status(400).json({ erro: "saldo_atual invalido" });
+            } else {
+                try {
+                    await dbPool.query(
+                        'UPDATE auto_traders SET saldo_atual=? WHERE ativo=true',
+                        [saldoRecebido]
+                    );
+
+                    saldoGlobalCorretora = saldoRecebido;
+                    for (let trader of AUTO_TRADERS_MEMORIA) {
+                        if (trader.ativo) trader.saldo_atual = saldoRecebido;
+                    }
+                } catch (e) {
+                    console.error("⚠️ Falha ao persistir saldo sincronizado dos Auto-Traders:", e.message);
+                    if (!vencedor) return res.status(500).json({ erro: "falha ao persistir saldo" });
+                }
+            }
+        }
+
+        if (!vencedor) return res.json({ recebido: true, saldo_atual: saldoGlobalCorretora });
+
+        res.json({ recebido: true });
 
         rotacionarSessaoAposInterrupcao(dados);
 
