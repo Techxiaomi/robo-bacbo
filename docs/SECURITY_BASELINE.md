@@ -45,3 +45,14 @@ Segredo removido em commit posterior continua presente no histórico anterior. P
 3. Confirmar que `sessao_salva.json` não aparece em `git status`.
 4. Revisar `git diff --cached` antes do commit.
 5. Nunca usar `git add -f` em arquivos ignorados sem motivo documentado.
+
+
+## SEC-002 — comunicação interna autenticada
+
+A comunicação Node.js ↔ Python usa `INTERNAL_API_TOKEN`, enviado exclusivamente no header `X-Internal-Token`.
+
+- `/apostar` rejeita chamadas sem o segredo compartilhado com HTTP 401.
+- `/receber-sinal` rejeita chamadas sem o segredo compartilhado com HTTP 401.
+- O Flask escuta em `127.0.0.1` por padrão (`EXECUTOR_HOST`) e porta configurável (`EXECUTOR_PORT`).
+- O sistema falha fechado na inicialização quando `INTERNAL_API_TOKEN` está vazio.
+- O token real permanece apenas no `.env`, que é ignorado pelo Git.

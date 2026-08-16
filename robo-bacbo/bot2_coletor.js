@@ -2,6 +2,7 @@ const mysql = require("mysql2/promise");
 const express = require("express");
 const cors = require("cors");
 const path = require("path");
+const crypto = require("crypto");
 const { Server } = require("socket.io");
 require("./env_loader").loadEnvFile(path.join(__dirname, "..", ".env"));
 
@@ -181,6 +182,25 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const PORTA = Number(process.env.NODE_PORT || 3000);
 const EXECUTOR_URL = process.env.EXECUTOR_URL || "http://127.0.0.1:5000/apostar";
+const INTERNAL_API_TOKEN = (process.env.INTERNAL_API_TOKEN || "").trim();
+
+if (!INTERNAL_API_TOKEN) {
+    throw new Error("INTERNAL_API_TOKEN nao configurado. Defina o segredo compartilhado no .env antes de iniciar o backend.");
+}
+
+function requisicaoInternaAutorizada(req) {
+    const tokenRecebido = req.get("X-Internal-Token") || "";
+    const recebido = Buffer.from(tokenRecebido, "utf8");
+    const esperado = Buffer.from(INTERNAL_API_TOKEN, "utf8");
+    return recebido.length === esperado.length && crypto.timingSafeEqual(recebido, esperado);
+}
+
+function headersInternos() {
+    return {
+        "Content-Type": "application/json",
+        "X-Internal-Token": INTERNAL_API_TOKEN
+    };
+}
 const server = app.listen(PORTA, () => { 
     console.log(`🌐 Painel Web rodando na porta ${PORTA}`); 
     console.log(`📡 Webhook aguardando sinais em: http://127.0.0.1:${PORTA}/receber-sinal`);
@@ -613,6 +633,10 @@ async function carregarSistemasParaMemoria() {
 
 app.post("/receber-sinal", async (req, res) => {
     try {
+        if (!requisicaoInternaAutorizada(req)) {
+            return res.status(401).json({ erro: "Nao autorizado" });
+        }
+
         res.json({ recebido: true });
         const dados = req.body || {};
 
@@ -705,7 +729,7 @@ app.post("/receber-sinal", async (req, res) => {
                                             await dbPool.query(`INSERT INTO auditoria_ordens (trader_id, estrategia_nome, fonte_sinal, alvo, nivel, risco_total, valor_entrada, status_ordem) VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDENTE')`, [trader.id, est.nome, est.origem, alvoPython, `GALE ${st.galeAtual}`, riscoAntigo + valorGale, valorGale]);
                                         } catch(e){}
 
-                                        try { fetch(EXECUTOR_URL, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ alvo: alvoPython, valor: valorGale }) }).catch(e=>{}); } catch(e){}
+                                        try { fetch(EXECUTOR_URL, { method: 'POST', headers: headersInternos(), body: JSON.stringify({ alvo: alvoPython, valor: valorGale }) }).catch(e=>{}); } catch(e){}
                                     }
                                 }
                             }
@@ -773,7 +797,7 @@ app.post("/receber-sinal", async (req, res) => {
                                     let alvoPython = est.entrada === 'Player' ? 'PlayerWon' : (est.entrada === 'Banker' ? 'BankerWon' : 'Tie');
 
                                     try {
-                                        fetch(EXECUTOR_URL, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ alvo: alvoPython, valor: valorArredondado }) }).catch(e=>{});
+                                        fetch(EXECUTOR_URL, { method: 'POST', headers: headersInternos(), body: JSON.stringify({ alvo: alvoPython, valor: valorArredondado }) }).catch(e=>{});
                                         trader.entradas_feitas++;
                                         await dbPool.query('UPDATE auto_traders SET entradas_feitas=? WHERE id=?', [trader.entradas_feitas, trader.id]);
                                         await dbPool.query(`INSERT INTO auditoria_ordens (trader_id, estrategia_nome, fonte_sinal, alvo, nivel, risco_total, valor_entrada, status_ordem) VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDENTE')`, [trader.id, est.nome, est.origem, alvoPython, 'DIRETO', valorArredondado, valorArredondado]);

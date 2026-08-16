@@ -8,6 +8,7 @@ import json
 import requests
 import logging
 import os
+import hmac
 from env_loader import load_env_file
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -26,6 +27,12 @@ ARQUIVO_SESSAO = os.getenv("SESSION_STATE_FILE", os.path.join(BASE_DIR, "sessao_
 USUARIO_CASSINO = os.getenv("CASINO_USER", "")
 SENHA_CASSINO = os.getenv("CASINO_PASSWORD", "")
 WEBHOOK_JS = os.getenv("NODE_WEBHOOK_URL", "http://127.0.0.1:3000/receber-sinal")
+INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN", "").strip()
+EXECUTOR_HOST = os.getenv("EXECUTOR_HOST", "127.0.0.1").strip() or "127.0.0.1"
+EXECUTOR_PORT = int(os.getenv("EXECUTOR_PORT", "5000"))
+
+if not INTERNAL_API_TOKEN:
+    raise RuntimeError("INTERNAL_API_TOKEN nao configurado. Defina o segredo compartilhado no .env antes de iniciar o executor.")
 
 # ====================================================================
 # SERVIDOR FLASK (O "Ouvido" do Robô para receber ordens do Node.js)
@@ -35,16 +42,33 @@ app = Flask(__name__)
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR) # Oculta os logs técnicos do Flask no terminal
 
+def requisicao_interna_autorizada():
+    token_recebido = request.headers.get("X-Internal-Token", "")
+    return hmac.compare_digest(token_recebido, INTERNAL_API_TOKEN)
+
 @app.route('/apostar', methods=['POST'])
 def receber_aposta():
-    """Recebe a ordem do Node.js e coloca na fila do Playwright"""
-    dados = request.json
+    """Recebe uma ordem autenticada do Node.js e coloca na fila do Playwright."""
+    if not requisicao_interna_autorizada():
+        return jsonify({"erro": "Nao autorizado"}), 401
+
+    dados = request.get_json(silent=True)
+    if not isinstance(dados, dict):
+        return jsonify({"erro": "Payload JSON invalido"}), 400
+
+    alvo = dados.get("alvo")
+    valor = dados.get("valor")
+    if alvo not in {"PlayerWon", "BankerWon", "Tie"}:
+        return jsonify({"erro": "Alvo invalido"}), 400
+    if not isinstance(valor, (int, float)) or isinstance(valor, bool) or valor <= 0:
+        return jsonify({"erro": "Valor de aposta invalido"}), 400
+
     fila_apostas.put(dados)
-    print(f"\n📥 ORDEM RECEBIDA DO NODE.JS: Apostar R$ {dados.get('valor')} no alvo {dados.get('alvo')}")
+    print(f"\n📥 ORDEM AUTENTICADA DO NODE.JS: Apostar R$ {valor} no alvo {alvo}")
     return jsonify({"status": "Aposta na fila de execucao!", "dados": dados}), 200
 
 def iniciar_servidor_flask():
-    app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
+    app.run(host=EXECUTOR_HOST, port=EXECUTOR_PORT, debug=False, use_reloader=False)
 
 # Inicia o Flask em segundo plano para não travar o robô principal
 threading.Thread(target=iniciar_servidor_flask, daemon=True).start()
@@ -58,7 +82,7 @@ def exibir_painel_versao():
     print("="*60)
     print(f"🤖 ROBÔ BAC BO EVOLUTION - MOTOR DE EXECUÇÃO")
     print(f"🏷️ VERSÃO: {VERSAO_ROBO} | {NOME_ATUALIZACAO}")
-    print(f"🎧 Escutando ordens de aposta na porta 5000...")
+    print(f"🎧 Escutando ordens autenticadas em {EXECUTOR_HOST}:{EXECUTOR_PORT}...")
     print("="*60)
 
 def aplicar_stealth(page):
@@ -243,7 +267,7 @@ def processar_resultado(dados):
                 "timestamp_coleta": int(tempo_atual * 1000)
             }
 
-            try: requests.post(WEBHOOK_JS, json=payload, timeout=2)
+            try: requests.post(WEBHOOK_JS, json=payload, headers={"X-Internal-Token": INTERNAL_API_TOKEN}, timeout=2)
             except: pass
 
             print("\n====================================")

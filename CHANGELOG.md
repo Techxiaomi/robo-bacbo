@@ -12,3 +12,10 @@
 - adicionada verificação preventiva de segredos.
 
 Nenhuma correção de lógica de apostas foi aplicada nesta versão.
+
+## Unreleased
+
+### Security
+- SEC-002: autenticação por segredo compartilhado nas rotas internas `/apostar` e `/receber-sinal`.
+- Executor Flask restrito a `127.0.0.1` por padrão e configurável por ambiente.
+- Validação mínima do payload antes de enfileirar uma ordem de aposta.
