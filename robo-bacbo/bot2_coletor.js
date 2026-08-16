@@ -678,6 +678,151 @@ async function registrarHistoricoResultadoEstrategia(est, tipoResultado, galeAtu
     );
 }
 
+function contarTiesLegados(tiesJson) {
+    if (!tiesJson) return 0;
+
+    try {
+        const ties = typeof tiesJson === 'string' ? JSON.parse(tiesJson) : tiesJson;
+        let total = 0;
+
+        for (const nivel of ['direto', 'gale1', 'gale2']) {
+            for (const valor of Object.values((ties && ties[nivel]) || {})) {
+                total += Number(valor) || 0;
+            }
+        }
+
+        return total;
+    } catch (e) {
+        return 0;
+    }
+}
+
+async function calcularAssertividadePersistidaEstrategia(est) {
+    const [baselineRows] = await dbPool.query(
+        'SELECT green_direto, gale1, gale2, red, ties_json FROM estrategias WHERE id=? LIMIT 1',
+        [est.id]
+    );
+
+    if (baselineRows.length === 0) return 0;
+
+    const base = baselineRows[0];
+    let greens = (Number(base.green_direto) || 0)
+        + (Number(base.gale1) || 0)
+        + (Number(base.gale2) || 0)
+        + contarTiesLegados(base.ties_json);
+    let reds = Number(base.red) || 0;
+
+    const [historicoRows] = await dbPool.query(
+        `SELECT tipo_resultado, COUNT(*) AS qtd
+         FROM historico_resultados
+         WHERE estrategia_id=?
+         GROUP BY tipo_resultado`,
+        [est.id]
+    );
+
+    for (const row of historicoRows) {
+        const qtd = Number(row.qtd) || 0;
+        if (row.tipo_resultado === 'GREEN' || row.tipo_resultado === 'TIE') greens += qtd;
+        else if (row.tipo_resultado === 'RED') reds += qtd;
+    }
+
+    const total = greens + reds;
+    return total > 0 ? (greens / total) * 100 : 0;
+}
+
+function roboSintonizaEstrategia(robo, est) {
+    const config = robo.config || {};
+
+    if (est.is_dinamico) {
+        return Number(est.robo_dono_id) === Number(robo.id);
+    }
+
+    const estrategiaId = String(est.id);
+    const origem = String(est.origem || '');
+    const excecoes = Array.isArray(config.excecoes) ? config.excecoes.map(String) : [];
+    const avulsos = Array.isArray(config.avulsos) ? config.avulsos.map(String) : [];
+    const origens = Array.isArray(config.origens) ? config.origens.map(String) : [];
+
+    if (excecoes.includes(estrategiaId)) return false;
+    if (avulsos.includes(estrategiaId)) return true;
+    return origens.includes(origem);
+}
+
+async function selecionarRobosWebParaEstrategia(est) {
+    if (est.quarentena_restante > 0) {
+        return { robos: [], assertividade: 0 };
+    }
+
+    const assertividade = await calcularAssertividadePersistidaEstrategia(est);
+    const robos = ROBOS_MEMORIA
+        .filter(robo => {
+            const ativo = robo.ativo === true || robo.ativo === 1;
+            const enviaWeb = robo.enviar_web === true || robo.enviar_web === 1;
+            const minAssert = Math.max(0, Number(robo.min_assertividade) || 0);
+
+            return ativo
+                && enviaWeb
+                && assertividade >= minAssert
+                && roboSintonizaEstrategia(robo, est);
+        })
+        .map(robo => ({
+            id: robo.id,
+            nome: robo.nome,
+            tag_visual: robo.tag_visual,
+            cor_hex: robo.cor_hex
+        }));
+
+    return {
+        robos,
+        assertividade: Number(assertividade.toFixed(1))
+    };
+}
+
+function emitirAlertaWebRobo(tipo, est, estado, extras = {}) {
+    if (!estado || !Array.isArray(estado.robosInscritos) || estado.robosInscritos.length === 0) return;
+
+    ioServer.emit('alerta_painel', {
+        tipo,
+        nome: est.nome,
+        entrada: est.entrada,
+        padrao: est.padrao,
+        assertividade: estado.assertividadeSinal,
+        robosNotificados: estado.robosInscritos,
+        ...extras
+    });
+}
+
+async function registrarHistoricoRobosInscritos(est, estado, tipoResultado, galeAtual, multiplicador, timestampColeta) {
+    if (!estado || !Array.isArray(estado.robosInscritos) || estado.robosInscritos.length === 0) return;
+
+    const timestampMs = Number(timestampColeta);
+    const timestampSegundos = Number.isFinite(timestampMs) && timestampMs > 0
+        ? timestampMs / 1000
+        : Date.now() / 1000;
+
+    const placeholders = estado.robosInscritos.map(() => '(?,?,?,?,?,?,FROM_UNIXTIME(?))').join(',');
+    const params = [];
+
+    for (const robo of estado.robosInscritos) {
+        params.push(
+            robo.id,
+            est.id,
+            tipoResultado,
+            nivelHistoricoResultado(galeAtual),
+            multiplicador || '',
+            est.origem || '',
+            timestampSegundos
+        );
+    }
+
+    await dbPool.query(
+        `INSERT INTO historico_disparos_robos
+            (robo_id, estrategia_id, tipo_resultado, nivel, multiplicador, estrategia_origem, data_hora)
+         VALUES ${placeholders}`,
+        params
+    );
+}
+
 function horarioParaMinutos(valor, padrao) {
     const texto = String(valor || padrao).trim();
     const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(texto);
@@ -842,6 +987,17 @@ app.post("/receber-sinal", async (req, res) => {
                         console.error(`Falha ao persistir historico da estrategia ${est.id}:`, e.message);
                     }
 
+                    try {
+                        await registrarHistoricoRobosInscritos(est, st, isTie ? 'TIE' : 'GREEN', st.galeAtual, isTie ? mult : '', dados.timestamp_coleta);
+                    } catch (e) {
+                        console.error(`Falha ao persistir historico dos robos para estrategia ${est.id}:`, e.message);
+                    }
+
+                    emitirAlertaWebRobo('GREEN', est, st, {
+                        resultado: isTie ? 'TIE' : 'GREEN',
+                        multiplicador: isTie ? mult : ''
+                    });
+
                     if (est.quarentena_restante <= 0) {
                         for (let trader of AUTO_TRADERS_MEMORIA) {
                             let cf = trader.config;
@@ -859,6 +1015,7 @@ app.post("/receber-sinal", async (req, res) => {
                 } else {
                     if (st.galeAtual < est.gales) {
                         st.galeAtual++;
+                        emitirAlertaWebRobo('GALE', est, st, { nivel: st.galeAtual });
                         if (est.quarentena_restante <= 0) {
                             for (let trader of AUTO_TRADERS_MEMORIA) {
                                 let cf = trader.config;
@@ -900,6 +1057,15 @@ app.post("/receber-sinal", async (req, res) => {
                         } catch (e) {
                             console.error(`Falha ao persistir historico da estrategia ${est.id}:`, e.message);
                         }
+
+                        try {
+                            await registrarHistoricoRobosInscritos(est, st, 'RED', st.galeAtual, '', dados.timestamp_coleta);
+                        } catch (e) {
+                            console.error(`Falha ao persistir historico dos robos para estrategia ${est.id}:`, e.message);
+                        }
+
+                        emitirAlertaWebRobo('RED', est, st);
+
                         if (est.quarentena_restante <= 0) {
                             for (let trader of AUTO_TRADERS_MEMORIA) {
                                 let cf = trader.config;
@@ -931,7 +1097,23 @@ app.post("/receber-sinal", async (req, res) => {
                     let matchCores = ult.every((val, i) => val.resultado === est.padrao[i]);
 
                     if (mesmaSessao && matchCores) {
-                        estadoApostas[est.id] = { aguardandoResultado: true, galeAtual: 0, robosInscritos: [], mensagensEntrada: [], mensagensGale: [] };
+                        let selecaoRobos = { robos: [], assertividade: 0 };
+                        try {
+                            selecaoRobos = await selecionarRobosWebParaEstrategia(est);
+                        } catch (e) {
+                            console.error(`Falha ao selecionar robos para estrategia ${est.id}:`, e.message);
+                        }
+
+                        estadoApostas[est.id] = {
+                            aguardandoResultado: true,
+                            galeAtual: 0,
+                            robosInscritos: selecaoRobos.robos,
+                            assertividadeSinal: selecaoRobos.assertividade,
+                            mensagensEntrada: [],
+                            mensagensGale: []
+                        };
+
+                        emitirAlertaWebRobo('ENTRADA', est, estadoApostas[est.id]);
 
                         if (est.quarentena_restante <= 0) {
                             for (let trader of AUTO_TRADERS_MEMORIA) {
