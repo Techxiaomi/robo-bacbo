@@ -28,3 +28,5 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - A transição é persistida no MySQL antes de atualizar o estado em memória; traders desligados ou em outros estados não são alterados.
 - BUG-003: editar configurações ou usar o toggle rápido do Auto-Trader não sobrescreve mais `saldo_inicial` nem `saldo_atual`.
 - Criação de um novo Auto-Trader continua inicializando os dois saldos; recalibração futura deverá ser uma ação explícita.
+- BUG-004: `interrupcao_fluxo` agora inicia uma nova `idSessaoContinua` antes de registrar o primeiro giro após uma pausa superior a 60 segundos.
+- A separação de sessão reaproveita a checagem `mesmaSessao` já existente e não altera ordens pendentes, stake, Gale ou frontend.
