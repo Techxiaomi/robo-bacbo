@@ -64,7 +64,11 @@ Status: **parcialmente mitigado no patch BUG-005A**.
 
 ### BUG-006 — Stop Win / Stop Loss / Trailing / horário estão configuráveis no painel sem enforcement localizado
 
-Os valores são salvos no `config_json`, porém não foi localizada a checagem dessas regras antes de novas apostas.
+Status: **parcialmente mitigado no patch BUG-006A**.
+
+A janela `hora_inicio`/`hora_fim` passa a ser aplicada antes de abrir novas sequências do Auto-Trader. Janelas normais e janelas que atravessam a meia-noite são suportadas; horários ausentes usam `00:00`–`23:59`, e configuração de horário inválida bloqueia a nova entrada. Gales de uma sequência já iniciada continuam até o desfecho para não deixar ordens pendentes/auditoria em estado incoerente.
+
+Stop Win, Stop Loss e trailing permanecem pendentes. O Python atual não envia `saldo_atual`, então o backend ainda não possui uma fonte confiável para aplicar limites financeiros. Além disso, `trailing_stop` é apenas booleano no painel e não define distância/recuo de trailing. Esses controles devem ser concluídos junto à sincronização de saldo (BUG-008) e à definição explícita da regra de trailing.
 
 ### BUG-007 — Telegram e filtros de robôs parecem incompletos
 
