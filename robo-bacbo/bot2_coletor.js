@@ -899,27 +899,30 @@ async function enviarMensagemTelegram(token, chatId, texto, fetchImpl = fetch) {
 }
 
 async function inscreverRobosTelegramEntrada(est, estado, candidatos) {
-    const inscritos = [];
+    const listaCandidatos = Array.isArray(candidatos) ? candidatos : [];
 
-    for (const robo of (Array.isArray(candidatos) ? candidatos : [])) {
-        const texto = montarMensagemTelegram('ENTRADA', est, estado, robo);
-        const resultados = await Promise.all(
-            robo.chat_ids.map(chatId => enviarMensagemTelegram(robo.telegram_token, chatId, texto))
-        );
+    const resultadosRobos = await Promise.all(
+        listaCandidatos.map(async robo => {
+            const texto = montarMensagemTelegram('ENTRADA', est, estado, robo);
+            const resultados = await Promise.all(
+                robo.chat_ids.map(chatId => enviarMensagemTelegram(robo.telegram_token, chatId, texto))
+            );
 
-        const chatIdsEntregues = robo.chat_ids.filter((chatId, indice) => resultados[indice] === true);
-        if (chatIdsEntregues.length === 0) {
-            console.warn(`⚠️ Robô ${robo.id}: nenhuma entrega Telegram confirmada na ENTRADA.`);
-            continue;
-        }
+            const chatIdsEntregues = robo.chat_ids.filter((chatId, indice) => resultados[indice] === true);
+            if (chatIdsEntregues.length === 0) {
+                console.warn(`⚠️ Robô ${robo.id}: nenhuma entrega Telegram confirmada na ENTRADA.`);
+                return null;
+            }
 
-        console.log(`📨 Robô ${robo.id}: Telegram confirmado em ${chatIdsEntregues.length}/${robo.chat_ids.length} destino(s).`);
-        inscritos.push({
-            ...robo,
-            chat_ids: chatIdsEntregues
-        });
-    }
+            console.log(`📨 Robô ${robo.id}: Telegram confirmado em ${chatIdsEntregues.length}/${robo.chat_ids.length} destino(s).`);
+            return {
+                ...robo,
+                chat_ids: chatIdsEntregues
+            };
+        })
+    );
 
+    const inscritos = resultadosRobos.filter(Boolean);
     estado.robosTelegramInscritos = inscritos;
     estado.robosInscritos = unirRobosInscritos(estado.robosWebInscritos, inscritos);
     return inscritos;
@@ -938,17 +941,20 @@ async function aguardarInscricaoTelegram(estado) {
 async function enviarTelegramParaInscritos(tipo, est, estado, extras = {}) {
     await aguardarInscricaoTelegram(estado);
 
-    for (const robo of (Array.isArray(estado.robosTelegramInscritos) ? estado.robosTelegramInscritos : [])) {
-        const texto = montarMensagemTelegram(tipo, est, estado, robo, extras);
-        const resultados = await Promise.all(
-            robo.chat_ids.map(chatId => enviarMensagemTelegram(robo.telegram_token, chatId, texto))
-        );
+    const inscritos = Array.isArray(estado.robosTelegramInscritos) ? estado.robosTelegramInscritos : [];
+    await Promise.all(
+        inscritos.map(async robo => {
+            const texto = montarMensagemTelegram(tipo, est, estado, robo, extras);
+            const resultados = await Promise.all(
+                robo.chat_ids.map(chatId => enviarMensagemTelegram(robo.telegram_token, chatId, texto))
+            );
 
-        const entregues = resultados.filter(Boolean).length;
-        if (entregues !== robo.chat_ids.length) {
-            console.warn(`⚠️ Robô ${robo.id}: Telegram ${tipo} confirmado em ${entregues}/${robo.chat_ids.length} destino(s).`);
-        }
-    }
+            const entregues = resultados.filter(Boolean).length;
+            if (entregues !== robo.chat_ids.length) {
+                console.warn(`⚠️ Robô ${robo.id}: Telegram ${tipo} confirmado em ${entregues}/${robo.chat_ids.length} destino(s).`);
+            }
+        })
+    );
 }
 
 function emitirAlertaWebRobo(tipo, est, estado, extras = {}) {
@@ -1373,8 +1379,6 @@ app.post("/receber-sinal", async (req, res) => {
                                 }
                             }
                         }
-                        await aguardarInscricaoTelegram(estadoSinal);
-
                         break; 
                     }
                 }
