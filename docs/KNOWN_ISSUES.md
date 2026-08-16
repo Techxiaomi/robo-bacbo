@@ -12,9 +12,11 @@ As credenciais SQL e de login foram substituídas por variáveis de ambiente. O 
 
 Ação operacional ainda necessária: após validar a migração, rotacionar credenciais que já tenham sido compartilhadas em outros serviços/conversas.
 
-### SEC-002 — `POST /apostar` sem autenticação e Flask ligado a `0.0.0.0`
+### SEC-002 — Comunicação interna Node ↔ Python sem autenticação
 
-Qualquer cliente que alcance a porta 5000 pode, em princípio, tentar colocar dados na fila de apostas. Planejar bind local (`127.0.0.1`) e autenticação/segredo entre processos.
+Status proposto: **mitigado no patch SEC-002**.
+
+As duas rotas internas (`/apostar` e `/receber-sinal`) passam a exigir `INTERNAL_API_TOKEN`; o executor Flask usa `127.0.0.1` por padrão e valida minimamente o payload antes de enfileirar uma ordem. O segredo real permanece somente no `.env`.
 
 ### SEC-003 — APIs Node sem autenticação e CORS amplo
 

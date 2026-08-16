@@ -13,7 +13,10 @@ Snapshot inicial preparado a partir dos dois projetos fornecidos, preservando a 
 
 1. Copie `.env.example` para `.env` na raiz do projeto.
 2. Preencha no `.env` as credenciais e URLs reais da sua instalação.
-3. Nunca envie `.env` ou `robo-sync-pilot/sessao_salva.json` ao Git.
+3. Gere um valor longo e aleatório para `INTERNAL_API_TOKEN` e mantenha o mesmo `.env` acessível aos processos Node.js e Python.
+4. Nunca envie `.env` ou `robo-sync-pilot/sessao_salva.json` ao Git.
+
+O backend e o executor recusam iniciar quando `INTERNAL_API_TOKEN` está vazio. As rotas internas `/receber-sinal` e `/apostar` exigem esse segredo no header `X-Internal-Token`.
 
 ### Backend Node.js
 
