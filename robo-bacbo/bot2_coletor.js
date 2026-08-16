@@ -678,6 +678,26 @@ async function registrarHistoricoResultadoEstrategia(est, tipoResultado, galeAtu
     );
 }
 
+function horarioParaMinutos(valor, padrao) {
+    const texto = String(valor || padrao).trim();
+    const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(texto);
+    if (!match) return null;
+    return (Number(match[1]) * 60) + Number(match[2]);
+}
+
+function traderDentroHorarioExecucao(config, agora = new Date()) {
+    const cf = config || {};
+    const inicio = horarioParaMinutos(cf.hora_inicio, '00:00');
+    const fim = horarioParaMinutos(cf.hora_fim, '23:59');
+
+    if (inicio === null || fim === null) return false;
+    if (inicio === fim) return true;
+
+    const minutoAtual = (agora.getHours() * 60) + agora.getMinutes();
+    if (inicio < fim) return minutoAtual >= inicio && minutoAtual <= fim;
+    return minutoAtual >= inicio || minutoAtual <= fim;
+}
+
 async function carregarSistemasParaMemoria() {
     try {
         const [linhasEst] = await dbPool.query('SELECT * FROM estrategias WHERE ativo = true');
@@ -900,6 +920,12 @@ app.post("/receber-sinal", async (req, res) => {
                             for (let trader of AUTO_TRADERS_MEMORIA) {
                                 let cf = trader.config;
                                 if (trader.ativo && trader.status_operacao === 'OPERANDO' && cf.fontes_sinal && cf.fontes_sinal.includes(est.origem)) {
+
+                                    if (!traderDentroHorarioExecucao(cf)) {
+                                        console.log(`Trader ${trader.id} fora da janela de execucao (${cf.hora_inicio || '00:00'}-${cf.hora_fim || '23:59'}). Nova entrada ignorada.`);
+                                        continue;
+                                    }
+
                                     
                                     if (cf.limite_entradas && trader.entradas_feitas >= cf.limite_entradas) {
                                         trader.status_operacao = 'META_ATINGIDA';
