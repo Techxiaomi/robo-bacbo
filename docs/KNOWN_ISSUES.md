@@ -60,7 +60,7 @@ Status: **parcialmente mitigado no patch BUG-005A**.
 
 `historico_resultados` passa a receber um registro quando cada sinal de estratégia é finalizado como `GREEN`, `TIE` ou `RED`, com nível `DIRETO`/`GALE1`/`GALE2`, multiplicador do empate quando aplicável e horário da rodada. Não são gravados registros intermediários a cada Gale, evitando duplicar um mesmo sinal.
 
-`historico_disparos_robos` passa a ser preenchido pelo BUG-007B somente para robôs que realmente receberam o sinal pelo canal web já implementado. Robôs configurados exclusivamente para Telegram não são contabilizados antes do BUG-007C realizar e confirmar a entrega externa.
+`historico_disparos_robos` é preenchido para robôs que participaram do sinal por pelo menos um canal efetivamente implementado. O BUG-007B cobre o canal web; o BUG-007C inclui robôs Telegram-only somente quando ao menos um destino confirma a entrega da mensagem de ENTRADA. Robôs presentes nos dois canais continuam gerando um único registro por sinal.
 
 ### BUG-006 — Stop Win / Stop Loss / Trailing / horário estão configuráveis no painel sem enforcement localizado
 
@@ -72,13 +72,13 @@ Stop Win, Stop Loss e trailing permanecem pendentes. O Python atual não envia `
 
 ### BUG-007 — Telegram e filtros de robôs parecem incompletos
 
-Status: **parcialmente mitigado pelos patches BUG-007A e BUG-007B**.
+Status: **parcialmente mitigado pelos patches BUG-007A, BUG-007B e BUG-007C**.
 
-O BUG-007A restaura o CRUD visual, destinatários, checklists de origens/exceções/avulsos, edição, toggle, cards e filtros usando as rotas `/api/robos` e `/api/robo` já existentes. Configurações desconhecidas existentes em `config_json` são preservadas durante a edição.
+O BUG-007A restaura o CRUD visual de Robôs. O BUG-007B conecta o canal web ao ciclo real do sinal, com precedência `exceção > avulso > origem`, propriedade por `robo_dono_id` em padrões dinâmicos e filtro de `min_assertividade`.
 
-O BUG-007B conecta o canal web ao ciclo real do sinal. Para padrões manuais, a precedência de sintonização é `exceção > avulso > origem`; para padrões dinâmicos, o `robo_dono_id` define o robô proprietário. `min_assertividade` usa o baseline legado persistido mais `historico_resultados`, evitando depender apenas de contadores em memória. A lista elegível é congelada em `robosInscritos` na ENTRADA e acompanha GALE e fechamento. Somente robôs com `enviar_web=true` são inscritos neste estágio, e o fechamento gera um registro por robô em `historico_disparos_robos`.
+O BUG-007C implementa o canal Telegram via Bot API `sendMessage`. Os destinos são deduplicados a partir de `telegram_chat_id` e `destinatarios_robo`; a mensagem é texto simples e respeita cabeçalho/rodapé e flags de exibição do robô. A ENTRADA é enviada em paralelo por destino com timeout e somente destinos confirmados (`HTTP ok` + `ok=true`) permanecem inscritos para GALE e fechamento. O token nunca é incluído nos logs. O canal web permanece separado, e `robosInscritos` é a união sem duplicatas dos canais que realmente inscreveram o robô.
 
-Pendente para BUG-007C/007D: envio Telegram real com confirmação de entrega e enforcement de `stop_reds_seguidos`/cooldown/standby. O BUG-007B não faz chamadas externas ao Telegram.
+Pendente para BUG-007D: enforcement de `stop_reds_seguidos`/cooldown/standby e atualização coerente de `greens_consecutivos`.
 
 ### BUG-008 — Sincronização de saldo da corretora estava incompleta
 

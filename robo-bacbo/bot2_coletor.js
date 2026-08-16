@@ -203,6 +203,7 @@ function headersInternos() {
 }
 
 const EXECUTOR_TIMEOUT_MS = 5000;
+const TELEGRAM_TIMEOUT_MS = 3000;
 
 async function enviarOrdemAoExecutor(alvo, valor) {
     const controller = new AbortController();
@@ -748,38 +749,216 @@ function roboSintonizaEstrategia(robo, est) {
     return origens.includes(origem);
 }
 
-async function selecionarRobosWebParaEstrategia(est) {
+function destinosTelegramRobo(robo) {
+    const destinos = new Set();
+
+    const principal = String(robo.telegram_chat_id || '').trim();
+    if (principal) destinos.add(principal);
+
+    for (const destinatario of (Array.isArray(robo.destinatarios) ? robo.destinatarios : [])) {
+        const chatId = String(destinatario.chat_id || '').trim();
+        if (chatId) destinos.add(chatId);
+    }
+
+    return [...destinos];
+}
+
+function snapshotPublicoRobo(robo) {
+    return {
+        id: robo.id,
+        nome: robo.nome,
+        tag_visual: robo.tag_visual,
+        cor_hex: robo.cor_hex
+    };
+}
+
+function unirRobosInscritos(...listas) {
+    const unicos = new Map();
+
+    for (const lista of listas) {
+        for (const robo of (Array.isArray(lista) ? lista : [])) {
+            if (robo && robo.id !== undefined && robo.id !== null) {
+                unicos.set(String(robo.id), snapshotPublicoRobo(robo));
+            }
+        }
+    }
+
+    return [...unicos.values()];
+}
+
+async function selecionarRobosParaEstrategia(est) {
     if (est.quarentena_restante > 0) {
-        return { robos: [], assertividade: 0 };
+        return { web: [], telegram: [], assertividade: 0 };
     }
 
     const assertividade = await calcularAssertividadePersistidaEstrategia(est);
-    const robos = ROBOS_MEMORIA
-        .filter(robo => {
-            const ativo = robo.ativo === true || robo.ativo === 1;
-            const enviaWeb = robo.enviar_web === true || robo.enviar_web === 1;
-            const minAssert = Math.max(0, Number(robo.min_assertividade) || 0);
+    const elegiveis = ROBOS_MEMORIA.filter(robo => {
+        const ativo = robo.ativo === true || robo.ativo === 1;
+        const minAssert = Math.max(0, Number(robo.min_assertividade) || 0);
 
-            return ativo
-                && enviaWeb
-                && assertividade >= minAssert
-                && roboSintonizaEstrategia(robo, est);
+        return ativo
+            && assertividade >= minAssert
+            && roboSintonizaEstrategia(robo, est);
+    });
+
+    const web = elegiveis
+        .filter(robo => robo.enviar_web === true || robo.enviar_web === 1)
+        .map(snapshotPublicoRobo);
+
+    const telegram = elegiveis
+        .filter(robo => {
+            const enviaTelegram = robo.enviar_telegram === true || robo.enviar_telegram === 1;
+            return enviaTelegram
+                && String(robo.telegram_token || '').trim() !== ''
+                && destinosTelegramRobo(robo).length > 0;
         })
         .map(robo => ({
-            id: robo.id,
-            nome: robo.nome,
-            tag_visual: robo.tag_visual,
-            cor_hex: robo.cor_hex
+            ...snapshotPublicoRobo(robo),
+            telegram_token: String(robo.telegram_token || '').trim(),
+            chat_ids: destinosTelegramRobo(robo),
+            config: JSON.parse(JSON.stringify(robo.config || {}))
         }));
 
     return {
-        robos,
+        web,
+        telegram,
         assertividade: Number(assertividade.toFixed(1))
     };
 }
 
+function formatarPadraoTelegram(padrao) {
+    return (Array.isArray(padrao) ? padrao : []).map(item => {
+        if (item === 'Player') return '🔵 P';
+        if (item === 'Banker') return '🔴 B';
+        if (item === 'Tie') return '🟡 T';
+        return String(item);
+    }).join(' → ');
+}
+
+function montarMensagemTelegram(tipo, est, estado, robo, extras = {}) {
+    const config = robo.config || {};
+    const linhas = [];
+
+    if (config.cabecalho) linhas.push(String(config.cabecalho).trim());
+
+    if (tipo === 'ENTRADA') linhas.push('🎯 ENTRADA');
+    else if (tipo === 'GALE') linhas.push(`🔁 GALE ${Number(extras.nivel) || 1}`);
+    else if (tipo === 'GREEN' && extras.resultado === 'TIE') linhas.push('🟡 EMPATE PROTEGIDO');
+    else if (tipo === 'GREEN') linhas.push('✅ GREEN');
+    else if (tipo === 'RED') linhas.push('❌ RED');
+    else linhas.push(String(tipo || 'SINAL'));
+
+    if (config.mostrar_nome !== false) linhas.push(`Estratégia: ${est.nome}`);
+
+    if (tipo === 'ENTRADA' && config.mostrar_padrao !== false) {
+        const padrao = formatarPadraoTelegram(est.padrao);
+        if (padrao) linhas.push(`Padrão: ${padrao}`);
+    }
+
+    if (config.mostrar_assertividade !== false && Number.isFinite(Number(estado.assertividadeSinal))) {
+        linhas.push(`Assertividade: ${Number(estado.assertividadeSinal).toFixed(1)}%`);
+    }
+
+    if (tipo === 'ENTRADA' || tipo === 'GALE') {
+        linhas.push(`Entrada: ${est.entrada === 'Player' ? '🔵 PLAYER' : (est.entrada === 'Banker' ? '🔴 BANKER' : '🟡 TIE')}`);
+    }
+
+    if (tipo === 'GREEN' && extras.resultado === 'TIE' && config.detalhar_empates !== false && extras.multiplicador) {
+        linhas.push(`Multiplicador: ${extras.multiplicador}`);
+    }
+
+    if (config.rodape) linhas.push(String(config.rodape).trim());
+
+    return linhas.filter(Boolean).join('\n').slice(0, 4096);
+}
+
+async function enviarMensagemTelegram(token, chatId, texto, fetchImpl = fetch) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), TELEGRAM_TIMEOUT_MS);
+
+    try {
+        const resposta = await fetchImpl(`https://api.telegram.org/bot${token}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                chat_id: chatId,
+                text: texto
+            }),
+            signal: controller.signal
+        });
+
+        let corpo = null;
+        try { corpo = await resposta.json(); } catch (e) {}
+
+        return resposta.ok && corpo && corpo.ok === true;
+    } catch (e) {
+        return false;
+    } finally {
+        clearTimeout(timeoutId);
+    }
+}
+
+async function inscreverRobosTelegramEntrada(est, estado, candidatos) {
+    const inscritos = [];
+
+    for (const robo of (Array.isArray(candidatos) ? candidatos : [])) {
+        const texto = montarMensagemTelegram('ENTRADA', est, estado, robo);
+        const resultados = await Promise.all(
+            robo.chat_ids.map(chatId => enviarMensagemTelegram(robo.telegram_token, chatId, texto))
+        );
+
+        const chatIdsEntregues = robo.chat_ids.filter((chatId, indice) => resultados[indice] === true);
+        if (chatIdsEntregues.length === 0) {
+            console.warn(`⚠️ Robô ${robo.id}: nenhuma entrega Telegram confirmada na ENTRADA.`);
+            continue;
+        }
+
+        console.log(`📨 Robô ${robo.id}: Telegram confirmado em ${chatIdsEntregues.length}/${robo.chat_ids.length} destino(s).`);
+        inscritos.push({
+            ...robo,
+            chat_ids: chatIdsEntregues
+        });
+    }
+
+    estado.robosTelegramInscritos = inscritos;
+    estado.robosInscritos = unirRobosInscritos(estado.robosWebInscritos, inscritos);
+    return inscritos;
+}
+
+async function aguardarInscricaoTelegram(estado) {
+    if (!estado || !estado.telegramEntradaPromise) return;
+
+    try {
+        await estado.telegramEntradaPromise;
+    } catch (e) {
+        console.error('⚠️ Falha inesperada ao aguardar inscrição Telegram:', e.message);
+    }
+}
+
+async function enviarTelegramParaInscritos(tipo, est, estado, extras = {}) {
+    await aguardarInscricaoTelegram(estado);
+
+    for (const robo of (Array.isArray(estado.robosTelegramInscritos) ? estado.robosTelegramInscritos : [])) {
+        const texto = montarMensagemTelegram(tipo, est, estado, robo, extras);
+        const resultados = await Promise.all(
+            robo.chat_ids.map(chatId => enviarMensagemTelegram(robo.telegram_token, chatId, texto))
+        );
+
+        const entregues = resultados.filter(Boolean).length;
+        if (entregues !== robo.chat_ids.length) {
+            console.warn(`⚠️ Robô ${robo.id}: Telegram ${tipo} confirmado em ${entregues}/${robo.chat_ids.length} destino(s).`);
+        }
+    }
+}
+
 function emitirAlertaWebRobo(tipo, est, estado, extras = {}) {
-    if (!estado || !Array.isArray(estado.robosInscritos) || estado.robosInscritos.length === 0) return;
+    if (!estado) return;
+
+    const robosWeb = Array.isArray(estado.robosWebInscritos)
+        ? estado.robosWebInscritos
+        : (Array.isArray(estado.robosInscritos) ? estado.robosInscritos : []);
+
+    if (robosWeb.length === 0) return;
 
     ioServer.emit('alerta_painel', {
         tipo,
@@ -787,7 +966,7 @@ function emitirAlertaWebRobo(tipo, est, estado, extras = {}) {
         entrada: est.entrada,
         padrao: est.padrao,
         assertividade: estado.assertividadeSinal,
-        robosNotificados: estado.robosInscritos,
+        robosNotificados: robosWeb,
         ...extras
     });
 }
@@ -864,11 +1043,15 @@ async function carregarSistemasParaMemoria() {
         estadoApostas = novoEstado;
 
         const [linhasRobos] = await dbPool.query('SELECT * FROM robos_canais WHERE ativo = true');
+        const [destinatariosRobos] = await dbPool.query('SELECT robo_id, nome_cliente, chat_id FROM destinatarios_robo');
+
         ROBOS_MEMORIA = linhasRobos.map(r => {
             let confObj = { origens: [], avulsos: [], excecoes: [], auto_tuning: { ativo: false }, cooldown: { ativo: false } };
             try { if (r.config_json) confObj = { ...confObj, ...JSON.parse(r.config_json) }; } catch(err){}
             if (!estadoStandbyRobos[r.id]) estadoStandbyRobos[r.id] = { em_standby_ate: 0, historico_reds: [] };
-            return { ...r, config: confObj };
+
+            const destinatarios = destinatariosRobos.filter(d => Number(d.robo_id) === Number(r.id));
+            return { ...r, config: confObj, destinatarios };
         });
 
         const [linhasAT] = await dbPool.query('SELECT * FROM auto_traders');
@@ -987,16 +1170,20 @@ app.post("/receber-sinal", async (req, res) => {
                         console.error(`Falha ao persistir historico da estrategia ${est.id}:`, e.message);
                     }
 
+                    await aguardarInscricaoTelegram(st);
+
                     try {
                         await registrarHistoricoRobosInscritos(est, st, isTie ? 'TIE' : 'GREEN', st.galeAtual, isTie ? mult : '', dados.timestamp_coleta);
                     } catch (e) {
                         console.error(`Falha ao persistir historico dos robos para estrategia ${est.id}:`, e.message);
                     }
 
-                    emitirAlertaWebRobo('GREEN', est, st, {
+                    const extrasFinal = {
                         resultado: isTie ? 'TIE' : 'GREEN',
                         multiplicador: isTie ? mult : ''
-                    });
+                    };
+                    emitirAlertaWebRobo('GREEN', est, st, extrasFinal);
+                    void enviarTelegramParaInscritos('GREEN', est, st, extrasFinal);
 
                     if (est.quarentena_restante <= 0) {
                         for (let trader of AUTO_TRADERS_MEMORIA) {
@@ -1015,7 +1202,9 @@ app.post("/receber-sinal", async (req, res) => {
                 } else {
                     if (st.galeAtual < est.gales) {
                         st.galeAtual++;
-                        emitirAlertaWebRobo('GALE', est, st, { nivel: st.galeAtual });
+                        const extrasGale = { nivel: st.galeAtual };
+                        emitirAlertaWebRobo('GALE', est, st, extrasGale);
+                        void enviarTelegramParaInscritos('GALE', est, st, extrasGale);
                         if (est.quarentena_restante <= 0) {
                             for (let trader of AUTO_TRADERS_MEMORIA) {
                                 let cf = trader.config;
@@ -1058,6 +1247,8 @@ app.post("/receber-sinal", async (req, res) => {
                             console.error(`Falha ao persistir historico da estrategia ${est.id}:`, e.message);
                         }
 
+                        await aguardarInscricaoTelegram(st);
+
                         try {
                             await registrarHistoricoRobosInscritos(est, st, 'RED', st.galeAtual, '', dados.timestamp_coleta);
                         } catch (e) {
@@ -1065,6 +1256,7 @@ app.post("/receber-sinal", async (req, res) => {
                         }
 
                         emitirAlertaWebRobo('RED', est, st);
+                        void enviarTelegramParaInscritos('RED', est, st);
 
                         if (est.quarentena_restante <= 0) {
                             for (let trader of AUTO_TRADERS_MEMORIA) {
@@ -1097,9 +1289,9 @@ app.post("/receber-sinal", async (req, res) => {
                     let matchCores = ult.every((val, i) => val.resultado === est.padrao[i]);
 
                     if (mesmaSessao && matchCores) {
-                        let selecaoRobos = { robos: [], assertividade: 0 };
+                        let selecaoRobos = { web: [], telegram: [], assertividade: 0 };
                         try {
-                            selecaoRobos = await selecionarRobosWebParaEstrategia(est);
+                            selecaoRobos = await selecionarRobosParaEstrategia(est);
                         } catch (e) {
                             console.error(`Falha ao selecionar robos para estrategia ${est.id}:`, e.message);
                         }
@@ -1107,13 +1299,17 @@ app.post("/receber-sinal", async (req, res) => {
                         estadoApostas[est.id] = {
                             aguardandoResultado: true,
                             galeAtual: 0,
-                            robosInscritos: selecaoRobos.robos,
+                            robosWebInscritos: selecaoRobos.web,
+                            robosTelegramInscritos: [],
+                            robosInscritos: unirRobosInscritos(selecaoRobos.web),
                             assertividadeSinal: selecaoRobos.assertividade,
                             mensagensEntrada: [],
                             mensagensGale: []
                         };
 
-                        emitirAlertaWebRobo('ENTRADA', est, estadoApostas[est.id]);
+                        const estadoSinal = estadoApostas[est.id];
+                        emitirAlertaWebRobo('ENTRADA', est, estadoSinal);
+                        estadoSinal.telegramEntradaPromise = inscreverRobosTelegramEntrada(est, estadoSinal, selecaoRobos.telegram);
 
                         if (est.quarentena_restante <= 0) {
                             for (let trader of AUTO_TRADERS_MEMORIA) {
@@ -1177,6 +1373,8 @@ app.post("/receber-sinal", async (req, res) => {
                                 }
                             }
                         }
+                        await aguardarInscricaoTelegram(estadoSinal);
+
                         break; 
                     }
                 }
