@@ -50,7 +50,9 @@ O endpoint `PUT /api/auto-trader/:id` passa a atualizar somente nome, estado ati
 
 ### BUG-004 — `interrupcao_fluxo` é enviado, mas não aplicado no Node
 
-O Python detecta pausas superiores a 60 segundos. O Node mantém `idSessaoContinua` constante no snapshot, portanto a separação de sessões pode não ocorrer.
+Status: **mitigado no patch BUG-004**.
+
+Quando o Python sinaliza `interrupcao_fluxo = true`, o Node rotaciona `idSessaoContinua` antes de persistir o primeiro resultado após a pausa. O novo ID usa `timestamp_coleta` quando válido (com fallback para `Date.now()`), fazendo a checagem `mesmaSessao` já existente impedir padrões formados pela concatenação de giros antes e depois da interrupção. Ordens pendentes e estado de Gale não são alterados por este patch.
 
 ### BUG-005 — Tabelas de histórico são consultadas sem persistência correspondente visível
 

@@ -644,6 +644,22 @@ async function ativarAutoTradersAguardandoMesa() {
     console.log(`🟢 ${aguardandoMesa.length} Auto-Trader(s) sincronizado(s) com a mesa e liberado(s) para OPERANDO.`);
 }
 
+function rotacionarSessaoAposInterrupcao(dados) {
+    if (!dados || dados.interrupcao_fluxo !== true) return false;
+
+    const sessaoAnterior = idSessaoContinua;
+    const timestampColeta = Number(dados.timestamp_coleta);
+    let novaSessao = Number.isFinite(timestampColeta) && timestampColeta > 0
+        ? Math.trunc(timestampColeta)
+        : Date.now();
+
+    if (novaSessao === sessaoAnterior) novaSessao++;
+    idSessaoContinua = novaSessao;
+
+    console.log(`🧭 Interrupção de fluxo detectada. Nova sessão contínua: ${sessaoAnterior} -> ${idSessaoContinua}`);
+    return true;
+}
+
 async function carregarSistemasParaMemoria() {
     try {
         const [linhasEst] = await dbPool.query('SELECT * FROM estrategias WHERE ativo = true');
@@ -718,6 +734,8 @@ app.post("/receber-sinal", async (req, res) => {
         else if (rawVenc.includes("TIE") || rawVenc === "T" || rawVenc === "EMPATE") vencedor = "Tie";
 
         if (!vencedor) return;
+
+        rotacionarSessaoAposInterrupcao(dados);
 
         try {
             await ativarAutoTradersAguardandoMesa();
