@@ -201,6 +201,43 @@ function headersInternos() {
         "X-Internal-Token": INTERNAL_API_TOKEN
     };
 }
+
+const EXECUTOR_TIMEOUT_MS = 5000;
+
+async function enviarOrdemAoExecutor(alvo, valor) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), EXECUTOR_TIMEOUT_MS);
+
+    try {
+        const resposta = await fetch(EXECUTOR_URL, {
+            method: 'POST',
+            headers: headersInternos(),
+            body: JSON.stringify({ alvo, valor }),
+            signal: controller.signal
+        });
+
+        let corpo = null;
+        try { corpo = await resposta.json(); } catch(e) {}
+
+        if (!resposta.ok) {
+            const detalhe = corpo && (corpo.erro || corpo.status) ? (corpo.erro || corpo.status) : `HTTP ${resposta.status}`;
+            throw new Error(`Executor recusou a ordem: ${detalhe}`);
+        }
+
+        if (!corpo || !corpo.dados || corpo.dados.alvo !== alvo || Number(corpo.dados.valor) !== Number(valor)) {
+            throw new Error("Executor respondeu sem confirmar os dados da ordem");
+        }
+
+        return corpo;
+    } catch (e) {
+        if (e && e.name === 'AbortError') {
+            throw new Error(`Timeout de ${EXECUTOR_TIMEOUT_MS}ms aguardando confirmacao do executor`);
+        }
+        throw e;
+    } finally {
+        clearTimeout(timeoutId);
+    }
+}
 const server = app.listen(PORTA, () => { 
     console.log(`🌐 Painel Web rodando na porta ${PORTA}`); 
     console.log(`📡 Webhook aguardando sinais em: http://127.0.0.1:${PORTA}/receber-sinal`);
@@ -401,6 +438,7 @@ app.post("/api/simular-banca", async (req, res) => {
             
             equity_curve.push(saldo);
             let dObj = new Date(row.data_hora); dates.push(`${dObj.getDate()}/${dObj.getMonth()+1} ${dObj.getHours().toString().padStart(2, '0')}:${dObj.getMinutes().toString().padStart(2, '0')}`);
+
             if (is_win) greens++; else reds++;
         }
 
@@ -726,10 +764,22 @@ app.post("/receber-sinal", async (req, res) => {
                                         
                                         try {
                                             await dbPool.query(`UPDATE auditoria_ordens SET status_ordem = 'LOSS', lucro_prejuizo = ?, saldo_pos = ?, placar_mesa = ? WHERE id = ?`, [-riscoAntigo, trader.saldo_atual, `[P:${p1+p2} B:${b1+b2}]`, pendentes[0].id]);
-                                            await dbPool.query(`INSERT INTO auditoria_ordens (trader_id, estrategia_nome, fonte_sinal, alvo, nivel, risco_total, valor_entrada, status_ordem) VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDENTE')`, [trader.id, est.nome, est.origem, alvoPython, `GALE ${st.galeAtual}`, riscoAntigo + valorGale, valorGale]);
-                                        } catch(e){}
+                                        } catch(e) {
+                                            console.error(`⚠️ Falha ao encerrar ordem anterior antes do GALE ${st.galeAtual} do trader ${trader.id}:`, e.message);
+                                        }
 
-                                        try { fetch(EXECUTOR_URL, { method: 'POST', headers: headersInternos(), body: JSON.stringify({ alvo: alvoPython, valor: valorGale }) }).catch(e=>{}); } catch(e){}
+                                        let executorConfirmouGale = false;
+                                        try {
+                                            await enviarOrdemAoExecutor(alvoPython, valorGale);
+                                            executorConfirmouGale = true;
+                                            await dbPool.query(`INSERT INTO auditoria_ordens (trader_id, estrategia_nome, fonte_sinal, alvo, nivel, risco_total, valor_entrada, status_ordem) VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDENTE')`, [trader.id, est.nome, est.origem, alvoPython, `GALE ${st.galeAtual}`, riscoAntigo + valorGale, valorGale]);
+                                        } catch(e) {
+                                            if (executorConfirmouGale) {
+                                                console.error(`⚠️ GALE ${st.galeAtual} confirmado pelo executor, mas nao registrado na auditoria do trader ${trader.id}:`, e.message);
+                                            } else {
+                                                console.error(`❌ GALE ${st.galeAtual} nao enviado para o trader ${trader.id}:`, e.message);
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -796,12 +846,32 @@ app.post("/receber-sinal", async (req, res) => {
                                     let valorArredondado = calcularFichaSegura(cf.stake_inicial || 10.00);
                                     let alvoPython = est.entrada === 'Player' ? 'PlayerWon' : (est.entrada === 'Banker' ? 'BankerWon' : 'Tie');
 
+                                    let executorConfirmouDireto = false;
                                     try {
-                                        fetch(EXECUTOR_URL, { method: 'POST', headers: headersInternos(), body: JSON.stringify({ alvo: alvoPython, valor: valorArredondado }) }).catch(e=>{});
-                                        trader.entradas_feitas++;
-                                        await dbPool.query('UPDATE auto_traders SET entradas_feitas=? WHERE id=?', [trader.entradas_feitas, trader.id]);
-                                        await dbPool.query(`INSERT INTO auditoria_ordens (trader_id, estrategia_nome, fonte_sinal, alvo, nivel, risco_total, valor_entrada, status_ordem) VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDENTE')`, [trader.id, est.nome, est.origem, alvoPython, 'DIRETO', valorArredondado, valorArredondado]);
-                                    } catch(e){}
+                                        await enviarOrdemAoExecutor(alvoPython, valorArredondado);
+                                        executorConfirmouDireto = true;
+
+                                        const conexao = await dbPool.getConnection();
+                                        try {
+                                            await conexao.beginTransaction();
+                                            const novasEntradas = trader.entradas_feitas + 1;
+                                            await conexao.query('UPDATE auto_traders SET entradas_feitas=? WHERE id=?', [novasEntradas, trader.id]);
+                                            await conexao.query(`INSERT INTO auditoria_ordens (trader_id, estrategia_nome, fonte_sinal, alvo, nivel, risco_total, valor_entrada, status_ordem) VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDENTE')`, [trader.id, est.nome, est.origem, alvoPython, 'DIRETO', valorArredondado, valorArredondado]);
+                                            await conexao.commit();
+                                            trader.entradas_feitas = novasEntradas;
+                                        } catch(e) {
+                                            try { await conexao.rollback(); } catch(rollbackError) {}
+                                            throw e;
+                                        } finally {
+                                            conexao.release();
+                                        }
+                                    } catch(e) {
+                                        if (executorConfirmouDireto) {
+                                            console.error(`⚠️ Ordem DIRETO confirmada pelo executor, mas nao registrada para o trader ${trader.id}:`, e.message);
+                                        } else {
+                                            console.error(`❌ Ordem DIRETO nao enviada para o trader ${trader.id}:`, e.message);
+                                        }
+                                    }
                                 }
                             }
                         }
