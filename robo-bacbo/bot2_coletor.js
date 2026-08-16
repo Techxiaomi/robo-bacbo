@@ -603,9 +603,9 @@ app.post("/api/auto-trader", async (req, res) => {
 
 app.put("/api/auto-trader/:id", async (req, res) => {
     try {
-        const { id } = req.params; const { nome, ativo, config, saldo_inicial } = req.body;
-        const configJson = JSON.stringify(config || {}); const sInicial = parseFloat(saldo_inicial) || 0.00;
-        await dbPool.query(`UPDATE auto_traders SET nome=?, ativo=?, config_json=?, saldo_inicial=?, saldo_atual=? WHERE id=?`, [nome, ativo ? 1 : 0, configJson, sInicial, sInicial, id]);
+        const { id } = req.params; const { nome, ativo, config } = req.body;
+        const configJson = JSON.stringify(config || {});
+        await dbPool.query(`UPDATE auto_traders SET nome=?, ativo=?, config_json=? WHERE id=?`, [nome, ativo ? 1 : 0, configJson, id]);
         await carregarSistemasParaMemoria(); res.json({ sucesso: true });
     } catch (e) { res.status(500).json({ sucesso: false }); }
 });
