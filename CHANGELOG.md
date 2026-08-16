@@ -36,3 +36,5 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - Gales de sequências já iniciadas continuam até o desfecho; Stop Win, Stop Loss e trailing ficam pendentes até existir saldo sincronizado e regra explícita de trailing.
 - BUG-008A: o executor pode sincronizar o saldo real da página por `CASINO_BALANCE_SELECTOR`, com parsing monetário, polling controlado e mensagens autenticadas ao Node.
 - O Node rejeita saldos inválidos e `saldoGlobalCorretora` passa a distinguir saldo desconhecido (`null`) de saldo real zero; nenhum saldo é inferido quando o seletor não está configurado.
+- BUG-007A: restauradas as funções frontend já referenciadas pelo módulo de Robôs para CRUD, destinatários, sintonização manual, edição, toggle, cards e filtros.
+- O patch preserva configurações desconhecidas no `config_json` e não envia Telegram nem altera o fluxo backend de sinais; roteamento real e histórico por robô ficam para BUG-007B.
