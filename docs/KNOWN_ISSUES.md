@@ -42,7 +42,9 @@ Auto-Traders ativos permanecem em `STANDBY` enquanto aguardam evidência de cone
 
 ### BUG-003 — Edição/toggle do auto-trader reseta `saldo_atual`
 
-O endpoint `PUT /api/auto-trader/:id` grava `saldo_inicial` e `saldo_atual` com o mesmo valor recebido. O toggle rápido reutiliza esse endpoint.
+Status: **mitigado no patch BUG-003**.
+
+O endpoint `PUT /api/auto-trader/:id` passa a atualizar somente nome, estado ativo e configuração. `saldo_inicial` e `saldo_atual` são preservados em edições e no toggle rápido. Uma futura recalibração de banca deve usar uma ação explícita e separada, em vez de ocorrer como efeito colateral de editar o motor.
 
 ## Médios
 
