@@ -170,7 +170,7 @@ let estadoStandbyRobos = {};
 let idSessaoContinua = Date.now(); 
 let contadorGirosParaLimpeza = 0;
 let contadorGirosGlobalPiloto = 0; 
-let saldoGlobalCorretora = 0.00;
+let saldoGlobalCorretora = null;
 
 // ==========================================
 // 3. SERVIDOR WEB E SOCKET
@@ -756,12 +756,25 @@ app.post("/receber-sinal", async (req, res) => {
         const dados = req.body || {};
 
         if (dados.saldo_atual !== undefined && dados.saldo_atual !== null) {
-            saldoGlobalCorretora = parseFloat(dados.saldo_atual);
-            for (let trader of AUTO_TRADERS_MEMORIA) {
-                if (trader.ativo) {
-                    trader.saldo_atual = saldoGlobalCorretora;
-                    try { await dbPool.query('UPDATE auto_traders SET saldo_atual=? WHERE id=?', [saldoGlobalCorretora, trader.id]); } catch(e) {}
+            const saldoRecebido = Number(dados.saldo_atual);
+
+            if (Number.isFinite(saldoRecebido) && saldoRecebido >= 0) {
+                saldoGlobalCorretora = saldoRecebido;
+
+                try {
+                    await dbPool.query(
+                        'UPDATE auto_traders SET saldo_atual=? WHERE ativo=true',
+                        [saldoGlobalCorretora]
+                    );
+
+                    for (let trader of AUTO_TRADERS_MEMORIA) {
+                        if (trader.ativo) trader.saldo_atual = saldoGlobalCorretora;
+                    }
+                } catch (e) {
+                    console.error("⚠️ Falha ao persistir saldo sincronizado dos Auto-Traders:", e.message);
                 }
+            } else {
+                console.warn("⚠️ saldo_atual inválido recebido do executor; atualização ignorada.");
             }
         }
 

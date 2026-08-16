@@ -30,6 +30,20 @@ WEBHOOK_JS = os.getenv("NODE_WEBHOOK_URL", "http://127.0.0.1:3000/receber-sinal"
 INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN", "").strip()
 EXECUTOR_HOST = os.getenv("EXECUTOR_HOST", "127.0.0.1").strip() or "127.0.0.1"
 EXECUTOR_PORT = int(os.getenv("EXECUTOR_PORT", "5000"))
+CASINO_BALANCE_SELECTOR = os.getenv("CASINO_BALANCE_SELECTOR", "").strip()
+
+try:
+    BALANCE_SYNC_INTERVAL_SECONDS = max(0.5, float(os.getenv("BALANCE_SYNC_INTERVAL_SECONDS", "2")))
+except ValueError:
+    BALANCE_SYNC_INTERVAL_SECONDS = 2.0
+
+try:
+    BALANCE_SYNC_HEARTBEAT_SECONDS = max(
+        BALANCE_SYNC_INTERVAL_SECONDS,
+        float(os.getenv("BALANCE_SYNC_HEARTBEAT_SECONDS", "60"))
+    )
+except ValueError:
+    BALANCE_SYNC_HEARTBEAT_SECONDS = 60.0
 
 if not INTERNAL_API_TOKEN:
     raise RuntimeError("INTERNAL_API_TOKEN nao configurado. Defina o segredo compartilhado no .env antes de iniciar o executor.")
@@ -235,6 +249,105 @@ def executar_aposta_na_tela(page, aposta):
     except Exception as e:
         print(f"❌ Erro grave na engine de aposta: {e}")
 
+def parsear_valor_monetario(texto):
+    if texto is None:
+        return None
+
+    match = re.search(r"-?\d[\d\s.,]*", str(texto).replace("\xa0", " "))
+    if not match:
+        return None
+
+    bruto = re.sub(r"\s+", "", match.group(0))
+    negativo = bruto.startswith("-")
+    bruto = bruto.lstrip("-")
+
+    if "," in bruto and "." in bruto:
+        if bruto.rfind(",") > bruto.rfind("."):
+            bruto = bruto.replace(".", "").replace(",", ".")
+        else:
+            bruto = bruto.replace(",", "")
+    elif "," in bruto:
+        esquerda, direita = bruto.rsplit(",", 1)
+        bruto = esquerda.replace(",", "") + "." + direita if len(direita) in (1, 2) else bruto.replace(",", "")
+    elif "." in bruto:
+        esquerda, direita = bruto.rsplit(".", 1)
+        bruto = esquerda.replace(".", "") + "." + direita if len(direita) in (1, 2) else bruto.replace(".", "")
+
+    try:
+        valor = float(bruto)
+    except ValueError:
+        return None
+
+    if negativo or valor < 0:
+        return None
+    return round(valor, 2)
+
+
+def ler_saldo_atual(page):
+    if not CASINO_BALANCE_SELECTOR:
+        return None
+
+    contextos = [page] + list(page.frames)
+    for contexto in contextos:
+        try:
+            localizador = contexto.locator(CASINO_BALANCE_SELECTOR)
+            limite = min(localizador.count(), 10)
+            for indice in range(limite):
+                elemento = localizador.nth(indice)
+                if not elemento.is_visible():
+                    continue
+                saldo = parsear_valor_monetario(elemento.inner_text(timeout=700))
+                if saldo is not None:
+                    return saldo
+        except Exception:
+            continue
+
+    return None
+
+
+def sincronizar_saldo_com_node(page, estado_saldo):
+    if not CASINO_BALANCE_SELECTOR:
+        return
+
+    agora = time.time()
+    if agora - estado_saldo["ultima_tentativa"] < BALANCE_SYNC_INTERVAL_SECONDS:
+        return
+    estado_saldo["ultima_tentativa"] = agora
+
+    saldo = ler_saldo_atual(page)
+    if saldo is None:
+        if agora - estado_saldo["ultimo_aviso"] >= 60:
+            print("⚠️ Saldo não localizado pelo CASINO_BALANCE_SELECTOR configurado.")
+            estado_saldo["ultimo_aviso"] = agora
+        return
+
+    ultimo_saldo = estado_saldo["ultimo_saldo"]
+    mudou = ultimo_saldo is None or abs(saldo - ultimo_saldo) >= 0.005
+    heartbeat = agora - estado_saldo["ultimo_envio"] >= BALANCE_SYNC_HEARTBEAT_SECONDS
+    if not mudou and not heartbeat:
+        return
+
+    payload = {
+        "saldo_atual": saldo,
+        "timestamp_coleta": int(agora * 1000)
+    }
+
+    try:
+        resposta = requests.post(
+            WEBHOOK_JS,
+            json=payload,
+            headers={"X-Internal-Token": INTERNAL_API_TOKEN},
+            timeout=2
+        )
+        resposta.raise_for_status()
+        estado_saldo["ultimo_saldo"] = saldo
+        estado_saldo["ultimo_envio"] = agora
+    except Exception as e:
+        if agora - estado_saldo["ultimo_erro"] >= 30:
+            print(f"⚠️ Falha ao sincronizar saldo com o Node: {e}")
+            estado_saldo["ultimo_erro"] = agora
+
+
 def processar_resultado(dados):
     global ultimo_tempo_rodada
     try:
@@ -306,6 +419,16 @@ def iniciar_robo_blindado():
         page = context.new_page()
         aplicar_stealth(page)
         status_conexao = {"ativa": True, "ws_conectado": False}
+        estado_saldo = {
+            "ultima_tentativa": 0.0,
+            "ultimo_saldo": None,
+            "ultimo_envio": 0.0,
+            "ultimo_aviso": 0.0,
+            "ultimo_erro": 0.0
+        }
+
+        if not CASINO_BALANCE_SELECTOR:
+            print("ℹ️ Sincronização de saldo desativada: configure CASINO_BALANCE_SELECTOR no .env.")
 
         def on_web_socket(ws):
             if "evolution" in ws.url.lower() or "evocdn" in ws.url.lower() or "game" in ws.url.lower():
@@ -353,7 +476,8 @@ def iniciar_robo_blindado():
                     if not status_conexao["ativa"]: break
                     
                     # CÉREBRO DE EXECUÇÃO: Checa a fila de apostas frequentemente
-                    for _ in range(20): 
+                    for _ in range(20):
+                        sincronizar_saldo_com_node(page, estado_saldo)
                         if not fila_apostas.empty():
                             ordem = fila_apostas.get()
                             executar_aposta_na_tela(page, ordem)
