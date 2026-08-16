@@ -38,3 +38,5 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - O Node rejeita saldos inválidos e `saldoGlobalCorretora` passa a distinguir saldo desconhecido (`null`) de saldo real zero; nenhum saldo é inferido quando o seletor não está configurado.
 - BUG-007A: restauradas as funções frontend já referenciadas pelo módulo de Robôs para CRUD, destinatários, sintonização manual, edição, toggle, cards e filtros.
 - O patch preserva configurações desconhecidas no `config_json` e não envia Telegram nem altera o fluxo backend de sinais; roteamento real e histórico por robô ficam para BUG-007B.
+- BUG-007B: robôs com canal web ativo passam a ser selecionados na abertura do sinal por origem/avulso/exceção (ou `robo_dono_id` em padrão dinâmico), respeitando `min_assertividade`, e ficam congelados em `robosInscritos` até o fechamento.
+- `alerta_painel` passa a emitir ENTRADA/GALE/GREEN/RED para os robôs realmente inscritos e `historico_disparos_robos` recebe um registro por robô no fechamento; Telegram-only permanece fora da contagem até BUG-007C.

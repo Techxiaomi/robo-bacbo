@@ -60,7 +60,7 @@ Status: **parcialmente mitigado no patch BUG-005A**.
 
 `historico_resultados` passa a receber um registro quando cada sinal de estratégia é finalizado como `GREEN`, `TIE` ou `RED`, com nível `DIRETO`/`GALE1`/`GALE2`, multiplicador do empate quando aplicável e horário da rodada. Não são gravados registros intermediários a cada Gale, evitando duplicar um mesmo sinal.
 
-`historico_disparos_robos` permanece pendente: o backend atual não mantém uma associação confiável entre um sinal e os robôs que efetivamente o receberam. Essa persistência será tratada junto ao fluxo de robôs/Telegram do BUG-007, em vez de fabricar estatísticas de destinatários.
+`historico_disparos_robos` passa a ser preenchido pelo BUG-007B somente para robôs que realmente receberam o sinal pelo canal web já implementado. Robôs configurados exclusivamente para Telegram não são contabilizados antes do BUG-007C realizar e confirmar a entrega externa.
 
 ### BUG-006 — Stop Win / Stop Loss / Trailing / horário estão configuráveis no painel sem enforcement localizado
 
@@ -72,13 +72,13 @@ Stop Win, Stop Loss e trailing permanecem pendentes. O Python atual não envia `
 
 ### BUG-007 — Telegram e filtros de robôs parecem incompletos
 
-Status: **parcialmente mitigado no patch BUG-007A**.
+Status: **parcialmente mitigado pelos patches BUG-007A e BUG-007B**.
 
-O HTML do módulo de Robôs já possuía formulário, campos, sintonizador e chamadas como `abrirFormularioRobo()`, `salvarRobo()`, `renderizarCardsRobos()` e `atualizarFiltrosRoboUI()`, mas essas funções não estavam definidas no frontend atual. O BUG-007A restaura o CRUD visual, destinatários, checklists de origens/exceções/avulsos, edição, toggle, cards e filtros usando exclusivamente as rotas `/api/robos` e `/api/robo` já existentes.
+O BUG-007A restaura o CRUD visual, destinatários, checklists de origens/exceções/avulsos, edição, toggle, cards e filtros usando as rotas `/api/robos` e `/api/robo` já existentes. Configurações desconhecidas existentes em `config_json` são preservadas durante a edição.
 
-Configurações desconhecidas existentes em `config_json` são preservadas durante a edição; os blocos `auto_tuning` e `cooldown` são apenas serializados pelo formulário e ainda não ganham enforcement neste patch.
+O BUG-007B conecta o canal web ao ciclo real do sinal. Para padrões manuais, a precedência de sintonização é `exceção > avulso > origem`; para padrões dinâmicos, o `robo_dono_id` define o robô proprietário. `min_assertividade` usa o baseline legado persistido mais `historico_resultados`, evitando depender apenas de contadores em memória. A lista elegível é congelada em `robosInscritos` na ENTRADA e acompanha GALE e fechamento. Somente robôs com `enviar_web=true` são inscritos neste estágio, e o fechamento gera um registro por robô em `historico_disparos_robos`.
 
-Pendente para BUG-007B/007C: vincular os robôs elegíveis ao ciclo real do sinal (`robosInscritos`), persistir `historico_disparos_robos`, emitir `alerta_painel` com os robôs realmente selecionados e, somente depois, implementar/validar o envio Telegram. O BUG-007A não faz chamadas externas ao Telegram.
+Pendente para BUG-007C/007D: envio Telegram real com confirmação de entrega e enforcement de `stop_reds_seguidos`/cooldown/standby. O BUG-007B não faz chamadas externas ao Telegram.
 
 ### BUG-008 — Sincronização de saldo da corretora estava incompleta
 
