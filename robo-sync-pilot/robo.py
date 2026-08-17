@@ -9,6 +9,7 @@ import requests
 import logging
 import os
 import hmac
+import uuid
 from env_loader import load_env_file
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -146,6 +147,8 @@ def iniciar_servidor_flask():
 threading.Thread(target=iniciar_servidor_flask, daemon=True).start()
 
 ultimo_tempo_rodada = 0
+COLETOR_SESSAO = str(uuid.uuid4())
+coletor_seq = 0
 avisos_erro_limitados = {}
 
 def registrar_erro_limitado(chave, mensagem, intervalo_segundos=30):
@@ -163,6 +166,7 @@ def exibir_painel_versao():
     print(f"🤖 ROBÔ BAC BO EVOLUTION - MOTOR DE EXECUÇÃO")
     print(f"🏷️ VERSÃO: {VERSAO_ROBO} | {NOME_ATUALIZACAO}")
     print(f"🎧 Escutando ordens autenticadas em {EXECUTOR_HOST}:{EXECUTOR_PORT}...")
+    print(f"🧭 Sessão do coletor: {COLETOR_SESSAO}")
     print("="*60)
 
 def aplicar_stealth(page):
@@ -422,12 +426,18 @@ def sincronizar_saldo_com_node(page, estado_saldo):
 
 
 def processar_resultado(dados):
-    global ultimo_tempo_rodada
+    global ultimo_tempo_rodada, coletor_seq
     try:
         game_info = dados.get("args", {}).get("game", {})
         status_atual = game_info.get("stage")
 
         if status_atual == "Resolved":
+            # Consome a sequência assim que um resultado resolvido é reconhecido.
+            # Se parsing ou POST falhar depois daqui, o próximo resultado deixará
+            # um salto observável pelo Node.
+            coletor_seq += 1
+            seq_atual = coletor_seq
+
             resultado_bruto = game_info.get("result", "")
             resultado = "Tie" if "Tie" in resultado_bruto else resultado_bruto
             
@@ -449,6 +459,8 @@ def processar_resultado(dados):
                 "pontos_banca": soma_banca,
                 "dados_jogador": [valores_dados[1], valores_dados[3]],
                 "dados_banca": [valores_dados[2], valores_dados[4]],
+                "coletor_sessao": COLETOR_SESSAO,
+                "coletor_seq": seq_atual,
                 "interrupcao_fluxo": houve_interrupcao,
                 "timestamp_coleta": int(tempo_atual * 1000)
             }

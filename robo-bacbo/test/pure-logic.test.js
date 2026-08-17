@@ -32,6 +32,10 @@ function carregarLogicaPura() {
             "// ==========================================\n// 5. ROTAS DE API"
         ),
         trechoEntre(
+            "function avaliarContinuidadeResultado",
+            "function rotacionarSessaoAposInterrupcao"
+        ),
+        trechoEntre(
             "function nivelHistoricoResultado",
             "async function registrarHistoricoResultadoEstrategia"
         ),
@@ -70,6 +74,7 @@ function carregarLogicaPura() {
     vm.runInContext(
         `${trechos.join("\n")}\nmodule.exports = {
             calcularFichaSegura,
+            avaliarContinuidadeResultado,
             nivelHistoricoResultado,
             contarTiesLegados,
             roboSintonizaEstrategia,
@@ -644,4 +649,70 @@ test("desligamento manual do Auto-Trader persiste DESLIGADO sem apagar status de
         source,
         /status_operacao='STANDBY', entradas_feitas=0, pulos_restantes=0/
     );
+});
+
+test("avaliarContinuidadeResultado detecta salto, restart e duplicatas", () => {
+    let r = logic.avaliarContinuidadeResultado(
+        { sessao: null, seq: null, timestamp_coleta: null },
+        { coletor_sessao: "sessao-a", coletor_seq: 1, timestamp_coleta: 1000 }
+    );
+    assert.equal(r.aceitar, true);
+    assert.equal(r.interrupcao, false);
+    assert.equal(r.buraco_confirmado, false);
+
+    r = logic.avaliarContinuidadeResultado(r.estado, { coletor_sessao: "sessao-a", coletor_seq: 2, timestamp_coleta: 2000 });
+    const estado2 = r.estado;
+    assert.equal(r.interrupcao, false);
+
+    r = logic.avaliarContinuidadeResultado(estado2, { coletor_sessao: "sessao-a", coletor_seq: 4, timestamp_coleta: 3000 });
+    assert.equal(r.interrupcao, true);
+    assert.equal(r.buraco_confirmado, true);
+    assert.equal(r.motivo, "SALTO_SEQUENCIA");
+
+    r = logic.avaliarContinuidadeResultado(estado2, { coletor_sessao: "sessao-a", coletor_seq: 2, timestamp_coleta: 3000 });
+    assert.equal(r.aceitar, false);
+    assert.equal(r.motivo, "DUPLICADO");
+
+    r = logic.avaliarContinuidadeResultado(estado2, { coletor_sessao: "sessao-a", coletor_seq: 1, timestamp_coleta: 3000 });
+    assert.equal(r.aceitar, false);
+    assert.equal(r.motivo, "FORA_DE_ORDEM");
+
+    r = logic.avaliarContinuidadeResultado(estado2, { coletor_sessao: "sessao-b", coletor_seq: 1, timestamp_coleta: 3000 });
+    assert.equal(r.interrupcao, true);
+    assert.equal(r.buraco_confirmado, true);
+    assert.equal(r.motivo, "COLETOR_REINICIADO");
+});
+
+test("continuidade separa pausa temporal de perda confirmada e invalida pendencias", () => {
+    let r = logic.avaliarContinuidadeResultado(
+        { sessao: "sessao-a", seq: 2, timestamp_coleta: 1000 },
+        { coletor_sessao: "sessao-a", coletor_seq: 3, timestamp_coleta: 62001 }
+    );
+    assert.equal(r.interrupcao, true);
+    assert.equal(r.buraco_confirmado, false);
+    assert.equal(r.motivo, "INTERVALO_NODE");
+
+    r = logic.avaliarContinuidadeResultado(
+        { sessao: "sessao-a", seq: 2, timestamp_coleta: 1000 },
+        { coletor_sessao: "sessao-a", coletor_seq: 3, timestamp_coleta: 2000, interrupcao_fluxo: true }
+    );
+    assert.equal(r.interrupcao, true);
+    assert.equal(r.buraco_confirmado, false);
+    assert.equal(r.motivo, "INTERRUPCAO_PYTHON");
+
+    r = logic.avaliarContinuidadeResultado(
+        { sessao: "sessao-a", seq: 2, timestamp_coleta: 1000 },
+        { timestamp_coleta: 2000 }
+    );
+    assert.equal(r.interrupcao, true);
+    assert.equal(r.buraco_confirmado, true);
+    assert.equal(r.motivo, "METADADOS_COLETOR_AUSENTES");
+
+    assert.match(source, /if \(continuidade\.buraco_confirmado\) \{\s*await invalidarSequenciasAposBuracoDados\(continuidade\.motivo\);/);
+    assert.match(source, /SET status_ordem='DADOS_INCOMPLETOS'\s*WHERE status_ordem='PENDENTE'/);
+    assert.match(source, /SET ativo=false, status_operacao='DADOS_INCOMPLETOS'/);
+    assert.match(frontendSource, /⚠️ DADOS INCOMPLETOS/);
+    assert.match(frontendSource, /sessaoAtual !== sessaoAnterior/);
+    assert.match(frontendSource, /dadosArr\[i \+ p\]\.id_sessao !== sessaoBase/);
+    assert.match(frontendSource, /dadosCorte\[i\+p\]\.id_sessao !== sessaoBase/);
 });

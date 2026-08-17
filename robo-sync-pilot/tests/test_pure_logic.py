@@ -153,6 +153,8 @@ class TestProcessarResultado(unittest.TestCase):
             "WEBHOOK_JS": "http://127.0.0.1:3000/receber-sinal",
             "INTERNAL_API_TOKEN": "token-teste",
             "ultimo_tempo_rodada": 0,
+            "COLETOR_SESSAO": "sessao-teste",
+            "coletor_seq": 0,
             "registrar_erro_limitado": lambda chave, mensagem, intervalo_segundos=30: self.logs.append(
                 (chave, mensagem, intervalo_segundos)
             ),
@@ -201,6 +203,8 @@ class TestProcessarResultado(unittest.TestCase):
         self.assertEqual(payload["pontos_banca"], 10)
         self.assertEqual(payload["dados_jogador"], [3, 5])
         self.assertEqual(payload["dados_banca"], [4, 6])
+        self.assertEqual(payload["coletor_sessao"], "sessao-teste")
+        self.assertEqual(payload["coletor_seq"], 1)
         self.assertFalse(payload["interrupcao_fluxo"])
         self.assertEqual(payload["timestamp_coleta"], 100000)
         self.assertEqual(self.ns["ultimo_tempo_rodada"], 100.0)
@@ -238,6 +242,24 @@ class TestProcessarResultado(unittest.TestCase):
         self.assertEqual(chave, "resultado_node")
         self.assertIn("HTTP 500", mensagem)
         self.assertEqual(intervalo, 30)
+
+
+    def test_falha_de_post_consume_seq_e_deixa_salto_observavel(self):
+        FakeRequests.proxima_resposta = FakeResponse(RuntimeError("HTTP 500"))
+        self.processar(self.dados_resolvidos("PlayerWon"))
+
+        primeiro = FakeRequests.chamadas[0]["kwargs"]["json"]
+        self.assertEqual(primeiro["coletor_seq"], 1)
+        self.assertEqual(self.ns["coletor_seq"], 1)
+
+        FakeRequests.proxima_resposta = FakeResponse()
+        FakeTime.atual = 120.0
+        self.processar(self.dados_resolvidos("BankerWon"))
+
+        segundo = FakeRequests.chamadas[1]["kwargs"]["json"]
+        self.assertEqual(segundo["coletor_sessao"], "sessao-teste")
+        self.assertEqual(segundo["coletor_seq"], 2)
+        self.assertEqual(self.ns["coletor_seq"], 2)
 
 
 if __name__ == "__main__":
