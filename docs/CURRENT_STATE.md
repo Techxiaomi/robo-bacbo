@@ -1,6 +1,6 @@
 # Estado Atual do Projeto
 
-Atualizado em 2026-08-17 após os patches BUG-001…BUG-013, SEC-002/003A/003B/004, OBS-001A…F e OBS-003A…D.
+Atualizado em 2026-08-17 após os patches BUG-001…BUG-013, SEC-002/003A/003B/004, OBS-001A…F e OBS-003A…E.
 
 Este arquivo descreve o estado atual do `main`, não o snapshot inicial.
 
@@ -32,7 +32,8 @@ O Python envia resultados autenticados para `POST /receber-sinal`. O Node envia 
 - migrations incrementais tratam somente coluna já existente como condição idempotente esperada;
 - limpeza de padrões IA órfãos ocorre no startup;
 - inicialização é fail-closed: APIs e Socket.IO não são liberados até banco/schema/memória estarem prontos;
-- falha crítica de preparação encerra o processo em vez de manter backend parcialmente inicializado.
+- falha crítica de preparação encerra o processo em vez de manter backend parcialmente inicializado;
+- o bootstrap a partir de MySQL vazio é validado automaticamente no CI contra MySQL 8.4.
 
 ### Estratégias, padrões e histórico
 
@@ -92,15 +93,19 @@ O Python envia resultados autenticados para `POST /receber-sinal`. O Node envia 
 - testes de contrato HTTP para login/logout e middleware administrativo;
 - testes do logger estruturado/rotativo;
 - suíte Python `unittest` sobre parsing, payloads e transporte interno;
-- GitHub Actions executa sintaxe + Node + Python em PRs e pushes para `main`.
+- GitHub Actions executa sintaxe + Node + Python em PRs e pushes para `main`;
+- job separado sobe MySQL 8.4 descartável e inicia o `bot2_coletor.js` real com Express/MySQL2/Socket.IO;
+- smoke HTTP real valida Origin, login/logout, sessão administrativa, painel/API e autenticação de `/receber-sinal`;
+- integração confirma as nove tabelas esperadas em banco vazio e garante que o próprio smoke não cria giro nem ordem financeira.
 
 ## Riscos e trabalhos ainda pendentes
 
 - rotacionar operacionalmente credenciais que tenham sido compartilhadas antes da externalização para `.env`;
 - idempotência de `order_id` do executor ainda é mantida somente em memória; exatamente-once através de restart exigiria estado/fila durável;
 - não existem métricas centralizadas/telemetria agregada; os logs estruturados já existem, mas métricas continuam pendentes;
-- testes HTTP atuais são de contrato com handlers reais e fakes; ainda não há suíte de integração com Express + MySQL reais;
+- o job de integração real ainda não valida handshake Socket.IO;
 - ainda não há teste Playwright/DOM real contra uma página controlada;
+- ainda não existe teste ponta a ponta completo captura → Node → executor → auditoria;
 - mudanças no DOM/WebSocket da plataforma de destino continuam sendo dependência externa operacional;
 - arquivos grandes e multifuncionais ainda merecem modularização gradual, porém somente com cobertura suficiente e patches pequenos.
 

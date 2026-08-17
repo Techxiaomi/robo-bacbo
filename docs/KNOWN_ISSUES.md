@@ -40,7 +40,7 @@ Risco residual: não há métricas/telemetria centralizada para agregação de s
 
 ### OBS-003 — Cobertura automatizada
 
-Status: **parcialmente mitigado pelos patches OBS-003A…OBS-003D**.
+Status: **parcialmente mitigado pelos patches OBS-003A…OBS-003E**.
 
 Já implementado:
 
@@ -48,11 +48,14 @@ Já implementado:
 - suíte Python `unittest` sem iniciar Flask/Playwright;
 - GitHub Actions em PR/push para `main`;
 - testes de contrato HTTP usando handlers reais de login/logout/middleware com `req`/`res`/`app` simulados;
-- testes do logger estruturado/rotativo.
+- testes do logger estruturado/rotativo;
+- integração real do `bot2_coletor.js` com Express + MySQL 8.4 descartável no CI;
+- smoke HTTP real cobrindo bootstrap de banco/schema/memória, login/logout, sessão administrativa, validação de Origin, APIs e `/receber-sinal` com `INTERNAL_API_TOKEN`;
+- verificação no MySQL de que as nove tabelas esperadas são criadas a partir de banco vazio e de que o smoke não grava giro nem ordem financeira.
 
 Riscos residuais:
 
-- falta suíte de integração com Express + MySQL reais;
+- falta teste real do handshake Socket.IO no job de integração;
 - falta teste Playwright/DOM real contra ambiente controlado;
 - ainda não há teste ponta a ponta do ciclo captura → Node → executor → auditoria.
 
@@ -130,7 +133,7 @@ Executor lê saldo por seletor CSS explícito, envia mudança/heartbeat ao Node 
 
 Status: **mitigado**.
 
-O backend cria as tabelas necessárias antes das migrations incrementais, permitindo inicialização de banco vazio sem depender de dump externo para as estruturas conhecidas.
+O backend cria as tabelas necessárias antes das migrations incrementais, permitindo inicialização de banco vazio sem depender de dump externo para as estruturas conhecidas. O OBS-003E passa a validar esse bootstrap automaticamente contra MySQL 8.4 vazio no CI.
 
 ### BUG-010 — Auto-Trader desligado permanecia `OPERANDO`
 

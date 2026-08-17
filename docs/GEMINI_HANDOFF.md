@@ -44,6 +44,7 @@ Também estão implementados:
 - Robôs/Canais Web + Telegram, filtros, Drawdown Control e Stop Reds;
 - logging estruturado JSONL rotativo com redaction de segredos;
 - testes Node, Python, contratos HTTP e logger;
+- integração real do backend com Express + MySQL 8.4 descartável;
 - GitHub Actions em PR/push para `main`.
 
 Consulte `CURRENT_STATE.md` para detalhes e riscos residuais.
@@ -89,8 +90,9 @@ Não misture correções independentes no mesmo patch.
 - rotação operacional de credenciais antigas compartilhadas;
 - idempotência de `order_id` não sobrevive a restart do executor;
 - métricas centralizadas ainda ausentes, apesar dos logs estruturados;
-- testes HTTP ainda não usam Express/MySQL reais;
+- integração real ainda não cobre handshake Socket.IO;
 - testes Playwright/DOM reais ainda ausentes;
+- ainda não existe E2E completo captura → Node → executor → auditoria;
 - dependência operacional da estrutura DOM/WebSocket do site de destino;
 - modularização futura deve ser gradual e coberta por testes.
 
@@ -103,10 +105,16 @@ Quando a alteração tocar Node:
 - `git diff --check` ou equivalente remoto;
 - GitHub Actions Node verde.
 
+Quando a alteração puder afetar bootstrap, rotas HTTP, autenticação ou schema MySQL:
+
+- manter verde o job `Backend HTTP + MySQL integration`;
+- o job deve usar banco descartável e credenciais fictícias, nunca `.env` real ou secrets do projeto;
+- não transformar o smoke em execução financeira: nenhum giro válido ou chamada ao executor deve ser necessária para validar infraestrutura.
+
 Quando tocar Python:
 
 - sintaxe Python;
 - `robo-sync-pilot/tests/test_pure_logic.py`;
 - GitHub Actions Python verde.
 
-Quando tocar integração operacional (Playwright, saldo, banco real ou `.env`), complementar o CI com teste controlado no ambiente local sem publicar segredos.
+Quando tocar integração operacional do site real (Playwright, saldo, DOM/WebSocket ou `.env`), complementar o CI com teste controlado no ambiente local sem publicar segredos.

@@ -57,3 +57,49 @@ jobs:
       - name: Run Python tests
         run: python tests/test_pure_logic.py
         working-directory: robo-sync-pilot
+
+  backend-integration:
+    name: Backend HTTP + MySQL integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_ROOT_HOST: "%"
+          MYSQL_DATABASE: bacbo_integration
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -proot"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install isolated integration dependencies
+        shell: bash
+        run: |
+          DEPS_DIR="$RUNNER_TEMP/bacbo-node-deps"
+          mkdir -p "$DEPS_DIR"
+          cd "$DEPS_DIR"
+          npm init -y >/dev/null 2>&1
+          npm install --ignore-scripts --no-audit --no-fund --package-lock=false \
+            express@5.2.1 mysql2@3.23.3 socket.io@4.8.3
+          echo "NODE_PATH=$(npm root)" >> "$GITHUB_ENV"
+
+      - name: Check integration test syntax
+        run: node --check integration/http-mysql-smoke.js
+        working-directory: robo-bacbo
+
+      - name: Run real backend integration smoke
+        run: node integration/http-mysql-smoke.js
+        working-directory: robo-bacbo
