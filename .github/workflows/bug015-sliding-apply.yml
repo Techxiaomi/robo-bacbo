@@ -1,4 +1,5 @@
 name: BUG-015 sliding apply
+# Trigger explícito após o workflow existir no head do PR.
 
 on:
   pull_request:
