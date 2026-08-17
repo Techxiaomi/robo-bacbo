@@ -142,6 +142,8 @@ async function prepararBancoDeDados() {
                 status_operacao VARCHAR(50) DEFAULT 'STANDBY',
                 entradas_feitas INT DEFAULT 0,
                 pulos_restantes INT DEFAULT 0,
+                reds_consecutivos INT DEFAULT 0,
+                stop_reds_pausado_ate BIGINT DEFAULT 0,
                 data_atualizacao DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
             )
         `);
@@ -191,6 +193,8 @@ async function prepararBancoDeDados() {
         await adicionarColuna("ALTER TABLE estrategias ADD COLUMN quarentena_restante INT DEFAULT 0");
         await adicionarColuna("ALTER TABLE historico_disparos_robos ADD COLUMN estrategia_origem VARCHAR(100) DEFAULT ''");
         await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN executor_order_id VARCHAR(64) DEFAULT NULL");
+        await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN reds_consecutivos INT DEFAULT 0");
+        await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN stop_reds_pausado_ate BIGINT DEFAULT 0");
 
         console.log("\n========================================================");
         console.log("🚀 MÓDULO BACKEND V12.0 PRO - MOTOR DE EXECUÇÃO INTEGRADO");
@@ -778,7 +782,19 @@ app.get("/api/auto-traders", async (req, res) => {
         const [linhas] = await dbPool.query('SELECT * FROM auto_traders ORDER BY id DESC');
         let sanitizados = linhas.map(at => {
             let confObj = {}; try { confObj = JSON.parse(at.config_json); } catch(e) {}
-            return { id: at.id, nome: at.nome, ativo: at.ativo === 1, config: confObj, saldo_inicial: parseFloat(at.saldo_inicial), saldo_atual: parseFloat(at.saldo_atual), status_operacao: at.status_operacao, entradas_feitas: at.entradas_feitas, pulos_restantes: at.pulos_restantes };
+            return {
+                id: at.id,
+                nome: at.nome,
+                ativo: at.ativo === 1,
+                config: confObj,
+                saldo_inicial: parseFloat(at.saldo_inicial),
+                saldo_atual: parseFloat(at.saldo_atual),
+                status_operacao: at.status_operacao,
+                entradas_feitas: at.entradas_feitas,
+                pulos_restantes: at.pulos_restantes,
+                reds_consecutivos: Math.max(0, Number(at.reds_consecutivos) || 0),
+                stop_reds_pausado_ate: Math.max(0, Number(at.stop_reds_pausado_ate) || 0)
+            };
         });
         res.json(sanitizados);
     } catch (e) { console.error('❌ GET /api/auto-traders falhou:', e.message); res.status(500).json([]); }
@@ -844,7 +860,8 @@ app.put("/api/auto-trader/:id", async (req, res) => {
             await dbPool.query(
                 `UPDATE auto_traders
                  SET nome=?, ativo=true, config_json=?, saldo_inicial=?, saldo_atual=?,
-                     status_operacao='STANDBY', entradas_feitas=0, pulos_restantes=0
+                     status_operacao='STANDBY', entradas_feitas=0, pulos_restantes=0,
+                     reds_consecutivos=0, stop_reds_pausado_ate=0
                  WHERE id=?`,
                 [nome, configJson, saldoFresco, saldoFresco, id]
             );
@@ -1485,6 +1502,183 @@ function traderDentroHorarioExecucao(config, agora = new Date()) {
     return minutoAtual >= inicio || minutoAtual <= fim;
 }
 
+function avaliarStopRedsAutoTrader(trader, tipoResultado, agora = Date.now()) {
+    const cf = (trader && trader.config) || {};
+    const limite = Math.max(0, Math.trunc(Number(cf.stop_reds_seguidos) || 0));
+    const redsAtuais = Math.max(0, Math.trunc(Number(trader && trader.reds_consecutivos) || 0));
+    const tipo = String(tipoResultado || '').toUpperCase();
+
+    if (!['GREEN', 'TIE', 'RED'].includes(tipo)) {
+        return {
+            reds_consecutivos: redsAtuais,
+            acao: null,
+            status_operacao: null,
+            stop_reds_pausado_ate: Math.max(0, Number(trader && trader.stop_reds_pausado_ate) || 0),
+            pausa_min: 0
+        };
+    }
+
+    if (tipo !== 'RED') {
+        return {
+            reds_consecutivos: 0,
+            acao: null,
+            status_operacao: null,
+            stop_reds_pausado_ate: 0,
+            pausa_min: 0
+        };
+    }
+
+    if (limite <= 0) {
+        return {
+            reds_consecutivos: 0,
+            acao: null,
+            status_operacao: null,
+            stop_reds_pausado_ate: 0,
+            pausa_min: 0
+        };
+    }
+
+    const proximosReds = redsAtuais + 1;
+    if (proximosReds < limite) {
+        return {
+            reds_consecutivos: proximosReds,
+            acao: null,
+            status_operacao: null,
+            stop_reds_pausado_ate: 0,
+            pausa_min: 0
+        };
+    }
+
+    const acaoConfigurada = String(cf.stop_reds_acao || 'PAUSAR').toUpperCase();
+    if (acaoConfigurada === 'DESLIGAR') {
+        return {
+            reds_consecutivos: proximosReds,
+            acao: 'DESLIGAR',
+            status_operacao: 'STOP_REDS',
+            stop_reds_pausado_ate: 0,
+            pausa_min: 0
+        };
+    }
+
+    const pausaMin = Math.max(1, Math.trunc(Number(cf.stop_reds_pausa_min) || 60));
+    const agoraNumerico = Number(agora);
+    const agoraMs = Number.isFinite(agoraNumerico) && agoraNumerico > 0
+        ? Math.trunc(agoraNumerico)
+        : Date.now();
+
+    return {
+        reds_consecutivos: 0,
+        acao: 'PAUSAR',
+        status_operacao: 'STOP_REDS_PAUSA',
+        stop_reds_pausado_ate: agoraMs + (pausaMin * 60 * 1000),
+        pausa_min: pausaMin
+    };
+}
+
+function aplicarEstadoStopRedsTraderEmMemoria(trader, avaliacao) {
+    trader.reds_consecutivos = Math.max(0, Number(avaliacao.reds_consecutivos) || 0);
+    trader.stop_reds_pausado_ate = Math.max(0, Number(avaliacao.stop_reds_pausado_ate) || 0);
+
+    if (avaliacao.acao === 'PAUSAR') {
+        trader.status_operacao = 'STOP_REDS_PAUSA';
+    } else if (avaliacao.acao === 'DESLIGAR') {
+        trader.ativo = false;
+        trader.status_operacao = 'STOP_REDS';
+    }
+}
+
+async function processarResultadoStopRedsAutoTrader(trader, tipoResultado, timestampResultado) {
+    const avaliacao = avaliarStopRedsAutoTrader(trader, tipoResultado, timestampResultado);
+    const redsAnteriores = Math.max(0, Number(trader.reds_consecutivos) || 0);
+    const pausaAnterior = Math.max(0, Number(trader.stop_reds_pausado_ate) || 0);
+    const mudouContador = redsAnteriores !== avaliacao.reds_consecutivos;
+    const mudouPausa = pausaAnterior !== avaliacao.stop_reds_pausado_ate;
+
+    if (!avaliacao.acao && !mudouContador && !mudouPausa) {
+        return avaliacao;
+    }
+
+    try {
+        if (avaliacao.acao === 'DESLIGAR') {
+            await dbPool.query(
+                `UPDATE auto_traders
+                 SET ativo=false, status_operacao='STOP_REDS', reds_consecutivos=?, stop_reds_pausado_ate=0
+                 WHERE id=?`,
+                [avaliacao.reds_consecutivos, trader.id]
+            );
+        } else if (avaliacao.acao === 'PAUSAR') {
+            await dbPool.query(
+                `UPDATE auto_traders
+                 SET status_operacao='STOP_REDS_PAUSA', reds_consecutivos=0, stop_reds_pausado_ate=?
+                 WHERE id=?`,
+                [avaliacao.stop_reds_pausado_ate, trader.id]
+            );
+        } else {
+            await dbPool.query(
+                `UPDATE auto_traders
+                 SET reds_consecutivos=?, stop_reds_pausado_ate=0
+                 WHERE id=?`,
+                [avaliacao.reds_consecutivos, trader.id]
+            );
+        }
+
+        aplicarEstadoStopRedsTraderEmMemoria(trader, avaliacao);
+    } catch (e) {
+        aplicarEstadoStopRedsTraderEmMemoria(trader, avaliacao);
+        console.error(
+            `Falha ao persistir Stop Reds do Auto-Trader ${trader.id}; estado conservador mantido em memoria:`,
+            e.message
+        );
+    }
+
+    if (avaliacao.acao === 'PAUSAR') {
+        console.log(
+            `Auto-Trader ${trader.id}: Stop Reds atingido. Pausado por ${avaliacao.pausa_min} minuto(s).`
+        );
+    } else if (avaliacao.acao === 'DESLIGAR') {
+        console.log(
+            `Auto-Trader ${trader.id}: Stop Reds atingido. Motor desligado ate reativacao manual.`
+        );
+    }
+
+    ioServer.emit('atualizar_interface');
+    return avaliacao;
+}
+
+async function rearmarAutoTradersStopRedsPausados(agora = Date.now()) {
+    const agoraMs = Number(agora);
+    const referencia = Number.isFinite(agoraMs) && agoraMs > 0 ? Math.trunc(agoraMs) : Date.now();
+    const prontos = AUTO_TRADERS_MEMORIA.filter(trader => {
+        const pausaAte = Math.max(0, Number(trader.stop_reds_pausado_ate) || 0);
+        return trader.ativo
+            && trader.status_operacao === 'STOP_REDS_PAUSA'
+            && pausaAte > 0
+            && pausaAte <= referencia;
+    });
+
+    if (prontos.length === 0) return 0;
+
+    const ids = prontos.map(trader => trader.id);
+    const placeholders = ids.map(() => '?').join(',');
+
+    await dbPool.query(
+        `UPDATE auto_traders
+         SET status_operacao='STANDBY', reds_consecutivos=0, stop_reds_pausado_ate=0
+         WHERE ativo=true AND status_operacao='STOP_REDS_PAUSA' AND id IN (${placeholders})`,
+        ids
+    );
+
+    for (const trader of prontos) {
+        trader.status_operacao = 'STANDBY';
+        trader.reds_consecutivos = 0;
+        trader.stop_reds_pausado_ate = 0;
+    }
+
+    console.log(`${prontos.length} Auto-Trader(s) rearmado(s) apos pausa de Stop Reds.`);
+    ioServer.emit('atualizar_interface');
+    return prontos.length;
+}
+
 function avaliarLimitesFinanceirosTrader(trader, snapshotSaldo) {
     const snapshot = snapshotSaldo || {};
     const saldoInicial = Number(trader && trader.saldo_inicial);
@@ -1606,7 +1800,9 @@ async function carregarSistemasParaMemoria() {
             return { 
                 id: at.id, nome: at.nome, ativo: at.ativo === 1, config: cfg, 
                 saldo_inicial: parseFloat(at.saldo_inicial), saldo_atual: parseFloat(at.saldo_atual), 
-                status_operacao: at.status_operacao, entradas_feitas: at.entradas_feitas, pulos_restantes: at.pulos_restantes 
+                status_operacao: at.status_operacao, entradas_feitas: at.entradas_feitas, pulos_restantes: at.pulos_restantes,
+                reds_consecutivos: Math.max(0, Number(at.reds_consecutivos) || 0),
+                stop_reds_pausado_ate: Math.max(0, Number(at.stop_reds_pausado_ate) || 0)
             }; 
         });
 
@@ -1667,6 +1863,12 @@ app.post("/receber-sinal", async (req, res) => {
         res.json({ recebido: true });
 
         rotacionarSessaoAposInterrupcao(dados);
+
+        try {
+            await rearmarAutoTradersStopRedsPausados();
+        } catch (e) {
+            console.error("Falha ao rearmar Auto-Trader apos pausa de Stop Reds:", e.message);
+        }
 
         try {
             await ativarAutoTradersAguardandoMesa();
@@ -1753,6 +1955,11 @@ app.post("/receber-sinal", async (req, res) => {
                                     let vLucro = isTie ? (vEntrada * parseInt(mult.replace('x', ''))) - vEntrada : vEntrada;
                                     try {
                                         await dbPool.query(`UPDATE auditoria_ordens SET status_ordem = ?, lucro_prejuizo = ?, saldo_pos = ?, placar_mesa = ? WHERE id = ?`, [isTie ? 'TIE' : 'WIN', vLucro, trader.saldo_atual, `[P:${p1+p2} B:${b1+b2}]`, pendentes[0].id]);
+                                        await processarResultadoStopRedsAutoTrader(
+                                            trader,
+                                            isTie ? 'TIE' : 'GREEN',
+                                            dados.timestamp_coleta
+                                        );
                                     } catch(e) {
                                         console.error(`❌ Falha ao fechar ordem ${pendentes[0].id} como ${isTie ? 'TIE' : 'WIN'} do trader ${trader.id}:`, e.message);
                                     }
@@ -1843,7 +2050,16 @@ app.post("/receber-sinal", async (req, res) => {
                                     const [pendentes] = await dbPool.query(`SELECT id, risco_total FROM auditoria_ordens WHERE trader_id = ? AND status_ordem = 'PENDENTE' LIMIT 1`, [trader.id]);
                                     if (pendentes.length > 0) {
                                         let prejuizo = -Math.abs(parseFloat(pendentes[0].risco_total));
-                                        try { await dbPool.query(`UPDATE auditoria_ordens SET status_ordem = 'LOSS', lucro_prejuizo = ?, saldo_pos = ?, placar_mesa = ? WHERE id = ?`, [prejuizo, trader.saldo_atual, `[P:${p1+p2} B:${b1+b2}]`, pendentes[0].id]); } catch(e) { console.error(`❌ Falha ao fechar ordem LOSS ${pendentes[0].id} do trader ${trader.id}:`, e.message); }
+                                        try {
+                                            await dbPool.query(`UPDATE auditoria_ordens SET status_ordem = 'LOSS', lucro_prejuizo = ?, saldo_pos = ?, placar_mesa = ? WHERE id = ?`, [prejuizo, trader.saldo_atual, `[P:${p1+p2} B:${b1+b2}]`, pendentes[0].id]);
+                                            await processarResultadoStopRedsAutoTrader(
+                                                trader,
+                                                'RED',
+                                                dados.timestamp_coleta
+                                            );
+                                        } catch(e) {
+                                            console.error(`❌ Falha ao fechar ordem LOSS ${pendentes[0].id} do trader ${trader.id}:`, e.message);
+                                        }
                                     }
                                 }
                             }

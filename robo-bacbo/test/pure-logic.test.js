@@ -7,7 +7,9 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const backendPath = path.join(__dirname, "..", "bot2_coletor.js");
+const frontendPath = path.join(__dirname, "..", "public", "index.html");
 const source = fs.readFileSync(backendPath, "utf8").replace(/\r\n/g, "\n");
+const frontendSource = fs.readFileSync(frontendPath, "utf8").replace(/\r\n/g, "\n");
 
 function trechoEntre(inicio, fim) {
     const posInicio = source.indexOf(inicio);
@@ -75,7 +77,8 @@ function carregarLogicaPura() {
             montarMensagemTelegram,
             horarioParaMinutos,
             traderDentroHorarioExecucao,
-            avaliarLimitesFinanceirosTrader
+            avaliarLimitesFinanceirosTrader,
+            avaliarStopRedsAutoTrader
         };`,
         contexto,
         { filename: "pure-logic-from-bot2.js" }
@@ -348,4 +351,86 @@ test("nova entrada DIRETO passa pelo guard financeiro antes do executor", () => 
         source,
         /autorizarNovaEntradaFinanceiraTrader[\s\S]*?UPDATE auto_traders SET ativo=false, status_operacao=\?, saldo_atual=\?/
     );
+});
+
+test("avaliarStopRedsAutoTrader aplica pausa, desligamento e reset por sequencia finalizada", () => {
+    let r = logic.avaliarStopRedsAutoTrader(
+        {
+            reds_consecutivos: 2,
+            config: {
+                stop_reds_seguidos: 3,
+                stop_reds_acao: "PAUSAR",
+                stop_reds_pausa_min: 30
+            }
+        },
+        "RED",
+        1000
+    );
+    assert.equal(r.acao, "PAUSAR");
+    assert.equal(r.status_operacao, "STOP_REDS_PAUSA");
+    assert.equal(r.reds_consecutivos, 0);
+    assert.equal(r.stop_reds_pausado_ate, 1801000);
+
+    r = logic.avaliarStopRedsAutoTrader(
+        {
+            reds_consecutivos: 1,
+            config: {
+                stop_reds_seguidos: 2,
+                stop_reds_acao: "DESLIGAR"
+            }
+        },
+        "RED",
+        1000
+    );
+    assert.equal(r.acao, "DESLIGAR");
+    assert.equal(r.status_operacao, "STOP_REDS");
+    assert.equal(r.reds_consecutivos, 2);
+    assert.equal(r.stop_reds_pausado_ate, 0);
+
+    r = logic.avaliarStopRedsAutoTrader(
+        { reds_consecutivos: 2, config: { stop_reds_seguidos: 3 } },
+        "GREEN",
+        1000
+    );
+    assert.equal(r.acao, null);
+    assert.equal(r.reds_consecutivos, 0);
+
+    r = logic.avaliarStopRedsAutoTrader(
+        { reds_consecutivos: 2, config: { stop_reds_seguidos: 3 } },
+        "TIE",
+        1000
+    );
+    assert.equal(r.reds_consecutivos, 0);
+
+    r = logic.avaliarStopRedsAutoTrader(
+        { reds_consecutivos: 9, config: { stop_reds_seguidos: 0 } },
+        "RED",
+        1000
+    );
+    assert.equal(r.acao, null);
+    assert.equal(r.reds_consecutivos, 0);
+});
+
+test("Stop Reds do Auto-Trader so e atualizado dentro de ordem PENDENTE realmente executada", () => {
+    assert.match(
+        source,
+        /if \(pendentes\.length > 0\) \{[\s\S]{0,2200}processarResultadoStopRedsAutoTrader\(\s*trader,\s*isTie \? 'TIE' : 'GREEN'/
+    );
+    assert.match(
+        source,
+        /if \(pendentes\.length > 0\) \{[\s\S]{0,1600}processarResultadoStopRedsAutoTrader\(\s*trader,\s*'RED'/
+    );
+    assert.match(
+        source,
+        /rearmarAutoTradersStopRedsPausados\(\)[\s\S]*?ativarAutoTradersAguardandoMesa\(\)/
+    );
+});
+
+test("Stop Reds de Robos/Canais permanece separado do Stop Reds do Auto-Trader", () => {
+    assert.match(source, /ALTER TABLE auto_traders ADD COLUMN reds_consecutivos INT DEFAULT 0/);
+    assert.match(source, /ALTER TABLE auto_traders ADD COLUMN stop_reds_pausado_ate BIGINT DEFAULT 0/);
+    assert.match(frontendSource, /id="robo-stop-red"/);
+    assert.match(frontendSource, /id="at-stop-reds"/);
+    assert.match(frontendSource, /id="at-stop-reds-acao"/);
+    assert.match(frontendSource, /id="at-stop-reds-pausa"/);
 });

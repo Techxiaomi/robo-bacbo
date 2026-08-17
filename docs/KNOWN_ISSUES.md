@@ -74,13 +74,17 @@ Status: **parcialmente mitigado no patch BUG-005A**.
 
 ### BUG-006 — Stop Win / Stop Loss / Trailing / horário estão configuráveis no painel sem enforcement localizado
 
-Status: **parcialmente mitigado nos patches BUG-006A e BUG-006B**.
+Status: **parcialmente mitigado nos patches BUG-006A, BUG-006B e BUG-006C**.
 
 A janela `hora_inicio`/`hora_fim` passa a ser aplicada antes de abrir novas sequências do Auto-Trader. Janelas normais e janelas que atravessam a meia-noite são suportadas; horários ausentes usam `00:00`–`23:59`, e configuração de horário inválida bloqueia a nova entrada. Gales de uma sequência já iniciada continuam até o desfecho para não deixar ordens pendentes/auditoria em estado incoerente.
 
 O BUG-006B aplica `stop_win` e `stop_loss` sobre a variação entre `saldo_inicial` e o saldo global real/fresco do backend antes de cada nova sequência. Saldo ausente ou além da janela de freshness bloqueia a nova entrada sem inferir valor. Ao atingir Stop Win ou Stop Loss, o Auto-Trader é desligado com status explícito e exige reativação manual; a reativação já existente captura um novo baseline fresco e inicia outro ciclo em `STANDBY`.
 
-Sequências já iniciadas, inclusive Gales, continuam até o desfecho para evitar corrida com a liquidação visual do saldo e preservar a auditoria. `trailing_stop` permanece pendente porque o painel ainda não define distância/recuo de trailing.
+O BUG-006C adiciona um Stop Reds exclusivo do Auto-Trader. A contagem só muda quando existe uma ordem `PENDENTE` daquele trader sendo efetivamente finalizada: GREEN/TIE zera o streak e um RED final, mesmo após DIRETO + Gales, acrescenta apenas 1 RED. Sinais apenas observados pelo sistema não contam.
+
+Ao atingir o limite configurado, o motor pode entrar em `STOP_REDS_PAUSA` por N minutos, permanecendo ativo porém impedido de abrir novas sequências até o rearmamento automático, ou pode entrar em `STOP_REDS` com `ativo=false`, exigindo reativação manual. A reativação manual reutiliza o fluxo existente de novo baseline e também zera o estado de Stop Reds. O estado é persistido para sobreviver a restart do Node.
+
+Sequências já iniciadas, inclusive Gales, continuam até o desfecho para preservar a auditoria. O Stop Reds de Robôs/Canais permanece um mecanismo separado de geração/distribuição de sinais e não é usado pelo BUG-006C. `trailing_stop` permanece pendente porque o painel ainda não define distância/recuo de trailing.
 
 ### BUG-007 — Telegram e filtros de robôs parecem incompletos
 
@@ -90,7 +94,7 @@ O BUG-007A restaura o CRUD visual de Robôs. O BUG-007B conecta o canal web ao c
 
 O BUG-007D aplica o Drawdown Control conforme a semântica explícita do painel: `CONSERVADOR` pausa no primeiro RED; `DINAMICO` pausa após X REDs dentro de Y minutos; ambos usam `pausa_min`. Robôs em `standby_ate` ficam fora da seleção Web/Telegram até a expiração. O estado de proteção e a janela recente de REDs são persistidos para sobreviver a restart do Node. GREEN/TIE incrementa `greens_consecutivos`, RED zera o streak, e o aviso opcional de proteção no Telegram é enviado depois da mensagem de RED somente a destinos cuja ENTRADA foi confirmada.
 
-O campo separado `stop_reds_seguidos` permanece sem enforcement porque o painel não define a ação de recuperação: não informa se deve desligar permanentemente, pausar por um período ou como rearmar o robô. Implementar esse campo exige uma regra explícita em vez de inferência.
+O campo `stop_reds_seguidos` deste módulo permanece independente do Stop Reds do Auto-Trader. Ele continua sem enforcement próprio porque ainda não foi definida a ação de recuperação específica do Robô/Canal; o BUG-006C não lê nem altera esse controle.
 
 ### BUG-008 — Sincronização de saldo da corretora estava incompleta
 
