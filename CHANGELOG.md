@@ -25,6 +25,8 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - Exposição deliberada fora de loopback gera aviso; autenticação administrativa permanece pendente como SEC-003B.
 - OBS-001A: falhas inesperadas em migrations e CRUDs críticos deixam de ser silenciosas; erros passam a ser registrados com contexto sem expor detalhes técnicos nas respostas HTTP.
 - Falhas em exclusão de estratégia, fechamento `LOSS`, persistência de camuflagem, rollback e processamento pós-ACK de `/receber-sinal` também passam a ficar visíveis nos logs.
+- OBS-001B: executor Python passa a validar o HTTP do resultado enviado ao Node e registrar falhas de entrega/processamento, Auto-Login, WebSocket e loop principal; eventos repetitivos usam log limitado no tempo.
+- Frames não-JSON e interações opcionais de UI continuam tolerados para evitar ruído e preservar o comportamento operacional.
 
 ### Fixed
 - BUG-001: o Node agora aguarda e valida a confirmação HTTP do executor antes de contabilizar uma entrada direta ou criar a nova ordem `PENDENTE` de Gale.

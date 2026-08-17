@@ -88,6 +88,14 @@ def iniciar_servidor_flask():
 threading.Thread(target=iniciar_servidor_flask, daemon=True).start()
 
 ultimo_tempo_rodada = 0
+avisos_erro_limitados = {}
+
+def registrar_erro_limitado(chave, mensagem, intervalo_segundos=30):
+    agora = time.time()
+    ultimo = avisos_erro_limitados.get(chave, 0.0)
+    if agora - ultimo >= intervalo_segundos:
+        print(mensagem)
+        avisos_erro_limitados[chave] = agora
 
 # ====================================================================
 # FUNÇÕES CORE DO ROBÔ (Navegação, Login e Apostas)
@@ -149,6 +157,7 @@ def renovar_sessao_automaticamente(page, context):
                 except: pass
                 
         if not login_aberto:
+            print("⚠️ Auto-Login não encontrou o formulário de autenticação.")
             return False
             
         page.locator("input[name='email']").fill(USUARIO_CASSINO)
@@ -166,7 +175,13 @@ def renovar_sessao_automaticamente(page, context):
         context.storage_state(path=ARQUIVO_SESSAO)
         print("✅ Auto-Login concluído com sucesso!")
         return True
-    except: return False
+    except Exception as e:
+        registrar_erro_limitado(
+            "auto_login",
+            f"⚠️ Auto-Login falhou: {type(e).__name__}: {e}",
+            30
+        )
+        return False
 
 def executar_aposta_na_tela(page, aposta):
     """Cérebro de Apostas com Bypass do Strict Mode (adicionado .first)."""
@@ -380,8 +395,20 @@ def processar_resultado(dados):
                 "timestamp_coleta": int(tempo_atual * 1000)
             }
 
-            try: requests.post(WEBHOOK_JS, json=payload, headers={"X-Internal-Token": INTERNAL_API_TOKEN}, timeout=2)
-            except: pass
+            try:
+                resposta = requests.post(
+                    WEBHOOK_JS,
+                    json=payload,
+                    headers={"X-Internal-Token": INTERNAL_API_TOKEN},
+                    timeout=2
+                )
+                resposta.raise_for_status()
+            except Exception as e:
+                registrar_erro_limitado(
+                    "resultado_node",
+                    f"❌ Falha ao enviar resultado resolvido ao Node: {type(e).__name__}: {e}",
+                    30
+                )
 
             print("\n====================================")
             if houve_interrupcao: print("⚠️ [ALERTA] Interrupção de Sequência (> 60s)")
@@ -390,8 +417,12 @@ def processar_resultado(dados):
             print(f"🔵 Jogador : {soma_jogador:02d} | 🔴 Banca: {soma_banca:02d}")
             print("====================================\n")
             
-    except Exception:
-        pass
+    except Exception as e:
+        registrar_erro_limitado(
+            "processar_resultado",
+            f"❌ Falha ao processar resultado da mesa: {type(e).__name__}: {e}",
+            30
+        )
 
 def iniciar_robo_blindado():
     with sync_playwright() as p:
@@ -445,7 +476,14 @@ def iniciar_robo_blindado():
                 dados = json.loads(texto_limpo)
                 if dados.get("type") == "bacbo.playerState":
                     processar_resultado(dados)
-            except: pass
+            except json.JSONDecodeError:
+                pass
+            except Exception as e:
+                registrar_erro_limitado(
+                    "capturar_frame",
+                    f"⚠️ Falha inesperada ao processar frame WebSocket: {type(e).__name__}: {e}",
+                    30
+                )
 
         page.on("websocket", on_web_socket)
 
@@ -493,9 +531,19 @@ def iniciar_robo_blindado():
                     
                     tempo_passado += 10000
                 
-            except PlaywrightTimeoutError:
+            except PlaywrightTimeoutError as e:
+                registrar_erro_limitado(
+                    "loop_timeout",
+                    f"⚠️ Timeout no loop principal do Playwright: {e}",
+                    30
+                )
                 time.sleep(10)
             except Exception as e:
+                registrar_erro_limitado(
+                    "loop_principal",
+                    f"❌ Falha inesperada no loop principal do executor: {type(e).__name__}: {e}",
+                    30
+                )
                 time.sleep(15)
 
 if __name__ == "__main__":
@@ -507,4 +555,5 @@ if __name__ == "__main__":
             print("\n👋 Robô desligado com sucesso.")
             break
         except Exception as e:
+            print(f"🔥 Executor reiniciando após falha não tratada: {type(e).__name__}: {e}")
             time.sleep(15)
