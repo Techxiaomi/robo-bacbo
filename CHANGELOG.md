@@ -22,7 +22,9 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - SEC-004: `GET /api/robos` deixa de expor `telegram_token`; o navegador recebe somente `telegram_configurado`.
 - Edições e toggles preservam o token armazenado quando o campo chega vazio/ausente, evitando retransmitir o segredo ao frontend.
 - SEC-003A: backend Node passa a usar `NODE_HOST=127.0.0.1` por padrão, remove CORS aberto e rejeita origem HTTP/Socket.IO diferente do host do próprio painel.
-- Exposição deliberada fora de loopback gera aviso; autenticação administrativa permanece pendente como SEC-003B.
+- SEC-003B: painel e APIs administrativas passam a exigir sessao de usuario por cookie `HttpOnly`/`SameSite=Strict` quando a autenticacao esta ativa.
+- Fora do loopback, `ADMIN_USERNAME`/`ADMIN_PASSWORD` sao obrigatorios e o backend falha fechado sem credenciais; o Socket.IO exige a mesma sessao no handshake.
+- O webhook interno `/receber-sinal` permanece separado e continua autenticado somente por `INTERNAL_API_TOKEN`; loopback pode manter o modo local sem login deixando as credenciais administrativas vazias.
 - OBS-001A: falhas inesperadas em migrations e CRUDs críticos deixam de ser silenciosas; erros passam a ser registrados com contexto sem expor detalhes técnicos nas respostas HTTP.
 - Falhas em exclusão de estratégia, fechamento `LOSS`, persistência de camuflagem, rollback e processamento pós-ACK de `/receber-sinal` também passam a ficar visíveis nos logs.
 - OBS-001B: executor Python passa a validar o HTTP do resultado enviado ao Node e registrar falhas de entrega/processamento, Auto-Login, WebSocket e loop principal; eventos repetitivos usam log limitado no tempo.

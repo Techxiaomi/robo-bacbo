@@ -97,6 +97,40 @@ function carregarLogicaPura() {
 
 const logic = carregarLogicaPura();
 
+function carregarHelpersAutenticacao() {
+    const trecho = trechoEntre(
+        "function compararTextoSeguro",
+        "const app = express();"
+    );
+
+    const contexto = {
+        module: { exports: {} },
+        exports: {},
+        crypto: require("node:crypto"),
+        Buffer,
+        decodeURIComponent,
+        encodeURIComponent,
+        Date,
+        Number,
+        String,
+        Map,
+        Math
+    };
+    vm.createContext(contexto);
+    vm.runInContext(
+        `${trecho}
+module.exports = {
+    compararTextoSeguro,
+    cookiesDoHeader
+};`,
+        contexto,
+        { filename: "sec-003b-auth-helpers.js" }
+    );
+    return contexto.module.exports;
+}
+
+const authHelpers = carregarHelpersAutenticacao();
+
 function relogio(horas, minutos) {
     return {
         getHours: () => horas,
@@ -845,4 +879,27 @@ test("API de estratégias usa cache de giros e cards exibem filtros 24h/hoje/sem
     assert.match(frontendSource, /<span>24H<\/span>/);
     assert.match(frontendSource, /<span>Geral<\/span>/);
     assert.equal(/let menusTabs = isAtivo \?/.test(frontendSource), false);
+});
+
+// SEC-003B helpers
+test("compararTextoSeguro aceita igualdade e rejeita credenciais diferentes", () => {
+    assert.equal(authHelpers.compararTextoSeguro("admin", "admin"), true);
+    assert.equal(authHelpers.compararTextoSeguro("admin", "Admin"), false);
+    assert.equal(authHelpers.compararTextoSeguro("curto", "muito-maior"), false);
+});
+
+test("cookiesDoHeader extrai cookie administrativo sem depender do frontend", () => {
+    const cookies = authHelpers.cookiesDoHeader(
+        "tema=dark; bacbo_admin_session=abc123%2Fxyz; outro=1"
+    );
+    assert.equal(cookies.tema, "dark");
+    assert.equal(cookies.bacbo_admin_session, "abc123/xyz");
+    assert.equal(cookies.outro, "1");
+});
+
+test("SEC-003B preserva webhook interno e exige sessao administrativa no Socket.IO", () => {
+    assert.match(source, /req\.path === '\/receber-sinal'/);
+    assert.match(source, /autenticacao_administrativa_necessaria/);
+    assert.match(source, /authAdminPermitida/);
+    assert.match(source, /sessaoAdminValidaCookie\(req\.headers\.cookie\)/);
 });

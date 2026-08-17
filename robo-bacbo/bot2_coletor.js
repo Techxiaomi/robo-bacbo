@@ -343,6 +343,68 @@ function origemCombinaComHost(origin, host) {
     }
 }
 
+// SEC003B-ADMIN-AUTH
+function compararTextoSeguro(recebido, esperado) {
+    const recebidoBuffer = Buffer.from(String(recebido ?? ''), 'utf8');
+    const esperadoBuffer = Buffer.from(String(esperado ?? ''), 'utf8');
+    return recebidoBuffer.length === esperadoBuffer.length
+        && crypto.timingSafeEqual(recebidoBuffer, esperadoBuffer);
+}
+
+function cookiesDoHeader(cookieHeader) {
+    const cookies = {};
+    for (const parte of String(cookieHeader || '').split(';')) {
+        const indice = parte.indexOf('=');
+        if (indice <= 0) continue;
+        const nome = parte.slice(0, indice).trim();
+        const valorBruto = parte.slice(indice + 1).trim();
+        if (!nome) continue;
+        try {
+            cookies[nome] = decodeURIComponent(valorBruto);
+        } catch (e) {
+            cookies[nome] = valorBruto;
+        }
+    }
+    return cookies;
+}
+
+function limparSessoesAdminExpiradas(agora = Date.now()) {
+    for (const [token, expiraEm] of SESSOES_ADMIN.entries()) {
+        if (!Number.isFinite(expiraEm) || expiraEm <= agora) {
+            SESSOES_ADMIN.delete(token);
+        }
+    }
+}
+
+function criarSessaoAdmin(agora = Date.now()) {
+    limparSessoesAdminExpiradas(agora);
+    const token = crypto.randomBytes(32).toString('hex');
+    SESSOES_ADMIN.set(token, agora + ADMIN_SESSION_TTL_MS);
+    return token;
+}
+
+function tokenSessaoAdminDoCookie(cookieHeader) {
+    return cookiesDoHeader(cookieHeader)[ADMIN_SESSION_COOKIE] || '';
+}
+
+function sessaoAdminValidaCookie(cookieHeader, agora = Date.now()) {
+    if (!ADMIN_AUTH_REQUIRED) return true;
+    limparSessoesAdminExpiradas(agora);
+    const token = tokenSessaoAdminDoCookie(cookieHeader);
+    if (!token) return false;
+    const expiraEm = SESSOES_ADMIN.get(token);
+    if (!Number.isFinite(expiraEm) || expiraEm <= agora) {
+        if (token) SESSOES_ADMIN.delete(token);
+        return false;
+    }
+    return true;
+}
+
+function cookieSessaoAdmin(token, maxAgeSeconds) {
+    const secure = ADMIN_COOKIE_SECURE ? '; Secure' : '';
+    return `${ADMIN_SESSION_COOKIE}=${encodeURIComponent(token)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.max(0, Math.floor(maxAgeSeconds))}${secure}`;
+}
+
 const app = express();
 app.use((req, res, next) => {
     const host = req.get('Host');
@@ -355,6 +417,53 @@ app.use((req, res, next) => {
     next();
 });
 app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
+
+app.get('/login', (req, res) => {
+    if (!ADMIN_AUTH_REQUIRED || sessaoAdminValidaCookie(req.get('Cookie'))) {
+        return res.redirect('/');
+    }
+    return res.sendFile(path.join(__dirname, 'public', 'login.html'));
+});
+
+app.post('/auth/login', (req, res) => {
+    if (!ADMIN_AUTH_REQUIRED) {
+        return res.redirect('/');
+    }
+
+    const usuario = String(req.body?.usuario || '').trim();
+    const senha = String(req.body?.senha || '');
+    const usuarioOk = compararTextoSeguro(usuario, ADMIN_USERNAME);
+    const senhaOk = compararTextoSeguro(senha, ADMIN_PASSWORD);
+
+    if (!usuarioOk || !senhaOk) {
+        return res.redirect('/login?erro=1');
+    }
+
+    const token = criarSessaoAdmin();
+    res.setHeader(
+        'Set-Cookie',
+        cookieSessaoAdmin(token, Math.floor(ADMIN_SESSION_TTL_MS / 1000))
+    );
+    return res.redirect('/');
+});
+
+app.post('/auth/logout', (req, res) => {
+    const token = tokenSessaoAdminDoCookie(req.get('Cookie'));
+    if (token) SESSOES_ADMIN.delete(token);
+    res.setHeader('Set-Cookie', cookieSessaoAdmin('', 0));
+    return res.redirect(ADMIN_AUTH_REQUIRED ? '/login' : '/');
+});
+
+app.use((req, res, next) => {
+    if (req.path === '/receber-sinal') return next();
+    if (!ADMIN_AUTH_REQUIRED || sessaoAdminValidaCookie(req.get('Cookie'))) return next();
+
+    if (req.path.startsWith('/api/')) {
+        return res.status(401).json({ erro: 'autenticacao_administrativa_necessaria' });
+    }
+    return res.redirect('/login');
+});
 app.use((req, res, next) => {
     const rotaDependeDeInicializacao = req.path === '/receber-sinal' || req.path.startsWith('/api/');
     if (rotaDependeDeInicializacao && !backendPronto) {
@@ -368,6 +477,30 @@ const NODE_HOST = (process.env.NODE_HOST || '127.0.0.1').trim() || '127.0.0.1';
 const PORTA = Number(process.env.NODE_PORT || 3000);
 const EXECUTOR_URL = process.env.EXECUTOR_URL || "http://127.0.0.1:5000/apostar";
 const INTERNAL_API_TOKEN = (process.env.INTERNAL_API_TOKEN || "").trim();
+
+const ADMIN_USERNAME = (process.env.ADMIN_USERNAME || '').trim();
+const ADMIN_PASSWORD = String(process.env.ADMIN_PASSWORD || '');
+const adminSessionTtlMinutesConfig = Number(process.env.ADMIN_SESSION_TTL_MINUTES || 720);
+const ADMIN_SESSION_TTL_MS = (
+    Number.isFinite(adminSessionTtlMinutesConfig)
+    && adminSessionTtlMinutesConfig >= 5
+    && adminSessionTtlMinutesConfig <= 1440
+        ? adminSessionTtlMinutesConfig
+        : 720
+) * 60 * 1000;
+const ADMIN_SESSION_COOKIE = 'bacbo_admin_session';
+const adminCookieSecureConfig = String(process.env.ADMIN_COOKIE_SECURE || '').trim().toLowerCase();
+const ADMIN_COOKIE_SECURE = adminCookieSecureConfig === 'true'
+    || (adminCookieSecureConfig !== 'false' && !hostNodeEhLoopback(NODE_HOST));
+const SESSOES_ADMIN = new Map();
+const ADMIN_AUTH_CONFIGURED = Boolean(ADMIN_USERNAME || ADMIN_PASSWORD);
+const ADMIN_AUTH_REQUIRED = !hostNodeEhLoopback(NODE_HOST) || ADMIN_AUTH_CONFIGURED;
+
+if (ADMIN_AUTH_REQUIRED && (!ADMIN_USERNAME || !ADMIN_PASSWORD)) {
+    throw new Error(
+        "ADMIN_USERNAME/ADMIN_PASSWORD incompletos. Fora do loopback a autenticacao administrativa e obrigatoria."
+    );
+}
 
 if (!INTERNAL_API_TOKEN) {
     throw new Error("INTERNAL_API_TOKEN nao configurado. Defina o segredo compartilhado no .env antes de iniciar o backend.");
@@ -481,7 +614,12 @@ async function enviarOrdemAoExecutor(alvo, valor, orderId = crypto.randomUUID())
     throw ultimoErro || new Error(`Falha desconhecida ao enviar ordem ${orderId}`);
 }
 if (!hostNodeEhLoopback(NODE_HOST)) {
-    console.warn(`⚠️ NODE_HOST=${NODE_HOST}: painel/API expostos fora do loopback. As rotas administrativas ainda não possuem autenticação de usuário.`);
+    console.warn(
+        `SEC-003B: NODE_HOST=${NODE_HOST} fora do loopback com autenticacao administrativa ativa. `
+        + `Use HTTPS/reverse proxy e mantenha ADMIN_COOKIE_SECURE habilitado em rede nao confiavel.`
+    );
+} else if (ADMIN_AUTH_REQUIRED) {
+    console.log('SEC-003B: autenticacao administrativa ativa tambem no loopback.');
 }
 
 const server = app.listen(PORTA, NODE_HOST, () => {
@@ -495,7 +633,12 @@ const ioServer = new Server(server, {
         const host = req.headers.host;
         const hostPermitido = hostPermitidoParaNode(host, NODE_HOST, PORTA);
         const origemPermitida = origemCombinaComHost(req.headers.origin, host);
-        callback(null, backendPronto && hostPermitido && origemPermitida);
+        const authAdminPermitida = !ADMIN_AUTH_REQUIRED
+            || sessaoAdminValidaCookie(req.headers.cookie);
+        callback(
+            null,
+            backendPronto && hostPermitido && origemPermitida && authAdminPermitida
+        );
     }
 });
 

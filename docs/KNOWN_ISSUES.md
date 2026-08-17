@@ -20,11 +20,15 @@ As duas rotas internas (`/apostar` e `/receber-sinal`) passam a exigir `INTERNAL
 
 ### SEC-003 — APIs Node sem autenticação e CORS amplo
 
-Status: **parcialmente mitigado no patch SEC-003A**.
+Status: **mitigado pelos patches SEC-003A e SEC-003B**.
 
-O Node passa a escutar em `127.0.0.1` por padrão via `NODE_HOST`, em vez de depender do bind implícito de `app.listen()`. O CORS aberto é removido e requisições HTTP com header `Origin` diferente do `Host` são rejeitadas. O handshake Socket.IO usa a mesma regra de mesma origem. Clientes internos sem `Origin`, como o executor Python autenticado, continuam permitidos.
+O SEC-003A mantem o Node em `127.0.0.1` por padrao, rejeita `Host` inesperado e bloqueia `Origin` diferente do host do proprio painel tanto no HTTP quanto no Socket.IO.
 
-É possível optar deliberadamente por outro `NODE_HOST` para acesso em rede, mas o backend emite aviso porque as rotas administrativas ainda não possuem autenticação de usuário. Portanto, **não considerar o painel seguro para Internet ou rede não confiável** até uma etapa separada de autenticação/autorização administrativa (SEC-003B).
+O SEC-003B adiciona autenticacao administrativa por sessao opaca em memoria, entregue ao navegador somente em cookie `HttpOnly` + `SameSite=Strict`. APIs administrativas, arquivos do painel e novos handshakes Socket.IO exigem sessao valida quando a autenticacao esta ativa. O `POST /receber-sinal` permanece fora da sessao de usuario e continua protegido exclusivamente pelo `INTERNAL_API_TOKEN`, mantendo separacao entre canal interno Python->Node e usuario do painel.
+
+Para preservar uso local, loopback continua podendo operar sem login quando `ADMIN_USERNAME` e `ADMIN_PASSWORD` estao ambos vazios. Se qualquer credencial administrativa for configurada, o login passa a ser exigido tambem no loopback. Fora do loopback, usuario e senha sao obrigatorios e o startup falha fechado se estiverem ausentes. O cookie `Secure` e automatico fora do loopback, com override explicito para HTTP de LAN confiavel; exposicao em rede nao confiavel deve usar HTTPS/reverse proxy.
+
+As sessoes ficam somente em memoria e expiram pelo TTL configurado; restart do Node invalida todos os logins, evitando persistir tokens de sessao em disco ou banco.
 
 ### SEC-004 — Token Telegram pode ser devolvido pelo `GET /api/robos`
 
