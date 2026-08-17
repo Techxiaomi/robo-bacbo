@@ -35,6 +35,11 @@ function loadEnvFile(filePath) {
     // O timer usa unref(), nao segura o processo aberto e independe do sink JSONL.
     const { instalarMetricasRuntime } = require("./metrics");
     instalarMetricasRuntime({ baseDir });
+
+    // OBS-001H: telemetria operacional local sem dependencias externas.
+    // Instrumenta HTTP inbound e fetch outbound antes do app.listen(), sem tocar no motor principal.
+    const { instalarMetricasOperacionais } = require("./operations_metrics");
+    instalarMetricasOperacionais({ baseDir });
 }
 
 module.exports = { loadEnvFile };
