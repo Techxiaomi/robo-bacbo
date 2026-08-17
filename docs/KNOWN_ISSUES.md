@@ -96,7 +96,11 @@ Há vários `catch(e){}` e `except: pass`, inclusive em persistência, HTTP e au
 
 ### OBS-002 — Schema inicial incompleto no código
 
-`estrategias` e `origens` são assumidas como existentes. Precisamos obter/exportar o schema real antes de considerar o repositório autocontido.
+Status: **mitigado no patch BUG-009**.
+
+`prepararBancoDeDados()` passa a criar `origens` e `estrategias` com os campos efetivamente exigidos pelas rotas CRUD, contadores legados e campos dinâmicos já usados/migrados pelo backend. As criações usam `CREATE TABLE IF NOT EXISTS` e ocorrem antes das migrations `ALTER TABLE`, permitindo inicializar um banco vazio sem depender de um dump externo.
+
+O patch não adiciona constraints, índices ou relacionamentos novos além das chaves primárias mínimas já implícitas no uso atual, preservando compatibilidade com bancos existentes.
 
 ### OBS-003 — Não há teste automatizado
 
