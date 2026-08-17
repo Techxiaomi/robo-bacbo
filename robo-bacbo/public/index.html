@@ -2412,7 +2412,9 @@
                 if (lucroLiquido >= 0) pctWin = Math.min(100, (lucroLiquido / stopWinAlvo) * 100); else pctLoss = Math.min(100, (Math.abs(lucroLiquido) / stopLossAlvo) * 100);
                 
                 let tagStatus = '';
-                if (!at.ativo) tagStatus = `<span style="background:#555; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">🔴 DESLIGADO</span>`;
+                if (at.status_operacao === 'STOP_WIN') tagStatus = `<span style="background:#198754; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">🏁 STOP WIN ATINGIDO</span>`;
+                else if (at.status_operacao === 'STOP_LOSS') tagStatus = `<span style="background:#dc3545; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">🛑 STOP LOSS ATINGIDO</span>`;
+                else if (!at.ativo) tagStatus = `<span style="background:#555; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">🔴 DESLIGADO</span>`;
                 else if (at.status_operacao === 'STANDBY') tagStatus = `<span style="background:#ffc107; color:black; padding:2px 8px; border-radius:4px; font-size:10px;">🟡 AGUARDANDO MESA</span>`;
                 else if (at.status_operacao === 'META_ATINGIDA') tagStatus = `<span style="background:#17a2b8; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">💤 META DO DIA BATIDA</span>`;
                 else tagStatus = `<span style="background:#28a745; color:white; padding:2px 8px; border-radius:4px; font-size:10px; animation: animar-piscar 1.5s infinite;">🟢 OPERANDO</span>`;
