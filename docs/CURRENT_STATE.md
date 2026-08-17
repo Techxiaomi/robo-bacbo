@@ -1,6 +1,6 @@
 # Estado Atual do Projeto
 
-Atualizado em 2026-08-17 após os patches BUG-001…BUG-013, SEC-002/003A/003B/004, OBS-001A…F e OBS-003A…H.
+Atualizado em 2026-08-17 após os patches BUG-001…BUG-013, BUG-001R, SEC-002/003A/003B/004, OBS-001A…F e OBS-003A…H.
 
 Este arquivo descreve o estado atual do `main`, não o snapshot inicial.
 
@@ -67,7 +67,8 @@ O Python envia resultados autenticados para `POST /receber-sinal`. O Node envia 
 - Stop Reds com pausa automática ou desligamento manualmente reversível;
 - Trailing Stop por recuo explícito a partir do pico de lucro persistido;
 - sequências já iniciadas, inclusive Gales, seguem até o desfecho para preservar auditoria;
-- ordens Node→Python usam `order_id` UUID e retry idempotente no mesmo processo executor;
+- ordens Node→Python usam `order_id` UUID; o executor persiste os últimos IDs aceitos em journal atômico e mantém a deduplicação através de restart;
+- journal ilegível/corrompido bloqueia o startup do executor e falha de persistência impede a ordem de entrar na fila;
 - auditoria financeira usa estados explícitos, inclusive `DADOS_INCOMPLETOS` quando há buraco confirmado de coleta.
 
 ### Saldo da corretora
@@ -92,19 +93,20 @@ O Python envia resultados autenticados para `POST /receber-sinal`. O Node envia 
 - suíte Node com `node:test` para lógica pura;
 - testes de contrato HTTP para login/logout e middleware administrativo;
 - testes do logger estruturado/rotativo;
-- suíte Python `unittest` sobre parsing, payloads e transporte interno;
+- suíte Python `unittest` sobre parsing, payloads, transporte interno e persistência de `order_id`;
 - GitHub Actions executa sintaxe + Node + Python em PRs e pushes para `main`;
 - job separado sobe MySQL 8.4 descartável e inicia o `bot2_coletor.js` real com Express/MySQL2/Socket.IO;
 - smoke HTTP real valida Origin, login/logout, sessão administrativa, painel/API e autenticação de `/receber-sinal`;
 - o mesmo smoke valida o handshake Socket.IO real: sem sessão é rejeitado, com cookie administrativo válido conecta e o cookie invalidado no logout deixa de conectar;
 - integração confirma as nove tabelas esperadas em banco vazio e garante que o próprio smoke de infraestrutura não cria giro nem ordem financeira;
 - job Playwright separado instala Chromium e executa DOM controlado local, validando `parsear_valor_monetario`, leitura de saldo no documento/iframe e os seletores de ficha/alvo da função `executar_aposta_na_tela` sem acessar o site real;
-- job E2E controlado usa a função real `processar_resultado` do Python, o backend Node real, MySQL 8.4 e executor HTTP fake autenticado para validar captura/sequência → matching de padrão → `STANDBY`→`OPERANDO` → ordem DIRETO com UUID → auditoria `PENDENTE` → segunda rodada → `WIN` + `historico_resultados=GREEN/DIRETO`.
+- job E2E controlado usa a função real `processar_resultado` do Python, o backend Node real, MySQL 8.4 e executor HTTP fake autenticado para validar captura/sequência → matching de padrão → `STANDBY`→`OPERANDO` → ordem DIRETO com UUID → auditoria `PENDENTE` → segunda rodada → `WIN` + `historico_resultados=GREEN/DIRETO`;
+- job `Executor restart idempotency integration` recria o runtime Flask com o mesmo journal e valida duplicata após restart, conflito de payload, nova ordem e falha fechada com journal corrompido.
 
 ## Riscos e trabalhos ainda pendentes
 
 - rotacionar operacionalmente credenciais que tenham sido compartilhadas antes da externalização para `.env`;
-- idempotência de `order_id` do executor ainda é mantida somente em memória; exatamente-once através de restart exigiria estado/fila durável;
+- deduplicação do `order_id` já sobrevive a restart, mas um crash exatamente durante o clique Playwright deixa o efeito externo ambíguo; IDs já persistidos não são reenfileirados automaticamente, priorizando evitar aposta duplicada;
 - não existem métricas centralizadas/telemetria agregada; os logs estruturados já existem, mas métricas continuam pendentes;
 - mudanças no DOM/WebSocket, sessão e comportamento da plataforma de destino continuam sendo dependência externa operacional e podem divergir dos ambientes controlados validados no CI;
 - arquivos grandes e multifuncionais ainda merecem modularização gradual, porém somente com cobertura suficiente e patches pequenos.

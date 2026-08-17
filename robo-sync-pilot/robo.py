@@ -32,6 +32,11 @@ INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN", "").strip()
 EXECUTOR_HOST = os.getenv("EXECUTOR_HOST", "127.0.0.1").strip() or "127.0.0.1"
 EXECUTOR_PORT = int(os.getenv("EXECUTOR_PORT", "5000"))
 CASINO_BALANCE_SELECTOR = os.getenv("CASINO_BALANCE_SELECTOR", "").strip()
+EXECUTOR_ORDER_JOURNAL_DEFAULT = os.path.join(BASE_DIR, "runtime", "executor_order_ids.json")
+EXECUTOR_ORDER_JOURNAL_FILE = (
+    os.getenv("EXECUTOR_ORDER_JOURNAL_FILE", EXECUTOR_ORDER_JOURNAL_DEFAULT).strip()
+    or EXECUTOR_ORDER_JOURNAL_DEFAULT
+)
 
 try:
     BALANCE_SYNC_INTERVAL_SECONDS = max(0.5, float(os.getenv("BALANCE_SYNC_INTERVAL_SECONDS", "2")))
@@ -64,6 +69,80 @@ def requisicao_interna_autorizada():
     token_recebido = request.headers.get("X-Internal-Token", "")
     return hmac.compare_digest(token_recebido, INTERNAL_API_TOKEN)
 
+def persistir_ordens_executor(estado=None):
+    estado_atual = ordens_executor_recebidas if estado is None else estado
+    caminho = os.path.abspath(EXECUTOR_ORDER_JOURNAL_FILE)
+    diretorio = os.path.dirname(caminho)
+    if diretorio:
+        os.makedirs(diretorio, exist_ok=True)
+
+    payload = {
+        "version": 1,
+        "orders": list(estado_atual.values())[-ORDEM_ID_LIMITE_MEMORIA:]
+    }
+    temporario = f"{caminho}.tmp-{os.getpid()}-{threading.get_ident()}"
+
+    try:
+        with open(temporario, "w", encoding="utf-8") as arquivo:
+            json.dump(payload, arquivo, ensure_ascii=False, separators=(",", ":"))
+            arquivo.flush()
+            os.fsync(arquivo.fileno())
+        os.replace(temporario, caminho)
+    finally:
+        if os.path.exists(temporario):
+            try:
+                os.remove(temporario)
+            except OSError:
+                pass
+
+def carregar_ordens_executor_persistidas():
+    caminho = os.path.abspath(EXECUTOR_ORDER_JOURNAL_FILE)
+    if not os.path.exists(caminho):
+        return 0
+
+    try:
+        with open(caminho, "r", encoding="utf-8") as arquivo:
+            payload = json.load(arquivo)
+    except Exception as e:
+        raise RuntimeError(f"Journal de idempotencia do executor ilegivel: {e}") from e
+
+    if not isinstance(payload, dict) or payload.get("version") != 1 or not isinstance(payload.get("orders"), list):
+        raise RuntimeError("Journal de idempotencia do executor possui formato invalido")
+
+    carregadas = {}
+    for item in payload["orders"][-ORDEM_ID_LIMITE_MEMORIA:]:
+        if not isinstance(item, dict):
+            raise RuntimeError("Journal de idempotencia do executor contem ordem invalida")
+
+        order_id = str(item.get("order_id") or "").strip().lower()
+        alvo = item.get("alvo")
+        valor_bruto = item.get("valor")
+        try:
+            valor = float(valor_bruto)
+        except (TypeError, ValueError):
+            raise RuntimeError("Journal de idempotencia do executor contem valor invalido")
+
+        if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", order_id):
+            raise RuntimeError("Journal de idempotencia do executor contem order_id invalido")
+        if alvo not in {"PlayerWon", "BankerWon", "Tie"}:
+            raise RuntimeError("Journal de idempotencia do executor contem alvo invalido")
+        if isinstance(valor_bruto, bool) or valor <= 0:
+            raise RuntimeError("Journal de idempotencia do executor contem valor invalido")
+
+        ordem = {"order_id": order_id, "alvo": alvo, "valor": valor}
+        existente = carregadas.get(order_id)
+        if existente is not None and (
+            existente["alvo"] != alvo or float(existente["valor"]) != valor
+        ):
+            raise RuntimeError("Journal de idempotencia do executor contem conflito de order_id")
+        carregadas[order_id] = ordem
+
+    with ordens_executor_lock:
+        ordens_executor_recebidas.clear()
+        ordens_executor_recebidas.update(carregadas)
+
+    return len(carregadas)
+
 def registrar_ordem_idempotente(dados):
     order_id = dados["order_id"]
     alvo = dados["alvo"]
@@ -83,14 +162,23 @@ def registrar_ordem_idempotente(dados):
             )
             return ("duplicada" if mesmo_payload else "conflito"), existente
 
-        ordens_executor_recebidas[order_id] = ordem_normalizada
-        while len(ordens_executor_recebidas) > ORDEM_ID_LIMITE_MEMORIA:
-            primeiro_id = next(iter(ordens_executor_recebidas))
-            del ordens_executor_recebidas[primeiro_id]
+        novo_estado = dict(ordens_executor_recebidas)
+        novo_estado[order_id] = ordem_normalizada
+        while len(novo_estado) > ORDEM_ID_LIMITE_MEMORIA:
+            primeiro_id = next(iter(novo_estado))
+            del novo_estado[primeiro_id]
 
+        # Persiste antes do ACK/fila: se o disco falhar, a ordem nao e aceita.
+        persistir_ordens_executor(novo_estado)
+        ordens_executor_recebidas.clear()
+        ordens_executor_recebidas.update(novo_estado)
         fila_apostas.put(ordem_normalizada)
 
     return "nova", ordem_normalizada
+
+ordens_persistidas = carregar_ordens_executor_persistidas()
+if ordens_persistidas:
+    print(f"♻️ Idempotencia restaurada: {ordens_persistidas} order_id(s) carregado(s) do journal.")
 
 @app.route('/apostar', methods=['POST'])
 def receber_aposta():
@@ -113,11 +201,15 @@ def receber_aposta():
     if not isinstance(valor, (int, float)) or isinstance(valor, bool) or valor <= 0:
         return jsonify({"erro": "Valor de aposta invalido"}), 400
 
-    resultado_idempotencia, ordem = registrar_ordem_idempotente({
-        "order_id": order_id,
-        "alvo": alvo,
-        "valor": valor
-    })
+    try:
+        resultado_idempotencia, ordem = registrar_ordem_idempotente({
+            "order_id": order_id,
+            "alvo": alvo,
+            "valor": valor
+        })
+    except Exception as e:
+        print(f"❌ Falha ao persistir idempotencia da ordem {order_id}: {type(e).__name__}: {e}")
+        return jsonify({"erro": "Falha ao persistir idempotencia da ordem"}), 503
 
     if resultado_idempotencia == "conflito":
         return jsonify({

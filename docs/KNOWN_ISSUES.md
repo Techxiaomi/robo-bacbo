@@ -12,13 +12,15 @@ Credenciais SQL, login e segredos foram externalizados para `.env`, arquivos de 
 
 Risco residual: qualquer credencial que tenha sido compartilhada antes dessa externalização deve ser rotacionada no serviço correspondente. Isso depende do ambiente/contas reais e não deve ser automatizado pelo repositório.
 
-### BUG-001R — Idempotência do executor não sobrevive a restart
+### BUG-001R — Restart do executor e exactly-once do efeito externo
 
-Status: **risco arquitetural residual**.
+Status: **deduplicação entre restarts mitigada; ambiguidade do efeito externo ainda residual**.
 
-O fluxo Node → Python usa `order_id` UUID. Retry ambíguo reutiliza o mesmo ID e o executor rejeita duplicatas enquanto o mesmo processo está ativo.
+O fluxo Node → Python usa `order_id` UUID. O executor agora mantém um journal JSON local dos últimos IDs aceitos, grava o estado de forma atômica antes de enfileirar uma nova ordem e restaura esse registro no startup. Reenvio do mesmo `order_id` após restart continua sendo tratado como duplicata; reutilização com payload diferente continua retornando conflito.
 
-Risco residual: a memória de IDs recebidos é volátil. Um restart do executor elimina essa memória; garantia de exactly-once através de restart exigiria estado durável/fila transacional e deve ser tratada como mudança arquitetural separada.
+Journal ilegível/corrompido faz o executor falhar fechado no startup. Falha ao persistir uma nova ordem faz `/apostar` retornar 503 sem colocá-la na fila. O CI possui um gate específico que recria o runtime Flask com o mesmo journal e comprova que a ordem persistida não é reenfileirada.
+
+Risco residual: o journal protege contra replay duplicado, mas não consegue provar o estado do efeito externo se o processo morrer exatamente durante a interação Playwright com a mesa. Um restart após o aceite não reenfileira automaticamente um ID já persistido, priorizando evitar aposta duplicada. Garantia de exactly-once absoluto do clique exigiria confirmação/idempotência transacional oferecida pela própria plataforma externa, que não está disponível ao executor.
 
 ### OBS-001 — Observabilidade
 
@@ -54,7 +56,8 @@ Já implementado:
 - handshake Socket.IO real cobrindo rejeição sem sessão, aceitação com cookie administrativo válido e nova rejeição do cookie invalidado após logout;
 - verificação no MySQL de que as nove tabelas esperadas são criadas a partir de banco vazio e de que o smoke de infraestrutura não grava giro nem ordem financeira;
 - Chromium real em DOM controlado local validando parsing/leitura de saldo no DOM principal e em iframe, além dos seletores de ficha/alvo usados por `executar_aposta_na_tela`;
-- E2E controlado do ciclo coletor Python → Node → executor fake autenticado → MySQL: `processar_resultado` real gera sequência/coleta, uma estratégia real casa o padrão, o Auto-Trader sai de `STANDBY`, a ordem DIRETO é confirmada com o mesmo `order_id`, a auditoria passa de `PENDENTE` para `WIN` e `historico_resultados` registra `GREEN/DIRETO`.
+- E2E controlado do ciclo coletor Python → Node → executor fake autenticado → MySQL: `processar_resultado` real gera sequência/coleta, uma estratégia real casa o padrão, o Auto-Trader sai de `STANDBY`, a ordem DIRETO é confirmada com o mesmo `order_id`, a auditoria passa de `PENDENTE` para `WIN` e `historico_resultados` registra `GREEN/DIRETO`;
+- integração específica do executor recria o runtime Flask com o mesmo journal e valida deduplicação de `order_id` através de restart, conflito de payload e falha fechada com journal corrompido.
 
 Risco residual externo:
 

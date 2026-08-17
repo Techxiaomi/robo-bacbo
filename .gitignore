@@ -19,6 +19,7 @@ __pycache__/
 # Logs, caches e arquivos temporários
 *.log
 logs/
+robo-sync-pilot/runtime/
 .cache/
 .pytest_cache/
 coverage/

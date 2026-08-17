@@ -1,7 +1,10 @@
 import ast
+import json
+import os
 import pathlib
 import queue
 import re
+import tempfile
 import threading
 import unittest
 
@@ -100,16 +103,35 @@ class TestParsearValorMonetario(unittest.TestCase):
 
 
 class TestRegistrarOrdemIdempotente(unittest.TestCase):
+    FUNCOES = [
+        "persistir_ordens_executor",
+        "carregar_ordens_executor_persistidas",
+        "registrar_ordem_idempotente",
+    ]
+
     def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.journal = os.path.join(self.temp_dir.name, "executor-order-ids.json")
+        self.ns = self.criar_namespace()
+        self.registrar = self.ns["registrar_ordem_idempotente"]
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def criar_namespace(self):
         ns = {
+            "json": json,
+            "os": os,
+            "re": re,
+            "threading": threading,
             "ordens_executor_recebidas": {},
             "ordens_executor_lock": threading.Lock(),
             "ORDEM_ID_LIMITE_MEMORIA": 5000,
+            "EXECUTOR_ORDER_JOURNAL_FILE": self.journal,
             "fila_apostas": queue.Queue(),
         }
-        carregar_funcoes(["registrar_ordem_idempotente"], ns)
-        self.ns = ns
-        self.registrar = ns["registrar_ordem_idempotente"]
+        carregar_funcoes(self.FUNCOES, ns)
+        return ns
 
     @staticmethod
     def ordem(order_id="123e4567-e89b-42d3-a456-426614174000", alvo="PlayerWon", valor=10):
@@ -124,6 +146,7 @@ class TestRegistrarOrdemIdempotente(unittest.TestCase):
         self.assertEqual(status, "nova")
         self.assertEqual(ordem["valor"], 10.0)
         self.assertEqual(self.ns["fila_apostas"].qsize(), 1)
+        self.assertTrue(os.path.isfile(self.journal))
 
     def test_repeticao_identica_nao_duplica_fila(self):
         self.registrar(self.ordem())
@@ -139,6 +162,27 @@ class TestRegistrarOrdemIdempotente(unittest.TestCase):
 
         self.assertEqual(status, "conflito")
         self.assertEqual(self.ns["fila_apostas"].qsize(), 1)
+
+    def test_reinicio_carrega_id_e_nao_reenfileira(self):
+        self.registrar(self.ordem())
+
+        ns_reiniciado = self.criar_namespace()
+        carregadas = ns_reiniciado["carregar_ordens_executor_persistidas"]()
+        self.assertEqual(carregadas, 1)
+        self.assertEqual(ns_reiniciado["fila_apostas"].qsize(), 0)
+
+        status, ordem = ns_reiniciado["registrar_ordem_idempotente"](self.ordem())
+        self.assertEqual(status, "duplicada")
+        self.assertEqual(ordem["order_id"], self.ordem()["order_id"])
+        self.assertEqual(ns_reiniciado["fila_apostas"].qsize(), 0)
+
+    def test_journal_corrompido_falha_fechado(self):
+        with open(self.journal, "w", encoding="utf-8") as arquivo:
+            arquivo.write("{corrompido")
+
+        ns_reiniciado = self.criar_namespace()
+        with self.assertRaisesRegex(RuntimeError, "(?i)journal"):
+            ns_reiniciado["carregar_ordens_executor_persistidas"]()
 
 
 class TestProcessarResultado(unittest.TestCase):
@@ -242,7 +286,6 @@ class TestProcessarResultado(unittest.TestCase):
         self.assertEqual(chave, "resultado_node")
         self.assertIn("HTTP 500", mensagem)
         self.assertEqual(intervalo, 30)
-
 
     def test_falha_de_post_consume_seq_e_deixa_salto_observavel(self):
         FakeRequests.proxima_resposta = FakeResponse(RuntimeError("HTTP 500"))
