@@ -2284,18 +2284,24 @@
         function limparFichas() { document.getElementById('at-stake').value = "0.00"; }
         function toggleConfigCamuflagem() { let modo = document.getElementById('at-camuflagem').value; let boxPulos = document.getElementById('box-at-pulos'); if (modo === 'PULOS') boxPulos.style.display = 'block'; else boxPulos.style.display = 'none'; }
 
-        // Nova rota para pegar o saldo ao vivo
+        // Prévia visual; o baseline real é capturado exclusivamente pelo backend.
         async function sincronizarSaldoPython() {
             try {
-                const res = await fetch('/api/saldo-global?_t=' + Date.now()); 
+                const res = await fetch('/api/saldo-global?_t=' + Date.now());
                 const data = await res.json();
-                if (data.saldo_atual > 0) {
-                    document.getElementById('at-saldo-visor').innerText = `R$ ${parseFloat(data.saldo_atual).toFixed(2).replace('.', ',')}`;
+                const saldo = Number(data.saldo_atual);
+
+                if (res.ok && data.fresco === true && Number.isFinite(saldo) && saldo >= 0) {
+                    document.getElementById('at-saldo-visor').innerText = `R$ ${saldo.toFixed(2).replace('.', ',')}`;
                     document.getElementById('at-saldo-visor').style.color = '#28a745';
-                } else {
-                    alert("Ainda não recebemos o saldo da mesa. Aguarde o próximo giro.");
+                    return;
                 }
-            } catch(e) { alert("Erro de conexão com o servidor local."); }
+
+                document.getElementById('at-saldo-visor').style.color = '#ffc107';
+                alert('Saldo real ainda não está recente o suficiente para iniciar um novo ciclo. Aguarde a sincronização do executor.');
+            } catch(e) {
+                alert('Erro de conexão com o servidor local.');
+            }
         }
 
         function abrirFormularioAutoTrader() {
@@ -2321,25 +2327,79 @@
         }
 
         async function salvarAutoTrader() {
-            let nome = document.getElementById('at-nome').value.trim(); if (!nome) return alert("Preencha o Nome do Motor.");
-            let saldoVisorTxt = document.getElementById('at-saldo-visor').innerText.replace('R$ ', '').replace(',', '.');
-            let saldoInicialCapturado = parseFloat(saldoVisorTxt) || 0.00;
-            let payload = {
-                nome: nome, ativo: document.getElementById('at-ativo').checked, saldo_inicial: saldoInicialCapturado,
-                config: { stake_inicial: parseFloat(document.getElementById('at-stake').value) || 10.0, gale_1_mult: parseFloat(document.getElementById('at-gale1').value) || 2.0, gale_2_mult: parseFloat(document.getElementById('at-gale2').value) || 4.0, modo_camuflagem: document.getElementById('at-camuflagem').value, camuflagem_pulos_min: parseInt(document.getElementById('at-pulo-min').value) || 1, camuflagem_pulos_max: parseInt(document.getElementById('at-pulo-max').value) || 3, limite_entradas: parseInt(document.getElementById('at-max-entradas').value) || 15, stop_win: parseFloat(document.getElementById('at-stop-win').value) || 100.0, trailing_stop: document.getElementById('at-trailing-stop').checked, stop_loss: parseFloat(document.getElementById('at-stop-loss').value) || 250.0, hora_inicio: document.getElementById('at-hora-inicio').value, hora_fim: document.getElementById('at-hora-fim').value, fontes_sinal: Array.from(document.querySelectorAll('.chk-at-fonte:checked')).map(i => i.value) }
+            const nome = document.getElementById('at-nome').value.trim();
+            if (!nome) return alert('Preencha o Nome do Motor.');
+
+            const payload = {
+                nome,
+                ativo: document.getElementById('at-ativo').checked,
+                config: {
+                    stake_inicial: parseFloat(document.getElementById('at-stake').value) || 10.0,
+                    gale_1_mult: parseFloat(document.getElementById('at-gale1').value) || 2.0,
+                    gale_2_mult: parseFloat(document.getElementById('at-gale2').value) || 4.0,
+                    modo_camuflagem: document.getElementById('at-camuflagem').value,
+                    camuflagem_pulos_min: parseInt(document.getElementById('at-pulo-min').value) || 1,
+                    camuflagem_pulos_max: parseInt(document.getElementById('at-pulo-max').value) || 3,
+                    limite_entradas: parseInt(document.getElementById('at-max-entradas').value) || 15,
+                    stop_win: parseFloat(document.getElementById('at-stop-win').value) || 100.0,
+                    trailing_stop: document.getElementById('at-trailing-stop').checked,
+                    stop_loss: parseFloat(document.getElementById('at-stop-loss').value) || 250.0,
+                    hora_inicio: document.getElementById('at-hora-inicio').value,
+                    hora_fim: document.getElementById('at-hora-fim').value,
+                    fontes_sinal: Array.from(document.querySelectorAll('.chk-at-fonte:checked')).map(i => i.value)
+                }
             };
-            try { 
-                const res = await fetch(autoTraderEditandoId ? `/api/auto-trader/${autoTraderEditandoId}` : `/api/auto-trader`, { method: autoTraderEditandoId ? `PUT` : `POST`, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) }); 
-                if (res.ok) { fecharFormularioAutoTrader(); await carregarAutoTraders(); } else alert("Erro ao salvar.");
-            } catch(e) { alert("Erro de conexão."); }
+
+            try {
+                const res = await fetch(
+                    autoTraderEditandoId ? `/api/auto-trader/${autoTraderEditandoId}` : '/api/auto-trader',
+                    {
+                        method: autoTraderEditandoId ? 'PUT' : 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(payload)
+                    }
+                );
+
+                let resposta = {};
+                try { resposta = await res.json(); } catch (e) {}
+
+                if (!res.ok) {
+                    return alert(resposta.mensagem || 'Erro ao salvar o Auto-Trader.');
+                }
+
+                fecharFormularioAutoTrader();
+                await carregarAutoTraders();
+            } catch(e) {
+                alert('Erro de conexão.');
+            }
         }
 
         async function excluirAutoTrader(id) { if (confirm("Apagar permanentemente este Motor?")) { await fetch(`/api/auto-trader/${id}`, { method: 'DELETE' }); await carregarAutoTraders(); } }
         async function carregarAutoTraders() { try { const res = await fetch('/api/auto-traders?_t=' + Date.now()); autoTradersGlobais = await res.json(); renderizarCardsAutoTraders(); } catch(e){} }
 
         async function toggleAutoTraderRapido(id, check) {
-            let at = autoTradersGlobais.find(x => x.id === id); if (!at) return; let nA = check.checked; 
-            try { await fetch(`/api/auto-trader/${id}`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({...at, ativo: nA}) }); at.ativo = nA; renderizarCardsAutoTraders(); } catch(e) { check.checked = !nA; } 
+            const at = autoTradersGlobais.find(x => x.id === id);
+            if (!at) return;
+
+            const novoAtivo = !!check.checked;
+            try {
+                const res = await fetch(`/api/auto-trader/${id}`, {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ ...at, ativo: novoAtivo })
+                });
+
+                let resposta = {};
+                try { resposta = await res.json(); } catch (e) {}
+                if (!res.ok) {
+                    throw new Error(resposta.mensagem || 'Falha ao atualizar o Auto-Trader.');
+                }
+
+                await carregarAutoTraders();
+            } catch(e) {
+                check.checked = !novoAtivo;
+                alert(e.message || 'Erro ao atualizar o Auto-Trader.');
+            }
         }
 
         function renderizarCardsAutoTraders() {
