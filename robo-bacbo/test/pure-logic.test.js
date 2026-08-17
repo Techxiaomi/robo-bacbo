@@ -78,6 +78,7 @@ function carregarLogicaPura() {
             horarioParaMinutos,
             traderDentroHorarioExecucao,
             avaliarLimitesFinanceirosTrader,
+            avaliarTrailingStopTrader,
             avaliarStopRedsAutoTrader
         };`,
         contexto,
@@ -433,4 +434,124 @@ test("Stop Reds de Robos/Canais permanece separado do Stop Reds do Auto-Trader",
     assert.match(frontendSource, /id="at-stop-reds"/);
     assert.match(frontendSource, /id="at-stop-reds-acao"/);
     assert.match(frontendSource, /id="at-stop-reds-pausa"/);
+});
+
+test("avaliarTrailingStopTrader arma somente com recuo explicito e dispara no recuo do pico", () => {
+    let r = logic.avaliarTrailingStopTrader(
+        { trailing_pico_lucro: 100, config: { trailing_stop: true } },
+        70
+    );
+    assert.equal(r.acionado, false);
+    assert.equal(r.pico_lucro, 100);
+    assert.equal(r.limite_disparo, null);
+
+    r = logic.avaliarTrailingStopTrader(
+        { trailing_pico_lucro: 50, config: { trailing_stop: true, trailing_recuo: 30 } },
+        100
+    );
+    assert.equal(r.acionado, false);
+    assert.equal(r.pico_lucro, 100);
+    assert.equal(r.limite_disparo, 70);
+
+    r = logic.avaliarTrailingStopTrader(
+        { trailing_pico_lucro: 100, config: { trailing_stop: true, trailing_recuo: 30 } },
+        71
+    );
+    assert.equal(r.acionado, false);
+
+    r = logic.avaliarTrailingStopTrader(
+        { trailing_pico_lucro: 100, config: { trailing_stop: true, trailing_recuo: 30 } },
+        70
+    );
+    assert.equal(r.acionado, true);
+    assert.equal(r.limite_disparo, 70);
+
+    r = logic.avaliarTrailingStopTrader(
+        { trailing_pico_lucro: 0, config: { trailing_stop: true, trailing_recuo: 30 } },
+        -50
+    );
+    assert.equal(r.acionado, false);
+    assert.equal(r.pico_lucro, 0);
+
+    r = logic.avaliarTrailingStopTrader(
+        { trailing_pico_lucro: 100, config: { trailing_stop: false, trailing_recuo: 30 } },
+        20
+    );
+    assert.equal(r.acionado, false);
+});
+
+test("avaliarLimitesFinanceirosTrader integra Trailing Stop sem superar Stop Win e Stop Loss", () => {
+    let r = logic.avaliarLimitesFinanceirosTrader(
+        {
+            saldo_inicial: 1000,
+            trailing_pico_lucro: 100,
+            config: {
+                stop_win: 500,
+                stop_loss: 500,
+                trailing_stop: true,
+                trailing_recuo: 30
+            }
+        },
+        { saldo_atual: 1070, fresco: true }
+    );
+    assert.equal(r.permitido, false);
+    assert.equal(r.motivo, "TRAILING_STOP");
+    assert.equal(r.trailing_pico_lucro, 100);
+    assert.equal(r.trailing_limite_disparo, 70);
+
+    r = logic.avaliarLimitesFinanceirosTrader(
+        {
+            saldo_inicial: 1000,
+            trailing_pico_lucro: 80,
+            config: {
+                stop_win: 500,
+                stop_loss: 500,
+                trailing_stop: true,
+                trailing_recuo: 30
+            }
+        },
+        { saldo_atual: 1100, fresco: true }
+    );
+    assert.equal(r.permitido, true);
+    assert.equal(r.trailing_pico_lucro, 100);
+
+    r = logic.avaliarLimitesFinanceirosTrader(
+        {
+            saldo_inicial: 1000,
+            trailing_pico_lucro: 100,
+            config: {
+                stop_win: 100,
+                stop_loss: 500,
+                trailing_stop: true,
+                trailing_recuo: 30
+            }
+        },
+        { saldo_atual: 1100, fresco: true }
+    );
+    assert.equal(r.motivo, "STOP_WIN");
+
+    r = logic.avaliarLimitesFinanceirosTrader(
+        {
+            saldo_inicial: 1000,
+            trailing_pico_lucro: 100,
+            config: {
+                stop_win: 500,
+                stop_loss: 250,
+                trailing_stop: true,
+                trailing_recuo: 30
+            }
+        },
+        { saldo_atual: 750, fresco: true }
+    );
+    assert.equal(r.motivo, "STOP_LOSS");
+});
+
+test("Trailing Stop persiste pico, reinicia ao mudar configuracao e possui controles no painel", () => {
+    assert.match(source, /ALTER TABLE auto_traders ADD COLUMN trailing_pico_lucro DECIMAL\(12,2\) DEFAULT 0/);
+    assert.match(source, /UPDATE auto_traders SET trailing_pico_lucro=\? WHERE id=\?/);
+    assert.match(source, /trailingConfigMudou[\s\S]*?trailing_pico_lucro=0/);
+    assert.match(source, /status_operacao='STANDBY'[\s\S]*?trailing_pico_lucro=0/);
+    assert.match(frontendSource, /id="at-trailing-recuo"/);
+    assert.match(frontendSource, /toggleTrailingStopAutoTrader/);
+    assert.match(frontendSource, /TRAILING_STOP/);
 });

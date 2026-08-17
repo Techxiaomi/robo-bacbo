@@ -1655,7 +1655,12 @@
                         <div style="flex:1; background:#1a1a1a; padding:15px; border-radius:8px; border:1px solid #28a745;">
                             <h4 style="margin:0 0 10px 0; font-size:12px; color:#28a745; text-transform:uppercase;">🏆 Meta de Lucro (Stop Win)</h4>
                             <div class="form-group"><label>Lucro Alvo (R$):</label><input type="number" id="at-stop-win" value="100.00" step="10.00"></div>
-                            <label style="cursor: pointer; display: flex; align-items: center; gap: 8px; margin-top:10px; font-size:11px; color:#aaa;"><input type="checkbox" id="at-trailing-stop" checked style="width: 14px; height: 14px; margin: 0;"> <strong>Ativar Trailing Stop (Proteger lucro)</strong></label>
+                            <label style="cursor: pointer; display: flex; align-items: center; gap: 8px; margin-top:10px; font-size:11px; color:#aaa;"><input type="checkbox" id="at-trailing-stop" checked onchange="toggleTrailingStopAutoTrader()" style="width: 14px; height: 14px; margin: 0;"> <strong>Ativar Trailing Stop (Proteger lucro)</strong></label>
+                            <div class="form-group" id="box-at-trailing-recuo" style="margin-top:10px;">
+                                <label>Recuo permitido a partir do pico (R$):</label>
+                                <input type="number" id="at-trailing-recuo" value="0.00" step="5.00" min="0">
+                                <span style="font-size:9px; color:#666;">0 = não armado. O pico começa a ser registrado após configurar um recuo maior que zero.</span>
+                            </div>
                         </div>
                         <div style="flex:1; background:#1a1a1a; padding:15px; border-radius:8px; border:1px solid #ff7777;">
                             <h4 style="margin:0 0 10px 0; font-size:12px; color:#ff7777; text-transform:uppercase;">🛑 Limite de Perda (Stop Loss)</h4>
@@ -2292,6 +2297,17 @@
         function addFicha(valor) { let input = document.getElementById('at-stake'); let atual = parseFloat(input.value) || 0; input.value = (atual + valor).toFixed(2); }
         function limparFichas() { document.getElementById('at-stake').value = "0.00"; }
         function toggleConfigCamuflagem() { let modo = document.getElementById('at-camuflagem').value; let boxPulos = document.getElementById('box-at-pulos'); if (modo === 'PULOS') boxPulos.style.display = 'block'; else boxPulos.style.display = 'none'; }
+        function toggleTrailingStopAutoTrader() {
+            const ativo = document.getElementById('at-trailing-stop')?.checked === true;
+            const input = document.getElementById('at-trailing-recuo');
+            const box = document.getElementById('box-at-trailing-recuo');
+            if (input) input.disabled = !ativo;
+            if (box) {
+                box.style.opacity = ativo ? '1' : '0.45';
+                box.style.pointerEvents = ativo ? 'auto' : 'none';
+            }
+        }
+
         function toggleStopRedsAutoTrader() {
             const limite = Math.max(0, parseInt(document.getElementById('at-stop-reds')?.value) || 0);
             const acao = document.getElementById('at-stop-reds-acao')?.value || 'PAUSAR';
@@ -2327,7 +2343,7 @@
 
         function abrirFormularioAutoTrader() {
             autoTraderEditandoId = null; document.getElementById('at-titulo').innerText = "💸 Cadastrar Motor de Execução";
-            document.getElementById('at-nome').value = ''; document.getElementById('at-ativo').checked = true; document.getElementById('at-saldo-visor').innerText = "R$ 0,00"; document.getElementById('at-saldo-visor').style.color = '#fff'; document.getElementById('at-stake').value = "10.00"; document.getElementById('at-gale1').value = "2.0"; document.getElementById('at-gale2').value = "4.0"; document.getElementById('at-camuflagem').value = "TODAS"; toggleConfigCamuflagem(); document.getElementById('at-pulo-min').value = "1"; document.getElementById('at-pulo-max').value = "3"; document.getElementById('at-max-entradas').value = "15"; document.getElementById('at-stop-win').value = "100.00"; document.getElementById('at-trailing-stop').checked = true; document.getElementById('at-stop-loss').value = "250.00"; document.getElementById('at-hora-inicio').value = "00:00"; document.getElementById('at-hora-fim').value = "23:59";
+            document.getElementById('at-nome').value = ''; document.getElementById('at-ativo').checked = true; document.getElementById('at-saldo-visor').innerText = "R$ 0,00"; document.getElementById('at-saldo-visor').style.color = '#fff'; document.getElementById('at-stake').value = "10.00"; document.getElementById('at-gale1').value = "2.0"; document.getElementById('at-gale2').value = "4.0"; document.getElementById('at-camuflagem').value = "TODAS"; toggleConfigCamuflagem(); document.getElementById('at-pulo-min').value = "1"; document.getElementById('at-pulo-max').value = "3"; document.getElementById('at-max-entradas').value = "15"; document.getElementById('at-stop-win').value = "100.00"; document.getElementById('at-trailing-stop').checked = true; document.getElementById('at-trailing-recuo').value = "0.00"; toggleTrailingStopAutoTrader(); document.getElementById('at-stop-loss').value = "250.00"; document.getElementById('at-hora-inicio').value = "00:00"; document.getElementById('at-hora-fim').value = "23:59";
             document.getElementById('at-stop-reds').value = "0";
             document.getElementById('at-stop-reds-acao').value = "PAUSAR";
             document.getElementById('at-stop-reds-pausa').value = "60";
@@ -2338,7 +2354,7 @@
         function prepararEdicaoAutoTrader(id) {
             let at = autoTradersGlobais.find(x => x.id === id); if (!at) return;
             autoTraderEditandoId = at.id; let cf = at.config;
-            document.getElementById('at-titulo').innerText = "✏️ Editar Motor de Execução"; document.getElementById('at-nome').value = at.nome; document.getElementById('at-ativo').checked = at.ativo; document.getElementById('at-saldo-visor').innerText = `R$ ${parseFloat(at.saldo_atual).toFixed(2).replace('.',',')}`; document.getElementById('at-saldo-visor').style.color = '#28a745'; document.getElementById('at-stake').value = (cf.stake_inicial || 10).toFixed(2); document.getElementById('at-gale1').value = cf.gale_1_mult || 2.0; document.getElementById('at-gale2').value = cf.gale_2_mult || 4.0; document.getElementById('at-camuflagem').value = cf.modo_camuflagem || 'TODAS'; toggleConfigCamuflagem(); document.getElementById('at-pulo-min').value = cf.camuflagem_pulos_min || 1; document.getElementById('at-pulo-max').value = cf.camuflagem_pulos_max || 3; document.getElementById('at-max-entradas').value = cf.limite_entradas || 15; document.getElementById('at-stop-win').value = (cf.stop_win || 100).toFixed(2); document.getElementById('at-trailing-stop').checked = cf.trailing_stop !== false; document.getElementById('at-stop-loss').value = (cf.stop_loss || 250).toFixed(2); document.getElementById('at-hora-inicio').value = cf.hora_inicio || "00:00"; document.getElementById('at-hora-fim').value = cf.hora_fim || "23:59";
+            document.getElementById('at-titulo').innerText = "✏️ Editar Motor de Execução"; document.getElementById('at-nome').value = at.nome; document.getElementById('at-ativo').checked = at.ativo; document.getElementById('at-saldo-visor').innerText = `R$ ${parseFloat(at.saldo_atual).toFixed(2).replace('.',',')}`; document.getElementById('at-saldo-visor').style.color = '#28a745'; document.getElementById('at-stake').value = (cf.stake_inicial || 10).toFixed(2); document.getElementById('at-gale1').value = cf.gale_1_mult || 2.0; document.getElementById('at-gale2').value = cf.gale_2_mult || 4.0; document.getElementById('at-camuflagem').value = cf.modo_camuflagem || 'TODAS'; toggleConfigCamuflagem(); document.getElementById('at-pulo-min').value = cf.camuflagem_pulos_min || 1; document.getElementById('at-pulo-max').value = cf.camuflagem_pulos_max || 3; document.getElementById('at-max-entradas').value = cf.limite_entradas || 15; document.getElementById('at-stop-win').value = (cf.stop_win || 100).toFixed(2); document.getElementById('at-trailing-stop').checked = cf.trailing_stop !== false; document.getElementById('at-trailing-recuo').value = Math.max(0, Number(cf.trailing_recuo) || 0).toFixed(2); toggleTrailingStopAutoTrader(); document.getElementById('at-stop-loss').value = (cf.stop_loss || 250).toFixed(2); document.getElementById('at-hora-inicio').value = cf.hora_inicio || "00:00"; document.getElementById('at-hora-fim').value = cf.hora_fim || "23:59";
             document.getElementById('at-stop-reds').value = Math.max(0, Number(cf.stop_reds_seguidos) || 0);
             document.getElementById('at-stop-reds-acao').value = String(cf.stop_reds_acao || 'PAUSAR').toUpperCase() === 'DESLIGAR' ? 'DESLIGAR' : 'PAUSAR';
             document.getElementById('at-stop-reds-pausa').value = Math.max(1, Number(cf.stop_reds_pausa_min) || 60);
@@ -2372,6 +2388,7 @@
                     limite_entradas: parseInt(document.getElementById('at-max-entradas').value) || 15,
                     stop_win: parseFloat(document.getElementById('at-stop-win').value) || 100.0,
                     trailing_stop: document.getElementById('at-trailing-stop').checked,
+                    trailing_recuo: Math.max(0, parseFloat(document.getElementById('at-trailing-recuo').value) || 0),
                     stop_loss: parseFloat(document.getElementById('at-stop-loss').value) || 250.0,
                     stop_reds_seguidos: Math.max(0, parseInt(document.getElementById('at-stop-reds').value) || 0),
                     stop_reds_acao: document.getElementById('at-stop-reds-acao').value === 'DESLIGAR' ? 'DESLIGAR' : 'PAUSAR',
@@ -2455,6 +2472,7 @@
                 let tagStatus = '';
                 if (at.status_operacao === 'STOP_WIN') tagStatus = `<span style="background:#198754; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">🏁 STOP WIN ATINGIDO</span>`;
                 else if (at.status_operacao === 'STOP_LOSS') tagStatus = `<span style="background:#dc3545; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">🛑 STOP LOSS ATINGIDO</span>`;
+                else if (at.status_operacao === 'TRAILING_STOP') tagStatus = `<span style="background:#6f42c1; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">🛡️ TRAILING STOP ATINGIDO</span>`;
                 else if (at.status_operacao === 'STOP_REDS') tagStatus = `<span style="background:#dc3545; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">STOP REDS - DESLIGADO</span>`;
                 else if (at.status_operacao === 'STOP_REDS_PAUSA' && at.ativo) tagStatus = `<span style="background:#fd7e14; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">STOP REDS - ${pausaStopRedsMin > 0 ? `PAUSADO (${pausaStopRedsMin} min)` : 'REARMANDO'}</span>`;
                 else if (!at.ativo) tagStatus = `<span style="background:#555; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">🔴 DESLIGADO</span>`;
@@ -2462,7 +2480,14 @@
                 else if (at.status_operacao === 'META_ATINGIDA') tagStatus = `<span style="background:#17a2b8; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">💤 META DO DIA BATIDA</span>`;
                 else tagStatus = `<span style="background:#28a745; color:white; padding:2px 8px; border-radius:4px; font-size:10px; animation: animar-piscar 1.5s infinite;">🟢 OPERANDO</span>`;
 
-                let trailingHTML = cf.trailing_stop ? `<div style="font-size:10px; color:#aaa; margin-top:2px;">↳ Trailing Stop Protegerá o Lucro Mínimo.</div>` : '';
+                const trailingRecuo = Math.max(0, Number(cf.trailing_recuo) || 0);
+                const trailingPico = Math.max(0, Number(at.trailing_pico_lucro) || 0);
+                let trailingHTML = '';
+                if (cf.trailing_stop && trailingRecuo > 0) {
+                    trailingHTML = `<div style="font-size:10px; color:#aaa; margin-top:2px;">↳ Trailing: recuo R$ ${trailingRecuo.toFixed(2).replace('.',',')} | pico registrado +R$ ${trailingPico.toFixed(2).replace('.',',')}</div>`;
+                } else if (cf.trailing_stop) {
+                    trailingHTML = `<div style="font-size:10px; color:#ffc107; margin-top:2px;">↳ Trailing habilitado, mas ainda sem recuo configurado.</div>`;
+                }
                 let camuflagemHTML = (cf.modo_camuflagem === 'PULOS') ? `<span style="display:inline-block; margin-top:5px; background:#111; padding:4px 8px; border-radius:4px; border:1px solid #333; font-size:11px;">🕵️ Camuflagem: Pulará <strong>${at.pulos_restantes}</strong> ordens.</span>` : '';
                 let strFontes = (cf.fontes_sinal || []).map(f => `<span style="font-size:10px; padding:2px 6px; border-radius:4px; background:${f.includes('[AUTO]')?'#17a2b8':'#444'}; color:white; margin-right:4px;">${f}</span>`).join('');
 

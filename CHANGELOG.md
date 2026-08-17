@@ -58,6 +58,8 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - A validação operacional do BUG-008 confirmou seletor real no Chromium headless e heartbeat de saldo; Gales já iniciados continuam até o desfecho e trailing permanece fora deste patch.
 - BUG-006C: Auto-Trader ganha Stop Reds próprio, contado somente quando uma sequência realmente executada é finalizada; GREEN/TIE zera o streak e RED final incrementa uma única vez, independentemente dos Gales intermediários.
 - Ao atingir o limite, o Auto-Trader pode pausar por N minutos e rearmar automaticamente ou desligar até reativação manual. O `stop_reds_seguidos` de Robôs/Canais permanece independente e inalterado.
+- BUG-006D: Trailing Stop passa a usar o maior lucro real registrado no ciclo e um recuo configurável em R$; ao atingir o recuo a partir do pico, o Auto-Trader desliga antes de abrir uma nova sequência.
+- O pico é persistido no MySQL, é zerado em reativação manual ou mudança da configuração de trailing e `trailing_stop=true` sem `trailing_recuo>0` permanece desarmado para compatibilidade com configurações antigas.
 - BUG-008A: o executor pode sincronizar o saldo real da página por `CASINO_BALANCE_SELECTOR`, com parsing monetário, polling controlado e mensagens autenticadas ao Node.
 - O Node rejeita saldos inválidos e `saldoGlobalCorretora` passa a distinguir saldo desconhecido (`null`) de saldo real zero; nenhum saldo é inferido quando o seletor não está configurado.
 - BUG-007A: restauradas as funções frontend já referenciadas pelo módulo de Robôs para CRUD, destinatários, sintonização manual, edição, toggle, cards e filtros.

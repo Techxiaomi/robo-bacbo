@@ -144,6 +144,7 @@ async function prepararBancoDeDados() {
                 pulos_restantes INT DEFAULT 0,
                 reds_consecutivos INT DEFAULT 0,
                 stop_reds_pausado_ate BIGINT DEFAULT 0,
+                trailing_pico_lucro DECIMAL(12,2) DEFAULT 0,
                 data_atualizacao DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
             )
         `);
@@ -195,6 +196,7 @@ async function prepararBancoDeDados() {
         await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN executor_order_id VARCHAR(64) DEFAULT NULL");
         await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN reds_consecutivos INT DEFAULT 0");
         await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN stop_reds_pausado_ate BIGINT DEFAULT 0");
+        await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN trailing_pico_lucro DECIMAL(12,2) DEFAULT 0");
 
         console.log("\n========================================================");
         console.log("🚀 MÓDULO BACKEND V12.0 PRO - MOTOR DE EXECUÇÃO INTEGRADO");
@@ -793,7 +795,8 @@ app.get("/api/auto-traders", async (req, res) => {
                 entradas_feitas: at.entradas_feitas,
                 pulos_restantes: at.pulos_restantes,
                 reds_consecutivos: Math.max(0, Number(at.reds_consecutivos) || 0),
-                stop_reds_pausado_ate: Math.max(0, Number(at.stop_reds_pausado_ate) || 0)
+                stop_reds_pausado_ate: Math.max(0, Number(at.stop_reds_pausado_ate) || 0),
+                trailing_pico_lucro: Math.max(0, Number(at.trailing_pico_lucro) || 0)
             };
         });
         res.json(sanitizados);
@@ -837,12 +840,23 @@ app.put("/api/auto-trader/:id", async (req, res) => {
         const novoAtivo = ativo === true || ativo === 1;
 
         const [existentes] = await dbPool.query(
-            'SELECT ativo FROM auto_traders WHERE id=? LIMIT 1',
+            'SELECT ativo, config_json FROM auto_traders WHERE id=? LIMIT 1',
             [id]
         );
         if (existentes.length === 0) {
             return res.status(404).json({ sucesso: false, erro: 'auto_trader_nao_encontrado' });
         }
+
+        let configAnterior = {};
+        try { configAnterior = JSON.parse(existentes[0].config_json || '{}'); } catch(e) {}
+        const configNova = config || {};
+        const trailingAnteriorAtivo = configAnterior.trailing_stop === true;
+        const trailingNovoAtivo = configNova.trailing_stop === true;
+        const trailingAnteriorRecuo = Math.max(0, Number(configAnterior.trailing_recuo) || 0);
+        const trailingNovoRecuo = Math.max(0, Number(configNova.trailing_recuo) || 0);
+        const trailingConfigMudou =
+            trailingAnteriorAtivo !== trailingNovoAtivo
+            || trailingAnteriorRecuo !== trailingNovoRecuo;
 
         const estavaAtivo = existentes[0].ativo === true || existentes[0].ativo === 1;
         const reativando = !estavaAtivo && novoAtivo;
@@ -861,15 +875,22 @@ app.put("/api/auto-trader/:id", async (req, res) => {
                 `UPDATE auto_traders
                  SET nome=?, ativo=true, config_json=?, saldo_inicial=?, saldo_atual=?,
                      status_operacao='STANDBY', entradas_feitas=0, pulos_restantes=0,
-                     reds_consecutivos=0, stop_reds_pausado_ate=0
+                     reds_consecutivos=0, stop_reds_pausado_ate=0, trailing_pico_lucro=0
                  WHERE id=?`,
                 [nome, configJson, saldoFresco, saldoFresco, id]
             );
         } else {
-            await dbPool.query(
-                'UPDATE auto_traders SET nome=?, ativo=?, config_json=? WHERE id=?',
-                [nome, novoAtivo ? 1 : 0, configJson, id]
-            );
+            if (trailingConfigMudou) {
+                await dbPool.query(
+                    'UPDATE auto_traders SET nome=?, ativo=?, config_json=?, trailing_pico_lucro=0 WHERE id=?',
+                    [nome, novoAtivo ? 1 : 0, configJson, id]
+                );
+            } else {
+                await dbPool.query(
+                    'UPDATE auto_traders SET nome=?, ativo=?, config_json=? WHERE id=?',
+                    [nome, novoAtivo ? 1 : 0, configJson, id]
+                );
+            }
         }
 
         await carregarSistemasParaMemoria();
@@ -1679,10 +1700,58 @@ async function rearmarAutoTradersStopRedsPausados(agora = Date.now()) {
     return prontos.length;
 }
 
+function avaliarTrailingStopTrader(trader, variacao) {
+    const cf = (trader && trader.config) || {};
+    const trailingAtivo = cf.trailing_stop === true;
+    const recuoBruto = Number(cf.trailing_recuo);
+    const lucroBruto = Number(variacao);
+    const picoAnteriorBruto = Math.max(0, Number(trader && trader.trailing_pico_lucro) || 0);
+    const picoAnterior = Math.round(picoAnteriorBruto * 100) / 100;
+
+    if (
+        !trailingAtivo
+        || !Number.isFinite(recuoBruto)
+        || recuoBruto <= 0
+        || !Number.isFinite(lucroBruto)
+    ) {
+        return {
+            acionado: false,
+            pico_lucro: picoAnterior,
+            limite_disparo: null,
+            recuo: Number.isFinite(recuoBruto) && recuoBruto > 0
+                ? Math.round(recuoBruto * 100) / 100
+                : 0
+        };
+    }
+
+    const recuo = Math.round(recuoBruto * 100) / 100;
+    const lucroAtual = Math.round(lucroBruto * 100) / 100;
+    const picoLido = lucroAtual > 0 ? lucroAtual : 0;
+    const picoLucro = Math.max(picoAnterior, picoLido);
+
+    if (picoLucro <= 0) {
+        return {
+            acionado: false,
+            pico_lucro: 0,
+            limite_disparo: null,
+            recuo
+        };
+    }
+
+    const limiteDisparo = Math.round((picoLucro - recuo) * 100) / 100;
+    return {
+        acionado: lucroAtual <= limiteDisparo,
+        pico_lucro: picoLucro,
+        limite_disparo: limiteDisparo,
+        recuo
+    };
+}
+
 function avaliarLimitesFinanceirosTrader(trader, snapshotSaldo) {
     const snapshot = snapshotSaldo || {};
     const saldoInicial = Number(trader && trader.saldo_inicial);
     const saldoAtual = Number(snapshot.saldo_atual);
+    const picoAnterior = Math.max(0, Number(trader && trader.trailing_pico_lucro) || 0);
 
     if (
         snapshot.fresco !== true
@@ -1695,7 +1764,10 @@ function avaliarLimitesFinanceirosTrader(trader, snapshotSaldo) {
             permitido: false,
             motivo: 'SALDO_INDISPONIVEL',
             variacao: null,
-            saldo_atual: Number.isFinite(saldoAtual) ? saldoAtual : null
+            saldo_atual: Number.isFinite(saldoAtual) ? saldoAtual : null,
+            trailing_pico_lucro: picoAnterior,
+            trailing_limite_disparo: null,
+            trailing_recuo: 0
         };
     }
 
@@ -1703,27 +1775,59 @@ function avaliarLimitesFinanceirosTrader(trader, snapshotSaldo) {
     const stopWin = Number(cf.stop_win ?? 100);
     const stopLoss = Number(cf.stop_loss ?? 250);
     const variacao = Math.round((saldoAtual - saldoInicial) * 100) / 100;
+    const trailing = avaliarTrailingStopTrader(trader, variacao);
+
+    const baseResultado = {
+        variacao,
+        saldo_atual: saldoAtual,
+        trailing_pico_lucro: trailing.pico_lucro,
+        trailing_limite_disparo: trailing.limite_disparo,
+        trailing_recuo: trailing.recuo
+    };
 
     if (Number.isFinite(stopWin) && stopWin > 0 && variacao >= stopWin) {
-        return { permitido: false, motivo: 'STOP_WIN', variacao, saldo_atual: saldoAtual };
+        return { permitido: false, motivo: 'STOP_WIN', ...baseResultado };
     }
 
     if (Number.isFinite(stopLoss) && stopLoss > 0 && variacao <= -stopLoss) {
-        return { permitido: false, motivo: 'STOP_LOSS', variacao, saldo_atual: saldoAtual };
+        return { permitido: false, motivo: 'STOP_LOSS', ...baseResultado };
     }
 
-    return { permitido: true, motivo: null, variacao, saldo_atual: saldoAtual };
+    if (trailing.acionado) {
+        return { permitido: false, motivo: 'TRAILING_STOP', ...baseResultado };
+    }
+
+    return { permitido: true, motivo: null, ...baseResultado };
 }
 
 async function autorizarNovaEntradaFinanceiraTrader(trader) {
     const avaliacao = avaliarLimitesFinanceirosTrader(trader, snapshotSaldoGlobal());
 
-    if (avaliacao.permitido) return true;
-
     if (avaliacao.motivo === 'SALDO_INDISPONIVEL') {
         console.warn(`⚠️ Trader ${trader.id}: nova entrada bloqueada porque o saldo global está ausente ou desatualizado.`);
         return false;
     }
+
+    const picoAnterior = Math.max(0, Number(trader.trailing_pico_lucro) || 0);
+    const picoAvaliado = Math.max(0, Number(avaliacao.trailing_pico_lucro) || 0);
+
+    if (picoAvaliado > picoAnterior) {
+        try {
+            await dbPool.query(
+                'UPDATE auto_traders SET trailing_pico_lucro=? WHERE id=?',
+                [picoAvaliado, trader.id]
+            );
+            trader.trailing_pico_lucro = picoAvaliado;
+        } catch (e) {
+            console.error(
+                `⚠️ Trader ${trader.id}: falha ao persistir novo pico do Trailing Stop; nova entrada bloqueada:`,
+                e.message
+            );
+            return false;
+        }
+    }
+
+    if (avaliacao.permitido) return true;
 
     trader.ativo = false;
     trader.status_operacao = avaliacao.motivo;
@@ -1740,12 +1844,27 @@ async function autorizarNovaEntradaFinanceiraTrader(trader) {
         console.error(`❌ Falha ao persistir ${avaliacao.motivo} do trader ${trader.id}:`, e.message);
     }
 
-    const valor = Math.abs(Number(avaliacao.variacao) || 0).toFixed(2);
-    console.log(
-        avaliacao.motivo === 'STOP_WIN'
-            ? `🏁 Trader ${trader.id}: Stop Win atingido (+R$ ${valor}). Motor desligado até reativação manual.`
-            : `🛑 Trader ${trader.id}: Stop Loss atingido (-R$ ${valor}). Motor desligado até reativação manual.`
-    );
+    if (avaliacao.motivo === 'STOP_WIN') {
+        const valor = Math.abs(Number(avaliacao.variacao) || 0).toFixed(2);
+        console.log(
+            `🏁 Trader ${trader.id}: Stop Win atingido (+R$ ${valor}). Motor desligado até reativação manual.`
+        );
+    } else if (avaliacao.motivo === 'STOP_LOSS') {
+        const valor = Math.abs(Number(avaliacao.variacao) || 0).toFixed(2);
+        console.log(
+            `🛑 Trader ${trader.id}: Stop Loss atingido (-R$ ${valor}). Motor desligado até reativação manual.`
+        );
+    } else {
+        const lucroAtual = Number(avaliacao.variacao) || 0;
+        const pico = Math.max(0, Number(avaliacao.trailing_pico_lucro) || 0);
+        const recuo = Math.max(0, Number(avaliacao.trailing_recuo) || 0);
+        console.log(
+            `🛡️ Trader ${trader.id}: Trailing Stop acionado em R$ ${lucroAtual.toFixed(2)} `
+            + `após pico de R$ ${pico.toFixed(2)} e recuo configurado de R$ ${recuo.toFixed(2)}. `
+            + `Motor desligado até reativação manual.`
+        );
+    }
+
     ioServer.emit('atualizar_interface');
     return false;
 }
@@ -1802,7 +1921,8 @@ async function carregarSistemasParaMemoria() {
                 saldo_inicial: parseFloat(at.saldo_inicial), saldo_atual: parseFloat(at.saldo_atual), 
                 status_operacao: at.status_operacao, entradas_feitas: at.entradas_feitas, pulos_restantes: at.pulos_restantes,
                 reds_consecutivos: Math.max(0, Number(at.reds_consecutivos) || 0),
-                stop_reds_pausado_ate: Math.max(0, Number(at.stop_reds_pausado_ate) || 0)
+                stop_reds_pausado_ate: Math.max(0, Number(at.stop_reds_pausado_ate) || 0),
+                trailing_pico_lucro: Math.max(0, Number(at.trailing_pico_lucro) || 0)
             }; 
         });
 
