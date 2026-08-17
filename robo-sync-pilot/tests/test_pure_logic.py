@@ -212,11 +212,14 @@ class TestProcessarResultado(unittest.TestCase):
             "ultimo_tempo_rodada": 0,
             "COLETOR_SESSAO": "sessao-teste",
             "coletor_seq": 0,
+            "ultimo_resultado_chave": None,
+            "ultimo_resultado_chave_em": 0.0,
+            "RESULT_DEDUP_WINDOW_SECONDS": 3.0,
             "registrar_erro_limitado": lambda chave, mensagem, intervalo_segundos=30: self.logs.append(
                 (chave, mensagem, intervalo_segundos)
             ),
         }
-        carregar_funcoes(["processar_resultado"], ns)
+        carregar_funcoes(["chave_resultado_resolvido", "resultado_resolvido_duplicado", "processar_resultado"], ns)
         self.ns = ns
         self.processar = ns["processar_resultado"]
 
@@ -287,6 +290,48 @@ class TestProcessarResultado(unittest.TestCase):
         payload = FakeRequests.chamadas[0]["kwargs"]["json"]
         self.assertFalse(payload["interrupcao_fluxo"])
         self.assertEqual(payload["vencedor"], "BankerWon")
+
+    def test_frame_resolved_identico_repetido_nao_consume_nova_seq(self):
+        dados = self.dados_resolvidos("PlayerWon")
+        self.processar(dados)
+        FakeTime.atual = 101.0
+        self.processar(dados)
+
+        self.assertEqual(len(FakeRequests.chamadas), 1)
+        self.assertEqual(self.ns["coletor_seq"], 1)
+        self.assertTrue(any(chave == "resultado_resolved_duplicado" for chave, _, _ in self.logs))
+
+    def test_fingerprint_igual_depois_da_janela_e_nova_rodada(self):
+        dados = self.dados_resolvidos("BankerWon")
+        self.processar(dados)
+        FakeTime.atual = 103.001
+        self.processar(dados)
+
+        self.assertEqual(len(FakeRequests.chamadas), 2)
+        self.assertEqual(FakeRequests.chamadas[0]["kwargs"]["json"]["coletor_seq"], 1)
+        self.assertEqual(FakeRequests.chamadas[1]["kwargs"]["json"]["coletor_seq"], 2)
+
+    def test_round_id_repetido_e_ignorado_mesmo_fora_da_janela(self):
+        dados = self.dados_resolvidos("PlayerWon")
+        dados["args"]["game"]["roundId"] = "round-123"
+        self.processar(dados)
+        FakeTime.atual = 120.0
+        self.processar(dados)
+
+        self.assertEqual(len(FakeRequests.chamadas), 1)
+        self.assertEqual(self.ns["coletor_seq"], 1)
+
+    def test_round_id_novo_processa_mesmo_com_mesmo_resultado_e_dados(self):
+        primeiro = self.dados_resolvidos("PlayerWon")
+        primeiro["args"]["game"]["round_id"] = "r1"
+        segundo = self.dados_resolvidos("PlayerWon")
+        segundo["args"]["game"]["round_id"] = "r2"
+        self.processar(primeiro)
+        FakeTime.atual = 100.1
+        self.processar(segundo)
+
+        self.assertEqual(len(FakeRequests.chamadas), 2)
+        self.assertEqual(self.ns["coletor_seq"], 2)
 
     def test_erro_http_e_registrado_sem_propagar(self):
         FakeRequests.proxima_resposta = FakeResponse(RuntimeError("HTTP 500"))

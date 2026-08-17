@@ -1,6 +1,6 @@
 # Estado Atual do Projeto
 
-Atualizado em 2026-08-17 após os patches BUG-001…BUG-014C, BUG-001R, SEC-002/003A/003B/004, OBS-001A…H e OBS-003A…H.
+Atualizado em 2026-08-17 após os patches BUG-001…BUG-015, BUG-001R, SEC-002/003A/003B/004, OBS-001A…H e OBS-003A…H.
 
 Este arquivo descreve o estado atual do `main`, não o snapshot inicial.
 
@@ -41,6 +41,7 @@ O Python envia resultados autenticados para `POST /receber-sinal`. O Node envia 
 - detecção sequencial de padrões;
 - entrada DIRETO e Gales;
 - separação lógica de sessões após pausa, restart do coletor, salto de sequência ou buraco confirmado Python→Node;
+- frames `Resolved` repetidos são deduplicados no coletor antes de consumir `coletor_seq`: usa `roundId`/variantes quando disponíveis e, na ausência, vencedor+dados dentro de uma janela curta configurável;
 - resultados finalizados persistidos em `historico_resultados`;
 - histórico de distribuição de Robôs/Canais persistido quando houve participação efetiva;
 - cards de padrões recalculam estatísticas pelo histórico bruto de `giros_recentes`, respeitando `id_sessao`;
@@ -110,7 +111,7 @@ O Python envia resultados autenticados para `POST /receber-sinal`. O Node envia 
 - testes de contrato HTTP para login/logout e middleware administrativo;
 - testes do logger estruturado/rotativo, métricas runtime e métricas operacionais/persistência atômica;
 - métricas operacionais possuem teste real com `http.createServer + fetch`, cobrindo transparência da resposta, hook HTTP/fetch, normalização de rota, freshness e ausência de query sensível no snapshot;
-- suíte Python `unittest` sobre parsing, payloads, transporte interno e persistência de `order_id`;
+- suíte Python `unittest` sobre parsing, payloads, transporte interno, persistência de `order_id` e deduplicação de frames `Resolved`;
 - GitHub Actions executa sintaxe + Node + Python em PRs e pushes para `main`;
 - job separado sobe MySQL 8.4 descartável e inicia o `bot2_coletor.js` real com Express/MySQL2/Socket.IO;
 - smoke HTTP real valida Origin, login/logout, sessão administrativa, painel/API e autenticação de `/receber-sinal`;

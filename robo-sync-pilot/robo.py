@@ -48,6 +48,11 @@ except ValueError:
     EXECUTOR_ORDER_TTL_SECONDS = 8.0
 
 try:
+    RESULT_DEDUP_WINDOW_SECONDS = max(0.5, min(10.0, float(os.getenv("RESULT_DEDUP_WINDOW_SECONDS", "3"))))
+except ValueError:
+    RESULT_DEDUP_WINDOW_SECONDS = 3.0
+
+try:
     BALANCE_SYNC_INTERVAL_SECONDS = max(0.5, float(os.getenv("BALANCE_SYNC_INTERVAL_SECONDS", "2")))
 except ValueError:
     BALANCE_SYNC_INTERVAL_SECONDS = 2.0
@@ -332,6 +337,8 @@ def processar_ordem_executor(page, ordem):
 ultimo_tempo_rodada = 0
 COLETOR_SESSAO = str(uuid.uuid4())
 coletor_seq = 0
+ultimo_resultado_chave = None
+ultimo_resultado_chave_em = 0.0
 avisos_erro_limitados = {}
 
 def registrar_erro_limitado(chave, mensagem, intervalo_segundos=30):
@@ -344,6 +351,51 @@ def registrar_erro_limitado(chave, mensagem, intervalo_segundos=30):
 # ====================================================================
 # FUNÇÕES CORE DO ROBÔ (Navegação, Login e Apostas)
 # ====================================================================
+def chave_resultado_resolvido(game_info):
+    info = game_info if isinstance(game_info, dict) else {}
+
+    # Prefere uma identidade explícita quando o payload disponibiliza uma.
+    for campo in ("roundId", "round_id", "roundID", "roundUid", "round_uid"):
+        valor = info.get(campo)
+        if valor is not None and str(valor).strip():
+            return ("round", campo, str(valor).strip())
+
+    # Fallback curto: vencedor + quatro dados normalizados. A janela temporal
+    # impede bloquear uma rodada futura que coincidentemente tenha o mesmo resultado.
+    dados_normalizados = []
+    for dado in info.get("dice", []) if isinstance(info.get("dice", []), list) else []:
+        if not isinstance(dado, dict):
+            continue
+        identificador = dado.get("id")
+        valor = dado.get("value")
+        dados_normalizados.append((str(identificador), str(valor)))
+    dados_normalizados.sort()
+
+    return (
+        "fingerprint",
+        str(info.get("result") or ""),
+        tuple(dados_normalizados)
+    )
+
+
+def resultado_resolvido_duplicado(game_info, agora=None):
+    global ultimo_resultado_chave, ultimo_resultado_chave_em
+
+    referencia = time.time() if agora is None else float(agora)
+    chave = chave_resultado_resolvido(game_info)
+    mesma_chave = chave == ultimo_resultado_chave
+
+    if mesma_chave:
+        if chave and chave[0] == "round":
+            return True
+        if referencia - ultimo_resultado_chave_em <= RESULT_DEDUP_WINDOW_SECONDS:
+            return True
+
+    ultimo_resultado_chave = chave
+    ultimo_resultado_chave_em = referencia
+    return False
+
+
 def exibir_painel_versao():
     print("="*60)
     print(f"🤖 ROBÔ BAC BO EVOLUTION - MOTOR DE EXECUÇÃO")
@@ -629,8 +681,17 @@ def processar_resultado(dados):
         status_atual = game_info.get("stage")
 
         if status_atual == "Resolved":
-            # Consome a sequência assim que um resultado resolvido é reconhecido.
-            # Se parsing ou POST falhar depois daqui, o próximo resultado deixará
+            tempo_atual = time.time()
+            if resultado_resolvido_duplicado(game_info, tempo_atual):
+                registrar_erro_limitado(
+                    "resultado_resolved_duplicado",
+                    "♻️ Frame Resolved duplicado ignorado sem consumir coletor_seq.",
+                    10
+                )
+                return
+
+            # Consome a sequência somente depois da deduplicação da rodada resolvida.
+            # Se parsing ou POST falhar depois daqui, o próximo resultado real deixará
             # um salto observável pelo Node.
             coletor_seq += 1
             seq_atual = coletor_seq
@@ -638,7 +699,6 @@ def processar_resultado(dados):
             resultado_bruto = game_info.get("result", "")
             resultado = "Tie" if "Tie" in resultado_bruto else resultado_bruto
             
-            tempo_atual = time.time()
             valores_dados = {1: 0, 2: 0, 3: 0, 4: 0}
             for d in game_info.get("dice", []):
                 valores_dados[d.get("id")] = d.get("value", 0)
