@@ -80,16 +80,16 @@ test("escrita cria JSONL e rotaciona preservando arquivos anteriores", () => {
     const filePath = path.join(dir, "backend.jsonl");
 
     try {
-        logger.escreverLinhaJson(filePath, { n: 1, texto: "A".repeat(40) }, {
-            maxBytes: 70,
+        logger.escreverLinhaJson(filePath, { n: 1, texto: "A".repeat(900) }, {
+            maxBytes: 1024,
             maxArquivos: 2
         });
-        logger.escreverLinhaJson(filePath, { n: 2, texto: "B".repeat(40) }, {
-            maxBytes: 70,
+        logger.escreverLinhaJson(filePath, { n: 2, texto: "B".repeat(900) }, {
+            maxBytes: 1024,
             maxArquivos: 2
         });
-        logger.escreverLinhaJson(filePath, { n: 3, texto: "C".repeat(40) }, {
-            maxBytes: 70,
+        logger.escreverLinhaJson(filePath, { n: 3, texto: "C".repeat(900) }, {
+            maxBytes: 1024,
             maxArquivos: 2
         });
 
