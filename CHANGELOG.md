@@ -31,6 +31,8 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - A suíte inicial cobre stake rounding, níveis de Gale, TIEs legados, filtros de robô, mensagens Telegram e janelas de horário inclusive overnight.
 - OBS-003B: adicionada suíte Python `unittest` que extrai funções de `robo.py` via AST sem importar/inicializar Flask ou Playwright.
 - Os testes cobrem parsing de saldo e transformação de rodada resolvida em payload Node, incluindo TIE, interrupção >60s e falha HTTP simulada.
+- OBS-003C: GitHub Actions passa a executar automaticamente as suítes Node/Python e checagens de sintaxe em PRs e pushes para `main`.
+- O CI usa permissões `contents: read`, sem secrets, sem instalação de dependências e sem inicializar MySQL, Flask, Playwright ou rede do projeto.
 
 ### Fixed
 - BUG-001: o Node agora aguarda e valida a confirmação HTTP do executor antes de contabilizar uma entrada direta ou criar a nova ordem `PENDENTE` de Gale.

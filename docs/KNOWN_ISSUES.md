@@ -120,10 +120,12 @@ O patch não adiciona constraints, índices ou relacionamentos novos além das c
 
 ### OBS-003 — Não há teste automatizado
 
-Status: **parcialmente mitigado nos patches OBS-003A e OBS-003B**.
+Status: **parcialmente mitigado nos patches OBS-003A, OBS-003B e OBS-003C**.
 
 O OBS-003A substitui o placeholder de `npm test` por uma suíte `node:test` sobre lógica pura já existente em `bot2_coletor.js`, sem iniciar Express, Socket.IO, MySQL, Telegram ou executor de apostas. Ela cobre arredondamento de ficha, classificação DIRETO/GALE, TIEs legados, precedência `exceção > avulso > origem`, propriedade de estratégia dinâmica, formatação Telegram e janelas de horário normais/full-day/overnight.
 
 O OBS-003B adiciona uma suíte Python com `unittest` que lê `robo.py` por AST e compila somente as funções sob teste, evitando executar o top-level que inicia Flask/Playwright. A cobertura inclui parsing monetário nos formatos brasileiro/internacional, rejeição de valores negativos, montagem do payload de rodada resolvida, normalização de TIE, fronteira de interrupção `> 60s`, autenticação interna no POST e tratamento de erro HTTP do resultado→Node com fakes locais.
+
+O OBS-003C adiciona GitHub Actions para executar automaticamente as duas suítes e checagens de sintaxe em cada pull request para `main` e em cada push para `main`. O workflow usa permissões somente de leitura, não recebe secrets, não instala dependências e não inicia banco, servidor, Playwright ou chamadas externas do projeto.
 
 Ainda faltam testes de integração de banco/rotas e testes reais de Playwright/DOM; por isso o item permanece parcialmente mitigado.
