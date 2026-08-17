@@ -40,7 +40,7 @@ Risco residual: não há métricas/telemetria centralizada para agregação de s
 
 ### OBS-003 — Cobertura automatizada
 
-Status: **parcialmente mitigado pelos patches OBS-003A…OBS-003F**.
+Status: **parcialmente mitigado pelos patches OBS-003A…OBS-003G**.
 
 Já implementado:
 
@@ -52,12 +52,13 @@ Já implementado:
 - integração real do `bot2_coletor.js` com Express + MySQL 8.4 descartável no CI;
 - smoke HTTP real cobrindo bootstrap de banco/schema/memória, login/logout, sessão administrativa, validação de Origin, APIs e `/receber-sinal` com `INTERNAL_API_TOKEN`;
 - handshake Socket.IO real cobrindo rejeição sem sessão, aceitação com cookie administrativo válido e nova rejeição do cookie invalidado após logout;
-- verificação no MySQL de que as nove tabelas esperadas são criadas a partir de banco vazio e de que o smoke não grava giro nem ordem financeira.
+- verificação no MySQL de que as nove tabelas esperadas são criadas a partir de banco vazio e de que o smoke não grava giro nem ordem financeira;
+- Chromium real em DOM controlado local validando parsing/leitura de saldo no DOM principal e em iframe, além dos seletores de ficha/alvo usados por `executar_aposta_na_tela`.
 
 Riscos residuais:
 
-- falta teste Playwright/DOM real contra ambiente controlado;
-- ainda não há teste ponta a ponta do ciclo captura → Node → executor → auditoria.
+- ainda não há teste ponta a ponta do ciclo captura → Node → executor → auditoria;
+- o DOM/WebSocket do site real continua sendo dependência externa e pode divergir do ambiente controlado do CI.
 
 ## Itens mitigados
 
