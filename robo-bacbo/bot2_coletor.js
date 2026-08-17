@@ -456,7 +456,8 @@ app.post('/auth/logout', (req, res) => {
 });
 
 app.use((req, res, next) => {
-    if (req.path === '/receber-sinal') return next();
+    const rotaInterna = req.path === '/receber-sinal' || req.path === '/executor-status';
+    if (rotaInterna) return next();
     if (!ADMIN_AUTH_REQUIRED || sessaoAdminValidaCookie(req.get('Cookie'))) return next();
 
     if (req.path.startsWith('/api/')) {
@@ -465,7 +466,9 @@ app.use((req, res, next) => {
     return res.redirect('/login');
 });
 app.use((req, res, next) => {
-    const rotaDependeDeInicializacao = req.path === '/receber-sinal' || req.path.startsWith('/api/');
+    const rotaDependeDeInicializacao = req.path === '/receber-sinal'
+        || req.path === '/executor-status'
+        || req.path.startsWith('/api/');
     if (rotaDependeDeInicializacao && !backendPronto) {
         return res.status(503).json({ erro: 'backend_inicializando' });
     }
@@ -522,6 +525,16 @@ function headersInternos() {
 
 const EXECUTOR_TIMEOUT_MS = 5000;
 const EXECUTOR_MAX_ATTEMPTS = 2;
+const executorExecutionTimeoutConfig = Number(process.env.EXECUTOR_EXECUTION_TIMEOUT_MS || 20000);
+const EXECUTOR_EXECUTION_TIMEOUT_MS = (
+    Number.isFinite(executorExecutionTimeoutConfig)
+    && executorExecutionTimeoutConfig >= 3000
+    && executorExecutionTimeoutConfig <= 120000
+        ? executorExecutionTimeoutConfig
+        : 20000
+);
+const CONFIRMACOES_EXECUTOR_PENDENTES = new Map();
+const STATUS_EXECUTOR_VALIDOS = new Set(['EXECUTADA', 'FALHOU', 'EXPIRADA', 'AMBIGUA']);
 const TELEGRAM_TIMEOUT_MS = 3000;
 const balanceSyncMaxAgeSecondsConfig = Number(process.env.BALANCE_SYNC_MAX_AGE_SECONDS || 90);
 const BALANCE_SYNC_MAX_AGE_MS = (
@@ -551,71 +564,181 @@ function obterSaldoGlobalFresco(agora = Date.now()) {
     return snapshot.fresco ? snapshot.saldo_atual : null;
 }
 
-async function enviarOrdemAoExecutor(alvo, valor, orderId = crypto.randomUUID()) {
-    let ultimoErro = null;
-
-    for (let tentativa = 1; tentativa <= EXECUTOR_MAX_ATTEMPTS; tentativa++) {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), EXECUTOR_TIMEOUT_MS);
-
-        try {
-            const resposta = await fetch(EXECUTOR_URL, {
-                method: 'POST',
-                headers: headersInternos(),
-                body: JSON.stringify({ order_id: orderId, alvo, valor }),
-                signal: controller.signal
-            });
-
-            let corpo = null;
-            try { corpo = await resposta.json(); } catch(e) {}
-
-            if (!resposta.ok) {
-                const detalhe = corpo && (corpo.erro || corpo.status) ? (corpo.erro || corpo.status) : `HTTP ${resposta.status}`;
-                const erroHttp = new Error(`Executor recusou a ordem: ${detalhe}`);
-                erroHttp.statusHttp = resposta.status;
-                throw erroHttp;
-            }
-
-            if (
-                !corpo
-                || !corpo.dados
-                || corpo.dados.order_id !== orderId
-                || corpo.dados.alvo !== alvo
-                || Number(corpo.dados.valor) !== Number(valor)
-            ) {
-                throw new Error("Executor respondeu sem confirmar o ID e os dados da ordem");
-            }
-
-            if (corpo.duplicada === true) {
-                console.warn(`♻️ Executor confirmou ordem idempotente já recebida: ${orderId}`);
-            }
-
-            return corpo;
-        } catch (e) {
-            const timeout = e && e.name === 'AbortError';
-            const statusHttp = Number(e && e.statusHttp);
-            const erroRepetivel = timeout || !Number.isFinite(statusHttp) || statusHttp >= 500;
-
-            ultimoErro = timeout
-                ? new Error(`Timeout de ${EXECUTOR_TIMEOUT_MS}ms aguardando confirmacao da ordem ${orderId}`)
-                : e;
-            ultimoErro.envio_ambiguo = erroRepetivel;
-
-            if (erroRepetivel && tentativa < EXECUTOR_MAX_ATTEMPTS) {
-                console.warn(`⚠️ Falha ambígua na ordem ${orderId}; repetindo com o mesmo ID (${tentativa + 1}/${EXECUTOR_MAX_ATTEMPTS}).`);
-                continue;
-            }
-
-            throw ultimoErro;
-        } finally {
-            clearTimeout(timeoutId);
-        }
+function criarEsperaResultadoExecutor(orderId) {
+    const id = String(orderId || '').trim().toLowerCase();
+    if (!id) throw new Error('order_id ausente ao criar espera de execução');
+    if (CONFIRMACOES_EXECUTOR_PENDENTES.has(id)) {
+        throw new Error(`Já existe espera de execução ativa para ${id}`);
     }
 
-    throw ultimoErro || new Error(`Falha desconhecida ao enviar ordem ${orderId}`);
+    let finalizado = false;
+    let resultadoAtual = null;
+    let resolverPromessa = null;
+    let timeoutId = null;
+    const promessa = new Promise(resolve => { resolverPromessa = resolve; });
+
+    const finalizar = (resultado) => {
+        if (finalizado) return false;
+        finalizado = true;
+        resultadoAtual = resultado;
+        if (timeoutId) clearTimeout(timeoutId);
+        CONFIRMACOES_EXECUTOR_PENDENTES.delete(id);
+        resolverPromessa(resultado);
+        return true;
+    };
+
+    timeoutId = setTimeout(() => {
+        finalizar({
+            order_id: id,
+            status: 'TIMEOUT',
+            motivo: `Sem callback do executor em ${EXECUTOR_EXECUTION_TIMEOUT_MS}ms`
+        });
+    }, EXECUTOR_EXECUTION_TIMEOUT_MS);
+    if (timeoutId && typeof timeoutId.unref === 'function') timeoutId.unref();
+
+    CONFIRMACOES_EXECUTOR_PENDENTES.set(id, {
+        criado_em: Date.now(),
+        finalizar
+    });
+
+    return {
+        promessa,
+        resultadoAtual: () => resultadoAtual,
+        cancelar: () => finalizar({ order_id: id, status: 'CANCELADA', motivo: 'Espera cancelada' })
+    };
+}
+
+function registrarResultadoExecucaoExecutor(dados) {
+    const id = String(dados && dados.order_id || '').trim().toLowerCase();
+    const pendente = CONFIRMACOES_EXECUTOR_PENDENTES.get(id);
+    if (!pendente) return false;
+    return pendente.finalizar({
+        order_id: id,
+        status: String(dados.status || '').trim().toUpperCase(),
+        motivo: String(dados.motivo || '').slice(0, 300)
+    });
+}
+
+function erroResultadoExecucaoExecutor(resultado) {
+    const status = String(resultado && resultado.status || 'TIMEOUT').toUpperCase();
+    const motivo = String(resultado && resultado.motivo || status);
+    const erro = new Error(`Executor reportou ${status}: ${motivo}`);
+    erro.status_executor = status;
+    erro.envio_ambiguo = status === 'AMBIGUA' || status === 'TIMEOUT';
+    return erro;
+}
+
+async function enviarOrdemAoExecutor(alvo, valor, orderId = crypto.randomUUID()) {
+    const esperaExecucao = criarEsperaResultadoExecutor(orderId);
+    let ultimoErro = null;
+    let confirmacaoAceite = null;
+
+    try {
+        for (let tentativa = 1; tentativa <= EXECUTOR_MAX_ATTEMPTS; tentativa++) {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), EXECUTOR_TIMEOUT_MS);
+
+            try {
+                const resposta = await fetch(EXECUTOR_URL, {
+                    method: 'POST',
+                    headers: headersInternos(),
+                    body: JSON.stringify({ order_id: orderId, alvo, valor }),
+                    signal: controller.signal
+                });
+
+                let corpo = null;
+                try { corpo = await resposta.json(); } catch(e) {}
+
+                if (!resposta.ok) {
+                    const detalhe = corpo && (corpo.erro || corpo.status)
+                        ? (corpo.erro || corpo.status)
+                        : `HTTP ${resposta.status}`;
+                    const erroHttp = new Error(`Executor recusou a ordem: ${detalhe}`);
+                    erroHttp.statusHttp = resposta.status;
+                    erroHttp.envio_ambiguo = !(corpo && corpo.aceita === false) && resposta.status >= 500;
+                    throw erroHttp;
+                }
+
+                if (
+                    !corpo
+                    || !corpo.dados
+                    || corpo.dados.order_id !== orderId
+                    || corpo.dados.alvo !== alvo
+                    || Number(corpo.dados.valor) !== Number(valor)
+                ) {
+                    throw new Error("Executor respondeu sem confirmar o ID e os dados da ordem");
+                }
+
+                if (corpo.duplicada === true) {
+                    console.warn(`♻️ Executor confirmou ordem idempotente já recebida: ${orderId}`);
+                }
+
+                confirmacaoAceite = corpo;
+                break;
+            } catch (e) {
+                const timeout = e && e.name === 'AbortError';
+                const statusHttp = Number(e && e.statusHttp);
+                const classificacaoExplicita = e && typeof e.envio_ambiguo === 'boolean';
+                const erroRepetivel = classificacaoExplicita
+                    ? e.envio_ambiguo
+                    : (timeout || !Number.isFinite(statusHttp) || statusHttp >= 500);
+
+                ultimoErro = timeout
+                    ? new Error(`Timeout de ${EXECUTOR_TIMEOUT_MS}ms aguardando aceite da ordem ${orderId}`)
+                    : e;
+                ultimoErro.envio_ambiguo = erroRepetivel;
+
+                // Um callback pode chegar mesmo quando a resposta HTTP do aceite se perdeu.
+                if (esperaExecucao.resultadoAtual()) break;
+
+                if (erroRepetivel && tentativa < EXECUTOR_MAX_ATTEMPTS) {
+                    console.warn(`⚠️ Falha ambígua no aceite ${orderId}; repetindo com o mesmo ID (${tentativa + 1}/${EXECUTOR_MAX_ATTEMPTS}).`);
+                    continue;
+                }
+                break;
+            } finally {
+                clearTimeout(timeoutId);
+            }
+        }
+
+        const resultadoAntecipado = esperaExecucao.resultadoAtual();
+        if (
+            !confirmacaoAceite
+            && ultimoErro
+            && ultimoErro.envio_ambiguo !== true
+            && !resultadoAntecipado
+        ) {
+            throw ultimoErro;
+        }
+
+        const resultadoExecucao = resultadoAntecipado || await esperaExecucao.promessa;
+        if (resultadoExecucao.status !== 'EXECUTADA') {
+            throw erroResultadoExecucaoExecutor(resultadoExecucao);
+        }
+
+        if (!confirmacaoAceite && ultimoErro) {
+            console.warn(
+                `⚠️ ACK HTTP da ordem ${orderId} ficou ambíguo, mas callback EXECUTADA foi recebido; `
+                + `o resultado local da interação DOM prevaleceu.`
+            );
+        }
+
+        return {
+            ...(confirmacaoAceite || {}),
+            status: confirmacaoAceite?.status || 'Execução DOM confirmada por callback',
+            duplicada: confirmacaoAceite?.duplicada === true,
+            dados: confirmacaoAceite?.dados || { order_id: orderId, alvo, valor },
+            execucao: resultadoExecucao
+        };
+    } finally {
+        esperaExecucao.cancelar();
+    }
 }
 
 function classificarStatusFalhaEnvioExecutor(erro) {
+    const statusExecutor = String(erro && erro.status_executor || '').toUpperCase();
+    if (statusExecutor === 'FALHOU') return 'FALHA_EXECUCAO';
+    if (statusExecutor === 'EXPIRADA') return 'ORDEM_EXPIRADA';
     return erro && erro.envio_ambiguo === true ? 'ENVIO_AMBIGUO' : 'FALHA_ENVIO';
 }
 
@@ -2726,6 +2849,35 @@ async function carregarSistemasParaMemoria() {
         throw e;
     }
 }
+
+app.post("/executor-status", (req, res) => {
+    if (!requisicaoInternaAutorizada(req)) {
+        return res.status(401).json({ erro: "Nao autorizado" });
+    }
+
+    const dados = req.body || {};
+    const orderId = String(dados.order_id || '').trim().toLowerCase();
+    const status = String(dados.status || '').trim().toUpperCase();
+
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(orderId)) {
+        return res.status(400).json({ erro: 'order_id invalido' });
+    }
+    if (!STATUS_EXECUTOR_VALIDOS.has(status)) {
+        return res.status(400).json({ erro: 'status_executor_invalido' });
+    }
+
+    const entregue = registrarResultadoExecucaoExecutor({
+        order_id: orderId,
+        status,
+        motivo: dados.motivo
+    });
+
+    if (!entregue) {
+        console.warn(`⚠️ Callback órfão do executor para ${orderId} (${status}); auditoria não foi promovida automaticamente.`);
+    }
+
+    return res.json({ recebido: true, orfa: !entregue });
+});
 
 app.post("/receber-sinal", async (req, res) => {
     try {

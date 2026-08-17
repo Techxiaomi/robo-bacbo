@@ -7,6 +7,7 @@ import queue
 import re
 import tempfile
 import threading
+import time
 
 from flask import Flask, jsonify, request
 
@@ -44,8 +45,11 @@ def carregar_funcoes(namespace):
     exec(compile(modulo, str(ROBO_PATH), "exec"), namespace)
 
 
-def criar_runtime(journal_path):
+def criar_runtime(journal_path, pronto=True):
     app = Flask(f"bug001r-{id(journal_path)}-{os.urandom(4).hex()}")
+    executor_pronto = threading.Event()
+    if pronto:
+        executor_pronto.set()
     namespace = {
         "app": app,
         "request": request,
@@ -55,12 +59,14 @@ def criar_runtime(journal_path):
         "os": os,
         "re": re,
         "threading": threading,
+        "time": time,
         "queue": queue,
         "INTERNAL_API_TOKEN": TOKEN,
         "EXECUTOR_ORDER_JOURNAL_FILE": str(journal_path),
         "ORDEM_ID_LIMITE_MEMORIA": 5000,
         "ordens_executor_recebidas": {},
         "ordens_executor_lock": threading.Lock(),
+        "executor_pronto": executor_pronto,
         "fila_apostas": queue.Queue(),
     }
     carregar_funcoes(namespace)
@@ -87,12 +93,13 @@ def main():
     with tempfile.TemporaryDirectory() as temp_dir:
         journal = pathlib.Path(temp_dir) / "executor-order-ids.json"
 
-        app1, ns1, carregadas1 = criar_runtime(journal)
+        app1, ns1, carregadas1 = criar_runtime(journal, pronto=True)
         assert carregadas1 == 0
         with app1.test_client() as client1:
             primeira = postar(client1, ORDER_1)
             assert_status(primeira, 200)
             corpo = primeira.get_json()
+            assert corpo["aceita"] is True
             assert corpo["duplicada"] is False
             assert corpo["dados"]["order_id"] == ORDER_1
             assert ns1["fila_apostas"].qsize() == 1
@@ -103,8 +110,8 @@ def main():
         assert len(payload["orders"]) == 1
         assert payload["orders"][0]["order_id"] == ORDER_1
 
-        # Simula restart: novo dict, novo lock, nova fila e mesmo journal.
-        app2, ns2, carregadas2 = criar_runtime(journal)
+        # Restart indisponível: ID já aceito segue idempotente, mas ID novo é recusado sem persistir/fila.
+        app2, ns2, carregadas2 = criar_runtime(journal, pronto=False)
         assert carregadas2 == 1
         assert ns2["fila_apostas"].qsize() == 0
 
@@ -112,20 +119,30 @@ def main():
             duplicada = postar(client2, ORDER_1)
             assert_status(duplicada, 200)
             corpo_dup = duplicada.get_json()
+            assert corpo_dup["aceita"] is True
             assert corpo_dup["duplicada"] is True
-            assert corpo_dup["dados"]["order_id"] == ORDER_1
             assert ns2["fila_apostas"].qsize() == 0
 
-            conflito = postar(client2, ORDER_1, alvo="BankerWon")
-            assert_status(conflito, 409)
+            indisponivel = postar(client2, ORDER_2, alvo="BankerWon", valor=25)
+            assert_status(indisponivel, 503)
+            corpo_ind = indisponivel.get_json()
+            assert corpo_ind["aceita"] is False
             assert ns2["fila_apostas"].qsize() == 0
+            payload_sem_nova = json.loads(journal.read_text(encoding="utf-8"))
+            assert len(payload_sem_nova["orders"]) == 1
 
+            ns2["executor_pronto"].set()
             nova = postar(client2, ORDER_2, alvo="BankerWon", valor=25)
             assert_status(nova, 200)
+            assert nova.get_json()["aceita"] is True
             assert nova.get_json()["duplicada"] is False
             assert ns2["fila_apostas"].qsize() == 1
 
-        app3, ns3, carregadas3 = criar_runtime(journal)
+            conflito = postar(client2, ORDER_2, alvo="PlayerWon", valor=25)
+            assert_status(conflito, 409)
+            assert ns2["fila_apostas"].qsize() == 1
+
+        app3, ns3, carregadas3 = criar_runtime(journal, pronto=True)
         assert carregadas3 == 2
         with app3.test_client() as client3:
             duplicada2 = postar(client3, ORDER_2, alvo="BankerWon", valor=25)
@@ -133,7 +150,6 @@ def main():
             assert duplicada2.get_json()["duplicada"] is True
             assert ns3["fila_apostas"].qsize() == 0
 
-        # Journal corrompido deve impedir startup seguro do registro idempotente.
         journal.write_text("{arquivo-corrompido", encoding="utf-8")
         try:
             criar_runtime(journal)
@@ -142,7 +158,7 @@ def main():
         else:
             raise AssertionError("Journal corrompido deveria falhar fechado")
 
-    print("BUG-001R executor restart idempotency integration: PASS")
+    print("BUG-001R/014B executor readiness + restart integration: PASS")
 
 
 if __name__ == "__main__":

@@ -82,6 +82,16 @@ HTML = {
 </body></html>""",
 }
 
+HTML["/game-partial.html"] = """<!doctype html>
+<html><body><iframe src="/game-partial-frame.html"></iframe></body></html>"""
+HTML["/game-partial-frame.html"] = """<!doctype html>
+<html><body>
+<script>window.__targetClicks = 0;</script>
+<div data-role="chip" data-value="10">10</div>
+<button data-role="bacbo-bet-spot-Player"
+  onclick="window.__targetClicks++; this.remove()">Player descartável</button>
+</body></html>"""
+
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -131,7 +141,7 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
     def frame_jogo(self, pagina):
         pagina.locator("iframe").wait_for(state="attached")
         for frame in pagina.frames:
-            if "game-frame.html" in frame.url:
+            if "game" in frame.url and "frame" in frame.url:
                 frame.locator("div[data-role='chip']").first.wait_for(state="visible")
                 return frame
         self.fail("Frame controlado de jogo nao encontrado")
@@ -160,8 +170,10 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
         pagina = self.nova_pagina("/game.html")
         try:
             frame = self.frame_jogo(pagina)
-            executar_aposta_na_tela(pagina, {"alvo": "PlayerWon", "valor": 35})
+            resultado = executar_aposta_na_tela(pagina, {"alvo": "PlayerWon", "valor": 35})
 
+            self.assertEqual(resultado["status"], "EXECUTADA")
+            self.assertEqual(resultado["cliques_alvo"], 2)
             chips = frame.evaluate("window.__chipClicks")
             alvos = frame.evaluate("window.__targetClicks")
             self.assertEqual(chips, {"25a": 1, "25b": 0, "10": 1, "5": 0})
@@ -176,12 +188,26 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
         pagina = self.nova_pagina("/game.html")
         try:
             frame = self.frame_jogo(pagina)
-            executar_aposta_na_tela(pagina, {"alvo": "PlayerWon", "valor": 4})
+            resultado = executar_aposta_na_tela(pagina, {"alvo": "PlayerWon", "valor": 4})
 
+            self.assertEqual(resultado["status"], "FALHOU")
+            self.assertEqual(resultado["cliques_alvo"], 0)
             chips = frame.evaluate("window.__chipClicks")
             alvos = frame.evaluate("window.__targetClicks")
             self.assertTrue(all(valor == 0 for valor in chips.values()))
             self.assertTrue(all(valor == 0 for valor in alvos.values()))
+        finally:
+            pagina.close()
+
+    def test_falha_apos_primeiro_clique_de_alvo_e_ambigua(self):
+        pagina = self.nova_pagina("/game-partial.html")
+        try:
+            frame = self.frame_jogo(pagina)
+            resultado = executar_aposta_na_tela(pagina, {"alvo": "PlayerWon", "valor": 20})
+
+            self.assertEqual(resultado["status"], "AMBIGUA")
+            self.assertEqual(resultado["cliques_alvo"], 1)
+            self.assertEqual(frame.evaluate("window.__targetClicks"), 1)
         finally:
             pagina.close()
 

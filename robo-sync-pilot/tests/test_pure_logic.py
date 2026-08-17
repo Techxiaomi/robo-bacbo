@@ -6,6 +6,7 @@ import queue
 import re
 import tempfile
 import threading
+import time
 import unittest
 
 
@@ -107,6 +108,7 @@ class TestRegistrarOrdemIdempotente(unittest.TestCase):
         "persistir_ordens_executor",
         "carregar_ordens_executor_persistidas",
         "registrar_ordem_idempotente",
+        "ordem_executor_expirada",
     ]
 
     def setUp(self):
@@ -124,9 +126,11 @@ class TestRegistrarOrdemIdempotente(unittest.TestCase):
             "os": os,
             "re": re,
             "threading": threading,
+            "time": time,
             "ordens_executor_recebidas": {},
             "ordens_executor_lock": threading.Lock(),
             "ORDEM_ID_LIMITE_MEMORIA": 5000,
+            "EXECUTOR_ORDER_TTL_SECONDS": 8.0,
             "EXECUTOR_ORDER_JOURNAL_FILE": self.journal,
             "fila_apostas": queue.Queue(),
         }
@@ -146,6 +150,8 @@ class TestRegistrarOrdemIdempotente(unittest.TestCase):
         self.assertEqual(status, "nova")
         self.assertEqual(ordem["valor"], 10.0)
         self.assertEqual(self.ns["fila_apostas"].qsize(), 1)
+        enfileirada = self.ns["fila_apostas"].queue[0]
+        self.assertGreater(enfileirada["aceita_em_ms"], 0)
         self.assertTrue(os.path.isfile(self.journal))
 
     def test_repeticao_identica_nao_duplica_fila(self):
@@ -183,6 +189,13 @@ class TestRegistrarOrdemIdempotente(unittest.TestCase):
         ns_reiniciado = self.criar_namespace()
         with self.assertRaisesRegex(RuntimeError, "(?i)journal"):
             ns_reiniciado["carregar_ordens_executor_persistidas"]()
+
+    def test_ttl_considera_ordem_velha_expirada_e_timestamp_ausente_inseguro(self):
+        expirada = self.ns["ordem_executor_expirada"]
+        ordem = {"aceita_em_ms": 1000}
+        self.assertFalse(expirada(ordem, agora_ms=9000))
+        self.assertTrue(expirada(ordem, agora_ms=9001))
+        self.assertTrue(expirada({}, agora_ms=1000))
 
 
 class TestProcessarResultado(unittest.TestCase):

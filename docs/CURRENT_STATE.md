@@ -1,6 +1,6 @@
 # Estado Atual do Projeto
 
-Atualizado em 2026-08-17 após os patches BUG-001…BUG-014A, BUG-001R, SEC-002/003A/003B/004, OBS-001A…H e OBS-003A…H.
+Atualizado em 2026-08-17 após os patches BUG-001…BUG-014B, BUG-001R, SEC-002/003A/003B/004, OBS-001A…H e OBS-003A…H.
 
 Este arquivo descreve o estado atual do `main`, não o snapshot inicial.
 
@@ -70,7 +70,11 @@ O Python envia resultados autenticados para `POST /receber-sinal`. O Node envia 
 - ordens Node→Python usam `order_id` UUID; o executor persiste os últimos IDs aceitos em journal atômico e mantém a deduplicação através de restart;
 - antes de qualquer POST financeiro ao executor, o Node persiste uma intenção `PREPARANDO` em `auditoria_ordens` com o mesmo `order_id`; DIRETO só incrementa `entradas_feitas` quando o ACK transforma essa intenção em `PENDENTE`;
 - no GALE, o `LOSS` da ordem anterior e a intenção `PREPARANDO` da próxima exposição são gravados na mesma transação antes do POST externo;
-- rejeição definitiva do executor marca a intenção `FALHA_ENVIO`; timeout, erro de transporte, 5xx ou confirmação inválida após os retries marcam `ENVIO_AMBIGUO`; ACK seguido de falha de finalização MySQL preserva `PREPARANDO` para não apagar a evidência de uma ordem externamente aceita;
+- o Flask só aceita um `order_id` novo quando o Playwright está efetivamente conectado/pronto; duplicatas já persistidas continuam idempotentes mesmo durante indisponibilidade;
+- cada nova ordem aceita recebe timestamp local e TTL (`EXECUTOR_ORDER_TTL_SECONDS`, padrão 8 s); se envelhecer antes da interação DOM, não é clicada e o executor reporta `EXPIRADA`;
+- `/apostar` continua sendo o ACK de fila, mas o Node agora mantém um waiter por `order_id` e só considera `enviarOrdemAoExecutor()` concluído após callback autenticado em `/executor-status`; o callback pode chegar antes do ACK HTTP sem se perder;
+- `executar_aposta_na_tela()` retorna `EXECUTADA` somente quando todos os cliques DOM planejados terminam sem erro local, `FALHOU` quando nenhum clique de alvo ocorreu e `AMBIGUA` quando houve clique(s) de alvo antes de uma falha; isso confirma a tentativa local no DOM, não aceite transacional pela plataforma externa;
+- `FALHOU` marca `FALHA_EXECUCAO`, `EXPIRADA` marca `ORDEM_EXPIRADA`, callback `AMBIGUA`/timeout permanece `ENVIO_AMBIGUO`, e recusa explícita sem aceite permanece `FALHA_ENVIO`;
 - journal ilegível/corrompido bloqueia o startup do executor e falha de persistência impede a ordem de entrar na fila;
 - auditoria financeira usa estados explícitos, inclusive `DADOS_INCOMPLETOS` quando há buraco confirmado de coleta.
 
@@ -111,16 +115,15 @@ O Python envia resultados autenticados para `POST /receber-sinal`. O Node envia 
 - smoke HTTP real valida Origin, login/logout, sessão administrativa, painel/API e autenticação de `/receber-sinal`;
 - o mesmo smoke valida o handshake Socket.IO real: sem sessão é rejeitado, com cookie administrativo válido conecta e o cookie invalidado no logout deixa de conectar;
 - integração confirma as nove tabelas esperadas em banco vazio e garante que o próprio smoke de infraestrutura não cria giro nem ordem financeira;
-- job Playwright separado instala Chromium e executa DOM controlado local, validando `parsear_valor_monetario`, leitura de saldo no documento/iframe e os seletores de ficha/alvo da função `executar_aposta_na_tela` sem acessar o site real;
-- job E2E controlado usa a função real `processar_resultado` do Python, o backend Node real, MySQL 8.4 e executor HTTP fake autenticado; o fake só responde ao POST depois de consultar o MySQL e comprovar que o mesmo `order_id` já existe como `PREPARANDO`, então o fluxo segue para `PENDENTE` e depois `WIN` + `historico_resultados=GREEN/DIRETO`;
+- job Playwright separado instala Chromium e executa DOM controlado local, validando parsing/saldo, `EXECUTADA` no fluxo completo, `FALHOU` sem clique e `AMBIGUA` quando a falha ocorre após o primeiro clique de alvo;
+- job E2E controlado usa a função real `processar_resultado` do Python, o backend Node real, MySQL 8.4 e executor HTTP fake autenticado; o fake comprova `PREPARANDO`, envia callback `EXECUTADA` antes do próprio ACK de fila e só então responde ao POST, validando que o waiter do Node já existia e que a linha avança para `PENDENTE`/`WIN`;
 - job `Executor restart idempotency integration` recria o runtime Flask com o mesmo journal e valida duplicata após restart, conflito de payload, nova ordem e falha fechada com journal corrompido.
 
 ## Riscos e trabalhos ainda pendentes
 
 - rotacionar operacionalmente credenciais que tenham sido compartilhadas antes da externalização para `.env`;
-- a intenção financeira agora é durável antes do POST externo, mas o ACK atual de `/apostar` ainda significa aceite na fila do executor, não confirmação de clique efetivo no DOM; timeout/5xx ficam registrados como `ENVIO_AMBIGUO` e ACK sem finalização MySQL preserva `PREPARANDO`;
-- deduplicação do `order_id` já sobrevive a restart, mas um crash exatamente durante o clique Playwright deixa o efeito externo ambíguo; IDs já persistidos não são reenfileirados automaticamente, priorizando evitar aposta duplicada;
-- o executor ainda pode aceitar uma ordem enquanto o Playwright não está pronto e a fila ainda não possui TTL; confirmação real de execução, readiness e expiração de ordem pertencem ao próximo patch do lifecycle, não ao BUG-014A;
+- readiness, TTL e callback de resultado DOM já fecham a janela de ordem velha/não pronta e impedem promoção para `PENDENTE` sem `EXECUTADA`; ainda assim, `EXECUTADA` significa apenas que os cliques locais terminaram sem erro observável, não que a plataforma externa confirmou atomicamente a aposta;
+- deduplicação do `order_id` já sobrevive a restart, mas um crash exatamente durante o clique Playwright pode continuar deixando o efeito externo ambíguo; IDs persistidos não são reenfileirados automaticamente, priorizando evitar aposta duplicada;
 - o processamento pós-ACK de `/receber-sinal` ainda não é serializado explicitamente; essa concorrência deve ser tratada separadamente para não misturar protocolo Node↔Python com ordenação das rodadas;
 - métricas runtime e HTTP operacionais locais já existem, porém ainda não há agregador externo, histórico central de longo prazo nem alertas automáticos;
 - latência de consultas MySQL e tempos internos de operações de negócio pós-ACK ainda não são instrumentados separadamente; isso deve ser adicionado somente se houver necessidade operacional clara, para não envolver o pool/banco de forma invasiva;
