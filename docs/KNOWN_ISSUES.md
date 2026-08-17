@@ -12,6 +12,16 @@ Credenciais SQL, login e segredos foram externalizados para `.env`, arquivos de 
 
 Risco residual: qualquer credencial que tenha sido compartilhada antes dessa externalização deve ser rotacionada no serviço correspondente. Isso depende do ambiente/contas reais e não deve ser automatizado pelo repositório.
 
+### BUG-014 — Lifecycle da ordem entre intenção, aceite e execução
+
+Status: **BUG-014A mitigou a janela sem auditoria durável; confirmação efetiva do executor e serialização de rodadas ainda pendentes**.
+
+Antes do BUG-014A, DIRETO e GALE podiam chegar ao executor antes de existir a linha correspondente em `auditoria_ordens`. Se o efeito externo fosse aceito e o MySQL falhasse logo depois, a exposição poderia existir sem uma intenção durável local.
+
+Agora o Node cria `PREPARANDO` com `executor_order_id`, trader, estratégia, alvo, nível, risco e valor antes de qualquer `POST /apostar`. No DIRETO, `entradas_feitas` continua aumentando somente depois do ACK e da transição da mesma linha para `PENDENTE`. No GALE, o `LOSS` anterior e a nova intenção são atômicos antes do envio. Rejeições definitivas viram `FALHA_ENVIO`; falhas ambíguas de transporte/timeout/5xx/confirmação inválida viram `ENVIO_AMBIGUO`. Se o executor já confirmou e a finalização no banco falhar, `PREPARANDO` é preservado como estado conservador para futura reconciliação.
+
+Riscos residuais: `/apostar` ainda confirma entrada na fila, não execução real dos cliques; o executor ainda não expõe readiness nem TTL de ordem; e o processamento pós-ACK de `/receber-sinal` ainda pode se sobrepor. Esses pontos devem ser corrigidos em patches separados para preservar rollback isolado e não fingir garantia de exactly-once do efeito externo.
+
 ### BUG-001R — Restart do executor e exactly-once do efeito externo
 
 Status: **deduplicação entre restarts mitigada; ambiguidade do efeito externo ainda residual**.
@@ -62,7 +72,7 @@ Já implementado:
 - handshake Socket.IO real cobrindo rejeição sem sessão, aceitação com cookie administrativo válido e nova rejeição do cookie invalidado após logout;
 - verificação no MySQL de que as nove tabelas esperadas são criadas a partir de banco vazio e de que o smoke de infraestrutura não grava giro nem ordem financeira;
 - Chromium real em DOM controlado local validando parsing/leitura de saldo no DOM principal e em iframe, além dos seletores de ficha/alvo usados por `executar_aposta_na_tela`;
-- E2E controlado do ciclo coletor Python → Node → executor fake autenticado → MySQL: `processar_resultado` real gera sequência/coleta, uma estratégia real casa o padrão, o Auto-Trader sai de `STANDBY`, a ordem DIRETO é confirmada com o mesmo `order_id`, a auditoria passa de `PENDENTE` para `WIN` e `historico_resultados` registra `GREEN/DIRETO`;
+- E2E controlado do ciclo coletor Python → Node → executor fake autenticado → MySQL: antes de responder ao POST, o executor fake comprova no banco a intenção `PREPARANDO` com o mesmo `order_id`; depois o backend promove a linha para `PENDENTE`, fecha em `WIN` e registra `historico_resultados=GREEN/DIRETO`;
 - integração específica do executor recria o runtime Flask com o mesmo journal e valida deduplicação de `order_id` através de restart, conflito de payload e falha fechada com journal corrompido.
 
 Risco residual externo:

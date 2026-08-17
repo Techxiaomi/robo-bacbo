@@ -599,6 +599,7 @@ async function enviarOrdemAoExecutor(alvo, valor, orderId = crypto.randomUUID())
             ultimoErro = timeout
                 ? new Error(`Timeout de ${EXECUTOR_TIMEOUT_MS}ms aguardando confirmacao da ordem ${orderId}`)
                 : e;
+            ultimoErro.envio_ambiguo = erroRepetivel;
 
             if (erroRepetivel && tentativa < EXECUTOR_MAX_ATTEMPTS) {
                 console.warn(`⚠️ Falha ambígua na ordem ${orderId}; repetindo com o mesmo ID (${tentativa + 1}/${EXECUTOR_MAX_ATTEMPTS}).`);
@@ -613,6 +614,60 @@ async function enviarOrdemAoExecutor(alvo, valor, orderId = crypto.randomUUID())
 
     throw ultimoErro || new Error(`Falha desconhecida ao enviar ordem ${orderId}`);
 }
+
+function classificarStatusFalhaEnvioExecutor(erro) {
+    return erro && erro.envio_ambiguo === true ? 'ENVIO_AMBIGUO' : 'FALHA_ENVIO';
+}
+
+async function criarIntencaoOrdem(queryable, dados) {
+    const orderId = String(dados.order_id || crypto.randomUUID());
+    const [resultado] = await queryable.query(
+        `INSERT INTO auditoria_ordens
+            (trader_id, estrategia_nome, fonte_sinal, alvo, nivel, risco_total,
+             valor_entrada, executor_order_id, status_ordem)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PREPARANDO')`,
+        [
+            dados.trader_id,
+            dados.estrategia_nome,
+            dados.fonte_sinal,
+            dados.alvo,
+            dados.nivel,
+            dados.risco_total,
+            dados.valor_entrada,
+            orderId
+        ]
+    );
+
+    const auditoriaId = Number(resultado.insertId);
+    if (!Number.isInteger(auditoriaId) || auditoriaId <= 0) {
+        throw new Error('MySQL nao retornou ID valido para a intencao de ordem');
+    }
+
+    return { auditoria_id: auditoriaId, order_id: orderId };
+}
+
+async function marcarIntencaoAposFalhaEnvio(auditoriaId, erro, contexto) {
+    const status = classificarStatusFalhaEnvioExecutor(erro);
+    try {
+        const [resultado] = await dbPool.query(
+            `UPDATE auditoria_ordens
+             SET status_ordem=?
+             WHERE id=? AND status_ordem='PREPARANDO'`,
+            [status, auditoriaId]
+        );
+        if (Number(resultado.affectedRows) !== 1) {
+            console.error(`⚠️ ${contexto}: intenção ${auditoriaId} não estava PREPARANDO ao registrar ${status}.`);
+        }
+    } catch (persistenciaErro) {
+        console.error(
+            `⚠️ ${contexto}: falha ao persistir ${status} na intenção ${auditoriaId}; `
+            + `PREPARANDO permanece como evidência conservadora:`,
+            persistenciaErro.message
+        );
+    }
+    return status;
+}
+
 if (!hostNodeEhLoopback(NODE_HOST)) {
     console.warn(
         `SEC-003B: NODE_HOST=${NODE_HOST} fora do loopback com autenticacao administrativa ativa. `
@@ -2870,24 +2925,77 @@ app.post("/receber-sinal", async (req, res) => {
                                         let valorGale = calcularFichaSegura((cf.stake_inicial || 10.00) * multGale);
                                         let alvoPython = est.entrada === 'Player' ? 'PlayerWon' : (est.entrada === 'Banker' ? 'BankerWon' : 'Tie');
 
+                                        const ordemExecutorIdGale = crypto.randomUUID();
+                                        let intencaoGale = null;
+                                        let conexaoGale = null;
                                         try {
-                                            await dbPool.query(`UPDATE auditoria_ordens SET status_ordem = 'LOSS', lucro_prejuizo = ?, saldo_pos = ?, placar_mesa = ? WHERE id = ?`, [-riscoAntigo, trader.saldo_atual, `[P:${p1+p2} B:${b1+b2}]`, pendentes[0].id]);
+                                            conexaoGale = await dbPool.getConnection();
+                                            await conexaoGale.beginTransaction();
+                                            await conexaoGale.query(
+                                                `UPDATE auditoria_ordens
+                                                 SET status_ordem='LOSS', lucro_prejuizo=?, saldo_pos=?, placar_mesa=?
+                                                 WHERE id=?`,
+                                                [-riscoAntigo, trader.saldo_atual, `[P:${p1+p2} B:${b1+b2}]`, pendentes[0].id]
+                                            );
+                                            intencaoGale = await criarIntencaoOrdem(conexaoGale, {
+                                                trader_id: trader.id,
+                                                estrategia_nome: est.nome,
+                                                fonte_sinal: est.origem,
+                                                alvo: alvoPython,
+                                                nivel: `GALE ${st.galeAtual}`,
+                                                risco_total: riscoAntigo + valorGale,
+                                                valor_entrada: valorGale,
+                                                order_id: ordemExecutorIdGale
+                                            });
+                                            await conexaoGale.commit();
                                         } catch(e) {
-                                            console.error(`⚠️ Falha ao encerrar ordem anterior antes do GALE ${st.galeAtual} do trader ${trader.id}:`, e.message);
+                                            if (conexaoGale) {
+                                                try { await conexaoGale.rollback(); } catch(rollbackError) {
+                                                    console.error(`❌ Rollback falhou ao preparar GALE ${st.galeAtual} do trader ${trader.id}:`, rollbackError.message);
+                                                }
+                                            }
+                                            console.error(
+                                                `❌ GALE ${st.galeAtual} do trader ${trader.id} bloqueado: `
+                                                + `falha ao persistir LOSS anterior + intenção PREPARANDO antes do executor:`,
+                                                e.message
+                                            );
+                                            continue;
+                                        } finally {
+                                            if (conexaoGale) conexaoGale.release();
                                         }
 
                                         let executorConfirmouGale = false;
-                                        let ordemExecutorIdGale = null;
                                         try {
-                                            const confirmacaoExecutor = await enviarOrdemAoExecutor(alvoPython, valorGale);
+                                            await enviarOrdemAoExecutor(alvoPython, valorGale, ordemExecutorIdGale);
                                             executorConfirmouGale = true;
-                                            ordemExecutorIdGale = confirmacaoExecutor.dados.order_id;
-                                            await dbPool.query(`INSERT INTO auditoria_ordens (trader_id, estrategia_nome, fonte_sinal, alvo, nivel, risco_total, valor_entrada, executor_order_id, status_ordem) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE')`, [trader.id, est.nome, est.origem, alvoPython, `GALE ${st.galeAtual}`, riscoAntigo + valorGale, valorGale, ordemExecutorIdGale]);
+                                            const [auditoriaAtualizada] = await dbPool.query(
+                                                `UPDATE auditoria_ordens
+                                                 SET status_ordem='PENDENTE'
+                                                 WHERE id=? AND executor_order_id=? AND status_ordem='PREPARANDO'`,
+                                                [intencaoGale.auditoria_id, ordemExecutorIdGale]
+                                            );
+                                            if (Number(auditoriaAtualizada.affectedRows) !== 1) {
+                                                throw new Error('Intenção PREPARANDO do GALE não encontrada após ACK do executor');
+                                            }
                                         } catch(e) {
                                             if (executorConfirmouGale) {
-                                                console.error(`⚠️ GALE ${st.galeAtual} confirmado pelo executor (${ordemExecutorIdGale}), mas nao registrado na auditoria do trader ${trader.id}:`, e.message);
+                                                console.error(
+                                                    `⚠️ GALE ${st.galeAtual} confirmado pelo executor (${ordemExecutorIdGale}), `
+                                                    + `mas a intenção ${intencaoGale.auditoria_id} não avançou para PENDENTE; `
+                                                    + `PREPARANDO foi preservado para reconciliação:`,
+                                                    e.message
+                                                );
                                             } else {
-                                                console.error(`❌ GALE ${st.galeAtual} nao enviado para o trader ${trader.id}:`, e.message);
+                                                const statusFalha = await marcarIntencaoAposFalhaEnvio(
+                                                    intencaoGale.auditoria_id,
+                                                    e,
+                                                    `GALE ${st.galeAtual} do trader ${trader.id}`
+                                                );
+                                                console.error(
+                                                    `❌ GALE ${st.galeAtual} não confirmado para o trader ${trader.id}; `
+                                                    + `intenção ${intencaoGale.auditoria_id} marcada ${statusFalha}:`,
+                                                    e.message
+                                                );
                                             }
                                         }
                                     }
@@ -3029,19 +3137,47 @@ app.post("/receber-sinal", async (req, res) => {
                                     let valorArredondado = calcularFichaSegura(cf.stake_inicial || 10.00);
                                     let alvoPython = est.entrada === 'Player' ? 'PlayerWon' : (est.entrada === 'Banker' ? 'BankerWon' : 'Tie');
 
-                                    let executorConfirmouDireto = false;
-                                    let ordemExecutorIdDireto = null;
+                                    const ordemExecutorIdDireto = crypto.randomUUID();
+                                    let intencaoDireto = null;
                                     try {
-                                        const confirmacaoExecutor = await enviarOrdemAoExecutor(alvoPython, valorArredondado);
+                                        intencaoDireto = await criarIntencaoOrdem(dbPool, {
+                                            trader_id: trader.id,
+                                            estrategia_nome: est.nome,
+                                            fonte_sinal: est.origem,
+                                            alvo: alvoPython,
+                                            nivel: 'DIRETO',
+                                            risco_total: valorArredondado,
+                                            valor_entrada: valorArredondado,
+                                            order_id: ordemExecutorIdDireto
+                                        });
+                                    } catch(e) {
+                                        console.error(
+                                            `❌ Ordem DIRETO do trader ${trader.id} bloqueada: `
+                                            + `falha ao persistir intenção PREPARANDO antes do executor:`,
+                                            e.message
+                                        );
+                                        continue;
+                                    }
+
+                                    let executorConfirmouDireto = false;
+                                    try {
+                                        await enviarOrdemAoExecutor(alvoPython, valorArredondado, ordemExecutorIdDireto);
                                         executorConfirmouDireto = true;
-                                        ordemExecutorIdDireto = confirmacaoExecutor.dados.order_id;
 
                                         const conexao = await dbPool.getConnection();
                                         try {
                                             await conexao.beginTransaction();
                                             const novasEntradas = trader.entradas_feitas + 1;
                                             await conexao.query('UPDATE auto_traders SET entradas_feitas=? WHERE id=?', [novasEntradas, trader.id]);
-                                            await conexao.query(`INSERT INTO auditoria_ordens (trader_id, estrategia_nome, fonte_sinal, alvo, nivel, risco_total, valor_entrada, executor_order_id, status_ordem) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE')`, [trader.id, est.nome, est.origem, alvoPython, 'DIRETO', valorArredondado, valorArredondado, ordemExecutorIdDireto]);
+                                            const [auditoriaAtualizada] = await conexao.query(
+                                                `UPDATE auditoria_ordens
+                                                 SET status_ordem='PENDENTE'
+                                                 WHERE id=? AND executor_order_id=? AND status_ordem='PREPARANDO'`,
+                                                [intencaoDireto.auditoria_id, ordemExecutorIdDireto]
+                                            );
+                                            if (Number(auditoriaAtualizada.affectedRows) !== 1) {
+                                                throw new Error('Intenção PREPARANDO DIRETO não encontrada após ACK do executor');
+                                            }
                                             await conexao.commit();
                                             trader.entradas_feitas = novasEntradas;
                                         } catch(e) {
@@ -3052,9 +3188,23 @@ app.post("/receber-sinal", async (req, res) => {
                                         }
                                     } catch(e) {
                                         if (executorConfirmouDireto) {
-                                            console.error(`⚠️ Ordem DIRETO confirmada pelo executor (${ordemExecutorIdDireto}), mas nao registrada para o trader ${trader.id}:`, e.message);
+                                            console.error(
+                                                `⚠️ Ordem DIRETO confirmada pelo executor (${ordemExecutorIdDireto}), `
+                                                + `mas a intenção ${intencaoDireto.auditoria_id} não avançou para PENDENTE; `
+                                                + `PREPARANDO foi preservado para reconciliação:`,
+                                                e.message
+                                            );
                                         } else {
-                                            console.error(`❌ Ordem DIRETO nao enviada para o trader ${trader.id}:`, e.message);
+                                            const statusFalha = await marcarIntencaoAposFalhaEnvio(
+                                                intencaoDireto.auditoria_id,
+                                                e,
+                                                `DIRETO do trader ${trader.id}`
+                                            );
+                                            console.error(
+                                                `❌ Ordem DIRETO não confirmada para o trader ${trader.id}; `
+                                                + `intenção ${intencaoDireto.auditoria_id} marcada ${statusFalha}:`,
+                                                e.message
+                                            );
                                         }
                                     }
                                 }

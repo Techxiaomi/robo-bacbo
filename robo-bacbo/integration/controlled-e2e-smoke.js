@@ -38,7 +38,7 @@ async function waitUntil(label, fn, timeoutMs = 12000) {
     );
 }
 
-function startFakeExecutor() {
+function startFakeExecutor(getDb) {
     const orders = [];
     let handlerError = null;
 
@@ -51,7 +51,7 @@ function startFakeExecutor() {
         let raw = "";
         req.setEncoding("utf8");
         req.on("data", chunk => { raw += chunk; });
-        req.on("end", () => {
+        req.on("end", async () => {
             try {
                 if (req.headers["x-internal-token"] !== TOKEN) {
                     res.writeHead(401, { "Content-Type": "application/json" });
@@ -67,7 +67,26 @@ function startFakeExecutor() {
                 assert.ok(["PlayerWon", "BankerWon", "Tie"].includes(payload.alvo));
                 assert.ok(Number(payload.valor) > 0);
 
-                orders.push({ payload, token: req.headers["x-internal-token"] });
+                const db = getDb();
+                assert.ok(db, "Conexão MySQL do teste deve existir antes da primeira ordem");
+                const [[intent]] = await db.query(
+                    `SELECT id, trader_id, alvo, nivel, valor_entrada, executor_order_id, status_ordem
+                     FROM auditoria_ordens
+                     WHERE executor_order_id=?
+                     ORDER BY id DESC LIMIT 1`,
+                    [payload.order_id]
+                );
+                assert.ok(intent, "Intenção durável deve existir antes do ACK do executor");
+                assert.equal(intent.status_ordem, "PREPARANDO");
+                assert.equal(intent.alvo, payload.alvo);
+                assert.equal(Number(intent.valor_entrada), Number(payload.valor));
+
+                orders.push({
+                    payload,
+                    token: req.headers["x-internal-token"],
+                    intentStatusBeforeAck: intent.status_ordem,
+                    intentIdBeforeAck: Number(intent.id)
+                });
                 res.writeHead(200, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({
                     status: "Aposta na fila de execucao!",
@@ -153,7 +172,8 @@ async function emitResult({ seq, winner, p1, p2, b1, b2 }) {
 }
 
 async function main() {
-    const fakeExecutor = await startFakeExecutor();
+    let db = null;
+    const fakeExecutor = await startFakeExecutor(() => db);
     const backend = spawn(process.execPath, [backendPath], {
         cwd: path.join(__dirname, ".."),
         env: {
@@ -186,7 +206,6 @@ async function main() {
         });
     }
 
-    let db = null;
     try {
         await waitUntil("backendPronto=true", async () => {
             if (backend.exitCode !== null) {
@@ -286,6 +305,8 @@ async function main() {
         assert.equal(order.token, TOKEN);
         assert.equal(order.payload.alvo, "BankerWon");
         assert.equal(Number(order.payload.valor), 10);
+        assert.equal(order.intentStatusBeforeAck, "PREPARANDO");
+        assert.ok(order.intentIdBeforeAck > 0);
 
         const pending = await waitUntil("auditoria PENDENTE", async () => {
             const [[row]] = await db.query(
