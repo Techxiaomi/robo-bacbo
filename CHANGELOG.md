@@ -42,3 +42,5 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - `alerta_painel` passa a emitir ENTRADA/GALE/GREEN/RED para os robôs realmente inscritos e `historico_disparos_robos` recebe um registro por robô no fechamento; Telegram-only permanece fora da contagem até BUG-007C.
 - BUG-007C: implementado envio Telegram real por `sendMessage`, com destinos deduplicados, timeout, validação de `HTTP ok` + `ok=true` e mensagens configuráveis por cabeçalho/rodapé/flags do robô.
 - Telegram-only só entra em `robosInscritos`/histórico após confirmação da ENTRADA; Web+Telegram continua gerando um único histórico por robô, e GALE/fechamento usam somente destinos confirmados na entrada.
+- BUG-007D: Drawdown Control passa a aplicar `CONSERVADOR` (pausa no primeiro RED) e `DINAMICO` (X REDs em Y minutos), persistindo `standby_ate`/janela de REDs para sobreviver a restart e excluindo robôs em proteção da seleção de sinais.
+- `greens_consecutivos` passa a ser atualizado por resultado efetivamente recebido pelo robô; aviso Telegram de proteção é encadeado após o RED. `stop_reds_seguidos` separado permanece pendente por não possuir regra de recuperação definida no painel.
