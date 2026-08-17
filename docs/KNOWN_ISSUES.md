@@ -1,195 +1,170 @@
 # Problemas e Riscos Conhecidos
 
-Prioridades iniciais sugeridas. Nenhum desses itens foi corrigido nesta baseline, salvo a retirada de credenciais do código versionável.
+Atualizado em 2026-08-17. Este arquivo descreve o estado atual do `main` e separa riscos ainda abertos de itens já mitigados.
 
-## Críticos / altos
+## Pendências reais
 
-### SEC-001 — Credenciais hardcoded no snapshot original
+### SEC-001 — Rotação operacional de credenciais antigas
 
-Status nesta baseline: **mitigado para versionamento**.
+Status: **mitigado no versionamento; ação operacional ainda pendente**.
 
-As credenciais SQL e de login foram substituídas por variáveis de ambiente. O arquivo real de sessão foi excluído da baseline e consta no `.gitignore`.
+Credenciais SQL, login e segredos foram externalizados para `.env`, arquivos de sessão ficaram fora do Git e o `.gitignore` cobre os artefatos sensíveis conhecidos.
 
-Ação operacional ainda necessária: após validar a migração, rotacionar credenciais que já tenham sido compartilhadas em outros serviços/conversas.
+Risco residual: qualquer credencial que tenha sido compartilhada antes dessa externalização deve ser rotacionada no serviço correspondente. Isso depende do ambiente/contas reais e não deve ser automatizado pelo repositório.
+
+### BUG-001R — Idempotência do executor não sobrevive a restart
+
+Status: **risco arquitetural residual**.
+
+O fluxo Node → Python usa `order_id` UUID. Retry ambíguo reutiliza o mesmo ID e o executor rejeita duplicatas enquanto o mesmo processo está ativo.
+
+Risco residual: a memória de IDs recebidos é volátil. Um restart do executor elimina essa memória; garantia de exactly-once através de restart exigiria estado durável/fila transacional e deve ser tratada como mudança arquitetural separada.
+
+### OBS-001 — Observabilidade
+
+Status: **amplamente mitigado pelos patches OBS-001A…OBS-001F; métricas centralizadas ainda pendentes**.
+
+Já implementado:
+
+- migrations e CRUDs críticos deixam erros inesperados visíveis;
+- persistências críticas e rollbacks registram contexto;
+- startup Node é fail-closed;
+- `uncaughtException` e `unhandledRejection` encerram o processo após log;
+- promises Telegram em background possuem `catch` contextual;
+- executor Python registra falhas de HTTP, WebSocket, Auto-Login e Playwright;
+- logging Node estruturado em JSONL com rotação por tamanho;
+- redaction de chaves sensíveis e segredos conhecidos do `.env`;
+- falha do sink de arquivo não derruba o backend e o console original é preservado.
+
+Risco residual: não há métricas/telemetria centralizada para agregação de saúde, latência, contagem de falhas ou alertas automáticos.
+
+### OBS-003 — Cobertura automatizada
+
+Status: **parcialmente mitigado pelos patches OBS-003A…OBS-003D**.
+
+Já implementado:
+
+- suíte Node `node:test` de lógica pura;
+- suíte Python `unittest` sem iniciar Flask/Playwright;
+- GitHub Actions em PR/push para `main`;
+- testes de contrato HTTP usando handlers reais de login/logout/middleware com `req`/`res`/`app` simulados;
+- testes do logger estruturado/rotativo.
+
+Riscos residuais:
+
+- falta suíte de integração com Express + MySQL reais;
+- falta teste Playwright/DOM real contra ambiente controlado;
+- ainda não há teste ponta a ponta do ciclo captura → Node → executor → auditoria.
+
+## Itens mitigados
 
 ### SEC-002 — Comunicação interna Node ↔ Python sem autenticação
 
-Status proposto: **mitigado no patch SEC-002**.
+Status: **mitigado**.
 
-As duas rotas internas (`/apostar` e `/receber-sinal`) passam a exigir `INTERNAL_API_TOKEN`; o executor Flask usa `127.0.0.1` por padrão e valida minimamente o payload antes de enfileirar uma ordem. O segredo real permanece somente no `.env`.
+`/apostar` e `/receber-sinal` exigem `INTERNAL_API_TOKEN`; o executor Flask usa loopback por padrão e valida payload mínimo antes de enfileirar ordem.
 
 ### SEC-003 — APIs Node sem autenticação e CORS amplo
 
 Status: **mitigado pelos patches SEC-003A e SEC-003B**.
 
-O SEC-003A mantem o Node em `127.0.0.1` por padrao, rejeita `Host` inesperado e bloqueia `Origin` diferente do host do proprio painel tanto no HTTP quanto no Socket.IO.
+O Node usa `127.0.0.1` por padrão, valida `Host`/`Origin`, protege Socket.IO e suporta autenticação administrativa por sessão opaca em memória com cookie `HttpOnly` + `SameSite=Strict`. Fora do loopback, credenciais administrativas são obrigatórias e o backend falha fechado se estiverem incompletas.
 
-O SEC-003B adiciona autenticacao administrativa por sessao opaca em memoria, entregue ao navegador somente em cookie `HttpOnly` + `SameSite=Strict`. APIs administrativas, arquivos do painel e novos handshakes Socket.IO exigem sessao valida quando a autenticacao esta ativa. O `POST /receber-sinal` permanece fora da sessao de usuario e continua protegido exclusivamente pelo `INTERNAL_API_TOKEN`, mantendo separacao entre canal interno Python->Node e usuario do painel.
+`/receber-sinal` permanece separado da sessão administrativa e continua protegido pelo token interno.
 
-Para preservar uso local, loopback continua podendo operar sem login quando `ADMIN_USERNAME` e `ADMIN_PASSWORD` estao ambos vazios. Se qualquer credencial administrativa for configurada, o login passa a ser exigido tambem no loopback. Fora do loopback, usuario e senha sao obrigatorios e o startup falha fechado se estiverem ausentes. O cookie `Secure` e automatico fora do loopback, com override explicito para HTTP de LAN confiavel; exposicao em rede nao confiavel deve usar HTTPS/reverse proxy.
+### SEC-004 — Token Telegram exposto pelo backend
 
-As sessoes ficam somente em memoria e expiram pelo TTL configurado; restart do Node invalida todos os logins, evitando persistir tokens de sessao em disco ou banco.
+Status: **mitigado**.
 
-### SEC-004 — Token Telegram pode ser devolvido pelo `GET /api/robos`
+`GET /api/robos` não devolve `telegram_token`; edição/toggle preserva o segredo quando o campo chega vazio/ausente.
 
-Status: **mitigado no patch SEC-004**.
+### BUG-001 — Ordem contabilizada sem confirmação do executor
 
-`GET /api/robos` deixa de devolver `telegram_token` e expõe apenas `telegram_configurado: true/false`. O formulário de edição mantém o campo de token vazio e informa que deixar em branco preserva a credencial já existente.
+Status: **mitigado pelos patches BUG-001 e BUG-001B**, sujeito ao risco residual BUG-001R acima.
 
-No `PUT /api/robo/:id`, token vazio ou ausente preserva o valor armazenado; um token novo só substitui o anterior quando é explicitamente informado. Isso também permite que o toggle rápido continue funcionando sem transportar o segredo pelo navegador.
+Node aguarda confirmação do executor antes de contabilizar entrada/criar Gale e usa `order_id` idempotente para retry ambíguo.
 
-### BUG-001 — Ordem pode ser registrada sem confirmação do executor
+### BUG-002 — `STANDBY` indefinido
 
-Status: **mitigado pelos patches BUG-001 e BUG-001B**.
+Status: **mitigado**.
 
-O BUG-001 faz o Node aguardar a resposta do executor e só contabilizar a entrada direta ou criar a nova ordem `PENDENTE` de Gale depois do aceite HTTP.
+Auto-Trader ativo passa de `STANDBY` para `OPERANDO` ao primeiro resultado válido/autenticado da mesa.
 
-O BUG-001B adiciona um UUID `order_id` compartilhado entre Node e Python. Em timeout, falha de transporte, resposta inválida ou HTTP 5xx, o Node pode repetir uma vez a mesma ordem com o mesmo ID. O executor registra o ID antes de enfileirar: repetição com o mesmo payload retorna sucesso idempotente sem nova entrada na fila; reutilização do mesmo ID com payload diferente retorna HTTP 409. O UUID confirmado também é gravado em `auditoria_ordens.executor_order_id`.
+### BUG-003 — Edição/toggle resetava saldo do Auto-Trader
 
-Isso elimina a duplicidade causada pela perda normal da resposta HTTP enquanto o mesmo processo do executor permanece ativo. Risco residual: a memória de IDs não sobrevive a restart do executor; exatamente-once através de restart exigiria fila/estado de execução durável, o que é uma mudança arquitetural separada.
+Status: **mitigado**.
 
-### BUG-002 — `STANDBY` pode impedir novas entradas indefinidamente
+Edição e toggle preservam `saldo_inicial`, `saldo_atual` e contadores operacionais; reativação usa novo baseline fresco quando apropriado.
 
-Status: **mitigado no patch BUG-002**.
+### BUG-004 — `interrupcao_fluxo` não separava sessões
 
-Auto-Traders ativos permanecem em `STANDBY` enquanto aguardam evidência de conexão com a mesa. Ao receber o primeiro resultado de rodada válido e autenticado em `/receber-sinal`, o Node persiste `status_operacao = 'OPERANDO'` e atualiza o estado em memória. Traders desligados ou em estados como `META_ATINGIDA` não são promovidos.
+Status: **mitigado**.
 
-### BUG-003 — Edição/toggle do auto-trader reseta `saldo_atual`
+Interrupção aceita rotaciona `id_sessao` antes de persistir o próximo giro, impedindo padrões atravessarem a fronteira lógica.
 
-Status: **mitigado no patch BUG-003**.
+### BUG-005 — Persistência de históricos incompleta
 
-O endpoint `PUT /api/auto-trader/:id` passa a atualizar somente nome, estado ativo e configuração. `saldo_inicial` e `saldo_atual` são preservados em edições e no toggle rápido. Uma futura recalibração de banca deve usar uma ação explícita e separada, em vez de ocorrer como efeito colateral de editar o motor.
+Status: **mitigado em conjunto por BUG-005A + BUG-007B/007C**.
 
-## Médios
+Resultados finalizados alimentam `historico_resultados`. Participação efetiva de Robôs/Canais alimenta `historico_disparos_robos`, incluindo canal Web e Telegram confirmado sem duplicação multicanal.
 
-### BUG-004 — `interrupcao_fluxo` é enviado, mas não aplicado no Node
+### BUG-006 — Regras financeiras/configuráveis sem enforcement
 
-Status: **mitigado no patch BUG-004**.
+Status: **mitigado pelos patches BUG-006A…BUG-006D**.
 
-Quando o Python sinaliza `interrupcao_fluxo = true`, o Node rotaciona `idSessaoContinua` antes de persistir o primeiro resultado após a pausa. O novo ID usa `timestamp_coleta` quando válido (com fallback para `Date.now()`), fazendo a checagem `mesmaSessao` já existente impedir padrões formados pela concatenação de giros antes e depois da interrupção. Ordens pendentes e estado de Gale não são alterados por este patch.
+Implementados: janela de horário, Stop Win, Stop Loss, Stop Reds do Auto-Trader e Trailing Stop. Gales já iniciados continuam até o desfecho para manter auditoria coerente.
 
-### BUG-005 — Tabelas de histórico são consultadas sem persistência correspondente visível
+### BUG-007 — Telegram, filtros e proteção de Robôs/Canais incompletos
 
-Status: **parcialmente mitigado no patch BUG-005A**.
+Status: **mitigado pelos patches BUG-007A…BUG-007E**.
 
-`historico_resultados` passa a receber um registro quando cada sinal de estratégia é finalizado como `GREEN`, `TIE` ou `RED`, com nível `DIRETO`/`GALE1`/`GALE2`, multiplicador do empate quando aplicável e horário da rodada. Não são gravados registros intermediários a cada Gale, evitando duplicar um mesmo sinal.
+Implementados: CRUD visual, Web, Telegram confirmado, filtros, propriedade de padrão dinâmico, assertividade mínima, Drawdown Control e Stop Reds definitivo do Robô/Canal.
 
-`historico_disparos_robos` é preenchido para robôs que participaram do sinal por pelo menos um canal efetivamente implementado. O BUG-007B cobre o canal web; o BUG-007C inclui robôs Telegram-only somente quando ao menos um destino confirma a entrega da mensagem de ENTRADA. Robôs presentes nos dois canais continuam gerando um único registro por sinal.
+### BUG-008 — Sincronização de saldo incompleta
 
-### BUG-006 — Stop Win / Stop Loss / Trailing / horário estão configuráveis no painel sem enforcement localizado
+Status: **mitigado pelos patches BUG-008A/008B e validação operacional de 2026-08-17**.
 
-Status: **mitigado nos patches BUG-006A, BUG-006B, BUG-006C e BUG-006D**.
+Executor lê saldo por seletor CSS explícito, envia mudança/heartbeat ao Node e o backend usa freshness antes de permitir novo baseline/exposição.
 
-A janela `hora_inicio`/`hora_fim` passa a ser aplicada antes de abrir novas sequências do Auto-Trader. Janelas normais e janelas que atravessam a meia-noite são suportadas; horários ausentes usam `00:00`–`23:59`, e configuração de horário inválida bloqueia a nova entrada. Gales de uma sequência já iniciada continuam até o desfecho para não deixar ordens pendentes/auditoria em estado incoerente.
+### BUG-009 / OBS-002 — Schema inicial incompleto
 
-O BUG-006B aplica `stop_win` e `stop_loss` sobre a variação entre `saldo_inicial` e o saldo global real/fresco do backend antes de cada nova sequência. Saldo ausente ou além da janela de freshness bloqueia a nova entrada sem inferir valor. Ao atingir Stop Win ou Stop Loss, o Auto-Trader é desligado com status explícito e exige reativação manual; a reativação já existente captura um novo baseline fresco e inicia outro ciclo em `STANDBY`.
+Status: **mitigado**.
 
-O BUG-006C adiciona um Stop Reds exclusivo do Auto-Trader. A contagem só muda quando existe uma ordem `PENDENTE` daquele trader sendo efetivamente finalizada: GREEN/TIE zera o streak e um RED final, mesmo após DIRETO + Gales, acrescenta apenas 1 RED. Sinais apenas observados pelo sistema não contam.
+O backend cria as tabelas necessárias antes das migrations incrementais, permitindo inicialização de banco vazio sem depender de dump externo para as estruturas conhecidas.
 
-Ao atingir o limite configurado, o motor pode entrar em `STOP_REDS_PAUSA` por N minutos, permanecendo ativo porém impedido de abrir novas sequências até o rearmamento automático, ou pode entrar em `STOP_REDS` com `ativo=false`, exigindo reativação manual. A reativação manual reutiliza o fluxo existente de novo baseline e também zera o estado de Stop Reds. O estado é persistido para sobreviver a restart do Node.
+### BUG-010 — Auto-Trader desligado permanecia `OPERANDO`
 
-O BUG-006D implementa o Trailing Stop com uma distância de recuo explícita em reais (`trailing_recuo`). O backend registra em `trailing_pico_lucro` o maior lucro real observado nos checkpoints que antecedem nova exposição financeira. Quando o lucro atual recua até `pico - trailing_recuo`, o Auto-Trader entra em `TRAILING_STOP`, fica `ativo=false` e exige reativação manual.
+Status: **mitigado**.
 
-O pico é persistido para sobreviver a restart do Node. Reativação manual, desligamento seguido de reativação e mudança de `trailing_stop`/`trailing_recuo` iniciam um novo pico. Para compatibilidade, configurações antigas com `trailing_stop=true` mas sem `trailing_recuo>0` permanecem desarmadas até que o usuário informe um recuo.
+Transição manual ON→OFF grava `DESLIGADO`; estados explícitos de hard stop são preservados.
 
-Sequências já iniciadas, inclusive Gales, continuam até o desfecho para preservar a auditoria; Stop Win e Stop Loss mantêm prioridade quando seus próprios limites também forem atingidos. O Stop Reds de Robôs/Canais permanece um mecanismo separado de geração/distribuição de sinais e não é usado pelo BUG-006C/BUG-006D.
+### BUG-011 — Buraco Python→Node podia concatenar sequência inexistente
 
-### BUG-007 — Telegram e filtros de robôs parecem incompletos
+Status: **mitigado**.
 
-Status: **mitigado pelos patches BUG-007A, BUG-007B, BUG-007C, BUG-007D e BUG-007E**.
+Cada processo coletor usa `coletor_sessao` e `coletor_seq`. O Node detecta salto, restart, duplicata/atraso e desaparecimento de metadados; buraco confirmado rotaciona sessão e invalida pendências sem inferir WIN/LOSS.
 
-O BUG-007A restaura o CRUD visual de Robôs. O BUG-007B conecta o canal web ao ciclo real do sinal, com precedência `exceção > avulso > origem`, propriedade por `robo_dono_id` em padrões dinâmicos e filtro de `min_assertividade`. O BUG-007C implementa entrega Telegram confirmada e união multicanal sem duplicar histórico.
+### BUG-012 — Padrões IA órfãos após excluir Robô/Canal
 
-O BUG-007D aplica o Drawdown Control conforme a semântica explícita do painel: `CONSERVADOR` pausa no primeiro RED; `DINAMICO` pausa após X REDs dentro de Y minutos; ambos usam `pausa_min`. Robôs em `standby_ate` ficam fora da seleção Web/Telegram até a expiração. O estado de proteção e a janela recente de REDs são persistidos para sobreviver a restart do Node. GREEN/TIE incrementa `greens_consecutivos`, RED zera o streak, e o aviso opcional de proteção no Telegram é enviado depois da mensagem de RED somente a destinos cuja ENTRADA foi confirmada.
+Status: **mitigado**.
 
-O BUG-007E aplica `stop_reds_seguidos` como hard stop exclusivo do Robô/Canal. A contagem usa somente sinais nos quais o robô aparece em `robosInscritos`: GREEN/TIE zera o streak e RED final acrescenta uma unidade. Ao atingir o limite, `ativo=false` é persistido, a proteção temporária é limpa e o robô deixa de participar de novos sinais até reativação manual.
+Exclusão é transacional e remove padrões IA filhos/históricos relacionados; startup também limpa órfãos legados de forma idempotente.
 
-Quando o mesmo RED também acionaria o Drawdown Control, o Stop Reds definitivo tem precedência e não inicia uma pausa temporária redundante. O Drawdown Control continua sendo o mecanismo de cooldown; o Stop Reds permanece um desligamento manualmente reversível. Esse estado é independente do Stop Reds do Auto-Trader e não altera execução financeira, fichas, Gales ou ordens.
+### BUG-013 — Cards usavam estatística operacional em vez de matching histórico
 
-### BUG-008 — Sincronização de saldo da corretora estava incompleta
+Status: **mitigado**.
 
-Status: **mitigado nos patches BUG-008A e BUG-008B, com validação operacional do seletor e heartbeat em 2026-08-17**.
+Cards usam `giros_recentes` como fonte analítica, respeitam `id_sessao` e calculam DIRETO/G1/G2/TIE/RED nas janelas 24H, Hoje, Semana, Mês e Geral.
 
-O executor pode ler o saldo real diretamente da página usando o seletor CSS explícito `CASINO_BALANCE_SELECTOR` e enviar mensagens autenticadas de saldo ao Node por mudança/heartbeat. Sem seletor configurado ou sem valor válido, nenhum saldo é inferido.
+## Dependências externas que continuam fora do controle do código
 
-O BUG-008B torna o backend dono do baseline financeiro. O navegador deixa de fornecer `saldo_inicial`; criação ativa e transição inativo→ativo exigem um saldo global recente, capturam esse valor como `saldo_inicial`/`saldo_atual` e iniciam um novo ciclo em `STANDBY`, zerando `entradas_feitas` e `pulos_restantes`. Edições de um trader já ativo preservam baseline, saldo e contadores. Criação inativa continua permitida e será recalibrada na ativação.
+- disponibilidade do MySQL e do site de destino;
+- validade das credenciais reais;
+- mudanças no DOM/WebSocket da plataforma;
+- Chromium/Playwright instalado e compatível;
+- seletor de saldo correto;
+- estabilidade de rede entre processos/serviços locais.
 
-O Node registra quando o último saldo foi aceito e considera o valor fresco por `BALANCE_SYNC_MAX_AGE_SECONDS` (90 s por padrão, acima do heartbeat padrão de 60 s). Após restart, o saldo volta a desconhecido até uma nova sincronização, evitando reutilizar snapshot antigo.
+## Política para novos problemas
 
-A validação operacional confirmou o seletor CSS real no Chromium headless, a leitura monetária, o envio autenticado Python→Node e a renovação do snapshot por heartbeat mantendo `fresco=true`. Com isso, o BUG-006B pode usar o saldo real como fonte de enforcement financeiro. A semântica de trailing permanece separada.
-
-### BUG-010 — Auto-Trader desligado pode conservar `status_operacao=OPERANDO`
-
-Status: **mitigado no patch BUG-010**.
-
-O `PUT /api/auto-trader/:id` atualizava `ativo=false` no desligamento manual, mas preservava o `status_operacao` anterior. Assim, um motor que estava `OPERANDO` podia ficar persistido como `ativo=false` + `OPERANDO`, mesmo sem executar novas entradas porque os gates financeiros também verificam `ativo`.
-
-O BUG-010 torna a transição manual ON→OFF explícita: grava `status_operacao='DESLIGADO'`. Criação inativa usa o mesmo status, enquanto a reativação continua capturando saldo fresco e iniciando em `STANDBY`. No startup, somente combinações legadas `ativo=false` + `OPERANDO`/`STANDBY` são normalizadas. Estados que registram a causa de um hard stop (`STOP_WIN`, `STOP_LOSS`, `STOP_REDS` e `TRAILING_STOP`) não são sobrescritos.
-
-### BUG-011 — Buraco Python→Node pode concatenar uma sequência que não existiu na mesa
-
-Status: **mitigado no patch BUG-011**.
-
-A proteção anterior dependia principalmente de `interrupcao_fluxo` calculado no Python por intervalo entre resultados capturados. Se o Python capturasse uma rodada normalmente, mas o POST daquele resultado não chegasse ao Node, o Python atualizava sua própria referência temporal e a rodada seguinte podia chegar com `interrupcao_fluxo=false`. O Node então não possuía evidência independente de que faltava um giro.
-
-O BUG-011 adiciona redundância explícita. Cada processo Python recebe um `coletor_sessao` próprio e cada evento `Resolved` consome um `coletor_seq` monotônico antes de parsing/POST. Assim, uma falha posterior deixa um salto observável. O Node mantém a última sessão/seq/timestamp aceitos e rejeita pacotes duplicados ou atrasados; salto de sequência, mudança da sessão do coletor ou desaparecimento dos metadados depois de estabelecidos são tratados como buraco confirmado.
-
-Toda quebra aceita rotaciona `id_sessao` antes de persistir a rodada seguinte, preservando a separação já usada pelo motor online, backtest e minerador. Em buraco confirmado, sinais que aguardavam resultado são invalidados para que a rodada seguinte não seja usada como resultado de uma sequência anterior. Se existir auditoria financeira `PENDENTE`, ela passa a `DADOS_INCOMPLETOS` e somente os Auto-Traders afetados são desligados até reativação manual, sem inferir WIN/LOSS.
-
-Intervalos superiores a 60 segundos continuam provocando apenas quebra de sessão quando a sequência do coletor permanece íntegra. Isso preserva o comportamento anterior para uma mesa lenta/pausada e evita classificar apenas demora temporal como perda financeira confirmada. A estatística visual de maiores sequências também passa a zerar streaks na fronteira de `id_sessao`.
-
-### BUG-012 — Padrões IA sobrevivem à exclusão do Robô/Canal proprietário
-
-Status: **mitigado no patch BUG-012**.
-
-Os cards de padrões dinâmicos são deliberadamente bloqueados no frontend porque pertencem ao Robô/Canal indicado por `robo_dono_id`. Porém, o endpoint `DELETE /api/robo/:id` removia somente destinatários e a linha de `robos_canais`, deixando os padrões `is_dinamico=true` órfãos no banco e ainda visíveis na área de padrões.
-
-O BUG-012 torna a exclusão do robô transacional: históricos ligados aos padrões IA filhos, os próprios padrões dinâmicos, o histórico de distribuição do robô, destinatários e o registro do Robô/Canal são removidos como uma única operação lógica. Padrões manuais não são selecionados por essa cascata.
-
-Para corrigir bancos já afetados, `prepararBancoDeDados()` executa no startup uma limpeza idempotente de estratégias `is_dinamico=true` cujo `robo_dono_id` é nulo ou não existe mais em `robos_canais`, removendo também seus históricos associados. Uma falha nessa limpeza aborta a inicialização pelo comportamento fail-closed já existente.
-
-### BUG-013 — Cards de padrões usam estatística operacional em vez de matching histórico
-
-Status: **mitigado no patch BUG-013**.
-
-A API `/api/estrategias` montava os cards a partir de `historico_resultados` e, em `geral`, ainda iniciava pelos contadores acumulados da própria tabela `estrategias`. Isso mede sinais já processados pela estratégia e não todas as ocorrências em que o padrão aparece no histórico bruto; também podia produzir números gerais inconsistentes após a introdução da persistência de resultados.
-
-O BUG-013 passa a usar `giros_recentes` como fonte analítica. O histórico é carregado para um cache em memória no startup e atualizado somente depois que um novo giro é persistido com sucesso. Para cada estratégia, o backend procura o padrão no histórico, impede match entre `id_sessao` diferentes e resolve DIRETO/G1/G2, TIE protegido e RED com a mesma semântica do Lab Padrões. Os intervalos 24H, Hoje, Semana, Mês e Geral são calculados a partir do início da ocorrência do padrão.
-
-Os cinco botões de período também voltam a aparecer nos cards cadastrados. Na lista de padrões, a escolha de período é global para manter todos os cards e a ordenação por assertividade/ocorrências comparando a mesma janela; o card de padrão ativo mantém seu período independente.
-
-### OBS-001 — Exceções críticas são frequentemente silenciadas
-
-Status: **parcialmente mitigado nos patches OBS-001A, OBS-001B, OBS-001C, OBS-001D e OBS-001E**.
-
-No Node, migrations incrementais deixam de silenciar erros inesperados: somente `ER_DUP_FIELDNAME`/errno 1060 continua tratado como condição normal de idempotência. Rotas CRUD críticas registram contexto técnico; `apagarEstrategiaEDados()` deixa o erro subir; e falhas em fechamento `LOSS`, `pulos_restantes`, rollback e processamento pós-ACK ficam visíveis.
-
-O OBS-001C torna a inicialização fail-closed. Enquanto banco/schema/memória ainda não terminaram, `/api/*` e `/receber-sinal` retornam 503 e Socket.IO rejeita handshake. Erro inesperado de migration ou carga inicial deixa de ser absorvido: a falha sobe até `iniciarApp()`, que fecha Socket.IO, HTTP e o pool MySQL e encerra o processo com código de erro, evitando um backend parcialmente inicializado.
-
-O OBS-001D torna visíveis as três persistências críticas que ainda estavam silenciosas no ciclo principal: inserção em `giros_recentes`, fechamento `WIN/TIE` em `auditoria_ordens` e persistência de `META_ATINGIDA`. O comportamento operacional não muda; apenas a falha deixa de desaparecer sem diagnóstico.
-
-O OBS-001E deixa de suprimir erros globais realmente não tratados: `uncaughtException` e `unhandledRejection` agora encerram o processo após registrar o erro, evitando continuar em estado potencialmente inconsistente. As três promises Telegram executadas em background recebem `catch` contextual próprio, para que falhas inesperadas de notificação sejam observadas localmente sem depender do handler global.
-
-No executor Python, o envio de resultado resolvido ao Node valida o status HTTP com `raise_for_status()` e registra falhas sem alterar o ciclo da mesa. Exceções inesperadas em `processar_resultado`, frames WebSocket, Auto-Login, loop principal do Playwright e restart externo também ficam visíveis. Logs de alta frequência usam limitação temporal de 30 segundos.
-
-Ruído esperado continua tolerado: frames WebSocket que não são JSON, falhas em pop-ups opcionais, fallback de stealth, varredura de frames para saldo e o botão opcional “Continuar” não viram erro fatal. O item permanece parcial porque ainda não existe logging estruturado/arquivo rotativo nem métricas centralizadas.
-
-### OBS-002 — Schema inicial incompleto no código
-
-Status: **mitigado no patch BUG-009**.
-
-`prepararBancoDeDados()` passa a criar `origens` e `estrategias` com os campos efetivamente exigidos pelas rotas CRUD, contadores legados e campos dinâmicos já usados/migrados pelo backend. As criações usam `CREATE TABLE IF NOT EXISTS` e ocorrem antes das migrations `ALTER TABLE`, permitindo inicializar um banco vazio sem depender de um dump externo.
-
-O patch não adiciona constraints, índices ou relacionamentos novos além das chaves primárias mínimas já implícitas no uso atual, preservando compatibilidade com bancos existentes.
-
-### OBS-003 — Não há teste automatizado
-
-Status: **parcialmente mitigado nos patches OBS-003A, OBS-003B e OBS-003C**.
-
-O OBS-003A substitui o placeholder de `npm test` por uma suíte `node:test` sobre lógica pura já existente em `bot2_coletor.js`, sem iniciar Express, Socket.IO, MySQL, Telegram ou executor de apostas. Ela cobre arredondamento de ficha, classificação DIRETO/GALE, TIEs legados, precedência `exceção > avulso > origem`, propriedade de estratégia dinâmica, formatação Telegram e janelas de horário normais/full-day/overnight.
-
-O OBS-003B adiciona uma suíte Python com `unittest` que lê `robo.py` por AST e compila somente as funções sob teste, evitando executar o top-level que inicia Flask/Playwright. A cobertura inclui parsing monetário nos formatos brasileiro/internacional, rejeição de valores negativos, montagem do payload de rodada resolvida, normalização de TIE, fronteira de interrupção `> 60s`, autenticação interna no POST e tratamento de erro HTTP do resultado→Node com fakes locais.
-
-O OBS-003C adiciona GitHub Actions para executar automaticamente as duas suítes e checagens de sintaxe em cada pull request para `main` e em cada push para `main`. O workflow usa permissões somente de leitura, não recebe secrets, não instala dependências e não inicia banco, servidor, Playwright ou chamadas externas do projeto.
-
-Ainda faltam testes de integração de banco/rotas e testes reais de Playwright/DOM; por isso o item permanece parcialmente mitigado.
+Antes de criar um novo BUG/SEC/OBS, confirmar que o comportamento ainda existe no `main` atual e não está apenas descrito em documentação antiga. Novos patches devem ser pequenos, isolados, validados por testes e GitHub Actions, sem misturar correções independentes.
