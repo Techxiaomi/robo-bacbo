@@ -43,7 +43,8 @@ Também estão implementados:
 - persistência de históricos e estatística dos cards pelo histórico bruto;
 - Robôs/Canais Web + Telegram, filtros, Drawdown Control e Stop Reds;
 - logging estruturado JSONL rotativo com redaction de segredos;
-- testes Node, Python, contratos HTTP e logger;
+- métricas runtime locais em snapshot JSON atômico, incluindo uptime, memória, event-loop delay, níveis de log e falhas dos sinks;
+- testes Node, Python, contratos HTTP, logger e métricas;
 - integração real do backend com Express + Socket.IO + MySQL 8.4 descartável;
 - handshake Socket.IO real validado com sessão administrativa antes e depois do logout;
 - Playwright/Chromium real em DOM controlado local para leitura de saldo e seletores de execução;
@@ -93,7 +94,7 @@ Não misture correções independentes no mesmo patch.
 
 - rotação operacional de credenciais antigas compartilhadas;
 - deduplicação do `order_id` sobrevive a restart, mas um crash exatamente durante o clique Playwright mantém ambiguidade sobre o efeito externo; IDs já persistidos não são reenfileirados automaticamente para priorizar prevenção de duplicidade;
-- métricas centralizadas ainda ausentes, apesar dos logs estruturados;
+- métricas runtime locais existem, porém agregação externa, retenção histórica central, alertas automáticos e métricas de latência por operação/HTTP ainda não existem;
 - dependência operacional da estrutura DOM/WebSocket, sessão e comportamento do site de destino, que pode divergir dos ambientes controlados do CI;
 - modularização futura deve ser gradual e coberta por testes.
 
@@ -105,6 +106,14 @@ Quando a alteração tocar Node:
 - `npm test` em `robo-bacbo`;
 - `git diff --check` ou equivalente remoto;
 - GitHub Actions Node verde.
+
+Quando tocar `logger.js`, `metrics.js`, `env_loader.js` ou configuração de observabilidade:
+
+- manter verdes os testes de logger e métricas;
+- preservar o console original e o fail-safe dos sinks;
+- não introduzir dependência externa apenas para coletar métricas locais;
+- timer de telemetria local não deve impedir encerramento normal do processo;
+- métricas/snapshots não podem incluir segredos do `.env` nem payloads sensíveis.
 
 Quando a alteração puder afetar bootstrap, rotas HTTP, autenticação, Socket.IO ou schema MySQL:
 
