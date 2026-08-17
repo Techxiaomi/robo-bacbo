@@ -32,6 +32,35 @@ const dbPool = mysql.createPool({
 async function prepararBancoDeDados() {
     try {
         await dbPool.query(`
+            CREATE TABLE IF NOT EXISTS origens (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                nome VARCHAR(100)
+            )
+        `);
+
+        await dbPool.query(`
+            CREATE TABLE IF NOT EXISTS estrategias (
+                id VARCHAR(100) PRIMARY KEY,
+                nome VARCHAR(100),
+                origem VARCHAR(100),
+                padrao TEXT,
+                entrada VARCHAR(20),
+                gales INT DEFAULT 0,
+                proteger_empate BOOLEAN DEFAULT true,
+                ativo BOOLEAN DEFAULT true,
+                green_direto INT DEFAULT 0,
+                gale1 INT DEFAULT 0,
+                gale2 INT DEFAULT 0,
+                red INT DEFAULT 0,
+                ties_json TEXT,
+                is_dinamico BOOLEAN DEFAULT false,
+                robo_dono_id INT DEFAULT NULL,
+                criado_em BIGINT DEFAULT 0,
+                quarentena_restante INT DEFAULT 0
+            )
+        `);
+
+        await dbPool.query(`
             CREATE TABLE IF NOT EXISTS historico_resultados (
                 id INT AUTO_INCREMENT PRIMARY KEY, 
                 estrategia_id VARCHAR(100), 

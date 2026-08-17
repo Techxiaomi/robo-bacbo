@@ -44,3 +44,5 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - Telegram-only só entra em `robosInscritos`/histórico após confirmação da ENTRADA; Web+Telegram continua gerando um único histórico por robô, e GALE/fechamento usam somente destinos confirmados na entrada.
 - BUG-007D: Drawdown Control passa a aplicar `CONSERVADOR` (pausa no primeiro RED) e `DINAMICO` (X REDs em Y minutos), persistindo `standby_ate`/janela de REDs para sobreviver a restart e excluindo robôs em proteção da seleção de sinais.
 - `greens_consecutivos` passa a ser atualizado por resultado efetivamente recebido pelo robô; aviso Telegram de proteção é encadeado após o RED. `stop_reds_seguidos` separado permanece pendente por não possuir regra de recuperação definida no painel.
+- BUG-009: `prepararBancoDeDados()` passa a criar também `origens` e `estrategias` antes das migrations, tornando o bootstrap compatível com banco vazio sem depender de dump legado.
+- O schema inicial contém somente os campos comprovadamente usados pelo CRUD, estatísticas legadas e metadados dinâmicos atuais; bancos existentes continuam preservados por `CREATE TABLE IF NOT EXISTS`.
