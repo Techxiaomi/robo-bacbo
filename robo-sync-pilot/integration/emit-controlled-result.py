@@ -43,22 +43,25 @@ class RequestsCompat:
             return ResponseCompat(error.code, body)
 
 
-def extract_function(source_path, function_name):
+def extract_functions(source_path, function_names):
     source = source_path.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(source_path))
-    function_node = next(
-        (
-            node
-            for node in tree.body
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and node.name == function_name
-        ),
-        None,
-    )
-    if function_node is None:
-        raise RuntimeError(f"Função {function_name} não encontrada em {source_path}")
+    by_name = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name in function_names
+    }
+    missing = [name for name in function_names if name not in by_name]
+    if missing:
+        raise RuntimeError(
+            f"Funções {missing} não encontradas em {source_path}"
+        )
 
-    module = ast.Module(body=[function_node], type_ignores=[])
+    module = ast.Module(
+        body=[by_name[name] for name in function_names],
+        type_ignores=[],
+    )
     ast.fix_missing_locations(module)
     return compile(module, str(source_path), "exec")
 
@@ -100,10 +103,23 @@ def main():
         "COLETOR_SESSAO": args.session,
         "ultimo_tempo_rodada": 0,
         "coletor_seq": args.seq - 1,
+        "ultimo_resultado_chave": None,
+        "ultimo_resultado_chave_em": 0.0,
+        "RESULT_DEDUP_WINDOW_SECONDS": 3.0,
         "registrar_erro_limitado": registrar_erro_limitado,
     }
 
-    exec(extract_function(robo_path, "processar_resultado"), namespace)
+    exec(
+        extract_functions(
+            robo_path,
+            [
+                "chave_resultado_resolvido",
+                "resultado_resolvido_duplicado",
+                "processar_resultado",
+            ],
+        ),
+        namespace,
+    )
 
     payload = {
         "args": {
