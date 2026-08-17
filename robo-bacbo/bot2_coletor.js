@@ -154,6 +154,7 @@ async function prepararBancoDeDados() {
                 nivel VARCHAR(20),
                 risco_total DECIMAL(12,2),
                 valor_entrada DECIMAL(12,2),
+                executor_order_id VARCHAR(64) DEFAULT NULL,
                 status_ordem VARCHAR(20) DEFAULT 'PENDENTE',
                 placar_mesa VARCHAR(50) DEFAULT '',
                 lucro_prejuizo DECIMAL(12,2) DEFAULT 0,
@@ -186,6 +187,7 @@ async function prepararBancoDeDados() {
         await adicionarColuna("ALTER TABLE estrategias ADD COLUMN criado_em BIGINT DEFAULT 0");
         await adicionarColuna("ALTER TABLE estrategias ADD COLUMN quarentena_restante INT DEFAULT 0");
         await adicionarColuna("ALTER TABLE historico_disparos_robos ADD COLUMN estrategia_origem VARCHAR(100) DEFAULT ''");
+        await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN executor_order_id VARCHAR(64) DEFAULT NULL");
 
         console.log("\n========================================================");
         console.log("🚀 MÓDULO BACKEND V12.0 PRO - MOTOR DE EXECUÇÃO INTEGRADO");
@@ -290,6 +292,7 @@ function headersInternos() {
 }
 
 const EXECUTOR_TIMEOUT_MS = 5000;
+const EXECUTOR_MAX_ATTEMPTS = 2;
 const TELEGRAM_TIMEOUT_MS = 3000;
 const balanceSyncMaxAgeSecondsConfig = Number(process.env.BALANCE_SYNC_MAX_AGE_SECONDS || 90);
 const BALANCE_SYNC_MAX_AGE_MS = (
@@ -319,39 +322,67 @@ function obterSaldoGlobalFresco(agora = Date.now()) {
     return snapshot.fresco ? snapshot.saldo_atual : null;
 }
 
-async function enviarOrdemAoExecutor(alvo, valor) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), EXECUTOR_TIMEOUT_MS);
+async function enviarOrdemAoExecutor(alvo, valor, orderId = crypto.randomUUID()) {
+    let ultimoErro = null;
 
-    try {
-        const resposta = await fetch(EXECUTOR_URL, {
-            method: 'POST',
-            headers: headersInternos(),
-            body: JSON.stringify({ alvo, valor }),
-            signal: controller.signal
-        });
+    for (let tentativa = 1; tentativa <= EXECUTOR_MAX_ATTEMPTS; tentativa++) {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), EXECUTOR_TIMEOUT_MS);
 
-        let corpo = null;
-        try { corpo = await resposta.json(); } catch(e) {}
+        try {
+            const resposta = await fetch(EXECUTOR_URL, {
+                method: 'POST',
+                headers: headersInternos(),
+                body: JSON.stringify({ order_id: orderId, alvo, valor }),
+                signal: controller.signal
+            });
 
-        if (!resposta.ok) {
-            const detalhe = corpo && (corpo.erro || corpo.status) ? (corpo.erro || corpo.status) : `HTTP ${resposta.status}`;
-            throw new Error(`Executor recusou a ordem: ${detalhe}`);
+            let corpo = null;
+            try { corpo = await resposta.json(); } catch(e) {}
+
+            if (!resposta.ok) {
+                const detalhe = corpo && (corpo.erro || corpo.status) ? (corpo.erro || corpo.status) : `HTTP ${resposta.status}`;
+                const erroHttp = new Error(`Executor recusou a ordem: ${detalhe}`);
+                erroHttp.statusHttp = resposta.status;
+                throw erroHttp;
+            }
+
+            if (
+                !corpo
+                || !corpo.dados
+                || corpo.dados.order_id !== orderId
+                || corpo.dados.alvo !== alvo
+                || Number(corpo.dados.valor) !== Number(valor)
+            ) {
+                throw new Error("Executor respondeu sem confirmar o ID e os dados da ordem");
+            }
+
+            if (corpo.duplicada === true) {
+                console.warn(`♻️ Executor confirmou ordem idempotente já recebida: ${orderId}`);
+            }
+
+            return corpo;
+        } catch (e) {
+            const timeout = e && e.name === 'AbortError';
+            const statusHttp = Number(e && e.statusHttp);
+            const erroRepetivel = timeout || !Number.isFinite(statusHttp) || statusHttp >= 500;
+
+            ultimoErro = timeout
+                ? new Error(`Timeout de ${EXECUTOR_TIMEOUT_MS}ms aguardando confirmacao da ordem ${orderId}`)
+                : e;
+
+            if (erroRepetivel && tentativa < EXECUTOR_MAX_ATTEMPTS) {
+                console.warn(`⚠️ Falha ambígua na ordem ${orderId}; repetindo com o mesmo ID (${tentativa + 1}/${EXECUTOR_MAX_ATTEMPTS}).`);
+                continue;
+            }
+
+            throw ultimoErro;
+        } finally {
+            clearTimeout(timeoutId);
         }
-
-        if (!corpo || !corpo.dados || corpo.dados.alvo !== alvo || Number(corpo.dados.valor) !== Number(valor)) {
-            throw new Error("Executor respondeu sem confirmar os dados da ordem");
-        }
-
-        return corpo;
-    } catch (e) {
-        if (e && e.name === 'AbortError') {
-            throw new Error(`Timeout de ${EXECUTOR_TIMEOUT_MS}ms aguardando confirmacao do executor`);
-        }
-        throw e;
-    } finally {
-        clearTimeout(timeoutId);
     }
+
+    throw ultimoErro || new Error(`Falha desconhecida ao enviar ordem ${orderId}`);
 }
 if (!hostNodeEhLoopback(NODE_HOST)) {
     console.warn(`⚠️ NODE_HOST=${NODE_HOST}: painel/API expostos fora do loopback. As rotas administrativas ainda não possuem autenticação de usuário.`);
@@ -1662,13 +1693,15 @@ app.post("/receber-sinal", async (req, res) => {
                                         }
 
                                         let executorConfirmouGale = false;
+                                        let ordemExecutorIdGale = null;
                                         try {
-                                            await enviarOrdemAoExecutor(alvoPython, valorGale);
+                                            const confirmacaoExecutor = await enviarOrdemAoExecutor(alvoPython, valorGale);
                                             executorConfirmouGale = true;
-                                            await dbPool.query(`INSERT INTO auditoria_ordens (trader_id, estrategia_nome, fonte_sinal, alvo, nivel, risco_total, valor_entrada, status_ordem) VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDENTE')`, [trader.id, est.nome, est.origem, alvoPython, `GALE ${st.galeAtual}`, riscoAntigo + valorGale, valorGale]);
+                                            ordemExecutorIdGale = confirmacaoExecutor.dados.order_id;
+                                            await dbPool.query(`INSERT INTO auditoria_ordens (trader_id, estrategia_nome, fonte_sinal, alvo, nivel, risco_total, valor_entrada, executor_order_id, status_ordem) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE')`, [trader.id, est.nome, est.origem, alvoPython, `GALE ${st.galeAtual}`, riscoAntigo + valorGale, valorGale, ordemExecutorIdGale]);
                                         } catch(e) {
                                             if (executorConfirmouGale) {
-                                                console.error(`⚠️ GALE ${st.galeAtual} confirmado pelo executor, mas nao registrado na auditoria do trader ${trader.id}:`, e.message);
+                                                console.error(`⚠️ GALE ${st.galeAtual} confirmado pelo executor (${ordemExecutorIdGale}), mas nao registrado na auditoria do trader ${trader.id}:`, e.message);
                                             } else {
                                                 console.error(`❌ GALE ${st.galeAtual} nao enviado para o trader ${trader.id}:`, e.message);
                                             }
@@ -1794,16 +1827,18 @@ app.post("/receber-sinal", async (req, res) => {
                                     let alvoPython = est.entrada === 'Player' ? 'PlayerWon' : (est.entrada === 'Banker' ? 'BankerWon' : 'Tie');
 
                                     let executorConfirmouDireto = false;
+                                    let ordemExecutorIdDireto = null;
                                     try {
-                                        await enviarOrdemAoExecutor(alvoPython, valorArredondado);
+                                        const confirmacaoExecutor = await enviarOrdemAoExecutor(alvoPython, valorArredondado);
                                         executorConfirmouDireto = true;
+                                        ordemExecutorIdDireto = confirmacaoExecutor.dados.order_id;
 
                                         const conexao = await dbPool.getConnection();
                                         try {
                                             await conexao.beginTransaction();
                                             const novasEntradas = trader.entradas_feitas + 1;
                                             await conexao.query('UPDATE auto_traders SET entradas_feitas=? WHERE id=?', [novasEntradas, trader.id]);
-                                            await conexao.query(`INSERT INTO auditoria_ordens (trader_id, estrategia_nome, fonte_sinal, alvo, nivel, risco_total, valor_entrada, status_ordem) VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDENTE')`, [trader.id, est.nome, est.origem, alvoPython, 'DIRETO', valorArredondado, valorArredondado]);
+                                            await conexao.query(`INSERT INTO auditoria_ordens (trader_id, estrategia_nome, fonte_sinal, alvo, nivel, risco_total, valor_entrada, executor_order_id, status_ordem) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE')`, [trader.id, est.nome, est.origem, alvoPython, 'DIRETO', valorArredondado, valorArredondado, ordemExecutorIdDireto]);
                                             await conexao.commit();
                                             trader.entradas_feitas = novasEntradas;
                                         } catch(e) {
@@ -1814,7 +1849,7 @@ app.post("/receber-sinal", async (req, res) => {
                                         }
                                     } catch(e) {
                                         if (executorConfirmouDireto) {
-                                            console.error(`⚠️ Ordem DIRETO confirmada pelo executor, mas nao registrada para o trader ${trader.id}:`, e.message);
+                                            console.error(`⚠️ Ordem DIRETO confirmada pelo executor (${ordemExecutorIdDireto}), mas nao registrada para o trader ${trader.id}:`, e.message);
                                         } else {
                                             console.error(`❌ Ordem DIRETO nao enviada para o trader ${trader.id}:`, e.message);
                                         }

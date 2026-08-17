@@ -38,6 +38,8 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - BUG-001: o Node agora aguarda e valida a confirmação HTTP do executor antes de contabilizar uma entrada direta ou criar a nova ordem `PENDENTE` de Gale.
 - Entradas diretas atualizam `entradas_feitas` e auditoria em uma transação local somente após o aceite do executor.
 - Falhas de conexão, timeout, HTTP não-2xx e confirmações divergentes deixam de ser silenciosas e não são contabilizadas como novas ordens enviadas.
+- BUG-001B: cada ordem Node→Python recebe `order_id` UUID; falhas ambíguas são repetidas uma vez com o mesmo ID e o executor responde idempotentemente sem duplicar a fila.
+- O executor rejeita reutilização do mesmo `order_id` com payload diferente (409), mantém uma janela em memória dos últimos 5000 IDs e a auditoria passa a registrar `executor_order_id`.
 - BUG-002: Auto-Traders ativos em `STANDBY` passam para `OPERANDO` ao primeiro resultado de rodada válido e autenticado recebido da mesa.
 - A transição é persistida no MySQL antes de atualizar o estado em memória; traders desligados ou em outros estados não são alterados.
 - BUG-003: editar configurações ou usar o toggle rápido do Auto-Trader não sobrescreve mais `saldo_inicial` nem `saldo_atual`.

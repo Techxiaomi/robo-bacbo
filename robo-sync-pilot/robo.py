@@ -52,6 +52,9 @@ if not INTERNAL_API_TOKEN:
 # SERVIDOR FLASK (O "Ouvido" do Robô para receber ordens do Node.js)
 # ====================================================================
 fila_apostas = queue.Queue()
+ordens_executor_recebidas = {}
+ordens_executor_lock = threading.Lock()
+ORDEM_ID_LIMITE_MEMORIA = 5000
 app = Flask(__name__)
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR) # Oculta os logs técnicos do Flask no terminal
@@ -59,6 +62,34 @@ log.setLevel(logging.ERROR) # Oculta os logs técnicos do Flask no terminal
 def requisicao_interna_autorizada():
     token_recebido = request.headers.get("X-Internal-Token", "")
     return hmac.compare_digest(token_recebido, INTERNAL_API_TOKEN)
+
+def registrar_ordem_idempotente(dados):
+    order_id = dados["order_id"]
+    alvo = dados["alvo"]
+    valor = float(dados["valor"])
+    ordem_normalizada = {
+        "order_id": order_id,
+        "alvo": alvo,
+        "valor": valor
+    }
+
+    with ordens_executor_lock:
+        existente = ordens_executor_recebidas.get(order_id)
+        if existente is not None:
+            mesmo_payload = (
+                existente["alvo"] == alvo
+                and float(existente["valor"]) == valor
+            )
+            return ("duplicada" if mesmo_payload else "conflito"), existente
+
+        ordens_executor_recebidas[order_id] = ordem_normalizada
+        while len(ordens_executor_recebidas) > ORDEM_ID_LIMITE_MEMORIA:
+            primeiro_id = next(iter(ordens_executor_recebidas))
+            del ordens_executor_recebidas[primeiro_id]
+
+        fila_apostas.put(ordem_normalizada)
+
+    return "nova", ordem_normalizada
 
 @app.route('/apostar', methods=['POST'])
 def receber_aposta():
@@ -70,16 +101,43 @@ def receber_aposta():
     if not isinstance(dados, dict):
         return jsonify({"erro": "Payload JSON invalido"}), 400
 
+    order_id = str(dados.get("order_id") or "").strip().lower()
     alvo = dados.get("alvo")
     valor = dados.get("valor")
+
+    if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", order_id):
+        return jsonify({"erro": "order_id invalido"}), 400
     if alvo not in {"PlayerWon", "BankerWon", "Tie"}:
         return jsonify({"erro": "Alvo invalido"}), 400
     if not isinstance(valor, (int, float)) or isinstance(valor, bool) or valor <= 0:
         return jsonify({"erro": "Valor de aposta invalido"}), 400
 
-    fila_apostas.put(dados)
-    print(f"\n📥 ORDEM AUTENTICADA DO NODE.JS: Apostar R$ {valor} no alvo {alvo}")
-    return jsonify({"status": "Aposta na fila de execucao!", "dados": dados}), 200
+    resultado_idempotencia, ordem = registrar_ordem_idempotente({
+        "order_id": order_id,
+        "alvo": alvo,
+        "valor": valor
+    })
+
+    if resultado_idempotencia == "conflito":
+        return jsonify({
+            "erro": "order_id reutilizado com payload diferente",
+            "dados": ordem
+        }), 409
+
+    if resultado_idempotencia == "duplicada":
+        print(f"\n♻️ ORDEM JA RECEBIDA: {order_id} - fila preservada sem duplicar aposta")
+        return jsonify({
+            "status": "Ordem ja recebida; fila preservada",
+            "duplicada": True,
+            "dados": ordem
+        }), 200
+
+    print(f"\n📥 ORDEM AUTENTICADA DO NODE.JS: {order_id} - Apostar R$ {valor} no alvo {alvo}")
+    return jsonify({
+        "status": "Aposta na fila de execucao!",
+        "duplicada": False,
+        "dados": ordem
+    }), 200
 
 def iniciar_servidor_flask():
     app.run(host=EXECUTOR_HOST, port=EXECUTOR_PORT, debug=False, use_reloader=False)

@@ -36,11 +36,13 @@ No `PUT /api/robo/:id`, token vazio ou ausente preserva o valor armazenado; um t
 
 ### BUG-001 — Ordem pode ser registrada sem confirmação do executor
 
-Status: **mitigado no patch BUG-001**.
+Status: **mitigado pelos patches BUG-001 e BUG-001B**.
 
-O Node passa a aguardar a resposta do executor, rejeitar timeout/erro HTTP/confirmação divergente e só então contabilizar a entrada direta ou criar a nova ordem `PENDENTE` de Gale. A ordem anterior de um Gale continua sendo encerrada pelo resultado já observado da mesa.
+O BUG-001 faz o Node aguardar a resposta do executor e só contabilizar a entrada direta ou criar a nova ordem `PENDENTE` de Gale depois do aceite HTTP.
 
-Risco residual: uma falha de rede exatamente após o executor enfileirar a ordem e antes da resposta chegar ao Node ainda pode gerar uma confirmação ambígua. Eliminar completamente esse caso exige um identificador idempotente de ordem compartilhado entre Node e Python.
+O BUG-001B adiciona um UUID `order_id` compartilhado entre Node e Python. Em timeout, falha de transporte, resposta inválida ou HTTP 5xx, o Node pode repetir uma vez a mesma ordem com o mesmo ID. O executor registra o ID antes de enfileirar: repetição com o mesmo payload retorna sucesso idempotente sem nova entrada na fila; reutilização do mesmo ID com payload diferente retorna HTTP 409. O UUID confirmado também é gravado em `auditoria_ordens.executor_order_id`.
+
+Isso elimina a duplicidade causada pela perda normal da resposta HTTP enquanto o mesmo processo do executor permanece ativo. Risco residual: a memória de IDs não sobrevive a restart do executor; exatamente-once através de restart exigiria fila/estado de execução durável, o que é uma mudança arquitetural separada.
 
 ### BUG-002 — `STANDBY` pode impedir novas entradas indefinidamente
 
