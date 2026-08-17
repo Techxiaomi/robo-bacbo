@@ -1,6 +1,8 @@
 import ast
 import pathlib
+import queue
 import re
+import threading
 import unittest
 
 
@@ -95,6 +97,48 @@ class TestParsearValorMonetario(unittest.TestCase):
         self.assertIsNone(self.parsear("sem saldo"))
         self.assertIsNone(self.parsear("-10,00"))
         self.assertIsNone(self.parsear("R$ -1.234,56"))
+
+
+class TestRegistrarOrdemIdempotente(unittest.TestCase):
+    def setUp(self):
+        ns = {
+            "ordens_executor_recebidas": {},
+            "ordens_executor_lock": threading.Lock(),
+            "ORDEM_ID_LIMITE_MEMORIA": 5000,
+            "fila_apostas": queue.Queue(),
+        }
+        carregar_funcoes(["registrar_ordem_idempotente"], ns)
+        self.ns = ns
+        self.registrar = ns["registrar_ordem_idempotente"]
+
+    @staticmethod
+    def ordem(order_id="123e4567-e89b-42d3-a456-426614174000", alvo="PlayerWon", valor=10):
+        return {
+            "order_id": order_id,
+            "alvo": alvo,
+            "valor": valor
+        }
+
+    def test_primeira_ordem_entra_na_fila(self):
+        status, ordem = self.registrar(self.ordem())
+        self.assertEqual(status, "nova")
+        self.assertEqual(ordem["valor"], 10.0)
+        self.assertEqual(self.ns["fila_apostas"].qsize(), 1)
+
+    def test_repeticao_identica_nao_duplica_fila(self):
+        self.registrar(self.ordem())
+        status, ordem = self.registrar(self.ordem())
+
+        self.assertEqual(status, "duplicada")
+        self.assertEqual(ordem["alvo"], "PlayerWon")
+        self.assertEqual(self.ns["fila_apostas"].qsize(), 1)
+
+    def test_mesmo_id_com_payload_diferente_e_conflito(self):
+        self.registrar(self.ordem())
+        status, _ = self.registrar(self.ordem(alvo="BankerWon"))
+
+        self.assertEqual(status, "conflito")
+        self.assertEqual(self.ns["fila_apostas"].qsize(), 1)
 
 
 class TestProcessarResultado(unittest.TestCase):
