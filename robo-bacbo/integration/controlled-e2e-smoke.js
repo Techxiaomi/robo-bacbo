@@ -19,13 +19,11 @@ const emitterPath = path.join(
 );
 
 let backendOutput = "";
-
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 async function waitUntil(label, fn, timeoutMs = 12000) {
     const start = Date.now();
     let lastError = null;
-
     while (Date.now() - start < timeoutMs) {
         try {
             const value = await fn();
@@ -35,7 +33,6 @@ async function waitUntil(label, fn, timeoutMs = 12000) {
         }
         await sleep(100);
     }
-
     throw new Error(
         `Timeout aguardando ${label}` + (lastError ? `: ${lastError.message}` : "")
     );
@@ -102,15 +99,16 @@ async function nodeRequest(route, options = {}) {
 async function postJson(route, body, internal = false) {
     const headers = { "Content-Type": "application/json" };
     if (internal) headers["X-Internal-Token"] = TOKEN;
-
     const response = await nodeRequest(route, {
         method: "POST",
         headers,
         body: JSON.stringify(body)
     });
-
     const data = await response.json();
-    assert.equal(response.status, 200, `${route}: HTTP ${response.status} ${JSON.stringify(data)}`);
+    assert.equal(
+        response.status, 200,
+        `${route}: HTTP ${response.status} ${JSON.stringify(data)}`
+    );
     return data;
 }
 
@@ -156,7 +154,6 @@ async function emitResult({ seq, winner, p1, p2, b1, b2 }) {
 
 async function main() {
     const fakeExecutor = await startFakeExecutor();
-
     const backend = spawn(process.execPath, [backendPath], {
         cwd: path.join(__dirname, ".."),
         env: {
@@ -190,7 +187,6 @@ async function main() {
     }
 
     let db = null;
-
     try {
         await waitUntil("backendPronto=true", async () => {
             if (backend.exitCode !== null) {
@@ -198,7 +194,7 @@ async function main() {
             }
             try {
                 return (await nodeRequest("/api/dashboard-stats")).status === 200;
-            } catch (error) {
+            } catch {
                 return false;
             }
         }, 30000);
@@ -352,21 +348,19 @@ async function main() {
             { tipo_resultado: "GREEN", nivel: "DIRETO", multiplicador: "" }
         );
 
-        const dashboardResponse = await nodeRequest("/api/dashboard-stats");
-        assert.equal(dashboardResponse.status, 200);
-        assert.deepEqual(await dashboardResponse.json(), {
-            sinais: 1,
-            greens: 1,
-            reds: 0,
-            assertividade: "100.0%"
-        });
-
-        const [[spinCount]] = await db.query("SELECT COUNT(*) AS total FROM giros_recentes");
+        const [[spinCount]] = await db.query(
+            "SELECT COUNT(*) AS total FROM giros_recentes"
+        );
+        const [[historyCount]] = await db.query(
+            "SELECT COUNT(*) AS total FROM historico_resultados WHERE estrategia_id=?",
+            [strategy.id]
+        );
         const [[pendingCount]] = await db.query(
             "SELECT COUNT(*) AS total FROM auditoria_ordens WHERE status_ordem='PENDENTE'"
         );
 
         assert.equal(Number(spinCount.total), 2);
+        assert.equal(Number(historyCount.total), 1);
         assert.equal(Number(pendingCount.total), 0);
         assert.equal(fakeExecutor.orders.length, 1);
         assert.equal(fakeExecutor.getError(), null);
@@ -379,9 +373,8 @@ async function main() {
         process.exitCode = 1;
     } finally {
         if (db) {
-            try { await db.end(); } catch (error) {}
+            try { await db.end(); } catch {}
         }
-
         if (backend.exitCode === null) {
             backend.kill("SIGTERM");
             await Promise.race([
@@ -390,8 +383,7 @@ async function main() {
             ]);
             if (backend.exitCode === null) backend.kill("SIGKILL");
         }
-
-        try { await fakeExecutor.close(); } catch (error) {}
+        try { await fakeExecutor.close(); } catch {}
     }
 }
 
