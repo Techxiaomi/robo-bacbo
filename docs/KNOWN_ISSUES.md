@@ -74,7 +74,7 @@ Status: **parcialmente mitigado no patch BUG-005A**.
 
 ### BUG-006 — Stop Win / Stop Loss / Trailing / horário estão configuráveis no painel sem enforcement localizado
 
-Status: **parcialmente mitigado nos patches BUG-006A, BUG-006B e BUG-006C**.
+Status: **mitigado nos patches BUG-006A, BUG-006B, BUG-006C e BUG-006D**.
 
 A janela `hora_inicio`/`hora_fim` passa a ser aplicada antes de abrir novas sequências do Auto-Trader. Janelas normais e janelas que atravessam a meia-noite são suportadas; horários ausentes usam `00:00`–`23:59`, e configuração de horário inválida bloqueia a nova entrada. Gales de uma sequência já iniciada continuam até o desfecho para não deixar ordens pendentes/auditoria em estado incoerente.
 
@@ -84,7 +84,11 @@ O BUG-006C adiciona um Stop Reds exclusivo do Auto-Trader. A contagem só muda q
 
 Ao atingir o limite configurado, o motor pode entrar em `STOP_REDS_PAUSA` por N minutos, permanecendo ativo porém impedido de abrir novas sequências até o rearmamento automático, ou pode entrar em `STOP_REDS` com `ativo=false`, exigindo reativação manual. A reativação manual reutiliza o fluxo existente de novo baseline e também zera o estado de Stop Reds. O estado é persistido para sobreviver a restart do Node.
 
-Sequências já iniciadas, inclusive Gales, continuam até o desfecho para preservar a auditoria. O Stop Reds de Robôs/Canais permanece um mecanismo separado de geração/distribuição de sinais e não é usado pelo BUG-006C. `trailing_stop` permanece pendente porque o painel ainda não define distância/recuo de trailing.
+O BUG-006D implementa o Trailing Stop com uma distância de recuo explícita em reais (`trailing_recuo`). O backend registra em `trailing_pico_lucro` o maior lucro real observado nos checkpoints que antecedem nova exposição financeira. Quando o lucro atual recua até `pico - trailing_recuo`, o Auto-Trader entra em `TRAILING_STOP`, fica `ativo=false` e exige reativação manual.
+
+O pico é persistido para sobreviver a restart do Node. Reativação manual, desligamento seguido de reativação e mudança de `trailing_stop`/`trailing_recuo` iniciam um novo pico. Para compatibilidade, configurações antigas com `trailing_stop=true` mas sem `trailing_recuo>0` permanecem desarmadas até que o usuário informe um recuo.
+
+Sequências já iniciadas, inclusive Gales, continuam até o desfecho para preservar a auditoria; Stop Win e Stop Loss mantêm prioridade quando seus próprios limites também forem atingidos. O Stop Reds de Robôs/Canais permanece um mecanismo separado de geração/distribuição de sinais e não é usado pelo BUG-006C/BUG-006D.
 
 ### BUG-007 — Telegram e filtros de robôs parecem incompletos
 
