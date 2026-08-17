@@ -200,6 +200,14 @@ async function prepararBancoDeDados() {
         await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN stop_reds_pausado_ate BIGINT DEFAULT 0");
         await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN trailing_pico_lucro DECIMAL(12,2) DEFAULT 0");
 
+        // Corrige estados legados impossíveis: um trader desligado manualmente não pode permanecer OPERANDO/STANDBY.
+        // Estados de parada explícita (STOP_WIN/STOP_LOSS/STOP_REDS/TRAILING_STOP) são preservados.
+        await dbPool.query(
+            `UPDATE auto_traders
+             SET status_operacao='DESLIGADO'
+             WHERE ativo=false AND status_operacao IN ('OPERANDO', 'STANDBY')`
+        );
+
         console.log("\n========================================================");
         console.log("🚀 MÓDULO BACKEND V12.0 PRO - MOTOR DE EXECUÇÃO INTEGRADO");
         console.log("========================================================\n");
@@ -898,10 +906,11 @@ app.post("/api/auto-trader", async (req, res) => {
         }
 
         const saldoBaseline = novoAtivo ? saldoFresco : 0;
+        const statusInicial = novoAtivo ? 'STANDBY' : 'DESLIGADO';
         await dbPool.query(
             `INSERT INTO auto_traders (nome, ativo, config_json, saldo_inicial, saldo_atual, status_operacao, entradas_feitas, pulos_restantes)
-             VALUES (?, ?, ?, ?, ?, 'STANDBY', 0, 0)`,
-            [nome, novoAtivo ? 1 : 0, configJson, saldoBaseline, saldoBaseline]
+             VALUES (?, ?, ?, ?, ?, ?, 0, 0)`,
+            [nome, novoAtivo ? 1 : 0, configJson, saldoBaseline, saldoBaseline, statusInicial]
         );
         await carregarSistemasParaMemoria();
         res.json({ sucesso: true, saldo_inicial: saldoBaseline });
@@ -919,7 +928,7 @@ app.put("/api/auto-trader/:id", async (req, res) => {
         const novoAtivo = ativo === true || ativo === 1;
 
         const [existentes] = await dbPool.query(
-            'SELECT ativo, config_json FROM auto_traders WHERE id=? LIMIT 1',
+            'SELECT ativo, config_json, status_operacao FROM auto_traders WHERE id=? LIMIT 1',
             [id]
         );
         if (existentes.length === 0) {
@@ -939,6 +948,7 @@ app.put("/api/auto-trader/:id", async (req, res) => {
 
         const estavaAtivo = existentes[0].ativo === true || existentes[0].ativo === 1;
         const reativando = !estavaAtivo && novoAtivo;
+        const desligando = estavaAtivo && !novoAtivo;
 
         if (reativando) {
             const saldoFresco = obterSaldoGlobalFresco();
@@ -958,6 +968,23 @@ app.put("/api/auto-trader/:id", async (req, res) => {
                  WHERE id=?`,
                 [nome, configJson, saldoFresco, saldoFresco, id]
             );
+        } else if (desligando) {
+            if (trailingConfigMudou) {
+                await dbPool.query(
+                    `UPDATE auto_traders
+                     SET nome=?, ativo=false, config_json=?,
+                         status_operacao='DESLIGADO', trailing_pico_lucro=0
+                     WHERE id=?`,
+                    [nome, configJson, id]
+                );
+            } else {
+                await dbPool.query(
+                    `UPDATE auto_traders
+                     SET nome=?, ativo=false, config_json=?, status_operacao='DESLIGADO'
+                     WHERE id=?`,
+                    [nome, configJson, id]
+                );
+            }
         } else {
             if (trailingConfigMudou) {
                 await dbPool.query(

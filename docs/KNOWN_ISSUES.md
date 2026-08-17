@@ -114,6 +114,14 @@ O Node registra quando o último saldo foi aceito e considera o valor fresco por
 
 A validação operacional confirmou o seletor CSS real no Chromium headless, a leitura monetária, o envio autenticado Python→Node e a renovação do snapshot por heartbeat mantendo `fresco=true`. Com isso, o BUG-006B pode usar o saldo real como fonte de enforcement financeiro. A semântica de trailing permanece separada.
 
+### BUG-010 — Auto-Trader desligado pode conservar `status_operacao=OPERANDO`
+
+Status: **mitigado no patch BUG-010**.
+
+O `PUT /api/auto-trader/:id` atualizava `ativo=false` no desligamento manual, mas preservava o `status_operacao` anterior. Assim, um motor que estava `OPERANDO` podia ficar persistido como `ativo=false` + `OPERANDO`, mesmo sem executar novas entradas porque os gates financeiros também verificam `ativo`.
+
+O BUG-010 torna a transição manual ON→OFF explícita: grava `status_operacao='DESLIGADO'`. Criação inativa usa o mesmo status, enquanto a reativação continua capturando saldo fresco e iniciando em `STANDBY`. No startup, somente combinações legadas `ativo=false` + `OPERANDO`/`STANDBY` são normalizadas. Estados que registram a causa de um hard stop (`STOP_WIN`, `STOP_LOSS`, `STOP_REDS` e `TRAILING_STOP`) não são sobrescritos.
+
 ### OBS-001 — Exceções críticas são frequentemente silenciadas
 
 Status: **parcialmente mitigado nos patches OBS-001A, OBS-001B, OBS-001C, OBS-001D e OBS-001E**.
