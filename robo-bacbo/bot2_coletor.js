@@ -100,6 +100,7 @@ async function prepararBancoDeDados() {
                 min_assertividade INT DEFAULT 0,
                 stop_reds_seguidos INT DEFAULT 0,
                 greens_consecutivos INT DEFAULT 0,
+                reds_consecutivos INT DEFAULT 0,
                 standby_ate BIGINT DEFAULT 0,
                 historico_reds_json TEXT,
                 ativo BOOLEAN DEFAULT true,
@@ -185,6 +186,7 @@ async function prepararBancoDeDados() {
         await adicionarColuna("ALTER TABLE robos_canais ADD COLUMN stop_reds_seguidos INT DEFAULT 0");
         await adicionarColuna("ALTER TABLE robos_canais ADD COLUMN min_assertividade INT DEFAULT 0");
         await adicionarColuna("ALTER TABLE robos_canais ADD COLUMN greens_consecutivos INT DEFAULT 0");
+        await adicionarColuna("ALTER TABLE robos_canais ADD COLUMN reds_consecutivos INT DEFAULT 0");
         await adicionarColuna("ALTER TABLE robos_canais ADD COLUMN standby_ate BIGINT DEFAULT 0");
         await adicionarColuna("ALTER TABLE robos_canais ADD COLUMN historico_reds_json TEXT");
 
@@ -760,14 +762,91 @@ app.post("/api/robo", async (req, res) => {
 
 app.put("/api/robo/:id", async (req, res) => {
     try {
-        const { id } = req.params; const { nome, tag, cor, telegram_token, telegram_chat_id, enviar_telegram, enviar_web, min_assert, stop_reds, ativo, config, destinatarios } = req.body;
+        const { id } = req.params;
+        const {
+            nome, tag, cor, telegram_token, telegram_chat_id,
+            enviar_telegram, enviar_web, min_assert, stop_reds,
+            ativo, config, destinatarios
+        } = req.body;
+
         const configJson = JSON.stringify(config || {});
         const tokenRecebido = typeof telegram_token === 'string' ? telegram_token.trim() : '';
-        await dbPool.query(`UPDATE robos_canais SET nome=?, tag_visual=?, cor_hex=?, telegram_token=COALESCE(NULLIF(?, ''), telegram_token), telegram_chat_id=?, enviar_telegram=?, enviar_web=?, min_assertividade=?, stop_reds_seguidos=?, ativo=?, config_json=? WHERE id=?`, [nome, tag, cor, tokenRecebido, telegram_chat_id || '', enviar_telegram ? 1 : 0, enviar_web ? 1 : 0, min_assert, stop_reds, ativo ? 1 : 0, configJson, id]);
+        const novoAtivo = ativo === true || ativo === 1;
+        const stopNovo = Math.max(0, Math.trunc(Number(stop_reds) || 0));
+
+        const [existentes] = await dbPool.query(
+            'SELECT ativo, stop_reds_seguidos FROM robos_canais WHERE id=? LIMIT 1',
+            [id]
+        );
+
+        if (existentes.length === 0) {
+            return res.status(404).json({ sucesso: false, erro: 'robo_nao_encontrado' });
+        }
+
+        const estavaAtivo = existentes[0].ativo === true || existentes[0].ativo === 1;
+        const reativando = !estavaAtivo && novoAtivo;
+        const stopAnterior = Math.max(
+            0,
+            Math.trunc(Number(existentes[0].stop_reds_seguidos) || 0)
+        );
+        const stopMudou = stopAnterior !== stopNovo;
+
+        if (reativando || stopMudou) {
+            await dbPool.query(
+                `UPDATE robos_canais
+                 SET nome=?, tag_visual=?, cor_hex=?,
+                     telegram_token=COALESCE(NULLIF(?, ''), telegram_token),
+                     telegram_chat_id=?, enviar_telegram=?, enviar_web=?,
+                     min_assertividade=?, stop_reds_seguidos=?, ativo=?,
+                     config_json=?, reds_consecutivos=0
+                 WHERE id=?`,
+                [
+                    nome, tag, cor, tokenRecebido, telegram_chat_id || '',
+                    enviar_telegram ? 1 : 0, enviar_web ? 1 : 0,
+                    min_assert, stopNovo, novoAtivo ? 1 : 0,
+                    configJson, id
+                ]
+            );
+        } else {
+            await dbPool.query(
+                `UPDATE robos_canais
+                 SET nome=?, tag_visual=?, cor_hex=?,
+                     telegram_token=COALESCE(NULLIF(?, ''), telegram_token),
+                     telegram_chat_id=?, enviar_telegram=?, enviar_web=?,
+                     min_assertividade=?, stop_reds_seguidos=?, ativo=?,
+                     config_json=?
+                 WHERE id=?`,
+                [
+                    nome, tag, cor, tokenRecebido, telegram_chat_id || '',
+                    enviar_telegram ? 1 : 0, enviar_web ? 1 : 0,
+                    min_assert, stopNovo, novoAtivo ? 1 : 0,
+                    configJson, id
+                ]
+            );
+        }
+
         await dbPool.query('DELETE FROM destinatarios_robo WHERE robo_id = ?', [id]);
-        if (destinatarios && Array.isArray(destinatarios)) { for (let d of destinatarios) { if (d.chat_id && d.chat_id.trim() !== '') await dbPool.query('INSERT INTO destinatarios_robo (robo_id, nome_cliente, chat_id) VALUES (?, ?, ?)', [id, d.nome_cliente || 'Cliente', d.chat_id.trim()]); } }
-        await carregarSistemasParaMemoria(); ioServer.emit('atualizar_robos'); res.json({ sucesso: true });
-    } catch(e) { console.error(`❌ PUT /api/robo/${req.params.id} falhou:`, e.message); res.status(500).json({ sucesso: false }); }
+        if (destinatarios && Array.isArray(destinatarios)) {
+            for (let d of destinatarios) {
+                if (d.chat_id && d.chat_id.trim() !== '') {
+                    await dbPool.query(
+                        'INSERT INTO destinatarios_robo (robo_id, nome_cliente, chat_id) VALUES (?, ?, ?)',
+                        [id, d.nome_cliente || 'Cliente', d.chat_id.trim()]
+                    );
+                }
+            }
+        }
+
+        await carregarSistemasParaMemoria();
+        ioServer.emit('atualizar_robos');
+        res.json({
+            sucesso: true,
+            stop_reds_resetado: reativando || stopMudou
+        });
+    } catch(e) {
+        console.error(`❌ PUT /api/robo/${req.params.id} falhou:`, e.message);
+        res.status(500).json({ sucesso: false });
+    }
 });
 
 app.delete("/api/robo/:id", async (req, res) => {
@@ -1039,6 +1118,43 @@ function roboSintonizaEstrategia(robo, est) {
     return origens.includes(origem);
 }
 
+function avaliarStopRedsRobo(robo, tipoResultado) {
+    const limite = Math.max(0, Math.trunc(Number(robo && robo.stop_reds_seguidos) || 0));
+    const redsAtuais = Math.max(0, Math.trunc(Number(robo && robo.reds_consecutivos) || 0));
+    const tipo = String(tipoResultado || '').toUpperCase();
+
+    if (!['GREEN', 'TIE', 'RED'].includes(tipo)) {
+        return {
+            reds_consecutivos: redsAtuais,
+            desligar: false,
+            limite
+        };
+    }
+
+    if (tipo !== 'RED') {
+        return {
+            reds_consecutivos: 0,
+            desligar: false,
+            limite
+        };
+    }
+
+    if (limite <= 0) {
+        return {
+            reds_consecutivos: 0,
+            desligar: false,
+            limite
+        };
+    }
+
+    const proximosReds = redsAtuais + 1;
+    return {
+        reds_consecutivos: proximosReds,
+        desligar: proximosReds >= limite,
+        limite
+    };
+}
+
 function estadoProtecaoDoRobo(robo) {
     if (!estadoStandbyRobos[robo.id]) {
         let historicoReds = [];
@@ -1067,7 +1183,7 @@ function roboEmStandby(robo, agora = Date.now()) {
     return Number(estado.em_standby_ate || 0) > agora;
 }
 
-function aplicarProtecaoRoboEmMemoria(robo, estado, greens) {
+function aplicarProtecaoRoboEmMemoria(robo, estado, greens, reds = robo.reds_consecutivos) {
     const estadoNormalizado = {
         em_standby_ate: Math.max(0, Math.trunc(Number(estado.em_standby_ate) || 0)),
         historico_reds: (Array.isArray(estado.historico_reds) ? estado.historico_reds : [])
@@ -1076,13 +1192,15 @@ function aplicarProtecaoRoboEmMemoria(robo, estado, greens) {
     };
 
     robo.greens_consecutivos = Math.max(0, Number(greens) || 0);
+    robo.reds_consecutivos = Math.max(0, Math.trunc(Number(reds) || 0));
     robo.standby_ate = estadoNormalizado.em_standby_ate;
     robo.historico_reds_json = JSON.stringify(estadoNormalizado.historico_reds);
     estadoStandbyRobos[robo.id] = estadoNormalizado;
 }
 
-async function persistirProtecaoRobo(robo, estado, greens) {
+async function persistirProtecaoRobo(robo, estado, greens, reds = robo.reds_consecutivos) {
     const greensNormalizado = Math.max(0, Number(greens) || 0);
+    const redsNormalizado = Math.max(0, Math.trunc(Number(reds) || 0));
     const standbyAte = Math.max(0, Math.trunc(Number(estado.em_standby_ate) || 0));
     const historicoReds = (Array.isArray(estado.historico_reds) ? estado.historico_reds : [])
         .map(Number)
@@ -1091,15 +1209,16 @@ async function persistirProtecaoRobo(robo, estado, greens) {
 
     await dbPool.query(
         `UPDATE robos_canais
-         SET greens_consecutivos=?, standby_ate=?, historico_reds_json=?
+         SET greens_consecutivos=?, reds_consecutivos=?, standby_ate=?, historico_reds_json=?
          WHERE id=?`,
-        [greensNormalizado, standbyAte, historicoJson, robo.id]
+        [greensNormalizado, redsNormalizado, standbyAte, historicoJson, robo.id]
     );
 
     aplicarProtecaoRoboEmMemoria(
         robo,
         { em_standby_ate: standbyAte, historico_reds: historicoReds },
-        greensNormalizado
+        greensNormalizado,
+        redsNormalizado
     );
 }
 
@@ -1132,6 +1251,7 @@ async function processarResultadoProtecaoRobos(estado, tipoResultado, timestampC
         const cooldown = robo.config?.cooldown || {};
         const cooldownAtivo = cooldown.ativo === true || cooldown.ativo === 1;
         const greensAtuais = Math.max(0, Number(robo.greens_consecutivos) || 0);
+        const stopReds = avaliarStopRedsRobo(robo, tipoResultado);
 
         if (tipoResultado !== 'RED') {
             const proximosGreens = greensAtuais + 1;
@@ -1145,7 +1265,12 @@ async function processarResultadoProtecaoRobos(estado, tipoResultado, timestampC
             }
 
             try {
-                await persistirProtecaoRobo(robo, proximoEstado, proximosGreens);
+                await persistirProtecaoRobo(
+                    robo,
+                    proximoEstado,
+                    proximosGreens,
+                    stopReds.reds_consecutivos
+                );
             } catch (e) {
                 console.error(`⚠️ Robô ${robo.id}: falha ao persistir streak/proteção após ${tipoResultado}; memória preservada no estado anterior.`, e.message);
             }
@@ -1154,13 +1279,69 @@ async function processarResultadoProtecaoRobos(estado, tipoResultado, timestampC
 
         const proximosGreens = 0;
 
+        if (stopReds.desligar) {
+            const estadoStop = {
+                em_standby_ate: 0,
+                historico_reds: []
+            };
+
+            try {
+                await dbPool.query(
+                    `UPDATE robos_canais
+                     SET ativo=false, greens_consecutivos=0, reds_consecutivos=?,
+                         standby_ate=0, historico_reds_json='[]'
+                     WHERE id=?`,
+                    [stopReds.reds_consecutivos, robo.id]
+                );
+
+                aplicarProtecaoRoboEmMemoria(
+                    robo,
+                    estadoStop,
+                    0,
+                    stopReds.reds_consecutivos
+                );
+                robo.ativo = false;
+
+                console.log(
+                    `🛑 Robô ${robo.id}: Stop Reds atingido `
+                    + `(${stopReds.reds_consecutivos}/${stopReds.limite}). `
+                    + `Robô desligado até reativação manual.`
+                );
+            } catch (e) {
+                aplicarProtecaoRoboEmMemoria(
+                    robo,
+                    estadoStop,
+                    0,
+                    stopReds.reds_consecutivos
+                );
+                robo.ativo = false;
+                console.error(
+                    `🚨 Robô ${robo.id}: falha ao persistir Stop Reds; `
+                    + `robô mantido desligado apenas em memória por segurança.`,
+                    e.message
+                );
+            }
+
+            continue;
+        }
+
         if (!cooldownAtivo) {
             proximoEstado.historico_reds = [];
 
             try {
-                await persistirProtecaoRobo(robo, proximoEstado, proximosGreens);
+                await persistirProtecaoRobo(
+                    robo,
+                    proximoEstado,
+                    proximosGreens,
+                    stopReds.reds_consecutivos
+                );
             } catch (e) {
-                aplicarProtecaoRoboEmMemoria(robo, proximoEstado, proximosGreens);
+                aplicarProtecaoRoboEmMemoria(
+                    robo,
+                    proximoEstado,
+                    proximosGreens,
+                    stopReds.reds_consecutivos
+                );
                 console.error(`⚠️ Robô ${robo.id}: falha ao persistir RED; estado conservador mantido apenas em memória.`, e.message);
             }
             continue;
@@ -1198,13 +1379,23 @@ async function processarResultadoProtecaoRobos(estado, tipoResultado, timestampC
         }
 
         try {
-            await persistirProtecaoRobo(robo, proximoEstado, proximosGreens);
+            await persistirProtecaoRobo(
+                robo,
+                proximoEstado,
+                proximosGreens,
+                stopReds.reds_consecutivos
+            );
 
             if (devePausar) {
                 console.log(`🛡️ Robô ${robo.id} em proteção por ${pausaMin} minuto(s).`);
             }
         } catch (e) {
-            aplicarProtecaoRoboEmMemoria(robo, proximoEstado, proximosGreens);
+            aplicarProtecaoRoboEmMemoria(
+                robo,
+                proximoEstado,
+                proximosGreens,
+                stopReds.reds_consecutivos
+            );
 
             if (devePausar) {
                 console.error(`🚨 Robô ${robo.id}: falha ao persistir standby; proteção mantida em memória por segurança.`, e.message);

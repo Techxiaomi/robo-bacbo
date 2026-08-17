@@ -92,13 +92,15 @@ Sequências já iniciadas, inclusive Gales, continuam até o desfecho para prese
 
 ### BUG-007 — Telegram e filtros de robôs parecem incompletos
 
-Status: **parcialmente mitigado pelos patches BUG-007A, BUG-007B, BUG-007C e BUG-007D**.
+Status: **mitigado pelos patches BUG-007A, BUG-007B, BUG-007C, BUG-007D e BUG-007E**.
 
 O BUG-007A restaura o CRUD visual de Robôs. O BUG-007B conecta o canal web ao ciclo real do sinal, com precedência `exceção > avulso > origem`, propriedade por `robo_dono_id` em padrões dinâmicos e filtro de `min_assertividade`. O BUG-007C implementa entrega Telegram confirmada e união multicanal sem duplicar histórico.
 
 O BUG-007D aplica o Drawdown Control conforme a semântica explícita do painel: `CONSERVADOR` pausa no primeiro RED; `DINAMICO` pausa após X REDs dentro de Y minutos; ambos usam `pausa_min`. Robôs em `standby_ate` ficam fora da seleção Web/Telegram até a expiração. O estado de proteção e a janela recente de REDs são persistidos para sobreviver a restart do Node. GREEN/TIE incrementa `greens_consecutivos`, RED zera o streak, e o aviso opcional de proteção no Telegram é enviado depois da mensagem de RED somente a destinos cuja ENTRADA foi confirmada.
 
-O campo `stop_reds_seguidos` deste módulo permanece independente do Stop Reds do Auto-Trader. Ele continua sem enforcement próprio porque ainda não foi definida a ação de recuperação específica do Robô/Canal; o BUG-006C não lê nem altera esse controle.
+O BUG-007E aplica `stop_reds_seguidos` como hard stop exclusivo do Robô/Canal. A contagem usa somente sinais nos quais o robô aparece em `robosInscritos`: GREEN/TIE zera o streak e RED final acrescenta uma unidade. Ao atingir o limite, `ativo=false` é persistido, a proteção temporária é limpa e o robô deixa de participar de novos sinais até reativação manual.
+
+Quando o mesmo RED também acionaria o Drawdown Control, o Stop Reds definitivo tem precedência e não inicia uma pausa temporária redundante. O Drawdown Control continua sendo o mecanismo de cooldown; o Stop Reds permanece um desligamento manualmente reversível. Esse estado é independente do Stop Reds do Auto-Trader e não altera execução financeira, fichas, Gales ou ordens.
 
 ### BUG-008 — Sincronização de saldo da corretora estava incompleta
 
