@@ -41,6 +41,7 @@ async function waitUntil(label, fn, timeoutMs = 12000) {
 function startFakeExecutor(getDb) {
     const orders = [];
     let handlerError = null;
+    const callbackDelayMs = 700;
 
     const server = http.createServer((req, res) => {
         if (req.method !== "POST" || req.url !== "/apostar") {
@@ -81,6 +82,10 @@ function startFakeExecutor(getDb) {
                 assert.equal(intent.alvo, payload.alvo);
                 assert.equal(Number(intent.valor_entrada), Number(payload.valor));
 
+                // Mantém a primeira rodada deliberadamente presa no executor.
+                // A segunda rodada será recebida pelo Node durante este intervalo.
+                await sleep(callbackDelayMs);
+
                 const callbackResponse = await fetch(`${BASE_URL}/executor-status`, {
                     method: "POST",
                     headers: {
@@ -103,7 +108,8 @@ function startFakeExecutor(getDb) {
                     token: req.headers["x-internal-token"],
                     intentStatusBeforeAck: intent.status_ordem,
                     intentIdBeforeAck: Number(intent.id),
-                    callbackBeforeAck: true
+                    callbackBeforeAck: true,
+                    callbackDelayMs
                 });
                 res.writeHead(200, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({
@@ -315,6 +321,13 @@ async function main() {
             p1: 4, p2: 3, b1: 2, b2: 1
         });
 
+        // Não espera executor/auditoria. Seq2 chega enquanto seq1 ainda está bloqueada
+        // no delay do callback EXECUTADA. Sem BUG-014C, seq2 pode ultrapassar seq1.
+        await emitResult({
+            seq: 2, winner: "BankerWon",
+            p1: 1, p2: 2, b1: 4, b2: 3
+        });
+
         await waitUntil("ordem no executor fake", () => {
             if (fakeExecutor.getError()) throw fakeExecutor.getError();
             return fakeExecutor.orders.length === 1;
@@ -327,26 +340,29 @@ async function main() {
         assert.equal(order.intentStatusBeforeAck, "PREPARANDO");
         assert.ok(order.intentIdBeforeAck > 0);
         assert.equal(order.callbackBeforeAck, true);
+        assert.equal(order.callbackDelayMs, 700);
 
-        const pending = await waitUntil("auditoria PENDENTE", async () => {
+        const finalized = await waitUntil("auditoria WIN apos rodadas sobrepostas", async () => {
             const [[row]] = await db.query(
                 `SELECT id, estrategia_nome, fonte_sinal, alvo, nivel, risco_total,
-                        valor_entrada, executor_order_id, status_ordem
+                        valor_entrada, executor_order_id, status_ordem, lucro_prejuizo, placar_mesa
                  FROM auditoria_ordens
                  WHERE trader_id=?
                  ORDER BY id DESC LIMIT 1`,
                 [trader.id]
             );
-            return row && row.status_ordem === "PENDENTE" ? row : null;
+            return row && row.status_ordem === "WIN" ? row : null;
         });
 
-        assert.equal(pending.estrategia_nome, "OBS-003H E2E Pattern");
-        assert.equal(pending.fonte_sinal, "OBS003H");
-        assert.equal(pending.alvo, "BankerWon");
-        assert.equal(pending.nivel, "DIRETO");
-        assert.equal(Number(pending.risco_total), 10);
-        assert.equal(Number(pending.valor_entrada), 10);
-        assert.equal(pending.executor_order_id, order.payload.order_id);
+        assert.equal(finalized.estrategia_nome, "OBS-003H E2E Pattern");
+        assert.equal(finalized.fonte_sinal, "OBS003H");
+        assert.equal(finalized.alvo, "BankerWon");
+        assert.equal(finalized.nivel, "DIRETO");
+        assert.equal(Number(finalized.risco_total), 10);
+        assert.equal(Number(finalized.valor_entrada), 10);
+        assert.equal(finalized.executor_order_id, order.payload.order_id);
+        assert.equal(Number(finalized.lucro_prejuizo), 10);
+        assert.equal(finalized.placar_mesa, "[P:3 B:7]");
 
         const [[traderOperating]] = await db.query(
             "SELECT status_operacao, entradas_feitas FROM auto_traders WHERE id=?",
@@ -354,23 +370,6 @@ async function main() {
         );
         assert.equal(traderOperating.status_operacao, "OPERANDO");
         assert.equal(Number(traderOperating.entradas_feitas), 1);
-
-        await emitResult({
-            seq: 2, winner: "BankerWon",
-            p1: 1, p2: 2, b1: 4, b2: 3
-        });
-
-        const finalized = await waitUntil("auditoria WIN", async () => {
-            const [[row]] = await db.query(
-                "SELECT status_ordem, lucro_prejuizo, placar_mesa FROM auditoria_ordens WHERE id=?",
-                [pending.id]
-            );
-            return row && row.status_ordem !== "PENDENTE" ? row : null;
-        });
-
-        assert.equal(finalized.status_ordem, "WIN");
-        assert.equal(Number(finalized.lucro_prejuizo), 10);
-        assert.equal(finalized.placar_mesa, "[P:3 B:7]");
 
         const [[history]] = await db.query(
             `SELECT tipo_resultado, nivel, multiplicador

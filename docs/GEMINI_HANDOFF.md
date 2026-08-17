@@ -53,6 +53,7 @@ Também estão implementados:
 - deduplicação de `order_id` persistida em journal local atômico, sobrevivendo a restart do executor e falhando fechado com journal inválido/indisponível;
 - BUG-014A: toda ordem DIRETO/GALE recebe intenção durável `PREPARANDO` no MySQL antes do POST ao executor;
 - BUG-014B: novas ordens só são aceitas com Playwright pronto, possuem TTL de fila e exigem callback autenticado `EXECUTADA/FALHOU/EXPIRADA/AMBIGUA`; Node só promove `PREPARANDO` após `EXECUTADA`, e callback antecipado é suportado;
+- BUG-014C: `/receber-sinal` reserva continuidade antes de I/O e serializa todo o processamento pós-ACK em FIFO, impedindo que uma rodada ultrapasse outra durante MySQL/callback do executor;
 - GitHub Actions em PR/push para `main`.
 
 Consulte `CURRENT_STATE.md` para detalhes e riscos residuais.
@@ -98,7 +99,6 @@ Não misture correções independentes no mesmo patch.
 - rotação operacional de credenciais antigas compartilhadas;
 - BUG-014B confirma conclusão local da tentativa DOM antes de `PENDENTE`, mas não confundir `EXECUTADA` com confirmação financeira transacional da plataforma; crash durante o clique ainda pode ser externamente ambíguo;
 - deduplicação do `order_id` sobrevive a restart e IDs já persistidos não são reenfileirados automaticamente para priorizar prevenção de duplicidade;
-- `/receber-sinal` ainda responde antes de concluir o processamento e não possui serialização explícita do pós-ACK; tratar esse risco em patch separado do protocolo do executor;
 - métricas runtime e HTTP operacionais locais existem, porém agregação externa, retenção histórica central e alertas automáticos ainda não existem;
 - latência MySQL e tempos internos de operações de negócio pós-ACK ainda não são instrumentados separadamente; só envolver o pool/banco se houver necessidade operacional real;
 - dependência operacional da estrutura DOM/WebSocket, sessão e comportamento do site de destino, que pode divergir dos ambientes controlados do CI;
@@ -140,7 +140,7 @@ Quando a alteração tocar matching de padrão, transição do Auto-Trader, envi
 
 - manter verde o job `Controlled collector + Node + executor + MySQL E2E`;
 - o E2E deve permanecer totalmente controlado, usando executor fake autenticado e MySQL descartável;
-- quando tocar criação/envio de ordens, o executor fake deve comprovar `PREPARANDO`, enviar callback autenticado `EXECUTADA` e validar que o Node só então promove a auditoria; preferir callback antes do ACK no teste para cobrir a corrida mais difícil;
+- quando tocar criação/envio de ordens, o executor fake deve comprovar `PREPARANDO`, enviar callback autenticado `EXECUTADA` e validar que o Node só então promove a auditoria; o E2E também deve manter o cenário em que a rodada 2 chega enquanto a rodada 1 ainda espera o executor, comprovando o FIFO pós-ACK;
 - nunca apontar esse job para site, executor ou conta real.
 
 Quando a alteração tocar recepção `/apostar`, `order_id`, journal ou idempotência do executor:

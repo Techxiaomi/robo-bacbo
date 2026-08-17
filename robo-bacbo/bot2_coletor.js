@@ -295,6 +295,42 @@ let estadoContinuidadeColetor = {
     seq: null,
     timestamp_coleta: null
 };
+// BUG-014C: a admissão avança sincronamente no recebimento para que duas requisições
+// consecutivas nunca avaliem o mesmo estado enquanto a rodada anterior aguarda I/O.
+let estadoContinuidadeRecepcao = {
+    sessao: null,
+    seq: null,
+    timestamp_coleta: null
+};
+let caudaProcessamentoResultados = Promise.resolve();
+let resultadosAguardandoProcessamento = 0;
+
+function aguardarTurnoProcessamentoResultado() {
+    resultadosAguardandoProcessamento++;
+    const turnoAnterior = caudaProcessamentoResultados;
+    let liberarProximo = null;
+    caudaProcessamentoResultados = new Promise(resolve => { liberarProximo = resolve; });
+
+    return turnoAnterior.then(() => {
+        let liberado = false;
+        return () => {
+            if (liberado) return false;
+            liberado = true;
+            resultadosAguardandoProcessamento = Math.max(0, resultadosAguardandoProcessamento - 1);
+            liberarProximo();
+            return true;
+        };
+    });
+}
+
+function reservarContinuidadeResultado(dados) {
+    const continuidade = avaliarContinuidadeResultado(estadoContinuidadeRecepcao, dados);
+    if (continuidade.aceitar) {
+        estadoContinuidadeRecepcao = { ...continuidade.estado };
+    }
+    return continuidade;
+}
+
 let contadorGirosParaLimpeza = 0;
 let contadorGirosGlobalPiloto = 0;
 let saldoGlobalCorretora = null;
@@ -2880,6 +2916,7 @@ app.post("/executor-status", (req, res) => {
 });
 
 app.post("/receber-sinal", async (req, res) => {
+    let liberarTurnoResultado = null;
     try {
         if (!requisicaoInternaAutorizada(req)) {
             return res.status(401).json({ erro: "Nao autorizado" });
@@ -2892,6 +2929,10 @@ app.post("/receber-sinal", async (req, res) => {
         if (rawVenc.includes("PLAYER") || rawVenc === "P" || rawVenc === "AZUL") vencedor = "Player";
         else if (rawVenc.includes("BANKER") || rawVenc === "B" || rawVenc === "VERMELHO") vencedor = "Banker";
         else if (rawVenc.includes("TIE") || rawVenc === "T" || rawVenc === "EMPATE") vencedor = "Tie";
+
+        // Reserva a continuidade antes de qualquer await (inclusive persistência de saldo).
+        // O processamento financeiro continua abaixo, serializado após o ACK.
+        const continuidade = vencedor ? reservarContinuidadeResultado(dados) : null;
 
         const temSaldo = dados.saldo_atual !== undefined && dados.saldo_atual !== null;
 
@@ -2922,14 +2963,15 @@ app.post("/receber-sinal", async (req, res) => {
 
         if (!vencedor) return res.json({ recebido: true, saldo_atual: saldoGlobalCorretora });
 
-        const continuidade = avaliarContinuidadeResultado(estadoContinuidadeColetor, dados);
-
-        if (!continuidade.aceitar) {
+        if (!continuidade || !continuidade.aceitar) {
             console.warn(`⚠️ Resultado ${continuidade.motivo === 'DUPLICADO' ? 'duplicado' : 'fora de ordem'} ignorado pelo Node (sessão=${dados.coletor_sessao || 'n/a'}, seq=${dados.coletor_seq || 'n/a'}).`);
             return res.json({ recebido: true, ignorado: true, motivo: continuidade.motivo });
         }
 
         res.json({ recebido: true });
+
+        // ACK continua rápido; somente o trabalho pós-ACK espera sua vez FIFO.
+        liberarTurnoResultado = await aguardarTurnoProcessamentoResultado();
 
         if (continuidade.interrupcao) {
             const dadosInterrupcao = { ...dados, interrupcao_fluxo: true, motivo_interrupcao: continuidade.motivo };
@@ -3369,6 +3411,10 @@ app.post("/receber-sinal", async (req, res) => {
         }
     } catch(erroGeral) {
         console.error('🔥 Falha no processamento de /receber-sinal após o ACK:', erroGeral);
+    } finally {
+        if (liberarTurnoResultado) {
+            liberarTurnoResultado();
+        }
     }
 });
 
