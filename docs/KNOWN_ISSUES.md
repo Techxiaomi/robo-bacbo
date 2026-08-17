@@ -24,7 +24,11 @@ O backend expõe operações administrativas e dados do sistema. A superfície d
 
 ### SEC-004 — Token Telegram pode ser devolvido pelo `GET /api/robos`
 
-O objeto retornado espalha os campos do registro (`...r`), o que inclui `telegram_token`. O frontend não precisa receber o segredo completo para listar robôs.
+Status: **mitigado no patch SEC-004**.
+
+`GET /api/robos` deixa de devolver `telegram_token` e expõe apenas `telegram_configurado: true/false`. O formulário de edição mantém o campo de token vazio e informa que deixar em branco preserva a credencial já existente.
+
+No `PUT /api/robo/:id`, token vazio ou ausente preserva o valor armazenado; um token novo só substitui o anterior quando é explicitamente informado. Isso também permite que o toggle rápido continue funcionando sem transportar o segredo pelo navegador.
 
 ### BUG-001 — Ordem pode ser registrada sem confirmação do executor
 

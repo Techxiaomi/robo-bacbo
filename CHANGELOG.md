@@ -19,6 +19,8 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - SEC-002: autenticação por segredo compartilhado nas rotas internas `/apostar` e `/receber-sinal`.
 - Executor Flask restrito a `127.0.0.1` por padrão e configurável por ambiente.
 - Validação mínima do payload antes de enfileirar uma ordem de aposta.
+- SEC-004: `GET /api/robos` deixa de expor `telegram_token`; o navegador recebe somente `telegram_configurado`.
+- Edições e toggles preservam o token armazenado quando o campo chega vazio/ausente, evitando retransmitir o segredo ao frontend.
 
 ### Fixed
 - BUG-001: o Node agora aguarda e valida a confirmação HTTP do executor antes de contabilizar uma entrada direta ou criar a nova ordem `PENDENTE` de Gale.

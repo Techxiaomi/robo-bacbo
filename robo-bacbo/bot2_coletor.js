@@ -576,7 +576,16 @@ app.get("/api/robos", async (req, res) => {
             let meusDestinatarios = destinatarios.filter(d => d.robo_id === r.id);
             let contagemIA = countDinamicos.find(d => d.robo_dono_id === r.id);
             let cState = estadoStandbyRobos[r.id];
-            return { ...r, config: confObj, destinatarios: meusDestinatarios, qtd_padroes_ia: contagemIA ? contagemIA.qtd : 0, detalhes: mapRobos[r.id], em_standby_ate: cState ? cState.em_standby_ate : 0 };
+            const { telegram_token: telegramTokenPrivado, ...roboPublico } = r;
+            return {
+                ...roboPublico,
+                telegram_configurado: Boolean(String(telegramTokenPrivado || '').trim()),
+                config: confObj,
+                destinatarios: meusDestinatarios,
+                qtd_padroes_ia: contagemIA ? contagemIA.qtd : 0,
+                detalhes: mapRobos[r.id],
+                em_standby_ate: cState ? cState.em_standby_ate : 0
+            };
         });
 
         res.json(robosSanitizados);
@@ -598,7 +607,8 @@ app.put("/api/robo/:id", async (req, res) => {
     try {
         const { id } = req.params; const { nome, tag, cor, telegram_token, telegram_chat_id, enviar_telegram, enviar_web, min_assert, stop_reds, ativo, config, destinatarios } = req.body;
         const configJson = JSON.stringify(config || {});
-        await dbPool.query(`UPDATE robos_canais SET nome=?, tag_visual=?, cor_hex=?, telegram_token=?, telegram_chat_id=?, enviar_telegram=?, enviar_web=?, min_assertividade=?, stop_reds_seguidos=?, ativo=?, config_json=? WHERE id=?`, [nome, tag, cor, telegram_token, telegram_chat_id || '', enviar_telegram ? 1 : 0, enviar_web ? 1 : 0, min_assert, stop_reds, ativo ? 1 : 0, configJson, id]);
+        const tokenRecebido = typeof telegram_token === 'string' ? telegram_token.trim() : '';
+        await dbPool.query(`UPDATE robos_canais SET nome=?, tag_visual=?, cor_hex=?, telegram_token=COALESCE(NULLIF(?, ''), telegram_token), telegram_chat_id=?, enviar_telegram=?, enviar_web=?, min_assertividade=?, stop_reds_seguidos=?, ativo=?, config_json=? WHERE id=?`, [nome, tag, cor, tokenRecebido, telegram_chat_id || '', enviar_telegram ? 1 : 0, enviar_web ? 1 : 0, min_assert, stop_reds, ativo ? 1 : 0, configJson, id]);
         await dbPool.query('DELETE FROM destinatarios_robo WHERE robo_id = ?', [id]);
         if (destinatarios && Array.isArray(destinatarios)) { for (let d of destinatarios) { if (d.chat_id && d.chat_id.trim() !== '') await dbPool.query('INSERT INTO destinatarios_robo (robo_id, nome_cliente, chat_id) VALUES (?, ?, ?)', [id, d.nome_cliente || 'Cliente', d.chat_id.trim()]); } }
         await carregarSistemasParaMemoria(); ioServer.emit('atualizar_robos'); res.json({ sucesso: true });
