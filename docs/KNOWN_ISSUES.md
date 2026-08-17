@@ -102,13 +102,13 @@ A validação operacional do seletor CSS real permanece pendente. Stop Win/Stop 
 
 ### OBS-001 — Exceções críticas são frequentemente silenciadas
 
-Status: **parcialmente mitigado no patch OBS-001A**.
+Status: **parcialmente mitigado nos patches OBS-001A e OBS-001B**.
 
-Migrations incrementais deixam de silenciar erros inesperados: somente `ER_DUP_FIELDNAME`/errno 1060 continua tratado como condição normal de idempotência. Rotas CRUD de estratégias, origens, robôs e Auto-Traders passam a registrar contexto técnico antes de devolver a mesma resposta HTTP genérica.
+No Node, migrations incrementais deixam de silenciar erros inesperados: somente `ER_DUP_FIELDNAME`/errno 1060 continua tratado como condição normal de idempotência. Rotas CRUD críticas registram contexto técnico; `apagarEstrategiaEDados()` deixa o erro subir; e falhas em fechamento `LOSS`, `pulos_restantes`, rollback e processamento pós-ACK ficam visíveis.
 
-`apagarEstrategiaEDados()` deixa de engolir falhas de banco, permitindo que a rota DELETE responda erro em vez de falso sucesso. Também passam a ser registrados erros antes silenciosos no fechamento de ordem `LOSS`, persistência de `pulos_restantes`, rollback transacional e no catch geral pós-ACK de `/receber-sinal`.
+No executor Python, o envio de resultado resolvido ao Node passa a validar o status HTTP com `raise_for_status()` e registrar falhas sem alterar o ciclo da mesa. Exceções inesperadas em `processar_resultado`, frames WebSocket, Auto-Login, loop principal do Playwright e restart externo também passam a ser visíveis. Logs de alta frequência usam limitação temporal de 30 segundos.
 
-`catch` usados apenas como fallback de parsing opcional de JSON continuam silenciosos de propósito. Ainda existem outros pontos de observabilidade a revisar, inclusive no executor Python; por isso o item permanece parcialmente mitigado.
+Ruído esperado continua tolerado: frames WebSocket que não são JSON, falhas em pop-ups opcionais, fallback de stealth, varredura de frames para saldo e o botão opcional “Continuar” não viram erro fatal. O item permanece parcial porque ainda não existe logging estruturado/arquivo rotativo nem métricas centralizadas.
 
 ### OBS-002 — Schema inicial incompleto no código
 
