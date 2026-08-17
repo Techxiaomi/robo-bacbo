@@ -1,6 +1,6 @@
 # Estado Atual do Projeto
 
-Atualizado em 2026-08-17 após os patches BUG-001…BUG-013, SEC-002/003A/003B/004, OBS-001A…F e OBS-003A…F.
+Atualizado em 2026-08-17 após os patches BUG-001…BUG-013, SEC-002/003A/003B/004, OBS-001A…F e OBS-003A…G.
 
 Este arquivo descreve o estado atual do `main`, não o snapshot inicial.
 
@@ -97,16 +97,16 @@ O Python envia resultados autenticados para `POST /receber-sinal`. O Node envia 
 - job separado sobe MySQL 8.4 descartável e inicia o `bot2_coletor.js` real com Express/MySQL2/Socket.IO;
 - smoke HTTP real valida Origin, login/logout, sessão administrativa, painel/API e autenticação de `/receber-sinal`;
 - o mesmo smoke valida o handshake Socket.IO real: sem sessão é rejeitado, com cookie administrativo válido conecta e o cookie invalidado no logout deixa de conectar;
-- integração confirma as nove tabelas esperadas em banco vazio e garante que o próprio smoke não cria giro nem ordem financeira.
+- integração confirma as nove tabelas esperadas em banco vazio e garante que o próprio smoke não cria giro nem ordem financeira;
+- job Playwright separado instala Chromium e executa DOM controlado local, validando `parsear_valor_monetario`, leitura de saldo no documento/iframe e os seletores de ficha/alvo da função `executar_aposta_na_tela` sem acessar o site real.
 
 ## Riscos e trabalhos ainda pendentes
 
 - rotacionar operacionalmente credenciais que tenham sido compartilhadas antes da externalização para `.env`;
 - idempotência de `order_id` do executor ainda é mantida somente em memória; exatamente-once através de restart exigiria estado/fila durável;
 - não existem métricas centralizadas/telemetria agregada; os logs estruturados já existem, mas métricas continuam pendentes;
-- ainda não há teste Playwright/DOM real contra uma página controlada;
 - ainda não existe teste ponta a ponta completo captura → Node → executor → auditoria;
-- mudanças no DOM/WebSocket da plataforma de destino continuam sendo dependência externa operacional;
+- mudanças no DOM/WebSocket da plataforma de destino continuam sendo dependência externa operacional e podem divergir do DOM controlado validado no CI;
 - arquivos grandes e multifuncionais ainda merecem modularização gradual, porém somente com cobertura suficiente e patches pequenos.
 
 ## Dependências externas
