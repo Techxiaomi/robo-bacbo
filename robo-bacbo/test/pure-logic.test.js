@@ -716,3 +716,35 @@ test("continuidade separa pausa temporal de perda confirmada e invalida pendenci
     assert.match(frontendSource, /dadosArr\[i \+ p\]\.id_sessao !== sessaoBase/);
     assert.match(frontendSource, /dadosCorte\[i\+p\]\.id_sessao !== sessaoBase/);
 });
+
+test("exclusao de robo remove padroes IA filhos e historicos na mesma transacao", () => {
+    const trecho = trechoEntre(
+        'app.delete("/api/robo/:id"',
+        'app.get("/api/auto-traders"'
+    );
+
+    assert.match(trecho, /beginTransaction\(\)/);
+    assert.match(trecho, /SELECT id FROM estrategias WHERE is_dinamico = true AND robo_dono_id = \?/);
+    assert.match(trecho, /DELETE FROM historico_resultados WHERE estrategia_id IN/);
+    assert.match(trecho, /DELETE FROM historico_disparos_robos WHERE estrategia_id IN/);
+    assert.match(trecho, /DELETE FROM estrategias WHERE is_dinamico = true AND robo_dono_id = \?/);
+    assert.match(trecho, /DELETE FROM robos_canais WHERE id=\?/);
+    assert.match(trecho, /commit\(\)/);
+    assert.match(trecho, /rollback\(\)/);
+    assert.match(trecho, /padroes_ia_excluidos/);
+});
+
+test("startup remove apenas padroes IA orfaos deixados por robos inexistentes", () => {
+    const trecho = trechoEntre(
+        'async function limparPadroesDinamicosOrfaos()',
+        'async function prepararBancoDeDados()'
+    );
+
+    assert.match(trecho, /LEFT JOIN robos_canais r ON r\.id = e\.robo_dono_id/);
+    assert.match(trecho, /e\.is_dinamico = true/);
+    assert.match(trecho, /e\.robo_dono_id IS NULL OR r\.id IS NULL/);
+    assert.match(trecho, /DELETE FROM historico_resultados WHERE estrategia_id IN/);
+    assert.match(trecho, /DELETE FROM historico_disparos_robos WHERE estrategia_id IN/);
+    assert.match(trecho, /DELETE FROM estrategias WHERE id IN/);
+    assert.match(source, /await limparPadroesDinamicosOrfaos\(\);/);
+});
