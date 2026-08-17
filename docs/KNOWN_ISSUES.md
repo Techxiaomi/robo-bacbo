@@ -122,6 +122,18 @@ O `PUT /api/auto-trader/:id` atualizava `ativo=false` no desligamento manual, ma
 
 O BUG-010 torna a transição manual ON→OFF explícita: grava `status_operacao='DESLIGADO'`. Criação inativa usa o mesmo status, enquanto a reativação continua capturando saldo fresco e iniciando em `STANDBY`. No startup, somente combinações legadas `ativo=false` + `OPERANDO`/`STANDBY` são normalizadas. Estados que registram a causa de um hard stop (`STOP_WIN`, `STOP_LOSS`, `STOP_REDS` e `TRAILING_STOP`) não são sobrescritos.
 
+### BUG-011 — Buraco Python→Node pode concatenar uma sequência que não existiu na mesa
+
+Status: **mitigado no patch BUG-011**.
+
+A proteção anterior dependia principalmente de `interrupcao_fluxo` calculado no Python por intervalo entre resultados capturados. Se o Python capturasse uma rodada normalmente, mas o POST daquele resultado não chegasse ao Node, o Python atualizava sua própria referência temporal e a rodada seguinte podia chegar com `interrupcao_fluxo=false`. O Node então não possuía evidência independente de que faltava um giro.
+
+O BUG-011 adiciona redundância explícita. Cada processo Python recebe um `coletor_sessao` próprio e cada evento `Resolved` consome um `coletor_seq` monotônico antes de parsing/POST. Assim, uma falha posterior deixa um salto observável. O Node mantém a última sessão/seq/timestamp aceitos e rejeita pacotes duplicados ou atrasados; salto de sequência, mudança da sessão do coletor ou desaparecimento dos metadados depois de estabelecidos são tratados como buraco confirmado.
+
+Toda quebra aceita rotaciona `id_sessao` antes de persistir a rodada seguinte, preservando a separação já usada pelo motor online, backtest e minerador. Em buraco confirmado, sinais que aguardavam resultado são invalidados para que a rodada seguinte não seja usada como resultado de uma sequência anterior. Se existir auditoria financeira `PENDENTE`, ela passa a `DADOS_INCOMPLETOS` e somente os Auto-Traders afetados são desligados até reativação manual, sem inferir WIN/LOSS.
+
+Intervalos superiores a 60 segundos continuam provocando apenas quebra de sessão quando a sequência do coletor permanece íntegra. Isso preserva o comportamento anterior para uma mesa lenta/pausada e evita classificar apenas demora temporal como perda financeira confirmada. A estatística visual de maiores sequências também passa a zerar streaks na fronteira de `id_sessao`.
+
 ### OBS-001 — Exceções críticas são frequentemente silenciadas
 
 Status: **parcialmente mitigado nos patches OBS-001A, OBS-001B, OBS-001C, OBS-001D e OBS-001E**.

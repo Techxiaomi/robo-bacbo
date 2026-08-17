@@ -226,7 +226,12 @@ let AUTO_TRADERS_MEMORIA = [];
 let historicoRecente = []; 
 let estadoApostas = {}; 
 let estadoStandbyRobos = {}; 
-let idSessaoContinua = Date.now(); 
+let idSessaoContinua = Date.now();
+let estadoContinuidadeColetor = {
+    sessao: null,
+    seq: null,
+    timestamp_coleta: null
+};
 let contadorGirosParaLimpeza = 0;
 let contadorGirosGlobalPiloto = 0; 
 let saldoGlobalCorretora = null;
@@ -1041,20 +1046,140 @@ async function ativarAutoTradersAguardandoMesa() {
     console.log(`🟢 ${aguardandoMesa.length} Auto-Trader(s) sincronizado(s) com a mesa e liberado(s) para OPERANDO.`);
 }
 
+function avaliarContinuidadeResultado(estadoAnterior, dados, limiteMs = 60000) {
+    const anterior = estadoAnterior || {};
+    const atual = dados || {};
+
+    const sessaoAnterior = String(anterior.sessao || '').trim();
+    const seqAnteriorNumero = Number(anterior.seq);
+    const seqAnterior = Number.isSafeInteger(seqAnteriorNumero) && seqAnteriorNumero > 0 ? seqAnteriorNumero : null;
+    const timestampAnteriorNumero = Number(anterior.timestamp_coleta);
+    const timestampAnterior = Number.isFinite(timestampAnteriorNumero) && timestampAnteriorNumero > 0 ? Math.trunc(timestampAnteriorNumero) : null;
+
+    const sessaoRecebidaBruta = String(atual.coletor_sessao || '').trim();
+    const sessaoRecebida = sessaoRecebidaBruta.length > 0 && sessaoRecebidaBruta.length <= 128 ? sessaoRecebidaBruta : '';
+    const seqRecebidaNumero = Number(atual.coletor_seq);
+    const seqRecebida = Number.isSafeInteger(seqRecebidaNumero) && seqRecebidaNumero > 0 ? seqRecebidaNumero : null;
+    const timestampRecebidoNumero = Number(atual.timestamp_coleta);
+    const timestampRecebido = Number.isFinite(timestampRecebidoNumero) && timestampRecebidoNumero > 0 ? Math.trunc(timestampRecebidoNumero) : null;
+
+    const tinhaMetadados = Boolean(sessaoAnterior) && seqAnterior !== null;
+    const temMetadados = Boolean(sessaoRecebida) && seqRecebida !== null;
+
+    if (tinhaMetadados && temMetadados && sessaoRecebida === sessaoAnterior && seqRecebida <= seqAnterior) {
+        return {
+            aceitar: false,
+            interrupcao: false,
+            buraco_confirmado: false,
+            motivo: seqRecebida === seqAnterior ? 'DUPLICADO' : 'FORA_DE_ORDEM',
+            estado: { sessao: sessaoAnterior, seq: seqAnterior, timestamp_coleta: timestampAnterior }
+        };
+    }
+
+    let interrupcao = false;
+    let buracoConfirmado = false;
+    let motivo = null;
+
+    if (tinhaMetadados) {
+        if (!temMetadados) {
+            interrupcao = true;
+            buracoConfirmado = true;
+            motivo = 'METADADOS_COLETOR_AUSENTES';
+        } else if (sessaoRecebida !== sessaoAnterior) {
+            interrupcao = true;
+            buracoConfirmado = true;
+            motivo = 'COLETOR_REINICIADO';
+        } else if (seqRecebida > seqAnterior + 1) {
+            interrupcao = true;
+            buracoConfirmado = true;
+            motivo = 'SALTO_SEQUENCIA';
+        }
+    }
+
+    const limiteNumero = Number(limiteMs);
+    const limite = Number.isFinite(limiteNumero) && limiteNumero > 0 ? limiteNumero : 60000;
+
+    if (!interrupcao && timestampAnterior !== null && timestampRecebido !== null && timestampRecebido - timestampAnterior > limite) {
+        interrupcao = true;
+        motivo = 'INTERVALO_NODE';
+    }
+
+    if (!interrupcao && atual.interrupcao_fluxo === true) {
+        interrupcao = true;
+        motivo = 'INTERRUPCAO_PYTHON';
+    }
+
+    return {
+        aceitar: true,
+        interrupcao,
+        buraco_confirmado: buracoConfirmado,
+        motivo,
+        estado: {
+            sessao: temMetadados ? sessaoRecebida : (sessaoAnterior || null),
+            seq: temMetadados ? seqRecebida : seqAnterior,
+            timestamp_coleta: timestampRecebido !== null ? timestampRecebido : timestampAnterior
+        }
+    };
+}
+
 function rotacionarSessaoAposInterrupcao(dados) {
     if (!dados || dados.interrupcao_fluxo !== true) return false;
 
     const sessaoAnterior = idSessaoContinua;
     const timestampColeta = Number(dados.timestamp_coleta);
-    let novaSessao = Number.isFinite(timestampColeta) && timestampColeta > 0
-        ? Math.trunc(timestampColeta)
-        : Date.now();
+    let novaSessao = Number.isFinite(timestampColeta) && timestampColeta > 0 ? Math.trunc(timestampColeta) : Date.now();
 
     if (novaSessao === sessaoAnterior) novaSessao++;
     idSessaoContinua = novaSessao;
 
-    console.log(`🧭 Interrupção de fluxo detectada. Nova sessão contínua: ${sessaoAnterior} -> ${idSessaoContinua}`);
+    const motivo = String(dados.motivo_interrupcao || 'INTERRUPCAO_PYTHON');
+    console.log(`🧭 Interrupção de fluxo detectada (${motivo}). Nova sessão contínua: ${sessaoAnterior} -> ${idSessaoContinua}`);
     return true;
+}
+
+async function invalidarSequenciasAposBuracoDados(motivo) {
+    let sinaisInvalidados = 0;
+
+    for (const estado of Object.values(estadoApostas)) {
+        if (!estado || !estado.aguardandoResultado) continue;
+        estado.aguardandoResultado = false;
+        estado.galeAtual = 0;
+        estado.robosWebInscritos = [];
+        estado.robosTelegramInscritos = [];
+        estado.robosInscritos = [];
+        estado.telegramEntradaPromise = null;
+        sinaisInvalidados++;
+    }
+
+    const [pendentes] = await dbPool.query(`SELECT DISTINCT trader_id FROM auditoria_ordens WHERE status_ordem = 'PENDENTE'`);
+    const traderIds = [...new Set(pendentes.map(row => Number(row.trader_id)).filter(Number.isFinite))];
+
+    if (traderIds.length > 0) {
+        const placeholders = traderIds.map(() => '?').join(',');
+        const conexao = await dbPool.getConnection();
+        try {
+            await conexao.beginTransaction();
+            await conexao.query(`UPDATE auditoria_ordens SET status_ordem='DADOS_INCOMPLETOS' WHERE status_ordem='PENDENTE'`);
+            await conexao.query(`UPDATE auto_traders SET ativo=false, status_operacao='DADOS_INCOMPLETOS' WHERE id IN (${placeholders})`, traderIds);
+            await conexao.commit();
+        } catch (e) {
+            try { await conexao.rollback(); } catch (rollbackError) { console.error('❌ Rollback falhou ao tratar buraco de dados:', rollbackError.message); }
+            throw e;
+        } finally {
+            conexao.release();
+        }
+
+        const idsBloqueados = new Set(traderIds.map(String));
+        for (const trader of AUTO_TRADERS_MEMORIA) {
+            if (!idsBloqueados.has(String(trader.id))) continue;
+            trader.ativo = false;
+            trader.status_operacao = 'DADOS_INCOMPLETOS';
+        }
+    }
+
+    console.warn(`⚠️ Buraco de dados confirmado (${motivo || 'DESCONHECIDO'}): ${sinaisInvalidados} sinal(is) pendente(s) invalidado(s), ${traderIds.length} Auto-Trader(s) com ordem pendente bloqueado(s).`);
+    ioServer.emit('atualizar_interface');
+    return { sinais_invalidados: sinaisInvalidados, traders_bloqueados: traderIds.length };
 }
 
 function nivelHistoricoResultado(galeAtual) {
@@ -2198,9 +2323,26 @@ app.post("/receber-sinal", async (req, res) => {
 
         if (!vencedor) return res.json({ recebido: true, saldo_atual: saldoGlobalCorretora });
 
+        const continuidade = avaliarContinuidadeResultado(estadoContinuidadeColetor, dados);
+
+        if (!continuidade.aceitar) {
+            console.warn(`⚠️ Resultado ${continuidade.motivo === 'DUPLICADO' ? 'duplicado' : 'fora de ordem'} ignorado pelo Node (sessão=${dados.coletor_sessao || 'n/a'}, seq=${dados.coletor_seq || 'n/a'}).`);
+            return res.json({ recebido: true, ignorado: true, motivo: continuidade.motivo });
+        }
+
         res.json({ recebido: true });
 
-        rotacionarSessaoAposInterrupcao(dados);
+        if (continuidade.interrupcao) {
+            const dadosInterrupcao = { ...dados, interrupcao_fluxo: true, motivo_interrupcao: continuidade.motivo };
+            rotacionarSessaoAposInterrupcao(dadosInterrupcao);
+
+            if (continuidade.buraco_confirmado) {
+                await invalidarSequenciasAposBuracoDados(continuidade.motivo);
+            }
+        }
+
+        // Só avança a continuidade depois que o tratamento de um buraco confirmado foi persistido com sucesso.
+        estadoContinuidadeColetor = continuidade.estado;
 
         try {
             await rearmarAutoTradersStopRedsPausados();
