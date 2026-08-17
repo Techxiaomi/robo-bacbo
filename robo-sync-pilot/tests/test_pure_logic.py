@@ -311,6 +311,21 @@ class TestProcessarResultado(unittest.TestCase):
         self.assertEqual(FakeRequests.chamadas[0]["kwargs"]["json"]["coletor_seq"], 1)
         self.assertEqual(FakeRequests.chamadas[1]["kwargs"]["json"]["coletor_seq"], 2)
 
+    def test_fingerprint_repetido_continuamente_renova_janela(self):
+        dados = self.dados_resolvidos("PlayerWon")
+        self.processar(dados)
+        for instante in (102.0, 104.0, 106.0):
+            FakeTime.atual = instante
+            self.processar(dados)
+
+        self.assertEqual(len(FakeRequests.chamadas), 1)
+        self.assertEqual(self.ns["coletor_seq"], 1)
+
+        FakeTime.atual = 109.001
+        self.processar(dados)
+        self.assertEqual(len(FakeRequests.chamadas), 2)
+        self.assertEqual(self.ns["coletor_seq"], 2)
+
     def test_round_id_repetido_e_ignorado_mesmo_fora_da_janela(self):
         dados = self.dados_resolvidos("PlayerWon")
         dados["args"]["game"]["roundId"] = "round-123"

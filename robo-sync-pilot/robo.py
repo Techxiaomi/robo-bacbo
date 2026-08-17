@@ -387,8 +387,13 @@ def resultado_resolvido_duplicado(game_info, agora=None):
 
     if mesma_chave:
         if chave and chave[0] == "round":
+            ultimo_resultado_chave_em = referencia
             return True
         if referencia - ultimo_resultado_chave_em <= RESULT_DEDUP_WINDOW_SECONDS:
+            # Janela deslizante: enquanto o mesmo Resolved continuar chegando,
+            # ele permanece duplicado. Só uma pausa maior que a janela permite
+            # que um fingerprint idêntico seja tratado como nova rodada.
+            ultimo_resultado_chave_em = referencia
             return True
 
     ultimo_resultado_chave = chave
