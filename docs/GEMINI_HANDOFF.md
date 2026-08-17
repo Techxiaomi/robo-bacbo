@@ -51,6 +51,7 @@ Também estão implementados:
 - Playwright/Chromium real em DOM controlado local para leitura de saldo e seletores de execução;
 - E2E controlado coletor Python → Node → executor fake autenticado → auditoria MySQL, incluindo ordem DIRETO e fechamento `WIN`;
 - deduplicação de `order_id` persistida em journal local atômico, sobrevivendo a restart do executor e falhando fechado com journal inválido/indisponível;
+- BUG-014A: toda ordem DIRETO/GALE recebe intenção durável `PREPARANDO` no MySQL antes do POST ao executor; falha definitiva vira `FALHA_ENVIO`, falha ambígua vira `ENVIO_AMBIGUO` e ACK sem finalização de banco preserva `PREPARANDO`;
 - GitHub Actions em PR/push para `main`.
 
 Consulte `CURRENT_STATE.md` para detalhes e riscos residuais.
@@ -94,7 +95,9 @@ Não misture correções independentes no mesmo patch.
 ## Riscos residuais prioritários
 
 - rotação operacional de credenciais antigas compartilhadas;
+- BUG-014A garante intenção MySQL antes do efeito externo, mas `/apostar` ainda confirma fila, não clique efetivo; o próximo passo prioritário é lifecycle explícito no executor com readiness, TTL e estados de execução, sem afirmar exactly-once absoluto;
 - deduplicação do `order_id` sobrevive a restart, mas um crash exatamente durante o clique Playwright mantém ambiguidade sobre o efeito externo; IDs já persistidos não são reenfileirados automaticamente para priorizar prevenção de duplicidade;
+- `/receber-sinal` ainda responde antes de concluir o processamento e não possui serialização explícita do pós-ACK; tratar esse risco em patch separado do protocolo do executor;
 - métricas runtime e HTTP operacionais locais existem, porém agregação externa, retenção histórica central e alertas automáticos ainda não existem;
 - latência MySQL e tempos internos de operações de negócio pós-ACK ainda não são instrumentados separadamente; só envolver o pool/banco se houver necessidade operacional real;
 - dependência operacional da estrutura DOM/WebSocket, sessão e comportamento do site de destino, que pode divergir dos ambientes controlados do CI;
@@ -136,6 +139,7 @@ Quando a alteração tocar matching de padrão, transição do Auto-Trader, envi
 
 - manter verde o job `Controlled collector + Node + executor + MySQL E2E`;
 - o E2E deve permanecer totalmente controlado, usando executor fake autenticado e MySQL descartável;
+- quando tocar criação/envio de ordens, o executor fake deve comprovar que a intenção `PREPARANDO` com o mesmo `order_id` já está visível no MySQL antes de devolver ACK;
 - nunca apontar esse job para site, executor ou conta real.
 
 Quando a alteração tocar recepção `/apostar`, `order_id`, journal ou idempotência do executor:

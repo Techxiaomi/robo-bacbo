@@ -45,6 +45,8 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - Entradas diretas atualizam `entradas_feitas` e auditoria em uma transação local somente após o aceite do executor.
 - Falhas de conexão, timeout, HTTP não-2xx e confirmações divergentes deixam de ser silenciosas e não são contabilizadas como novas ordens enviadas.
 - BUG-001B: cada ordem Node→Python recebe `order_id` UUID; falhas ambíguas são repetidas uma vez com o mesmo ID e o executor responde idempotentemente sem duplicar a fila.
+- BUG-014A: DIRETO e GALE passam a persistir uma intenção `PREPARANDO` em `auditoria_ordens` com o mesmo `order_id` antes de qualquer POST ao executor; rejeição definitiva vira `FALHA_ENVIO`, falha ambígua vira `ENVIO_AMBIGUO` e ACK seguido de falha de finalização preserva `PREPARANDO` para reconciliação.
+- No GALE, o encerramento `LOSS` da exposição anterior e a criação da nova intenção são transacionais antes do efeito externo; no DIRETO, `entradas_feitas` continua sendo incrementado somente após ACK e promoção da intenção para `PENDENTE`.
 - O executor rejeita reutilização do mesmo `order_id` com payload diferente (409), mantém uma janela em memória dos últimos 5000 IDs e a auditoria passa a registrar `executor_order_id`.
 - BUG-002: Auto-Traders ativos em `STANDBY` passam para `OPERANDO` ao primeiro resultado de rodada válido e autenticado recebido da mesa.
 - A transição é persistida no MySQL antes de atualizar o estado em memória; traders desligados ou em outros estados não são alterados.
