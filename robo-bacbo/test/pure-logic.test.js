@@ -74,7 +74,8 @@ function carregarLogicaPura() {
             formatarPadraoTelegram,
             montarMensagemTelegram,
             horarioParaMinutos,
-            traderDentroHorarioExecucao
+            traderDentroHorarioExecucao,
+            avaliarLimitesFinanceirosTrader
         };`,
         contexto,
         { filename: "pure-logic-from-bot2.js" }
@@ -304,4 +305,47 @@ test("handlers fatais encerram o Node e promises Telegram fire-and-forget possue
     assert.match(source, /enviarTelegramParaInscritos\('GREEN'[\s\S]*?\.catch\(e => \{[\s\S]*?Telegram GREEN/);
     assert.match(source, /enviarTelegramParaInscritos\('GALE'[\s\S]*?\.catch\(e => \{[\s\S]*?Telegram GALE/);
     assert.match(source, /enviarAvisosProtecaoTelegram\(st, avisosProtecao\);[\s\S]*?\}\)\(\)\.catch\(e => \{[\s\S]*?Telegram RED\/proteção/);
+});
+
+test("avaliarLimitesFinanceirosTrader aplica Stop Win/Stop Loss somente com saldo fresco", () => {
+    let r = logic.avaliarLimitesFinanceirosTrader(
+        { saldo_inicial: 1000, config: { stop_win: 100, stop_loss: 250 } },
+        { saldo_atual: 1100, fresco: true }
+    );
+    assert.equal(r.permitido, false);
+    assert.equal(r.motivo, "STOP_WIN");
+    assert.equal(r.variacao, 100);
+
+    r = logic.avaliarLimitesFinanceirosTrader(
+        { saldo_inicial: 1000, config: { stop_win: 100, stop_loss: 250 } },
+        { saldo_atual: 750, fresco: true }
+    );
+    assert.equal(r.permitido, false);
+    assert.equal(r.motivo, "STOP_LOSS");
+    assert.equal(r.variacao, -250);
+
+    r = logic.avaliarLimitesFinanceirosTrader(
+        { saldo_inicial: 1000, config: { stop_win: 100, stop_loss: 250 } },
+        { saldo_atual: 900, fresco: true }
+    );
+    assert.equal(r.permitido, true);
+    assert.equal(r.motivo, null);
+
+    r = logic.avaliarLimitesFinanceirosTrader(
+        { saldo_inicial: 1000, config: { stop_win: 100, stop_loss: 250 } },
+        { saldo_atual: 1200, fresco: false }
+    );
+    assert.equal(r.permitido, false);
+    assert.equal(r.motivo, "SALDO_INDISPONIVEL");
+});
+
+test("nova entrada DIRETO passa pelo guard financeiro antes do executor", () => {
+    assert.match(
+        source,
+        /if \(!\(await autorizarNovaEntradaFinanceiraTrader\(trader\)\)\) \{[\s\S]*?continue;[\s\S]*?if \(cf\.limite_entradas/
+    );
+    assert.match(
+        source,
+        /autorizarNovaEntradaFinanceiraTrader[\s\S]*?UPDATE auto_traders SET ativo=false, status_operacao=\?, saldo_atual=\?/
+    );
 });

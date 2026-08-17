@@ -1485,6 +1485,77 @@ function traderDentroHorarioExecucao(config, agora = new Date()) {
     return minutoAtual >= inicio || minutoAtual <= fim;
 }
 
+function avaliarLimitesFinanceirosTrader(trader, snapshotSaldo) {
+    const snapshot = snapshotSaldo || {};
+    const saldoInicial = Number(trader && trader.saldo_inicial);
+    const saldoAtual = Number(snapshot.saldo_atual);
+
+    if (
+        snapshot.fresco !== true
+        || !Number.isFinite(saldoInicial)
+        || saldoInicial < 0
+        || !Number.isFinite(saldoAtual)
+        || saldoAtual < 0
+    ) {
+        return {
+            permitido: false,
+            motivo: 'SALDO_INDISPONIVEL',
+            variacao: null,
+            saldo_atual: Number.isFinite(saldoAtual) ? saldoAtual : null
+        };
+    }
+
+    const cf = (trader && trader.config) || {};
+    const stopWin = Number(cf.stop_win ?? 100);
+    const stopLoss = Number(cf.stop_loss ?? 250);
+    const variacao = Math.round((saldoAtual - saldoInicial) * 100) / 100;
+
+    if (Number.isFinite(stopWin) && stopWin > 0 && variacao >= stopWin) {
+        return { permitido: false, motivo: 'STOP_WIN', variacao, saldo_atual: saldoAtual };
+    }
+
+    if (Number.isFinite(stopLoss) && stopLoss > 0 && variacao <= -stopLoss) {
+        return { permitido: false, motivo: 'STOP_LOSS', variacao, saldo_atual: saldoAtual };
+    }
+
+    return { permitido: true, motivo: null, variacao, saldo_atual: saldoAtual };
+}
+
+async function autorizarNovaEntradaFinanceiraTrader(trader) {
+    const avaliacao = avaliarLimitesFinanceirosTrader(trader, snapshotSaldoGlobal());
+
+    if (avaliacao.permitido) return true;
+
+    if (avaliacao.motivo === 'SALDO_INDISPONIVEL') {
+        console.warn(`⚠️ Trader ${trader.id}: nova entrada bloqueada porque o saldo global está ausente ou desatualizado.`);
+        return false;
+    }
+
+    trader.ativo = false;
+    trader.status_operacao = avaliacao.motivo;
+    if (Number.isFinite(avaliacao.saldo_atual)) {
+        trader.saldo_atual = avaliacao.saldo_atual;
+    }
+
+    try {
+        await dbPool.query(
+            'UPDATE auto_traders SET ativo=false, status_operacao=?, saldo_atual=? WHERE id=?',
+            [avaliacao.motivo, trader.saldo_atual, trader.id]
+        );
+    } catch (e) {
+        console.error(`❌ Falha ao persistir ${avaliacao.motivo} do trader ${trader.id}:`, e.message);
+    }
+
+    const valor = Math.abs(Number(avaliacao.variacao) || 0).toFixed(2);
+    console.log(
+        avaliacao.motivo === 'STOP_WIN'
+            ? `🏁 Trader ${trader.id}: Stop Win atingido (+R$ ${valor}). Motor desligado até reativação manual.`
+            : `🛑 Trader ${trader.id}: Stop Loss atingido (-R$ ${valor}). Motor desligado até reativação manual.`
+    );
+    ioServer.emit('atualizar_interface');
+    return false;
+}
+
 async function carregarSistemasParaMemoria() {
     try {
         const [linhasEst] = await dbPool.query('SELECT * FROM estrategias WHERE ativo = true');
@@ -1829,6 +1900,10 @@ app.post("/receber-sinal", async (req, res) => {
                                     }
 
                                     
+                                    if (!(await autorizarNovaEntradaFinanceiraTrader(trader))) {
+                                        continue;
+                                    }
+
                                     if (cf.limite_entradas && trader.entradas_feitas >= cf.limite_entradas) {
                                         trader.status_operacao = 'META_ATINGIDA';
                                         try {
