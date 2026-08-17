@@ -204,6 +204,7 @@ let idSessaoContinua = Date.now();
 let contadorGirosParaLimpeza = 0;
 let contadorGirosGlobalPiloto = 0; 
 let saldoGlobalCorretora = null;
+let saldoGlobalAtualizadoEm = 0;
 
 // ==========================================
 // 3. SERVIDOR WEB E SOCKET
@@ -237,6 +238,33 @@ function headersInternos() {
 
 const EXECUTOR_TIMEOUT_MS = 5000;
 const TELEGRAM_TIMEOUT_MS = 3000;
+const balanceSyncMaxAgeSecondsConfig = Number(process.env.BALANCE_SYNC_MAX_AGE_SECONDS || 90);
+const BALANCE_SYNC_MAX_AGE_MS = (
+    Number.isFinite(balanceSyncMaxAgeSecondsConfig) && balanceSyncMaxAgeSecondsConfig >= 5
+        ? balanceSyncMaxAgeSecondsConfig
+        : 90
+) * 1000;
+
+function snapshotSaldoGlobal(agora = Date.now()) {
+    const saldoValido = Number.isFinite(saldoGlobalCorretora) && saldoGlobalCorretora >= 0;
+    const timestampValido = Number.isFinite(saldoGlobalAtualizadoEm) && saldoGlobalAtualizadoEm > 0;
+    const idadeMs = timestampValido ? Math.max(0, agora - saldoGlobalAtualizadoEm) : null;
+    const fresco = saldoValido
+        && timestampValido
+        && idadeMs <= BALANCE_SYNC_MAX_AGE_MS;
+
+    return {
+        saldo_atual: saldoValido ? saldoGlobalCorretora : null,
+        atualizado_em: timestampValido ? saldoGlobalAtualizadoEm : null,
+        idade_ms: idadeMs,
+        fresco
+    };
+}
+
+function obterSaldoGlobalFresco(agora = Date.now()) {
+    const snapshot = snapshotSaldoGlobal(agora);
+    return snapshot.fresco ? snapshot.saldo_atual : null;
+}
 
 async function enviarOrdemAoExecutor(alvo, valor) {
     const controller = new AbortController();
@@ -297,7 +325,7 @@ function calcularFichaSegura(valorDesejado) {
 // 5. ROTAS DE API
 // ==========================================
 app.get("/api/saldo-global", (req, res) => {
-    res.json({ saldo_atual: saldoGlobalCorretora });
+    res.json(snapshotSaldoGlobal());
 });
 
 app.get("/api/estrategias", async (req, res) => {
@@ -637,21 +665,79 @@ app.get("/api/auto-traders", async (req, res) => {
 
 app.post("/api/auto-trader", async (req, res) => {
     try {
-        const { nome, ativo, config, saldo_inicial } = req.body;
+        const { nome, ativo, config } = req.body;
         const configJson = JSON.stringify(config || {});
-        const sInicial = parseFloat(saldo_inicial) || 0.00;
-        await dbPool.query(`INSERT INTO auto_traders (nome, ativo, config_json, saldo_inicial, saldo_atual, status_operacao) VALUES (?, ?, ?, ?, ?, 'STANDBY')`, [nome, ativo ? 1 : 0, configJson, sInicial, sInicial]);
-        await carregarSistemasParaMemoria(); res.json({ sucesso: true });
-    } catch (e) { res.status(500).json({ sucesso: false }); }
+        const novoAtivo = ativo === true || ativo === 1;
+        const saldoFresco = obterSaldoGlobalFresco();
+
+        if (novoAtivo && saldoFresco === null) {
+            return res.status(409).json({
+                sucesso: false,
+                erro: 'saldo_global_indisponivel',
+                mensagem: 'Saldo real ausente ou desatualizado. Aguarde a sincronização da página antes de ativar o Auto-Trader.'
+            });
+        }
+
+        const saldoBaseline = novoAtivo ? saldoFresco : 0;
+        await dbPool.query(
+            `INSERT INTO auto_traders (nome, ativo, config_json, saldo_inicial, saldo_atual, status_operacao, entradas_feitas, pulos_restantes)
+             VALUES (?, ?, ?, ?, ?, 'STANDBY', 0, 0)`,
+            [nome, novoAtivo ? 1 : 0, configJson, saldoBaseline, saldoBaseline]
+        );
+        await carregarSistemasParaMemoria();
+        res.json({ sucesso: true, saldo_inicial: saldoBaseline });
+    } catch (e) {
+        res.status(500).json({ sucesso: false });
+    }
 });
 
 app.put("/api/auto-trader/:id", async (req, res) => {
     try {
-        const { id } = req.params; const { nome, ativo, config } = req.body;
+        const { id } = req.params;
+        const { nome, ativo, config } = req.body;
         const configJson = JSON.stringify(config || {});
-        await dbPool.query(`UPDATE auto_traders SET nome=?, ativo=?, config_json=? WHERE id=?`, [nome, ativo ? 1 : 0, configJson, id]);
-        await carregarSistemasParaMemoria(); res.json({ sucesso: true });
-    } catch (e) { res.status(500).json({ sucesso: false }); }
+        const novoAtivo = ativo === true || ativo === 1;
+
+        const [existentes] = await dbPool.query(
+            'SELECT ativo FROM auto_traders WHERE id=? LIMIT 1',
+            [id]
+        );
+        if (existentes.length === 0) {
+            return res.status(404).json({ sucesso: false, erro: 'auto_trader_nao_encontrado' });
+        }
+
+        const estavaAtivo = existentes[0].ativo === true || existentes[0].ativo === 1;
+        const reativando = !estavaAtivo && novoAtivo;
+
+        if (reativando) {
+            const saldoFresco = obterSaldoGlobalFresco();
+            if (saldoFresco === null) {
+                return res.status(409).json({
+                    sucesso: false,
+                    erro: 'saldo_global_indisponivel',
+                    mensagem: 'Saldo real ausente ou desatualizado. Aguarde a sincronização da página antes de reativar o Auto-Trader.'
+                });
+            }
+
+            await dbPool.query(
+                `UPDATE auto_traders
+                 SET nome=?, ativo=true, config_json=?, saldo_inicial=?, saldo_atual=?,
+                     status_operacao='STANDBY', entradas_feitas=0, pulos_restantes=0
+                 WHERE id=?`,
+                [nome, configJson, saldoFresco, saldoFresco, id]
+            );
+        } else {
+            await dbPool.query(
+                'UPDATE auto_traders SET nome=?, ativo=?, config_json=? WHERE id=?',
+                [nome, novoAtivo ? 1 : 0, configJson, id]
+            );
+        }
+
+        await carregarSistemasParaMemoria();
+        res.json({ sucesso: true, baseline_recapturado: reativando });
+    } catch (e) {
+        res.status(500).json({ sucesso: false });
+    }
 });
 
 app.delete("/api/auto-trader/:id", async (req, res) => { 
@@ -1370,6 +1456,7 @@ app.post("/receber-sinal", async (req, res) => {
                     );
 
                     saldoGlobalCorretora = saldoRecebido;
+                    saldoGlobalAtualizadoEm = Date.now();
                     for (let trader of AUTO_TRADERS_MEMORIA) {
                         if (trader.ativo) trader.saldo_atual = saldoRecebido;
                     }

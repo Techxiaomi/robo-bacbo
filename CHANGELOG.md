@@ -48,3 +48,5 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - `greens_consecutivos` passa a ser atualizado por resultado efetivamente recebido pelo robô; aviso Telegram de proteção é encadeado após o RED. `stop_reds_seguidos` separado permanece pendente por não possuir regra de recuperação definida no painel.
 - BUG-009: `prepararBancoDeDados()` passa a criar também `origens` e `estrategias` antes das migrations, tornando o bootstrap compatível com banco vazio sem depender de dump legado.
 - O schema inicial contém somente os campos comprovadamente usados pelo CRUD, estatísticas legadas e metadados dinâmicos atuais; bancos existentes continuam preservados por `CREATE TABLE IF NOT EXISTS`.
+- BUG-008B: criação ativa e reativação de Auto-Trader passam a capturar `saldo_inicial` exclusivamente do saldo global recente no backend; o frontend deixa de enviar baseline financeiro.
+- Reativação inicia novo ciclo em `STANDBY`, zera `entradas_feitas`/`pulos_restantes` e rejeita ativação com HTTP 409 quando o saldo está ausente ou além da janela de freshness configurável. Edição de trader já ativo continua preservando os saldos.

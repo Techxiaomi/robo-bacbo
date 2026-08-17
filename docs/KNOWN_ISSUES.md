@@ -72,7 +72,7 @@ Status: **parcialmente mitigado no patch BUG-006A**.
 
 A janela `hora_inicio`/`hora_fim` passa a ser aplicada antes de abrir novas sequências do Auto-Trader. Janelas normais e janelas que atravessam a meia-noite são suportadas; horários ausentes usam `00:00`–`23:59`, e configuração de horário inválida bloqueia a nova entrada. Gales de uma sequência já iniciada continuam até o desfecho para não deixar ordens pendentes/auditoria em estado incoerente.
 
-Stop Win, Stop Loss e trailing permanecem pendentes. O Python atual não envia `saldo_atual`, então o backend ainda não possui uma fonte confiável para aplicar limites financeiros. Além disso, `trailing_stop` é apenas booleano no painel e não define distância/recuo de trailing. Esses controles devem ser concluídos junto à sincronização de saldo (BUG-008) e à definição explícita da regra de trailing.
+Stop Win, Stop Loss e trailing permanecem pendentes. O BUG-008A/008B fornece sincronização de saldo e baseline financeiro controlado pelo backend, mas a leitura real da página ainda precisa de validação operacional antes de liberar enforcement financeiro. Além disso, `trailing_stop` é apenas booleano no painel e não define distância/recuo de trailing.
 
 ### BUG-007 — Telegram e filtros de robôs parecem incompletos
 
@@ -86,13 +86,15 @@ O campo separado `stop_reds_seguidos` permanece sem enforcement porque o painel 
 
 ### BUG-008 — Sincronização de saldo da corretora estava incompleta
 
-Status: **parcialmente mitigado no patch BUG-008A**.
+Status: **parcialmente mitigado nos patches BUG-008A e BUG-008B**.
 
-O executor passa a poder ler o saldo real diretamente da página usando o seletor CSS explícito `CASINO_BALANCE_SELECTOR`. A leitura ocorre periodicamente no mesmo thread do Playwright, procura o seletor na página principal e nos frames, valida formatos monetários e envia mensagens autenticadas de saldo ao Node somente quando o valor muda ou em heartbeat. Sem seletor configurado ou sem valor válido, nenhum saldo é inferido.
+O executor pode ler o saldo real diretamente da página usando o seletor CSS explícito `CASINO_BALANCE_SELECTOR` e enviar mensagens autenticadas de saldo ao Node por mudança/heartbeat. Sem seletor configurado ou sem valor válido, nenhum saldo é inferido.
 
-O Node valida `saldo_atual` como número finito e não-negativo antes de persistir o valor nos Auto-Traders ativos. `saldoGlobalCorretora` passa a iniciar como desconhecido (`null`) em vez de zero.
+O BUG-008B torna o backend dono do baseline financeiro. O navegador deixa de fornecer `saldo_inicial`; criação ativa e transição inativo→ativo exigem um saldo global recente, capturam esse valor como `saldo_inicial`/`saldo_atual` e iniciam um novo ciclo em `STANDBY`, zerando `entradas_feitas` e `pulos_restantes`. Edições de um trader já ativo preservam baseline, saldo e contadores. Criação inativa continua permitida e será recalibrada na ativação.
 
-Ainda é necessário identificar e validar operacionalmente o seletor CSS real da casa utilizada. Stop Win/Stop Loss permanecem fora de enforcement até essa leitura ser confirmada em operação. A criação/recalibração explícita de `saldo_inicial` também continua sendo uma etapa separada antes de concluir o BUG-006B.
+O Node registra quando o último saldo foi aceito e considera o valor fresco por `BALANCE_SYNC_MAX_AGE_SECONDS` (90 s por padrão, acima do heartbeat padrão de 60 s). Após restart, o saldo volta a desconhecido até uma nova sincronização, evitando reutilizar snapshot antigo.
+
+A validação operacional do seletor CSS real permanece pendente. Stop Win/Stop Loss continuam fora de enforcement até essa leitura ser confirmada em operação; a semântica de trailing também permanece separada.
 
 ### OBS-001 — Exceções críticas são frequentemente silenciadas
 
