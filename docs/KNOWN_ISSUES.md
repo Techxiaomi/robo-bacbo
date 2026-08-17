@@ -40,7 +40,7 @@ Risco residual: não há métricas/telemetria centralizada para agregação de s
 
 ### OBS-003 — Cobertura automatizada
 
-Status: **parcialmente mitigado pelos patches OBS-003A…OBS-003G**.
+Status: **amplamente mitigado pelos patches OBS-003A…OBS-003H; o site real permanece dependência externa não determinística**.
 
 Já implementado:
 
@@ -52,13 +52,13 @@ Já implementado:
 - integração real do `bot2_coletor.js` com Express + MySQL 8.4 descartável no CI;
 - smoke HTTP real cobrindo bootstrap de banco/schema/memória, login/logout, sessão administrativa, validação de Origin, APIs e `/receber-sinal` com `INTERNAL_API_TOKEN`;
 - handshake Socket.IO real cobrindo rejeição sem sessão, aceitação com cookie administrativo válido e nova rejeição do cookie invalidado após logout;
-- verificação no MySQL de que as nove tabelas esperadas são criadas a partir de banco vazio e de que o smoke não grava giro nem ordem financeira;
-- Chromium real em DOM controlado local validando parsing/leitura de saldo no DOM principal e em iframe, além dos seletores de ficha/alvo usados por `executar_aposta_na_tela`.
+- verificação no MySQL de que as nove tabelas esperadas são criadas a partir de banco vazio e de que o smoke de infraestrutura não grava giro nem ordem financeira;
+- Chromium real em DOM controlado local validando parsing/leitura de saldo no DOM principal e em iframe, além dos seletores de ficha/alvo usados por `executar_aposta_na_tela`;
+- E2E controlado do ciclo coletor Python → Node → executor fake autenticado → MySQL: `processar_resultado` real gera sequência/coleta, uma estratégia real casa o padrão, o Auto-Trader sai de `STANDBY`, a ordem DIRETO é confirmada com o mesmo `order_id`, a auditoria passa de `PENDENTE` para `WIN` e `historico_resultados` registra `GREEN/DIRETO`.
 
-Riscos residuais:
+Risco residual externo:
 
-- ainda não há teste ponta a ponta do ciclo captura → Node → executor → auditoria;
-- o DOM/WebSocket do site real continua sendo dependência externa e pode divergir do ambiente controlado do CI.
+- o DOM/WebSocket do site real, sessão autenticada, disponibilidade e regras da plataforma podem divergir do ambiente controlado do CI; esses fatores devem ser tratados como validação operacional, não como gate determinístico do repositório.
 
 ## Itens mitigados
 

@@ -47,6 +47,7 @@ Também estão implementados:
 - integração real do backend com Express + Socket.IO + MySQL 8.4 descartável;
 - handshake Socket.IO real validado com sessão administrativa antes e depois do logout;
 - Playwright/Chromium real em DOM controlado local para leitura de saldo e seletores de execução;
+- E2E controlado coletor Python → Node → executor fake autenticado → auditoria MySQL, incluindo ordem DIRETO e fechamento `WIN`;
 - GitHub Actions em PR/push para `main`.
 
 Consulte `CURRENT_STATE.md` para detalhes e riscos residuais.
@@ -92,8 +93,7 @@ Não misture correções independentes no mesmo patch.
 - rotação operacional de credenciais antigas compartilhadas;
 - idempotência de `order_id` não sobrevive a restart do executor;
 - métricas centralizadas ainda ausentes, apesar dos logs estruturados;
-- ainda não existe E2E completo captura → Node → executor → auditoria;
-- dependência operacional da estrutura DOM/WebSocket do site de destino, que pode divergir do ambiente controlado do CI;
+- dependência operacional da estrutura DOM/WebSocket, sessão e comportamento do site de destino, que pode divergir dos ambientes controlados do CI;
 - modularização futura deve ser gradual e coberta por testes.
 
 ## Validação mínima esperada
@@ -110,7 +110,13 @@ Quando a alteração puder afetar bootstrap, rotas HTTP, autenticação, Socket.
 - manter verde o job `Backend HTTP + Socket.IO + MySQL integration`;
 - o job deve usar banco descartável e credenciais fictícias, nunca `.env` real ou secrets do projeto;
 - preservar testes de sessão administrativa no HTTP e no handshake Socket.IO;
-- não transformar o smoke em execução financeira: nenhum giro válido ou chamada ao executor deve ser necessária para validar infraestrutura.
+- não transformar o smoke de infraestrutura em execução financeira.
+
+Quando a alteração tocar matching de padrão, transição do Auto-Trader, envio de ordem, `order_id`, auditoria financeira ou processamento de resultado Python→Node:
+
+- manter verde o job `Controlled collector + Node + executor + MySQL E2E`;
+- o E2E deve permanecer totalmente controlado, usando executor fake autenticado e MySQL descartável;
+- nunca apontar esse job para site, executor ou conta real.
 
 Quando tocar Python:
 
