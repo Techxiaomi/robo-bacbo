@@ -1,22 +1,50 @@
-# Bac Bo Automation — Baseline Segura
+# Bac Bo Automation
 
-Snapshot inicial preparado a partir dos dois projetos fornecidos, preservando a lógica existente e removendo credenciais do código versionável.
+Projeto integrado de automação/monitoramento da mesa Bac Bo, composto por backend Node.js e executor/coletor Python com Playwright.
+
+O `main` não representa mais apenas o snapshot inicial: ele incorpora as correções funcionais, de segurança, observabilidade e cobertura automatizada documentadas em `CHANGELOG.md`, `docs/CURRENT_STATE.md` e `docs/KNOWN_ISSUES.md`.
 
 ## Componentes
 
-- `robo-bacbo/`: backend Node.js + painel web.
-- `robo-sync-pilot/`: executor/capturador Python com Flask + Playwright.
-- `docs/`: arquitetura, estado atual, riscos e regras de evolução.
-- `scripts/check_secrets.py`: verificação preventiva antes de commits.
+- `robo-bacbo/`: backend Node.js / Express / MySQL / Socket.IO, painel, estratégias, Robôs/Canais, Auto-Trader, auditoria e telemetria local.
+- `robo-sync-pilot/`: Flask + Playwright, sessão da plataforma, captura das rodadas, sincronização de saldo e execução das ordens.
+- `docs/`: arquitetura, estado atual, riscos, segurança e regras de evolução.
+- `scripts/check_secrets.py`: verificação preventiva de segredos antes de commits.
+
+## Fluxo principal
+
+```text
+Mesa / Playwright
+   |  resultado + coletor_sessao/coletor_seq
+   v
+POST /receber-sinal
+   |
+   v
+Node + MySQL
+   |  intenção PREPARANDO + order_id
+   v
+POST /apostar
+   |
+   v
+Executor Playwright
+   |  callback EXECUTADA/FALHOU/EXPIRADA/AMBIGUA
+   v
+POST /executor-status
+   |
+   v
+Node / auditoria
+```
+
+O processamento de rodadas no Node preserva ACK rápido para o coletor, mas serializa o trabalho pós-ACK em FIFO. O coletor também deduplica frames `Resolved` repetidos antes de consumir `coletor_seq`.
 
 ## Primeira configuração local
 
 1. Copie `.env.example` para `.env` na raiz do projeto.
-2. Preencha no `.env` as credenciais e URLs reais da sua instalação.
-3. Gere um valor longo e aleatório para `INTERNAL_API_TOKEN` e mantenha o mesmo `.env` acessível aos processos Node.js e Python.
-4. Nunca envie `.env` ou `robo-sync-pilot/sessao_salva.json` ao Git.
+2. Preencha somente na sua máquina as credenciais, URLs e seletores reais.
+3. Gere um `INTERNAL_API_TOKEN` longo e aleatório e use o mesmo valor nos dois processos.
+4. Nunca versione `.env`, `robo-sync-pilot/sessao_salva.json` ou outros arquivos de sessão/credenciais.
 
-O backend e o executor recusam iniciar quando `INTERNAL_API_TOKEN` está vazio. As rotas internas `/receber-sinal` e `/apostar` exigem esse segredo no header `X-Internal-Token`.
+Por padrão, Node e Flask ficam em loopback. As rotas internas `/receber-sinal`, `/apostar` e `/executor-status` exigem `INTERNAL_API_TOKEN`. Fora do loopback, o painel/API administrativa exige `ADMIN_USERNAME` e `ADMIN_PASSWORD` e o backend falha fechado se a configuração estiver incompleta.
 
 ### Backend Node.js
 
@@ -40,12 +68,36 @@ python gerar_sessao.py
 python robo.py
 ```
 
-`gerar_sessao.py` só precisa ser usado quando for necessário criar/renovar o arquivo local `sessao_salva.json`.
+`gerar_sessao.py` só precisa ser executado quando for necessário criar ou renovar o `storage_state` local.
 
-## Antes de qualquer commit
+## Validação
+
+Antes de qualquer commit:
 
 ```bash
 python scripts/check_secrets.py
 ```
 
-A baseline atual **não pretende corrigir os bugs funcionais já existentes**. Ela apenas torna o snapshot versionável com segurança e documenta o que foi encontrado. Consulte `docs/KNOWN_ISSUES.md` antes de alterar comportamento.
+Testes locais principais:
+
+```bash
+cd robo-bacbo
+npm test
+```
+
+```bash
+cd robo-sync-pilot
+python tests/test_pure_logic.py
+```
+
+O GitHub Actions também executa gates de integração com MySQL descartável, autenticação HTTP/Socket.IO, restart/idempotência do executor, Chromium em DOM controlado e E2E controlado coletor → Node → executor → auditoria.
+
+## Documentação de referência
+
+- `docs/CURRENT_STATE.md`: fonte principal para o estado funcional atual.
+- `docs/KNOWN_ISSUES.md`: riscos residuais e itens já mitigados.
+- `docs/ARCHITECTURE.md`: contratos e fluxo arquitetural atual.
+- `docs/SECURITY_BASELINE.md`: regras de segurança e versionamento.
+- `PROJECT_RULES.md`: regras obrigatórias para novas alterações.
+
+Mudanças devem permanecer pequenas, isoladas, testáveis e compatíveis com os contratos existentes entre frontend, Node, Python e MySQL.
