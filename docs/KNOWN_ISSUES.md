@@ -24,6 +24,14 @@ O Node cria o waiter do `order_id` antes do POST, portanto um callback antecipad
 
 O BUG-014C mantém o ACK rápido de `/receber-sinal`, mas separa admissão de sequência e processamento: `coletor_sessao/coletor_seq` são reservados sincronamente antes do primeiro `await`, e toda mutação pós-ACK entra em uma fila FIFO. Assim uma rodada recebida durante MySQL/callback da anterior aguarda sua vez e não pode fechar/criar sinais sobre estado intermediário.
 
+### BUG-015 — Frames `Resolved` repetidos podiam virar rodadas distintas
+
+Status: **mitigado**.
+
+O callback WebSocket chamava `processar_resultado()` para todo `bacbo.playerState` em estágio `Resolved`; não havia identidade/fingerprint local antes de incrementar `coletor_seq`. Uma repetição imediata do mesmo estado poderia, portanto, ser enviada ao Node como se fosse outra rodada válida.
+
+O coletor agora deduplica antes de consumir sequência. Quando o payload traz `roundId`, `round_id`, `roundID`, `roundUid` ou `round_uid`, a identidade explícita prevalece. Sem identificador, usa resultado + dados normalizados apenas dentro de `RESULT_DEDUP_WINDOW_SECONDS` (3 s por padrão), permitindo que uma rodada futura legitimamente igual seja processada após a janela. Falha de POST continua consumindo a sequência da primeira observação, preservando a detecção de buraco do BUG-011.
+
 ### BUG-001R — Restart do executor e exactly-once do efeito externo
 
 Status: **deduplicação entre restarts mitigada; ambiguidade do efeito externo ainda residual**.

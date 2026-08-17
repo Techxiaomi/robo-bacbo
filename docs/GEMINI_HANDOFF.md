@@ -54,6 +54,7 @@ Também estão implementados:
 - BUG-014A: toda ordem DIRETO/GALE recebe intenção durável `PREPARANDO` no MySQL antes do POST ao executor;
 - BUG-014B: novas ordens só são aceitas com Playwright pronto, possuem TTL de fila e exigem callback autenticado `EXECUTADA/FALHOU/EXPIRADA/AMBIGUA`; Node só promove `PREPARANDO` após `EXECUTADA`, e callback antecipado é suportado;
 - BUG-014C: `/receber-sinal` reserva continuidade antes de I/O e serializa todo o processamento pós-ACK em FIFO, impedindo que uma rodada ultrapasse outra durante MySQL/callback do executor;
+- BUG-015: o coletor deduplica frames `Resolved` repetidos antes de incrementar `coletor_seq`, preferindo identidade de rodada e usando fingerprint temporal curto como fallback;
 - GitHub Actions em PR/push para `main`.
 
 Consulte `CURRENT_STATE.md` para detalhes e riscos residuais.
@@ -141,7 +142,8 @@ Quando a alteração tocar matching de padrão, transição do Auto-Trader, envi
 - manter verde o job `Controlled collector + Node + executor + MySQL E2E`;
 - o E2E deve permanecer totalmente controlado, usando executor fake autenticado e MySQL descartável;
 - quando tocar criação/envio de ordens, o executor fake deve comprovar `PREPARANDO`, enviar callback autenticado `EXECUTADA` e validar que o Node só então promove a auditoria; o E2E também deve manter o cenário em que a rodada 2 chega enquanto a rodada 1 ainda espera o executor, comprovando o FIFO pós-ACK;
-- nunca apontar esse job para site, executor ou conta real.
+- nunca apontar esse job para site, executor ou conta real;
+- ao tocar `processar_resultado`, preservar testes de frame `Resolved` duplicado, nova rodada após a janela e `roundId` distinto.
 
 Quando a alteração tocar recepção `/apostar`, `order_id`, journal ou idempotência do executor:
 
