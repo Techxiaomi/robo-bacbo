@@ -74,6 +74,7 @@ function carregarLogicaPura() {
     vm.runInContext(
         `${trechos.join("\n")}\nmodule.exports = {
             calcularFichaSegura,
+            calcularDetalhesPadraoNoHistorico,
             avaliarContinuidadeResultado,
             nivelHistoricoResultado,
             contarTiesLegados,
@@ -747,4 +748,101 @@ test("startup remove apenas padroes IA orfaos deixados por robos inexistentes", 
     assert.match(trecho, /DELETE FROM historico_disparos_robos WHERE estrategia_id IN/);
     assert.match(trecho, /DELETE FROM estrategias WHERE id IN/);
     assert.match(source, /await limparPadroesDinamicosOrfaos\(\);/);
+});
+test("cards recalculam padrão pelo histórico bruto com DIRETO, Gale, TIE, RED e sessão", () => {
+    const agora = Date.now();
+    const recente = agora - (60 * 60 * 1000);
+    const antigo = agora - (30 * 60 * 60 * 1000);
+    const giros = [
+        { resultado: "Player", id_sessao: 1, timestamp_ms: recente },
+        { resultado: "Banker", id_sessao: 1, timestamp_ms: recente + 1 },
+        { resultado: "Banker", id_sessao: 1, timestamp_ms: recente + 2 },
+
+        { resultado: "Player", id_sessao: 2, timestamp_ms: recente + 3 },
+        { resultado: "Banker", id_sessao: 2, timestamp_ms: recente + 4 },
+        { resultado: "Player", id_sessao: 2, timestamp_ms: recente + 5 },
+        { resultado: "Banker", id_sessao: 2, timestamp_ms: recente + 6 },
+
+        { resultado: "Player", id_sessao: 3, timestamp_ms: recente + 7 },
+        { resultado: "Banker", id_sessao: 3, timestamp_ms: recente + 8 },
+        { resultado: "Tie", multiplicador: "6x", id_sessao: 3, timestamp_ms: recente + 9 },
+
+        { resultado: "Player", id_sessao: 4, timestamp_ms: recente + 10 },
+        { resultado: "Banker", id_sessao: 4, timestamp_ms: recente + 11 },
+        { resultado: "Player", id_sessao: 4, timestamp_ms: recente + 12 },
+        { resultado: "Player", id_sessao: 4, timestamp_ms: recente + 13 },
+        { resultado: "Player", id_sessao: 4, timestamp_ms: recente + 14 },
+
+        { resultado: "Player", id_sessao: 5, timestamp_ms: antigo },
+        { resultado: "Banker", id_sessao: 5, timestamp_ms: antigo + 1 },
+        { resultado: "Banker", id_sessao: 5, timestamp_ms: antigo + 2 },
+
+        // Não pode formar padrão atravessando a fronteira de sessão.
+        { resultado: "Player", id_sessao: 6, timestamp_ms: recente + 20 },
+        { resultado: "Banker", id_sessao: 7, timestamp_ms: recente + 21 },
+        { resultado: "Banker", id_sessao: 7, timestamp_ms: recente + 22 }
+    ];
+
+    const detalhes = logic.calcularDetalhesPadraoNoHistorico({
+        padrao: ["Player", "Banker"],
+        entrada: "Banker",
+        gales: 2,
+        proteger_empate: 1
+    }, giros, agora);
+
+    assert.equal(detalhes["24h"].green_direto, 1);
+    assert.equal(detalhes["24h"].gale1, 1);
+    assert.equal(detalhes["24h"].gale2, 0);
+    assert.equal(detalhes["24h"].ties.direto["6x"], 1);
+    assert.equal(detalhes["24h"].red, 1);
+
+    assert.equal(detalhes.geral.green_direto, 2);
+    assert.equal(detalhes.geral.gale1, 1);
+    assert.equal(detalhes.geral.ties.direto["6x"], 1);
+    assert.equal(detalhes.geral.red, 1);
+});
+
+test("TIE sem proteção segue como tentativa e pode fechar no Gale seguinte", () => {
+    const agora = Date.now();
+    const giros = [
+        { resultado: "Player", id_sessao: 10, timestamp_ms: agora - 1000 },
+        { resultado: "Banker", id_sessao: 10, timestamp_ms: agora - 900 },
+        { resultado: "Tie", multiplicador: "25x", id_sessao: 10, timestamp_ms: agora - 800 },
+        { resultado: "Banker", id_sessao: 10, timestamp_ms: agora - 700 }
+    ];
+
+    const detalhes = logic.calcularDetalhesPadraoNoHistorico({
+        padrao: ["Player", "Banker"],
+        entrada: "Banker",
+        gales: 1,
+        proteger_empate: 0
+    }, giros, agora);
+
+    assert.equal(detalhes["24h"].green_direto, 0);
+    assert.equal(detalhes["24h"].gale1, 1);
+    assert.equal(Object.keys(detalhes["24h"].ties.direto).length, 0);
+    assert.equal(detalhes["24h"].red, 0);
+});
+
+test("API de estratégias usa cache de giros e cards exibem filtros 24h/hoje/semana/mês/geral", () => {
+    const rota = trechoEntre(
+        'app.get("/api/estrategias", async (req, res) => {',
+        'app.get("/api/dashboard-stats", async (req, res) => {'
+    );
+
+    assert.match(source, /let historicoGirosAnalitico = \[\];/);
+    assert.match(source, /async function carregarHistoricoGirosAnalitico\(\)/);
+    assert.match(source, /FROM giros_recentes[\s\S]*?ORDER BY id ASC/);
+    assert.match(source, /await carregarHistoricoGirosAnalitico\(\);/);
+    assert.match(source, /historicoGirosAnalitico\.push\(\{/);
+    assert.match(rota, /calcularDetalhesPadraoNoHistorico\(est, historicoGirosAnalitico, agoraMs\)/);
+    assert.equal(/FROM historico_resultados/.test(rota), false);
+
+    assert.match(frontendSource, /function mudarPeriodoCardEstrategia\(tipoCard, periodo\)/);
+    assert.match(frontendSource, /padroesPeriodoAtual = periodo;/);
+    assert.match(frontendSource, /dashPeriodoAtual = periodo;/);
+    assert.match(frontendSource, /mudarPeriodoCardEstrategia\('\$\{idPrefixo\}', '24h'\)/);
+    assert.match(frontendSource, /<span>24H<\/span>/);
+    assert.match(frontendSource, /<span>Geral<\/span>/);
+    assert.equal(/let menusTabs = isAtivo \?/.test(frontendSource), false);
 });

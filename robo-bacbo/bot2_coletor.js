@@ -1,4 +1,4 @@
-const mysql = require("mysql2/promise"); 
+const mysql = require("mysql2/promise");
 const express = require("express");
 const path = require("path");
 const crypto = require("crypto");
@@ -121,30 +121,30 @@ async function prepararBancoDeDados() {
 
         await dbPool.query(`
             CREATE TABLE IF NOT EXISTS historico_resultados (
-                id INT AUTO_INCREMENT PRIMARY KEY, 
-                estrategia_id VARCHAR(100), 
-                tipo_resultado VARCHAR(20), 
-                nivel VARCHAR(20), 
-                multiplicador VARCHAR(10), 
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                estrategia_id VARCHAR(100),
+                tipo_resultado VARCHAR(20),
+                nivel VARCHAR(20),
+                multiplicador VARCHAR(10),
                 data_hora DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         `);
 
         await dbPool.query(`
             CREATE TABLE IF NOT EXISTS giros_recentes (
-                id INT AUTO_INCREMENT PRIMARY KEY, 
-                resultado VARCHAR(20), 
-                p_d1 INT DEFAULT 0, 
-                p_d2 INT DEFAULT 0, 
-                b_d1 INT DEFAULT 0, 
-                b_d2 INT DEFAULT 0, 
-                numero_empate INT DEFAULT 0, 
-                multiplicador VARCHAR(10) DEFAULT '', 
-                id_sessao BIGINT, 
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                resultado VARCHAR(20),
+                p_d1 INT DEFAULT 0,
+                p_d2 INT DEFAULT 0,
+                b_d1 INT DEFAULT 0,
+                b_d2 INT DEFAULT 0,
+                numero_empate INT DEFAULT 0,
+                multiplicador VARCHAR(10) DEFAULT '',
+                id_sessao BIGINT,
                 data_hora DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         `);
-        
+
         await dbPool.query(`
             CREATE TABLE IF NOT EXISTS robos_canais (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -282,12 +282,13 @@ async function prepararBancoDeDados() {
 // ==========================================
 // 2. VARIÁVEIS GLOBAIS DE ESTADO EM MEMÓRIA
 // ==========================================
-let ESTRATEGIAS_MEMORIA = []; 
+let ESTRATEGIAS_MEMORIA = [];
 let ROBOS_MEMORIA = [];
-let AUTO_TRADERS_MEMORIA = []; 
-let historicoRecente = []; 
-let estadoApostas = {}; 
-let estadoStandbyRobos = {}; 
+let AUTO_TRADERS_MEMORIA = [];
+let historicoRecente = [];
+let historicoGirosAnalitico = [];
+let estadoApostas = {};
+let estadoStandbyRobos = {};
 let idSessaoContinua = Date.now();
 let estadoContinuidadeColetor = {
     sessao: null,
@@ -295,7 +296,7 @@ let estadoContinuidadeColetor = {
     timestamp_coleta: null
 };
 let contadorGirosParaLimpeza = 0;
-let contadorGirosGlobalPiloto = 0; 
+let contadorGirosGlobalPiloto = 0;
 let saldoGlobalCorretora = null;
 let saldoGlobalAtualizadoEm = 0;
 let backendPronto = false;
@@ -504,12 +505,184 @@ const ioServer = new Server(server, {
 function calcularFichaSegura(valorDesejado) {
     let valor = parseFloat(valorDesejado);
     if (isNaN(valor) || valor <= 0) return 0;
-    
+
     let valorArredondado = Math.round(valor / 5) * 5;
     if (valorArredondado === 0 && valor > 0) {
         valorArredondado = 5;
     }
     return valorArredondado;
+}
+
+function criarDetalhesPadraoVazios() {
+    const periodo = () => ({
+        green_direto: 0,
+        gale1: 0,
+        gale2: 0,
+        red: 0,
+        ties: { direto: {}, gale1: {}, gale2: {} }
+    });
+    return {
+        '24h': periodo(),
+        hoje: periodo(),
+        semana: periodo(),
+        mes: periodo(),
+        geral: periodo()
+    };
+}
+
+function limitesPeriodosHistorico(agoraMs = Date.now()) {
+    const agora = new Date(agoraMs);
+    if (!Number.isFinite(agoraMs) || Number.isNaN(agora.getTime())) {
+        return limitesPeriodosHistorico(Date.now());
+    }
+
+    const inicioHoje = new Date(agora.getFullYear(), agora.getMonth(), agora.getDate()).getTime();
+    const inicioSemana = new Date(
+        agora.getFullYear(),
+        agora.getMonth(),
+        agora.getDate() - agora.getDay()
+    ).getTime();
+    const inicioMes = new Date(agora.getFullYear(), agora.getMonth(), 1).getTime();
+
+    return {
+        '24h': agoraMs - (24 * 60 * 60 * 1000),
+        hoje: inicioHoje,
+        semana: inicioSemana,
+        mes: inicioMes
+    };
+}
+
+function calcularDetalhesPadraoNoHistorico(est, dadosArr, agoraMs = Date.now()) {
+    const detalhes = criarDetalhesPadraoVazios();
+    if (!est || !Array.isArray(dadosArr) || dadosArr.length === 0) return detalhes;
+
+    let padraoArr = est.padrao;
+    if (!Array.isArray(padraoArr)) {
+        try { padraoArr = JSON.parse(String(padraoArr || '[]')); } catch (e) { padraoArr = []; }
+    }
+    if (!Array.isArray(padraoArr) || padraoArr.length === 0) return detalhes;
+    padraoArr = padraoArr.map(String);
+
+    const alvo = String(est.entrada || '');
+    if (alvo !== 'Player' && alvo !== 'Banker') return detalhes;
+
+    const gales = Math.max(0, Math.floor(Number(est.gales) || 0));
+    const protegerEmpate = est.proteger_empate === true
+        || Number(est.proteger_empate) === 1
+        || est.protegerEmpate === true;
+    const limites = limitesPeriodosHistorico(agoraMs);
+    const tamanho = padraoArr.length;
+
+    const periodosDaOcorrencia = (timestampMs) => {
+        const periodos = ['geral'];
+        const ts = Number(timestampMs);
+        if (!Number.isFinite(ts) || ts <= 0) return periodos;
+        if (ts >= limites['24h']) periodos.push('24h');
+        if (ts >= limites.hoje) periodos.push('hoje');
+        if (ts >= limites.semana) periodos.push('semana');
+        if (ts >= limites.mes) periodos.push('mes');
+        return periodos;
+    };
+
+    const registrarDesfecho = (periodos, tipo, nivel, multiplicador) => {
+        for (const periodo of periodos) {
+            const stats = detalhes[periodo];
+            if (tipo === 'GREEN') {
+                if (nivel === 0) stats.green_direto++;
+                else if (nivel === 1) stats.gale1++;
+                else if (nivel === 2) stats.gale2++;
+            } else if (tipo === 'TIE') {
+                const nivelTie = nivel === 0 ? 'direto' : (nivel === 1 ? 'gale1' : 'gale2');
+                const mult = String(multiplicador || '4x');
+                if (!stats.ties[nivelTie][mult]) stats.ties[nivelTie][mult] = 0;
+                stats.ties[nivelTie][mult]++;
+            } else if (tipo === 'RED') {
+                stats.red++;
+            }
+        }
+    };
+
+    for (let i = 0; i <= dadosArr.length - tamanho - 1; i++) {
+        const sessaoBase = dadosArr[i].id_sessao;
+        let match = true;
+
+        for (let p = 0; p < tamanho; p++) {
+            const giroPadrao = dadosArr[i + p];
+            if (!giroPadrao
+                || String(giroPadrao.resultado) !== padraoArr[p]
+                || giroPadrao.id_sessao !== sessaoBase) {
+                match = false;
+                break;
+            }
+        }
+        if (!match) continue;
+
+        let currentIndex = i + tamanho;
+        if (currentIndex >= dadosArr.length || dadosArr[currentIndex].id_sessao !== sessaoBase) continue;
+
+        let step = 0;
+        let desfecho = null;
+        let lastIndexChecked = currentIndex;
+
+        while (step <= gales && currentIndex < dadosArr.length) {
+            const giroResultado = dadosArr[currentIndex];
+            if (giroResultado.id_sessao !== sessaoBase) break;
+
+            lastIndexChecked = currentIndex;
+            const resultado = String(giroResultado.resultado || '');
+            if (resultado === alvo) {
+                desfecho = { tipo: 'GREEN', nivel: step, multiplicador: '' };
+                break;
+            }
+            if (resultado === 'Tie' && protegerEmpate) {
+                desfecho = {
+                    tipo: 'TIE',
+                    nivel: step,
+                    multiplicador: giroResultado.multiplicador || '4x'
+                };
+                break;
+            }
+
+            step++;
+            currentIndex++;
+        }
+
+        if (!desfecho
+            && step > gales
+            && lastIndexChecked < dadosArr.length
+            && dadosArr[lastIndexChecked].id_sessao === sessaoBase) {
+            desfecho = { tipo: 'RED', nivel: gales, multiplicador: '' };
+        }
+        if (!desfecho) continue;
+
+        const periodos = periodosDaOcorrencia(dadosArr[i].timestamp_ms);
+        registrarDesfecho(periodos, desfecho.tipo, desfecho.nivel, desfecho.multiplicador);
+    }
+
+    return detalhes;
+}
+
+async function carregarHistoricoGirosAnalitico() {
+    const [linhas] = await dbPool.query(`
+        SELECT
+            id,
+            resultado,
+            multiplicador,
+            id_sessao,
+            UNIX_TIMESTAMP(data_hora) * 1000 AS timestamp_ms
+        FROM giros_recentes
+        ORDER BY id ASC
+    `);
+
+    historicoGirosAnalitico = linhas.map(row => ({
+        id: Number(row.id) || 0,
+        resultado: String(row.resultado || ''),
+        multiplicador: String(row.multiplicador || ''),
+        id_sessao: row.id_sessao,
+        timestamp_ms: Number(row.timestamp_ms) || 0
+    }));
+
+    console.log(`📚 Histórico analítico carregado: ${historicoGirosAnalitico.length} giros.`);
 }
 
 // ==========================================
@@ -522,68 +695,12 @@ app.get("/api/saldo-global", (req, res) => {
 app.get("/api/estrategias", async (req, res) => {
     try {
         const [linhas] = await dbPool.query('SELECT * FROM estrategias ORDER BY id DESC');
-        let historyMap = {};
-        
-        const createEmptyStats = () => ({
-            '24h': { green_direto: 0, gale1: 0, gale2: 0, red: 0, ties: { direto:{}, gale1:{}, gale2:{} } },
-            hoje: { green_direto: 0, gale1: 0, gale2: 0, red: 0, ties: { direto:{}, gale1:{}, gale2:{} } },
-            semana: { green_direto: 0, gale1: 0, gale2: 0, red: 0, ties: { direto:{}, gale1:{}, gale2:{} } },
-            mes: { green_direto: 0, gale1: 0, gale2: 0, red: 0, ties: { direto:{}, gale1:{}, gale2:{} } },
-            geral: { green_direto: 0, gale1: 0, gale2: 0, red: 0, ties: { direto:{}, gale1:{}, gale2:{} } }
-        });
+        const agoraMs = Date.now();
 
-        linhas.forEach(est => {
-            historyMap[est.id] = createEmptyStats();
-            historyMap[est.id].geral.green_direto = est.green_direto; 
-            historyMap[est.id].geral.gale1 = est.gale1; 
-            historyMap[est.id].geral.gale2 = est.gale2; 
-            historyMap[est.id].geral.red = est.red;
-            
-            if (est.ties_json) {
-                try { historyMap[est.id].geral.ties = JSON.parse(est.ties_json); } catch(e) {}
-            }
-        });
-
-        const [historico] = await dbPool.query(`
-            SELECT 
-                estrategia_id, tipo_resultado, nivel, multiplicador, 
-                data_hora >= DATE_SUB(NOW(), INTERVAL 24 HOUR) AS is_24h, 
-                DATE(data_hora) = CURDATE() AS is_hoje, 
-                YEARWEEK(data_hora, 0) = YEARWEEK(CURDATE(), 0) AS is_semana, 
-                YEAR(data_hora) = YEAR(CURDATE()) AND MONTH(data_hora) = MONTH(CURDATE()) AS is_mes 
-            FROM historico_resultados
-        `);
-
-        historico.forEach(row => {
-            let sid = row.estrategia_id; 
-            if (!historyMap[sid]) return;
-
-            let levelKey = 'green_direto'; 
-            let tieLevelKey = 'direto';
-
-            if (row.nivel === 'GALE1') { levelKey = 'gale1'; tieLevelKey = 'gale1'; } 
-            if (row.nivel === 'GALE2') { levelKey = 'gale2'; tieLevelKey = 'gale2'; }
-
-            const addStat = (period) => {
-                if (row.tipo_resultado === 'GREEN') {
-                    historyMap[sid][period][levelKey]++;
-                } else if (row.tipo_resultado === 'RED') {
-                    historyMap[sid][period].red++;
-                } else if (row.tipo_resultado === 'TIE') { 
-                    let m = row.multiplicador || '4x'; 
-                    if (!historyMap[sid][period].ties[tieLevelKey][m]) historyMap[sid][period].ties[tieLevelKey][m] = 0; 
-                    historyMap[sid][period].ties[tieLevelKey][m]++; 
-                }
-            };
-
-            if (row.is_24h) addStat('24h'); 
-            if (row.is_hoje) addStat('hoje'); 
-            if (row.is_semana) addStat('semana'); 
-            if (row.is_mes) addStat('mes'); 
-            addStat('geral');
-        });
-
-        res.json(linhas.map(est => ({ ...est, detalhes: historyMap[est.id] })));
+        res.json(linhas.map(est => ({
+            ...est,
+            detalhes: calcularDetalhesPadraoNoHistorico(est, historicoGirosAnalitico, agoraMs)
+        })));
     } catch (erro) {
         console.error('❌ GET /api/estrategias falhou:', erro.message);
         res.status(500).json({ erro: "Erro ao buscar estratégias" });
@@ -605,9 +722,9 @@ app.get("/api/dashboard-stats", async (req, res) => {
         if (origem && origem !== 'TODAS') { queryWhere += " AND h.estrategia_origem = ?"; queryParams.push(origem); }
 
         const [linhas] = await dbPool.query(`
-            SELECT h.tipo_resultado, h.nivel, h.multiplicador 
-            FROM historico_disparos_robos h 
-            LEFT JOIN estrategias e ON h.estrategia_id = e.id 
+            SELECT h.tipo_resultado, h.nivel, h.multiplicador
+            FROM historico_disparos_robos h
+            LEFT JOIN estrategias e ON h.estrategia_id = e.id
             ${queryWhere}
         `, queryParams);
 
@@ -642,8 +759,8 @@ app.post("/api/simular-banca", async (req, res) => {
         const { tipo_alvo, alvo_id, banca_inicial, stake_principal, cobrir_empate, pct_empate, mult_gale, periodo, filtro_horario, hora_inicio, hora_fim } = req.body;
         let query = ""; let params = [];
 
-        if (tipo_alvo === 'ESTRATEGIA') { query = "SELECT tipo_resultado, nivel, multiplicador, data_hora, estrategia_id FROM historico_resultados WHERE estrategia_id = ?"; params.push(alvo_id); } 
-        else if (tipo_alvo === 'ORIGEM') { query = "SELECT h.tipo_resultado, h.nivel, h.multiplicador, h.data_hora, h.estrategia_id FROM historico_resultados h JOIN estrategias e ON h.estrategia_id = e.id WHERE e.origem = ?"; params.push(alvo_id); } 
+        if (tipo_alvo === 'ESTRATEGIA') { query = "SELECT tipo_resultado, nivel, multiplicador, data_hora, estrategia_id FROM historico_resultados WHERE estrategia_id = ?"; params.push(alvo_id); }
+        else if (tipo_alvo === 'ORIGEM') { query = "SELECT h.tipo_resultado, h.nivel, h.multiplicador, h.data_hora, h.estrategia_id FROM historico_resultados h JOIN estrategias e ON h.estrategia_id = e.id WHERE e.origem = ?"; params.push(alvo_id); }
         else if (tipo_alvo === 'ROBO') { query = "SELECT tipo_resultado, nivel, multiplicador, data_hora, estrategia_id FROM historico_disparos_robos WHERE robo_id = ?"; params.push(alvo_id); }
 
         if (periodo === '24h') query += " AND data_hora >= DATE_SUB(NOW(), INTERVAL 24 HOUR)";
@@ -663,7 +780,7 @@ app.post("/api/simular-banca", async (req, res) => {
             filtered = linhas.filter(r => {
                 let d = new Date(r.data_hora); let timeNum = d.getHours() * 100 + d.getMinutes();
                 if (tStart <= tEnd) return timeNum >= tStart && timeNum <= tEnd;
-                else return timeNum >= tStart || timeNum <= tEnd; 
+                else return timeNum >= tStart || timeNum <= tEnd;
             });
         }
 
@@ -691,7 +808,7 @@ app.post("/api/simular-banca", async (req, res) => {
             saldo = saldo - custoSoma + lucro;
             if (saldo > peak) peak = saldo;
             let current_dd = peak - saldo; if (current_dd > max_dd) max_dd = current_dd;
-            
+
             equity_curve.push(saldo);
             let dObj = new Date(row.data_hora); dates.push(`${dObj.getDate()}/${dObj.getMonth()+1} ${dObj.getHours().toString().padStart(2, '0')}:${dObj.getMinutes().toString().padStart(2, '0')}`);
 
@@ -712,7 +829,7 @@ app.post("/api/novo-padrao", async (req, res) => {
     try {
         const { nome, origem, padrao, entrada, gales, protegerEmpate, ativo } = req.body;
         const padraoJson = JSON.stringify(padrao.split(',').map(s => s.trim()));
-        const id = "padrao_" + Date.now(); 
+        const id = "padrao_" + Date.now();
         const tiesZerado = JSON.stringify({ direto: { '88x': 0, '25x': 0, '10x': 0, '6x': 0, '4x': 0 }, gale1: { '88x': 0, '25x': 0, '10x': 0, '6x': 0, '4x': 0 }, gale2: { '88x': 0, '25x': 0, '10x': 0, '6x': 0, '4x': 0 } });
         await dbPool.query('INSERT INTO estrategias (id, nome, origem, padrao, entrada, gales, proteger_empate, ativo, green_direto, gale1, gale2, red, ties_json, is_dinamico) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, ?, false)', [id, nome, origem, padraoJson, entrada, parseInt(gales), protegerEmpate ? 1 : 0, ativo ? 1 : 0, tiesZerado]);
         await carregarSistemasParaMemoria(); ioServer.emit('atualizar_interface'); res.json({ sucesso: true });
@@ -758,18 +875,18 @@ app.delete("/api/origem/:id", async (req, res) => { try { await dbPool.query('DE
 // 6. API: GESTÃO DE ROBÔS E AUTO-TRADERS
 // ==========================================
 app.get("/api/robos", async (req, res) => {
-    try { 
-        const [linhas] = await dbPool.query('SELECT * FROM robos_canais ORDER BY id DESC'); 
+    try {
+        const [linhas] = await dbPool.query('SELECT * FROM robos_canais ORDER BY id DESC');
         const [destinatarios] = await dbPool.query('SELECT * FROM destinatarios_robo');
         const [countDinamicos] = await dbPool.query('SELECT robo_dono_id, COUNT(id) as qtd FROM estrategias WHERE is_dinamico = true GROUP BY robo_dono_id');
 
         const [historicoRobos] = await dbPool.query(`
-            SELECT 
-                robo_id, tipo_resultado, nivel, multiplicador, 
-                data_hora >= DATE_SUB(NOW(), INTERVAL 24 HOUR) AS is_24h, 
-                DATE(data_hora) = CURDATE() AS is_hoje, 
-                YEARWEEK(data_hora, 0) = YEARWEEK(CURDATE(), 0) AS is_semana, 
-                YEAR(data_hora) = YEAR(CURDATE()) AND MONTH(data_hora) = MONTH(CURDATE()) AS is_mes 
+            SELECT
+                robo_id, tipo_resultado, nivel, multiplicador,
+                data_hora >= DATE_SUB(NOW(), INTERVAL 24 HOUR) AS is_24h,
+                DATE(data_hora) = CURDATE() AS is_hoje,
+                YEARWEEK(data_hora, 0) = YEARWEEK(CURDATE(), 0) AS is_semana,
+                YEAR(data_hora) = YEAR(CURDATE()) AND MONTH(data_hora) = MONTH(CURDATE()) AS is_mes
             FROM historico_disparos_robos
         `);
 
@@ -787,16 +904,16 @@ app.get("/api/robos", async (req, res) => {
         historicoRobos.forEach(row => {
             let rid = row.robo_id; if (!mapRobos[rid]) return;
             let levelKey = 'green_direto'; let tieLevelKey = 'direto';
-            if (row.nivel === 'GALE1') { levelKey = 'gale1'; tieLevelKey = 'gale1'; } 
+            if (row.nivel === 'GALE1') { levelKey = 'gale1'; tieLevelKey = 'gale1'; }
             if (row.nivel === 'GALE2') { levelKey = 'gale2'; tieLevelKey = 'gale2'; }
-            
+
             const addStat = (period) => {
                 if (row.tipo_resultado === 'GREEN') mapRobos[rid][period][levelKey]++;
                 else if (row.tipo_resultado === 'RED') mapRobos[rid][period].red++;
-                else if (row.tipo_resultado === 'TIE') { 
-                    let m = row.multiplicador || '4x'; 
-                    if (!mapRobos[rid][period].ties[tieLevelKey][m]) mapRobos[rid][period].ties[tieLevelKey][m] = 0; 
-                    mapRobos[rid][period].ties[tieLevelKey][m]++; 
+                else if (row.tipo_resultado === 'TIE') {
+                    let m = row.multiplicador || '4x';
+                    if (!mapRobos[rid][period].ties[tieLevelKey][m]) mapRobos[rid][period].ties[tieLevelKey][m] = 0;
+                    mapRobos[rid][period].ties[tieLevelKey][m]++;
                 }
             };
             if (row.is_24h) addStat('24h'); if (row.is_hoje) addStat('hoje'); if (row.is_semana) addStat('semana'); if (row.is_mes) addStat('mes'); addStat('geral');
@@ -2353,11 +2470,11 @@ async function carregarSistemasParaMemoria() {
             let padraoParsed = []; try { padraoParsed = JSON.parse(db.padrao); } catch(e) {}
             let tiesParsed = { direto:{}, gale1:{}, gale2:{} }; if (db.ties_json) { try { tiesParsed = JSON.parse(db.ties_json); } catch(e) {} }
 
-            let est = { 
-                id: db.id, nome: db.nome, origem: db.origem, padrao: padraoParsed, entrada: db.entrada, 
-                gales: db.gales, protegerEmpate: db.proteger_empate === 1, ativo: true, is_dinamico: db.is_dinamico === 1, 
+            let est = {
+                id: db.id, nome: db.nome, origem: db.origem, padrao: padraoParsed, entrada: db.entrada,
+                gales: db.gales, protegerEmpate: db.proteger_empate === 1, ativo: true, is_dinamico: db.is_dinamico === 1,
                 robo_dono_id: db.robo_dono_id, quarentena_restante: db.quarentena_restante || 0,
-                stats: { greenDireto: db.green_direto, gale1: db.gale1, gale2: db.gale2, red: db.red, ties: tiesParsed } 
+                stats: { greenDireto: db.green_direto, gale1: db.gale1, gale2: db.gale2, red: db.red, ties: tiesParsed }
             };
             ESTRATEGIAS_MEMORIA.push(est);
             novoEstado[est.id] = estadoApostas[est.id] || { aguardandoResultado: false, galeAtual: 0, robosInscritos: [], mensagensEntrada: [], mensagensGale: [] };
@@ -2389,16 +2506,16 @@ async function carregarSistemasParaMemoria() {
         });
 
         const [linhasAT] = await dbPool.query('SELECT * FROM auto_traders');
-        AUTO_TRADERS_MEMORIA = linhasAT.map(at => { 
-            let cfg = {}; try { cfg = JSON.parse(at.config_json); } catch(e){} 
-            return { 
-                id: at.id, nome: at.nome, ativo: at.ativo === 1, config: cfg, 
-                saldo_inicial: parseFloat(at.saldo_inicial), saldo_atual: parseFloat(at.saldo_atual), 
+        AUTO_TRADERS_MEMORIA = linhasAT.map(at => {
+            let cfg = {}; try { cfg = JSON.parse(at.config_json); } catch(e){}
+            return {
+                id: at.id, nome: at.nome, ativo: at.ativo === 1, config: cfg,
+                saldo_inicial: parseFloat(at.saldo_inicial), saldo_atual: parseFloat(at.saldo_atual),
                 status_operacao: at.status_operacao, entradas_feitas: at.entradas_feitas, pulos_restantes: at.pulos_restantes,
                 reds_consecutivos: Math.max(0, Number(at.reds_consecutivos) || 0),
                 stop_reds_pausado_ate: Math.max(0, Number(at.stop_reds_pausado_ate) || 0),
                 trailing_pico_lucro: Math.max(0, Number(at.trailing_pico_lucro) || 0)
-            }; 
+            };
         });
 
         // 🌟 LOGS DETALHADOS RESTAURADOS NA INICIALIZAÇÃO
@@ -2488,15 +2605,15 @@ app.post("/receber-sinal", async (req, res) => {
             console.error("⚠️ Falha ao promover Auto-Trader de STANDBY para OPERANDO:", e.message);
         }
 
-        let p1 = (dados.dados_jogador && dados.dados_jogador.length > 0) ? parseInt(dados.dados_jogador[0]) : 0; 
-        let p2 = (dados.dados_jogador && dados.dados_jogador.length > 1) ? parseInt(dados.dados_jogador[1]) : 0; 
-        let b1 = (dados.dados_banca && dados.dados_banca.length > 0) ? parseInt(dados.dados_banca[0]) : 0; 
+        let p1 = (dados.dados_jogador && dados.dados_jogador.length > 0) ? parseInt(dados.dados_jogador[0]) : 0;
+        let p2 = (dados.dados_jogador && dados.dados_jogador.length > 1) ? parseInt(dados.dados_jogador[1]) : 0;
+        let b1 = (dados.dados_banca && dados.dados_banca.length > 0) ? parseInt(dados.dados_banca[0]) : 0;
         let b2 = (dados.dados_banca && dados.dados_banca.length > 1) ? parseInt(dados.dados_banca[1]) : 0;
-        let nEmp = 0; let mult = "4x"; 
-        
-        if (vencedor === "Tie") { 
-            nEmp = parseInt(dados.pontos_jogador); if (isNaN(nEmp) || nEmp === 0) nEmp = p1 + p2; 
-            if (nEmp === 2 || nEmp === 12) mult = "88x"; else if (nEmp === 3 || nEmp === 11) mult = "25x"; else if (nEmp === 4 || nEmp === 10) mult = "10x"; else if (nEmp === 5 || nEmp === 9) mult = "6x"; else mult = "4x"; 
+        let nEmp = 0; let mult = "4x";
+
+        if (vencedor === "Tie") {
+            nEmp = parseInt(dados.pontos_jogador); if (isNaN(nEmp) || nEmp === 0) nEmp = p1 + p2;
+            if (nEmp === 2 || nEmp === 12) mult = "88x"; else if (nEmp === 3 || nEmp === 11) mult = "25x"; else if (nEmp === 4 || nEmp === 10) mult = "10x"; else if (nEmp === 5 || nEmp === 9) mult = "6x"; else mult = "4x";
         }
 
         // 🌟 LOG DETALHADO DO VENCEDOR RESTAURADO NO TERMINAL
@@ -2504,30 +2621,41 @@ app.post("/receber-sinal", async (req, res) => {
         let totalP = (p1 + p2).toString().padStart(2, '0'); let totalB = (b1 + b2).toString().padStart(2, '0');
         console.log(`\n====================================\n🔥 Vencedor: ${logNomeVencedor}\n🔵 Jogador : ${totalP} | 🔴 Banca: ${totalB}\n====================================\n`);
 
-        try { 
-            await dbPool.query('INSERT INTO giros_recentes (resultado, p_d1, p_d2, b_d1, b_d2, numero_empate, multiplicador, id_sessao, data_hora) VALUES (?,?,?,?,?,?,?,?,FROM_UNIXTIME(?))', [vencedor, p1, p2, b1, b2, nEmp, mult, idSessaoContinua, (dados.timestamp_coleta || Date.now()) / 1000]); 
+        try {
+            const timestampColetaNumero = Number(dados.timestamp_coleta);
+            const timestampGiroAnalitico = Number.isFinite(timestampColetaNumero) && timestampColetaNumero > 0
+                ? timestampColetaNumero
+                : Date.now();
+            const [resultadoInsertGiro] = await dbPool.query('INSERT INTO giros_recentes (resultado, p_d1, p_d2, b_d1, b_d2, numero_empate, multiplicador, id_sessao, data_hora) VALUES (?,?,?,?,?,?,?,?,FROM_UNIXTIME(?))', [vencedor, p1, p2, b1, b2, nEmp, mult, idSessaoContinua, timestampGiroAnalitico / 1000]);
+            historicoGirosAnalitico.push({
+                id: Number(resultadoInsertGiro.insertId) || 0,
+                resultado: vencedor,
+                multiplicador: mult || '',
+                id_sessao: idSessaoContinua,
+                timestamp_ms: timestampGiroAnalitico
+            });
         } catch(e) {
             console.error('❌ Falha ao persistir giro recente:', e.message);
         }
 
-        historicoRecente.push({ resultado: vencedor, placarStr: `[P:${p1+p2} B:${b1+b2}]`, id_sessao: idSessaoContinua }); 
-        if (historicoRecente.length > 30) historicoRecente.shift(); 
+        historicoRecente.push({ resultado: vencedor, placarStr: `[P:${p1+p2} B:${b1+b2}]`, id_sessao: idSessaoContinua });
+        if (historicoRecente.length > 30) historicoRecente.shift();
         let sinalFinalizadoAgora = false;
 
         for (let est of ESTRATEGIAS_MEMORIA) {
             let st = estadoApostas[est.id];
             if (st && st.aguardandoResultado) {
-                let finalizar = false; 
+                let finalizar = false;
                 let isTie = (vencedor==='Tie');
 
                 if (vencedor === est.entrada || (isTie && est.protegerEmpate)) {
-                    if (!isTie) { 
-                        if (st.galeAtual===0) est.stats.greenDireto++; else if (st.galeAtual===1) est.stats.gale1++; else est.stats.gale2++; 
-                    } else { 
-                        let tL = st.galeAtual===0?'direto':(st.galeAtual===1?'gale1':'gale2'); 
-                        if (!est.stats.ties[tL][mult]) est.stats.ties[tL][mult]=0; est.stats.ties[tL][mult]++; 
+                    if (!isTie) {
+                        if (st.galeAtual===0) est.stats.greenDireto++; else if (st.galeAtual===1) est.stats.gale1++; else est.stats.gale2++;
+                    } else {
+                        let tL = st.galeAtual===0?'direto':(st.galeAtual===1?'gale1':'gale2');
+                        if (!est.stats.ties[tL][mult]) est.stats.ties[tL][mult]=0; est.stats.ties[tL][mult]++;
                     }
-                    
+
                     try {
                         await registrarHistoricoResultadoEstrategia(est, isTie ? 'TIE' : 'GREEN', st.galeAtual, isTie ? mult : '', dados.timestamp_coleta);
                     } catch (e) {
@@ -2598,7 +2726,7 @@ app.post("/receber-sinal", async (req, res) => {
                                         let multGale = st.galeAtual === 1 ? (cf.gale_1_mult || 2.0) : (cf.gale_2_mult || 4.0);
                                         let valorGale = calcularFichaSegura((cf.stake_inicial || 10.00) * multGale);
                                         let alvoPython = est.entrada === 'Player' ? 'PlayerWon' : (est.entrada === 'Banker' ? 'BankerWon' : 'Tie');
-                                        
+
                                         try {
                                             await dbPool.query(`UPDATE auditoria_ordens SET status_ordem = 'LOSS', lucro_prejuizo = ?, saldo_pos = ?, placar_mesa = ? WHERE id = ?`, [-riscoAntigo, trader.saldo_atual, `[P:${p1+p2} B:${b1+b2}]`, pendentes[0].id]);
                                         } catch(e) {
@@ -2727,7 +2855,7 @@ app.post("/receber-sinal", async (req, res) => {
                                         continue;
                                     }
 
-                                    
+
                                     if (!(await autorizarNovaEntradaFinanceiraTrader(trader))) {
                                         continue;
                                     }
@@ -2746,9 +2874,9 @@ app.post("/receber-sinal", async (req, res) => {
                                         if (trader.pulos_restantes > 0) {
                                             trader.pulos_restantes--;
                                             try { await dbPool.query('UPDATE auto_traders SET pulos_restantes=? WHERE id=?', [trader.pulos_restantes, trader.id]); } catch(e) { console.error(`❌ Falha ao persistir pulos_restantes do trader ${trader.id}:`, e.message); }
-                                            continue; 
+                                            continue;
                                         } else {
-                                            let pMin = cf.camuflagem_pulos_min || 1; 
+                                            let pMin = cf.camuflagem_pulos_min || 1;
                                             let pMax = cf.camuflagem_pulos_max || 3;
                                             trader.pulos_restantes = Math.floor(Math.random() * (pMax - pMin + 1)) + pMin;
                                             try { await dbPool.query('UPDATE auto_traders SET pulos_restantes=? WHERE id=?', [trader.pulos_restantes, trader.id]); } catch(e) { console.error(`❌ Falha ao persistir novo ciclo de pulos do trader ${trader.id}:`, e.message); }
@@ -2789,7 +2917,7 @@ app.post("/receber-sinal", async (req, res) => {
                                 }
                             }
                         }
-                        break; 
+                        break;
                     }
                 }
             }
@@ -2801,6 +2929,7 @@ app.post("/receber-sinal", async (req, res) => {
 
 async function iniciarApp() {
     await prepararBancoDeDados();
+    await carregarHistoricoGirosAnalitico();
     await carregarSistemasParaMemoria();
     backendPronto = true;
     console.log("✅ Backend inicializado e pronto para atender APIs.");
