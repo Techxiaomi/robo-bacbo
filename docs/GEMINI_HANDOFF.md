@@ -44,7 +44,8 @@ Também estão implementados:
 - Robôs/Canais Web + Telegram, filtros, Drawdown Control e Stop Reds;
 - logging estruturado JSONL rotativo com redaction de segredos;
 - testes Node, Python, contratos HTTP e logger;
-- integração real do backend com Express + MySQL 8.4 descartável;
+- integração real do backend com Express + Socket.IO + MySQL 8.4 descartável;
+- handshake Socket.IO real validado com sessão administrativa antes e depois do logout;
 - GitHub Actions em PR/push para `main`.
 
 Consulte `CURRENT_STATE.md` para detalhes e riscos residuais.
@@ -90,7 +91,6 @@ Não misture correções independentes no mesmo patch.
 - rotação operacional de credenciais antigas compartilhadas;
 - idempotência de `order_id` não sobrevive a restart do executor;
 - métricas centralizadas ainda ausentes, apesar dos logs estruturados;
-- integração real ainda não cobre handshake Socket.IO;
 - testes Playwright/DOM reais ainda ausentes;
 - ainda não existe E2E completo captura → Node → executor → auditoria;
 - dependência operacional da estrutura DOM/WebSocket do site de destino;
@@ -105,10 +105,11 @@ Quando a alteração tocar Node:
 - `git diff --check` ou equivalente remoto;
 - GitHub Actions Node verde.
 
-Quando a alteração puder afetar bootstrap, rotas HTTP, autenticação ou schema MySQL:
+Quando a alteração puder afetar bootstrap, rotas HTTP, autenticação, Socket.IO ou schema MySQL:
 
-- manter verde o job `Backend HTTP + MySQL integration`;
+- manter verde o job `Backend HTTP + Socket.IO + MySQL integration`;
 - o job deve usar banco descartável e credenciais fictícias, nunca `.env` real ou secrets do projeto;
+- preservar testes de sessão administrativa no HTTP e no handshake Socket.IO;
 - não transformar o smoke em execução financeira: nenhum giro válido ou chamada ao executor deve ser necessária para validar infraestrutura.
 
 Quando tocar Python:
