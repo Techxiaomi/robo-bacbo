@@ -24,7 +24,7 @@ Risco residual: o journal protege contra replay duplicado, mas não consegue pro
 
 ### OBS-001 — Observabilidade
 
-Status: **amplamente mitigado pelos patches OBS-001A…OBS-001G; agregação externa e alertas ainda pendentes**.
+Status: **amplamente mitigado pelos patches OBS-001A…OBS-001H; agregação externa e alertas ainda pendentes**.
 
 Já implementado:
 
@@ -38,9 +38,12 @@ Já implementado:
 - redaction de chaves sensíveis e segredos conhecidos do `.env`;
 - falha do sink de arquivo não derruba o backend e o console original é preservado;
 - snapshot local `backend.metrics.json` com uptime, memória, event-loop delay p50/p95/p99/max/média, contagem de logs, último warn/error e falhas dos sinks;
-- persistência de métricas é atômica, configurável e usa timer `unref()` para não manter o processo aberto.
+- snapshot local `backend.operations.json` com contagem/status/latência HTTP inbound por rota normalizada, chamadas outbound agregadas por `executor`/`telegram`/`other` e freshness do último resultado/saldo aceitos;
+- rotas retiram query strings e normalizam IDs; outbound não persiste URLs, tokens ou payloads;
+- persistência das métricas é atômica, configurável e usa timers `unref()` para não manter o processo aberto;
+- amostras e rotas operacionais são limitadas em memória para evitar cardinalidade/crescimento ilimitado.
 
-Risco residual: as métricas ainda são locais ao processo/host. Não há agregador externo, retenção histórica central, alertas automáticos nem métricas de latência por operação/HTTP. Esses itens devem ser tratados separadamente caso haja necessidade operacional real.
+Risco residual: as métricas ainda são locais ao processo/host. Não há agregador externo, retenção histórica central nem alertas automáticos. Latência de consultas MySQL e tempos internos de operações de negócio pós-ACK também não são medidos separadamente; instrumentar esses pontos deve ser uma decisão específica caso exista necessidade operacional real, evitando envolver o pool/banco apenas por conveniência.
 
 ### OBS-003 — Cobertura automatizada
 
@@ -52,7 +55,8 @@ Já implementado:
 - suíte Python `unittest` sem iniciar Flask/Playwright;
 - GitHub Actions em PR/push para `main`;
 - testes de contrato HTTP usando handlers reais de login/logout/middleware com `req`/`res`/`app` simulados;
-- testes do logger estruturado/rotativo e das métricas runtime;
+- testes do logger estruturado/rotativo, das métricas runtime e das métricas operacionais HTTP;
+- teste real `http.createServer + fetch` comprova que os hooks de telemetria não alteram a resposta e não persistem query sensível;
 - integração real do `bot2_coletor.js` com Express + MySQL 8.4 descartável no CI;
 - smoke HTTP real cobrindo bootstrap de banco/schema/memória, login/logout, sessão administrativa, validação de Origin, APIs e `/receber-sinal` com `INTERNAL_API_TOKEN`;
 - handshake Socket.IO real cobrindo rejeição sem sessão, aceitação com cookie administrativo válido e nova rejeição do cookie invalidado após logout;
