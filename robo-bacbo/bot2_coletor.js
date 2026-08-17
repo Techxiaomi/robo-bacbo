@@ -1,6 +1,5 @@
 const mysql = require("mysql2/promise"); 
 const express = require("express");
-const cors = require("cors");
 const path = require("path");
 const crypto = require("crypto");
 const { Server } = require("socket.io");
@@ -209,11 +208,60 @@ let saldoGlobalAtualizadoEm = 0;
 // ==========================================
 // 3. SERVIDOR WEB E SOCKET
 // ==========================================
+function hostNodeEhLoopback(host) {
+    const normalizado = String(host || '').trim().toLowerCase();
+    return normalizado === '127.0.0.1' || normalizado === 'localhost' || normalizado === '::1';
+}
+
+function hostPermitidoParaNode(hostHeader, nodeHost, porta) {
+    const recebido = String(hostHeader || '').trim().toLowerCase();
+    if (!recebido) return false;
+
+    const hostConfigurado = String(nodeHost || '').trim().toLowerCase();
+    const portaTexto = String(porta);
+
+    if (hostNodeEhLoopback(hostConfigurado)) {
+        return new Set([
+            `127.0.0.1:${portaTexto}`,
+            `localhost:${portaTexto}`,
+            `[::1]:${portaTexto}`
+        ]).has(recebido);
+    }
+
+    const hostFormatado = hostConfigurado.includes(':') && !hostConfigurado.startsWith('[')
+        ? `[${hostConfigurado}]`
+        : hostConfigurado;
+    return recebido === `${hostFormatado}:${portaTexto}`;
+}
+
+function origemCombinaComHost(origin, host) {
+    if (!origin) return true;
+    if (!host) return false;
+
+    try {
+        const urlOrigem = new URL(origin);
+        const protocoloValido = urlOrigem.protocol === 'http:' || urlOrigem.protocol === 'https:';
+        return protocoloValido && urlOrigem.host.toLowerCase() === String(host).toLowerCase();
+    } catch (e) {
+        return false;
+    }
+}
+
 const app = express();
-app.use(cors());
+app.use((req, res, next) => {
+    const host = req.get('Host');
+    const hostPermitido = hostPermitidoParaNode(host, NODE_HOST, PORTA);
+    const origemPermitida = origemCombinaComHost(req.get('Origin'), host);
+
+    if (!hostPermitido || !origemPermitida) {
+        return res.status(403).json({ erro: 'Origem ou host nao permitido' });
+    }
+    next();
+});
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
+const NODE_HOST = (process.env.NODE_HOST || '127.0.0.1').trim() || '127.0.0.1';
 const PORTA = Number(process.env.NODE_PORT || 3000);
 const EXECUTOR_URL = process.env.EXECUTOR_URL || "http://127.0.0.1:5000/apostar";
 const INTERNAL_API_TOKEN = (process.env.INTERNAL_API_TOKEN || "").trim();
@@ -300,12 +348,24 @@ async function enviarOrdemAoExecutor(alvo, valor) {
         clearTimeout(timeoutId);
     }
 }
-const server = app.listen(PORTA, () => { 
-    console.log(`🌐 Painel Web rodando na porta ${PORTA}`); 
-    console.log(`📡 Webhook aguardando sinais em: http://127.0.0.1:${PORTA}/receber-sinal`);
+if (!hostNodeEhLoopback(NODE_HOST)) {
+    console.warn(`⚠️ NODE_HOST=${NODE_HOST}: painel/API expostos fora do loopback. As rotas administrativas ainda não possuem autenticação de usuário.`);
+}
+
+const server = app.listen(PORTA, NODE_HOST, () => {
+    const hostExibicao = NODE_HOST.includes(':') ? `[${NODE_HOST}]` : NODE_HOST;
+    console.log(`🌐 Painel Web rodando em http://${hostExibicao}:${PORTA}`);
+    console.log(`📡 Webhook aguardando sinais em: http://${hostExibicao}:${PORTA}/receber-sinal`);
 });
 
-const ioServer = new Server(server);
+const ioServer = new Server(server, {
+    allowRequest: (req, callback) => {
+        const host = req.headers.host;
+        const hostPermitido = hostPermitidoParaNode(host, NODE_HOST, PORTA);
+        const origemPermitida = origemCombinaComHost(req.headers.origin, host);
+        callback(null, hostPermitido && origemPermitida);
+    }
+});
 
 // ==========================================
 // 4. FUNÇÕES DE ARREDONDAMENTO (SMART ROUNDING)
