@@ -120,4 +120,8 @@ O patch não adiciona constraints, índices ou relacionamentos novos além das c
 
 ### OBS-003 — Não há teste automatizado
 
-O `package.json` possui apenas um teste placeholder e o Python não inclui suite de testes. Criar testes de lógica pura antes de grandes refatorações.
+Status: **parcialmente mitigado no patch OBS-003A**.
+
+O `npm test` deixa de ser placeholder e passa a executar uma suíte com `node:test` sobre lógica pura já existente em `bot2_coletor.js`, sem iniciar Express, Socket.IO, MySQL, Telegram ou executor de apostas. A suíte cobre arredondamento de ficha, classificação DIRETO/GALE, contagem de TIEs legados, precedência `exceção > avulso > origem`, propriedade de estratégia dinâmica, formatação Telegram e janelas de horário normais/full-day/overnight.
+
+Para evitar uma refatoração de produção apenas por testabilidade, a suíte extrai os blocos das funções canônicas diretamente do arquivo do backend e falha se os marcadores estruturais desaparecerem. Ainda faltam testes de integração de banco/rotas e uma suíte Python dedicada; por isso o item permanece parcialmente mitigado.
