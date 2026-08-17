@@ -76,3 +76,5 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - O schema inicial contém somente os campos comprovadamente usados pelo CRUD, estatísticas legadas e metadados dinâmicos atuais; bancos existentes continuam preservados por `CREATE TABLE IF NOT EXISTS`.
 - BUG-008B: criação ativa e reativação de Auto-Trader passam a capturar `saldo_inicial` exclusivamente do saldo global recente no backend; o frontend deixa de enviar baseline financeiro.
 - Reativação inicia novo ciclo em `STANDBY`, zera `entradas_feitas`/`pulos_restantes` e rejeita ativação com HTTP 409 quando o saldo está ausente ou além da janela de freshness configurável. Edição de trader já ativo continua preservando os saldos.
+- BUG-010: o desligamento manual do Auto-Trader passa a persistir `status_operacao='DESLIGADO'`, eliminando combinações incoerentes como `ativo=false` + `OPERANDO`.
+- Traders criados inativos também começam em `DESLIGADO`; no startup, linhas legadas inativas em `OPERANDO`/`STANDBY` são normalizadas sem alterar `STOP_WIN`, `STOP_LOSS`, `STOP_REDS` ou `TRAILING_STOP`. A reativação continua entrando em `STANDBY` com novo baseline.

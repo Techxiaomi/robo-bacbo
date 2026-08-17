@@ -617,3 +617,31 @@ test("Stop Reds de Robos conta somente inscritos, precede cooldown e permanece i
     assert.match(frontendSource, /id="at-stop-reds"/);
     assert.match(frontendSource, /id="at-stop-reds-acao"/);
 });
+
+test("desligamento manual do Auto-Trader persiste DESLIGADO sem apagar status de stops", () => {
+    assert.match(
+        source,
+        /const statusInicial = novoAtivo \? 'STANDBY' : 'DESLIGADO';/
+    );
+    assert.match(
+        source,
+        /const desligando = estavaAtivo && !novoAtivo;/
+    );
+    assert.match(
+        source,
+        /else if \(desligando\) \{[\s\S]*?status_operacao='DESLIGADO'/
+    );
+    assert.match(
+        source,
+        /WHERE ativo=false AND status_operacao IN \('OPERANDO', 'STANDBY'\)/
+    );
+
+    for (const status of ["STOP_WIN", "STOP_LOSS", "STOP_REDS", "TRAILING_STOP"]) {
+        assert.match(source, new RegExp(status));
+    }
+
+    assert.match(
+        source,
+        /status_operacao='STANDBY', entradas_feitas=0, pulos_restantes=0/
+    );
+});
