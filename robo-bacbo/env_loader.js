@@ -24,10 +24,17 @@ function loadEnvFile(filePath) {
         }
     }
 
+    const baseDir = path.dirname(filePath);
+
     // OBS-001F: instala o sink estruturado somente depois de carregar o .env,
     // para que caminho, limites e redaction usem a configuracao local real.
     const { instalarLoggingEstruturado } = require("./logger");
-    instalarLoggingEstruturado({ baseDir: path.dirname(filePath) });
+    instalarLoggingEstruturado({ baseDir });
+
+    // OBS-001G: snapshot de saude do processo em arquivo JSON atomico.
+    // O timer usa unref(), nao segura o processo aberto e independe do sink JSONL.
+    const { instalarMetricasRuntime } = require("./metrics");
+    instalarMetricasRuntime({ baseDir });
 }
 
 module.exports = { loadEnvFile };
