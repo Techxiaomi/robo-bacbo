@@ -1,0 +1,54 @@
+name: BUG-014A apply
+
+on:
+  push:
+    branches:
+      - agent/bug-014a-durable-order-intent
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/bug-014a-durable-order-intent
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Apply guarded patch
+        run: python scripts/apply_bug014a.py
+
+      - name: Syntax checks
+        run: |
+          node --check robo-bacbo/bot2_coletor.js
+          node --check robo-bacbo/integration/controlled-e2e-smoke.js
+          node --check robo-bacbo/test/order-intent.test.js
+
+      - name: Node regression tests
+        run: npm test
+        working-directory: robo-bacbo
+
+      - name: Diff hygiene
+        run: git diff --check
+
+      - name: Commit BUG-014A
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add robo-bacbo/bot2_coletor.js \
+                  robo-bacbo/integration/controlled-e2e-smoke.js \
+                  robo-bacbo/test/order-intent.test.js \
+                  docs/CURRENT_STATE.md docs/KNOWN_ISSUES.md docs/GEMINI_HANDOFF.md CHANGELOG.md
+          git commit -m 'BUG-014A: persistir intenção antes do executor'
+          git push origin HEAD:agent/bug-014a-durable-order-intent
