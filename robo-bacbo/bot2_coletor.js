@@ -170,6 +170,7 @@ async function prepararBancoDeDados() {
             } catch (e) {
                 if (e && (e.code === 'ER_DUP_FIELDNAME' || Number(e.errno) === 1060)) return;
                 console.error(`❌ Falha em migration incremental: ${query}`, e.message);
+                throw e;
             }
         };
 
@@ -192,8 +193,9 @@ async function prepararBancoDeDados() {
         console.log("\n========================================================");
         console.log("🚀 MÓDULO BACKEND V12.0 PRO - MOTOR DE EXECUÇÃO INTEGRADO");
         console.log("========================================================\n");
-    } catch (e) { 
-        console.log("❌ Erro Crítico ao preparar banco de dados:", e.message); 
+    } catch (e) {
+        console.error("❌ Erro Crítico ao preparar banco de dados:", e.message);
+        throw e;
     }
 }
 
@@ -211,6 +213,7 @@ let contadorGirosParaLimpeza = 0;
 let contadorGirosGlobalPiloto = 0; 
 let saldoGlobalCorretora = null;
 let saldoGlobalAtualizadoEm = 0;
+let backendPronto = false;
 
 // ==========================================
 // 3. SERVIDOR WEB E SOCKET
@@ -266,6 +269,13 @@ app.use((req, res, next) => {
     next();
 });
 app.use(express.json());
+app.use((req, res, next) => {
+    const rotaDependeDeInicializacao = req.path === '/receber-sinal' || req.path.startsWith('/api/');
+    if (rotaDependeDeInicializacao && !backendPronto) {
+        return res.status(503).json({ erro: 'backend_inicializando' });
+    }
+    next();
+});
 app.use(express.static(path.join(__dirname, 'public')));
 
 const NODE_HOST = (process.env.NODE_HOST || '127.0.0.1').trim() || '127.0.0.1';
@@ -399,7 +409,7 @@ const ioServer = new Server(server, {
         const host = req.headers.host;
         const hostPermitido = hostPermitidoParaNode(host, NODE_HOST, PORTA);
         const origemPermitida = origemCombinaComHost(req.headers.origin, host);
-        callback(null, hostPermitido && origemPermitida);
+        callback(null, backendPronto && hostPermitido && origemPermitida);
     }
 });
 
@@ -1532,8 +1542,9 @@ async function carregarSistemasParaMemoria() {
         console.log(`   - Estratégias Ativas: ${ESTRATEGIAS_MEMORIA.length}`);
         console.log(`   - Robôs de Canal: ${ROBOS_MEMORIA.length}`);
         console.log(`   - Motores Auto-Trader: ${AUTO_TRADERS_MEMORIA.length}\n`);
-    } catch (e) { 
-        console.log("❌ Erro ao carregar memória:", e.message); 
+    } catch (e) {
+        console.error("❌ Erro ao carregar memória:", e.message);
+        throw e;
     }
 }
 
@@ -1870,6 +1881,33 @@ app.post("/receber-sinal", async (req, res) => {
 async function iniciarApp() {
     await prepararBancoDeDados();
     await carregarSistemasParaMemoria();
+    backendPronto = true;
+    console.log("✅ Backend inicializado e pronto para atender APIs.");
 }
 
-iniciarApp();
+async function encerrarAposFalhaInicializacao(erro) {
+    backendPronto = false;
+    console.error("🔥 Inicialização do backend falhou; encerrando processo em modo seguro:", erro);
+
+    try {
+        ioServer.close();
+    } catch (e) {
+        console.error("⚠️ Falha ao fechar Socket.IO após erro de inicialização:", e.message);
+    }
+
+    try {
+        await new Promise(resolve => server.close(resolve));
+    } catch (e) {
+        console.error("⚠️ Falha ao fechar servidor HTTP após erro de inicialização:", e.message);
+    }
+
+    try {
+        await dbPool.end();
+    } catch (e) {
+        console.error("⚠️ Falha ao encerrar pool MySQL após erro de inicialização:", e.message);
+    }
+
+    process.exitCode = 1;
+}
+
+iniciarApp().catch(encerrarAposFalhaInicializacao);

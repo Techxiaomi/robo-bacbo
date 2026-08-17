@@ -27,6 +27,8 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - Falhas em exclusão de estratégia, fechamento `LOSS`, persistência de camuflagem, rollback e processamento pós-ACK de `/receber-sinal` também passam a ficar visíveis nos logs.
 - OBS-001B: executor Python passa a validar o HTTP do resultado enviado ao Node e registrar falhas de entrega/processamento, Auto-Login, WebSocket e loop principal; eventos repetitivos usam log limitado no tempo.
 - Frames não-JSON e interações opcionais de UI continuam tolerados para evitar ruído e preservar o comportamento operacional.
+- OBS-001C: inicialização do Node passa a ser fail-closed; APIs dependentes do backend retornam 503 e Socket.IO rejeita conexões até banco/schema/memória estarem prontos.
+- Erros inesperados de migration/carga inicial agora sobem até `iniciarApp()`, que fecha Socket.IO, HTTP e pool MySQL em vez de manter processo parcialmente inicializado.
 - OBS-003A: `npm test` passa a executar testes reais com `node:test` sobre lógica pura do backend, sem MySQL, rede ou inicialização do servidor.
 - A suíte inicial cobre stake rounding, níveis de Gale, TIEs legados, filtros de robô, mensagens Telegram e janelas de horário inclusive overnight.
 - OBS-003B: adicionada suíte Python `unittest` que extrai funções de `robo.py` via AST sem importar/inicializar Flask ou Playwright.
