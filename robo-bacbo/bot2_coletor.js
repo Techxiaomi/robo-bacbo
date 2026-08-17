@@ -70,6 +70,8 @@ async function prepararBancoDeDados() {
                 min_assertividade INT DEFAULT 0,
                 stop_reds_seguidos INT DEFAULT 0,
                 greens_consecutivos INT DEFAULT 0,
+                standby_ate BIGINT DEFAULT 0,
+                historico_reds_json TEXT,
                 ativo BOOLEAN DEFAULT true,
                 config_json TEXT
             )
@@ -143,6 +145,8 @@ async function prepararBancoDeDados() {
         await adicionarColuna("ALTER TABLE robos_canais ADD COLUMN stop_reds_seguidos INT DEFAULT 0");
         await adicionarColuna("ALTER TABLE robos_canais ADD COLUMN min_assertividade INT DEFAULT 0");
         await adicionarColuna("ALTER TABLE robos_canais ADD COLUMN greens_consecutivos INT DEFAULT 0");
+        await adicionarColuna("ALTER TABLE robos_canais ADD COLUMN standby_ate BIGINT DEFAULT 0");
+        await adicionarColuna("ALTER TABLE robos_canais ADD COLUMN historico_reds_json TEXT");
 
         await adicionarColuna("ALTER TABLE estrategias ADD COLUMN is_dinamico BOOLEAN DEFAULT false");
         await adicionarColuna("ALTER TABLE estrategias ADD COLUMN robo_dono_id INT DEFAULT NULL");
@@ -749,6 +753,210 @@ function roboSintonizaEstrategia(robo, est) {
     return origens.includes(origem);
 }
 
+function estadoProtecaoDoRobo(robo) {
+    if (!estadoStandbyRobos[robo.id]) {
+        let historicoReds = [];
+
+        try {
+            const bruto = robo.historico_reds_json;
+            const parseado = typeof bruto === 'string' ? JSON.parse(bruto || '[]') : bruto;
+            if (Array.isArray(parseado)) {
+                historicoReds = parseado
+                    .map(Number)
+                    .filter(Number.isFinite);
+            }
+        } catch (e) {}
+
+        estadoStandbyRobos[robo.id] = {
+            em_standby_ate: Math.max(0, Number(robo.standby_ate) || 0),
+            historico_reds: historicoReds
+        };
+    }
+
+    return estadoStandbyRobos[robo.id];
+}
+
+function roboEmStandby(robo, agora = Date.now()) {
+    const estado = estadoProtecaoDoRobo(robo);
+    return Number(estado.em_standby_ate || 0) > agora;
+}
+
+function aplicarProtecaoRoboEmMemoria(robo, estado, greens) {
+    const estadoNormalizado = {
+        em_standby_ate: Math.max(0, Math.trunc(Number(estado.em_standby_ate) || 0)),
+        historico_reds: (Array.isArray(estado.historico_reds) ? estado.historico_reds : [])
+            .map(Number)
+            .filter(Number.isFinite)
+    };
+
+    robo.greens_consecutivos = Math.max(0, Number(greens) || 0);
+    robo.standby_ate = estadoNormalizado.em_standby_ate;
+    robo.historico_reds_json = JSON.stringify(estadoNormalizado.historico_reds);
+    estadoStandbyRobos[robo.id] = estadoNormalizado;
+}
+
+async function persistirProtecaoRobo(robo, estado, greens) {
+    const greensNormalizado = Math.max(0, Number(greens) || 0);
+    const standbyAte = Math.max(0, Math.trunc(Number(estado.em_standby_ate) || 0));
+    const historicoReds = (Array.isArray(estado.historico_reds) ? estado.historico_reds : [])
+        .map(Number)
+        .filter(Number.isFinite);
+    const historicoJson = JSON.stringify(historicoReds);
+
+    await dbPool.query(
+        `UPDATE robos_canais
+         SET greens_consecutivos=?, standby_ate=?, historico_reds_json=?
+         WHERE id=?`,
+        [greensNormalizado, standbyAte, historicoJson, robo.id]
+    );
+
+    aplicarProtecaoRoboEmMemoria(
+        robo,
+        { em_standby_ate: standbyAte, historico_reds: historicoReds },
+        greensNormalizado
+    );
+}
+
+async function processarResultadoProtecaoRobos(estado, tipoResultado, timestampColeta) {
+    if (!estado) return [];
+
+    await aguardarInscricaoTelegram(estado);
+
+    const idsInscritos = new Set(
+        (Array.isArray(estado.robosInscritos) ? estado.robosInscritos : [])
+            .map(robo => String(robo.id))
+    );
+
+    if (idsInscritos.size === 0) return [];
+
+    const timestampMs = Number(timestampColeta);
+    const agoraResultado = Number.isFinite(timestampMs) && timestampMs > 0
+        ? Math.trunc(timestampMs)
+        : Date.now();
+    const avisosProtecao = [];
+
+    for (const robo of ROBOS_MEMORIA) {
+        if (!idsInscritos.has(String(robo.id))) continue;
+
+        const estadoAtual = estadoProtecaoDoRobo(robo);
+        const proximoEstado = {
+            em_standby_ate: Math.max(0, Number(estadoAtual.em_standby_ate) || 0),
+            historico_reds: [...(Array.isArray(estadoAtual.historico_reds) ? estadoAtual.historico_reds : [])]
+        };
+        const cooldown = robo.config?.cooldown || {};
+        const cooldownAtivo = cooldown.ativo === true || cooldown.ativo === 1;
+        const greensAtuais = Math.max(0, Number(robo.greens_consecutivos) || 0);
+
+        if (tipoResultado !== 'RED') {
+            const proximosGreens = greensAtuais + 1;
+
+            if (!cooldownAtivo) {
+                proximoEstado.historico_reds = [];
+            } else if (String(cooldown.tipo || 'CONSERVADOR').toUpperCase() === 'DINAMICO') {
+                const intervaloMin = Math.max(1, Number(cooldown.intervalo_min) || 30);
+                const limite = agoraResultado - (intervaloMin * 60 * 1000);
+                proximoEstado.historico_reds = proximoEstado.historico_reds.filter(ts => Number(ts) >= limite);
+            }
+
+            try {
+                await persistirProtecaoRobo(robo, proximoEstado, proximosGreens);
+            } catch (e) {
+                console.error(`⚠️ Robô ${robo.id}: falha ao persistir streak/proteção após ${tipoResultado}; memória preservada no estado anterior.`, e.message);
+            }
+            continue;
+        }
+
+        const proximosGreens = 0;
+
+        if (!cooldownAtivo) {
+            proximoEstado.historico_reds = [];
+
+            try {
+                await persistirProtecaoRobo(robo, proximoEstado, proximosGreens);
+            } catch (e) {
+                aplicarProtecaoRoboEmMemoria(robo, proximoEstado, proximosGreens);
+                console.error(`⚠️ Robô ${robo.id}: falha ao persistir RED; estado conservador mantido apenas em memória.`, e.message);
+            }
+            continue;
+        }
+
+        const tipoCooldown = String(cooldown.tipo || 'CONSERVADOR').toUpperCase();
+        const pausaMin = Math.max(1, Number(cooldown.pausa_min) || 15);
+        let devePausar = false;
+
+        if (tipoCooldown === 'DINAMICO') {
+            const intervaloMin = Math.max(1, Number(cooldown.intervalo_min) || 30);
+            const qtdReds = Math.max(2, Number(cooldown.reds) || 2);
+            const limite = agoraResultado - (intervaloMin * 60 * 1000);
+
+            proximoEstado.historico_reds = proximoEstado.historico_reds
+                .filter(ts => Number(ts) >= limite);
+            proximoEstado.historico_reds.push(agoraResultado);
+            devePausar = proximoEstado.historico_reds.length >= qtdReds;
+        } else {
+            proximoEstado.historico_reds = [agoraResultado];
+            devePausar = true;
+        }
+
+        if (devePausar) {
+            proximoEstado.em_standby_ate = Math.max(Date.now(), agoraResultado) + (pausaMin * 60 * 1000);
+            proximoEstado.historico_reds = [];
+
+            avisosProtecao.push({
+                robo_id: robo.id,
+                pausa_min: pausaMin,
+                texto: String(cooldown.aviso_texto || '⚠️ EM PROTEÇÃO ⚠️ Retorna em {minutos} minutos.')
+                    .replaceAll('{minutos}', String(pausaMin)),
+                avisar_telegram: cooldown.aviso_telegram !== false
+            });
+        }
+
+        try {
+            await persistirProtecaoRobo(robo, proximoEstado, proximosGreens);
+
+            if (devePausar) {
+                console.log(`🛡️ Robô ${robo.id} em proteção por ${pausaMin} minuto(s).`);
+            }
+        } catch (e) {
+            aplicarProtecaoRoboEmMemoria(robo, proximoEstado, proximosGreens);
+
+            if (devePausar) {
+                console.error(`🚨 Robô ${robo.id}: falha ao persistir standby; proteção mantida em memória por segurança.`, e.message);
+            } else {
+                console.error(`⚠️ Robô ${robo.id}: falha ao persistir janela de REDs; estado conservador mantido apenas em memória.`, e.message);
+            }
+        }
+    }
+
+    ioServer.emit('atualizar_robos');
+    return avisosProtecao;
+}
+
+async function enviarAvisosProtecaoTelegram(estado, avisos) {
+    if (!estado || !Array.isArray(avisos) || avisos.length === 0) return;
+
+    await aguardarInscricaoTelegram(estado);
+
+    const inscritosTelegram = Array.isArray(estado.robosTelegramInscritos)
+        ? estado.robosTelegramInscritos
+        : [];
+
+    await Promise.all(
+        avisos
+            .filter(aviso => aviso.avisar_telegram)
+            .map(async aviso => {
+                const robo = inscritosTelegram.find(r => String(r.id) === String(aviso.robo_id));
+                if (!robo) return;
+
+                await Promise.all(
+                    robo.chat_ids.map(chatId =>
+                        enviarMensagemTelegram(robo.telegram_token, chatId, aviso.texto)
+                    )
+                );
+            })
+    );
+}
+
 function destinosTelegramRobo(robo) {
     const destinos = new Set();
 
@@ -797,6 +1005,7 @@ async function selecionarRobosParaEstrategia(est) {
         const minAssert = Math.max(0, Number(robo.min_assertividade) || 0);
 
         return ativo
+            && !roboEmStandby(robo)
             && assertividade >= minAssert
             && roboSintonizaEstrategia(robo, est);
     });
@@ -1054,7 +1263,19 @@ async function carregarSistemasParaMemoria() {
         ROBOS_MEMORIA = linhasRobos.map(r => {
             let confObj = { origens: [], avulsos: [], excecoes: [], auto_tuning: { ativo: false }, cooldown: { ativo: false } };
             try { if (r.config_json) confObj = { ...confObj, ...JSON.parse(r.config_json) }; } catch(err){}
-            if (!estadoStandbyRobos[r.id]) estadoStandbyRobos[r.id] = { em_standby_ate: 0, historico_reds: [] };
+
+            if (!estadoStandbyRobos[r.id]) {
+                let historicoReds = [];
+                try {
+                    const parseado = JSON.parse(r.historico_reds_json || '[]');
+                    if (Array.isArray(parseado)) historicoReds = parseado.map(Number).filter(Number.isFinite);
+                } catch (e) {}
+
+                estadoStandbyRobos[r.id] = {
+                    em_standby_ate: Math.max(0, Number(r.standby_ate) || 0),
+                    historico_reds: historicoReds
+                };
+            }
 
             const destinatarios = destinatariosRobos.filter(d => Number(d.robo_id) === Number(r.id));
             return { ...r, config: confObj, destinatarios };
@@ -1184,6 +1405,12 @@ app.post("/receber-sinal", async (req, res) => {
                         console.error(`Falha ao persistir historico dos robos para estrategia ${est.id}:`, e.message);
                     }
 
+                    try {
+                        await processarResultadoProtecaoRobos(st, isTie ? 'TIE' : 'GREEN', dados.timestamp_coleta);
+                    } catch (e) {
+                        console.error(`Falha ao atualizar proteção dos robôs da estratégia ${est.id}:`, e.message);
+                    }
+
                     const extrasFinal = {
                         resultado: isTie ? 'TIE' : 'GREEN',
                         multiplicador: isTie ? mult : ''
@@ -1261,8 +1488,18 @@ app.post("/receber-sinal", async (req, res) => {
                             console.error(`Falha ao persistir historico dos robos para estrategia ${est.id}:`, e.message);
                         }
 
+                        let avisosProtecao = [];
+                        try {
+                            avisosProtecao = await processarResultadoProtecaoRobos(st, 'RED', dados.timestamp_coleta);
+                        } catch (e) {
+                            console.error(`Falha ao atualizar proteção dos robôs da estratégia ${est.id}:`, e.message);
+                        }
+
                         emitirAlertaWebRobo('RED', est, st);
-                        void enviarTelegramParaInscritos('RED', est, st);
+                        void (async () => {
+                            await enviarTelegramParaInscritos('RED', est, st);
+                            await enviarAvisosProtecaoTelegram(st, avisosProtecao);
+                        })();
 
                         if (est.quarentena_restante <= 0) {
                             for (let trader of AUTO_TRADERS_MEMORIA) {

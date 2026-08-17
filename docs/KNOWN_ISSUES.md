@@ -72,13 +72,13 @@ Stop Win, Stop Loss e trailing permanecem pendentes. O Python atual não envia `
 
 ### BUG-007 — Telegram e filtros de robôs parecem incompletos
 
-Status: **parcialmente mitigado pelos patches BUG-007A, BUG-007B e BUG-007C**.
+Status: **parcialmente mitigado pelos patches BUG-007A, BUG-007B, BUG-007C e BUG-007D**.
 
-O BUG-007A restaura o CRUD visual de Robôs. O BUG-007B conecta o canal web ao ciclo real do sinal, com precedência `exceção > avulso > origem`, propriedade por `robo_dono_id` em padrões dinâmicos e filtro de `min_assertividade`.
+O BUG-007A restaura o CRUD visual de Robôs. O BUG-007B conecta o canal web ao ciclo real do sinal, com precedência `exceção > avulso > origem`, propriedade por `robo_dono_id` em padrões dinâmicos e filtro de `min_assertividade`. O BUG-007C implementa entrega Telegram confirmada e união multicanal sem duplicar histórico.
 
-O BUG-007C implementa o canal Telegram via Bot API `sendMessage`. Os destinos são deduplicados a partir de `telegram_chat_id` e `destinatarios_robo`; a mensagem é texto simples e respeita cabeçalho/rodapé e flags de exibição do robô. A ENTRADA é enviada em paralelo por destino com timeout e somente destinos confirmados (`HTTP ok` + `ok=true`) permanecem inscritos para GALE e fechamento. O token nunca é incluído nos logs. O canal web permanece separado, e `robosInscritos` é a união sem duplicatas dos canais que realmente inscreveram o robô.
+O BUG-007D aplica o Drawdown Control conforme a semântica explícita do painel: `CONSERVADOR` pausa no primeiro RED; `DINAMICO` pausa após X REDs dentro de Y minutos; ambos usam `pausa_min`. Robôs em `standby_ate` ficam fora da seleção Web/Telegram até a expiração. O estado de proteção e a janela recente de REDs são persistidos para sobreviver a restart do Node. GREEN/TIE incrementa `greens_consecutivos`, RED zera o streak, e o aviso opcional de proteção no Telegram é enviado depois da mensagem de RED somente a destinos cuja ENTRADA foi confirmada.
 
-Pendente para BUG-007D: enforcement de `stop_reds_seguidos`/cooldown/standby e atualização coerente de `greens_consecutivos`.
+O campo separado `stop_reds_seguidos` permanece sem enforcement porque o painel não define a ação de recuperação: não informa se deve desligar permanentemente, pausar por um período ou como rearmar o robô. Implementar esse campo exige uma regra explícita em vez de inferência.
 
 ### BUG-008 — Sincronização de saldo da corretora estava incompleta
 
