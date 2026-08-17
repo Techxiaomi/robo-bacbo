@@ -29,6 +29,8 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - Frames não-JSON e interações opcionais de UI continuam tolerados para evitar ruído e preservar o comportamento operacional.
 - OBS-003A: `npm test` passa a executar testes reais com `node:test` sobre lógica pura do backend, sem MySQL, rede ou inicialização do servidor.
 - A suíte inicial cobre stake rounding, níveis de Gale, TIEs legados, filtros de robô, mensagens Telegram e janelas de horário inclusive overnight.
+- OBS-003B: adicionada suíte Python `unittest` que extrai funções de `robo.py` via AST sem importar/inicializar Flask ou Playwright.
+- Os testes cobrem parsing de saldo e transformação de rodada resolvida em payload Node, incluindo TIE, interrupção >60s e falha HTTP simulada.
 
 ### Fixed
 - BUG-001: o Node agora aguarda e valida a confirmação HTTP do executor antes de contabilizar uma entrada direta ou criar a nova ordem `PENDENTE` de Gale.
