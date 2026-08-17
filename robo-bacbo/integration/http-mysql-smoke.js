@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const mysql = require("mysql2/promise");
+const { io } = require("socket.io-client");
 
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.INTEGRATION_NODE_PORT || 3117);
@@ -34,6 +35,61 @@ async function requisicao(caminho, opcoes = {}) {
 
 function cookiePrincipal(setCookie) {
     return String(setCookie || "").split(";")[0];
+}
+
+function conectarSocket(cookie = "") {
+    return new Promise((resolve, reject) => {
+        const extraHeaders = { Origin: BASE_URL };
+        if (cookie) extraHeaders.Cookie = cookie;
+
+        const socket = io(BASE_URL, {
+            transports: ["websocket"],
+            forceNew: true,
+            reconnection: false,
+            timeout: 3000,
+            extraHeaders
+        });
+
+        let finalizado = false;
+        const finalizar = (erro, socketConectado = null) => {
+            if (finalizado) return;
+            finalizado = true;
+            clearTimeout(timer);
+            socket.off("connect", aoConectar);
+            socket.off("connect_error", aoErro);
+            if (erro) {
+                socket.close();
+                reject(erro);
+            } else {
+                resolve(socketConectado);
+            }
+        };
+
+        const aoConectar = () => finalizar(null, socket);
+        const aoErro = erro => finalizar(erro || new Error("Socket.IO connect_error"));
+        const timer = setTimeout(
+            () => finalizar(new Error("Timeout aguardando handshake Socket.IO")),
+            5000
+        );
+
+        socket.once("connect", aoConectar);
+        socket.once("connect_error", aoErro);
+    });
+}
+
+async function confirmarSocketRejeitado(cookie = "") {
+    let rejeitado = false;
+    let conectado = null;
+
+    try {
+        conectado = await conectarSocket(cookie);
+    } catch (e) {
+        rejeitado = true;
+    } finally {
+        if (conectado) conectado.close();
+    }
+
+    assert.equal(rejeitado, true, "Handshake Socket.IO deveria ter sido rejeitado");
 }
 
 async function aguardarBackendPronto(cookie, processo, timeoutMs = 30000) {
@@ -92,6 +148,7 @@ async function main() {
     backend.stderr.on("data", chunk => registrarSaida(chunk, process.stderr));
 
     let conexao = null;
+    let socketAutorizado = null;
 
     try {
         let loginDisponivel = false;
@@ -155,6 +212,13 @@ async function main() {
         const cookie = cookiePrincipal(setCookie);
 
         await aguardarBackendPronto(cookie, backend);
+
+        await confirmarSocketRejeitado();
+
+        socketAutorizado = await conectarSocket(cookie);
+        assert.equal(socketAutorizado.connected, true);
+        socketAutorizado.close();
+        socketAutorizado = null;
 
         const painel = await requisicao("/", {
             headers: { Cookie: cookie }
@@ -244,13 +308,19 @@ async function main() {
         });
         assert.equal(apiDepoisLogout.status, 401);
 
-        console.log("OBS-003E integration smoke: PASS");
+        await confirmarSocketRejeitado(cookie);
+
+        console.log("OBS-003F integration smoke: PASS");
     } catch (erro) {
-        console.error("OBS-003E integration smoke: FAIL", erro);
+        console.error("OBS-003F integration smoke: FAIL", erro);
         console.error("--- Saida acumulada do backend ---");
         console.error(backendSaida);
         process.exitCode = 1;
     } finally {
+        if (socketAutorizado) {
+            try { socketAutorizado.close(); } catch (e) {}
+        }
+
         if (conexao) {
             try { await conexao.end(); } catch (e) {}
         }
@@ -267,6 +337,6 @@ async function main() {
 }
 
 main().catch(erro => {
-    console.error("OBS-003E integration smoke: FAIL fatal", erro);
+    console.error("OBS-003F integration smoke: FAIL fatal", erro);
     process.exitCode = 1;
 });

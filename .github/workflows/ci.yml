@@ -59,7 +59,7 @@ jobs:
         working-directory: robo-sync-pilot
 
   backend-integration:
-    name: Backend HTTP + MySQL integration
+    name: Backend HTTP + Socket.IO + MySQL integration
     runs-on: ubuntu-latest
     timeout-minutes: 8
     services:
@@ -93,7 +93,7 @@ jobs:
           cd "$DEPS_DIR"
           npm init -y >/dev/null 2>&1
           npm install --ignore-scripts --no-audit --no-fund --package-lock=false \
-            express@5.2.1 mysql2@3.23.3 socket.io@4.8.3
+            express@5.2.1 mysql2@3.23.3 socket.io@4.8.3 socket.io-client@4.8.3
           echo "NODE_PATH=$(npm root)" >> "$GITHUB_ENV"
 
       - name: Check integration test syntax
