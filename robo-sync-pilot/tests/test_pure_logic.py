@@ -181,7 +181,7 @@ class TestRegistrarOrdemIdempotente(unittest.TestCase):
             arquivo.write("{corrompido")
 
         ns_reiniciado = self.criar_namespace()
-        with self.assertRaisesRegex(RuntimeError, "journal"):
+        with self.assertRaisesRegex(RuntimeError, "(?i)journal"):
             ns_reiniciado["carregar_ordens_executor_persistidas"]()
 
 
