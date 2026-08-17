@@ -287,3 +287,21 @@ test("traderDentroHorarioExecucao cobre janela normal, full-day e overnight", ()
         false
     );
 });
+
+test("handlers fatais encerram o Node e promises Telegram fire-and-forget possuem catch local", () => {
+    const exits = source.match(/process\.exit\(1\);/g) || [];
+    assert.equal(exits.length, 2);
+
+    assert.match(
+        source,
+        /process\.on\('uncaughtException'[\s\S]*?ERRO CRÍTICO NÃO TRATADO; encerrando processo:[\s\S]*?process\.exit\(1\);/
+    );
+    assert.match(
+        source,
+        /process\.on\('unhandledRejection'[\s\S]*?REJEIÇÃO DE PROMISE NÃO TRATADA; encerrando processo:[\s\S]*?process\.exit\(1\);/
+    );
+
+    assert.match(source, /enviarTelegramParaInscritos\('GREEN'[\s\S]*?\.catch\(e => \{[\s\S]*?Telegram GREEN/);
+    assert.match(source, /enviarTelegramParaInscritos\('GALE'[\s\S]*?\.catch\(e => \{[\s\S]*?Telegram GALE/);
+    assert.match(source, /enviarAvisosProtecaoTelegram\(st, avisosProtecao\);[\s\S]*?\}\)\(\)\.catch\(e => \{[\s\S]*?Telegram RED\/proteção/);
+});

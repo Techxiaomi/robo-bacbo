@@ -5,13 +5,15 @@ const crypto = require("crypto");
 const { Server } = require("socket.io");
 require("./env_loader").loadEnvFile(path.join(__dirname, "..", ".env"));
 
-// Monitoramento Global para impedir que erros silenciosos travem o servidor Node.js
+// Erros globais realmente não tratados são fatais: continuar pode deixar estado financeiro incoerente.
 process.on('uncaughtException', (err) => {
-    console.error('🔥 ERRO CRÍTICO NÃO TRATADO:', err);
+    console.error('🔥 ERRO CRÍTICO NÃO TRATADO; encerrando processo:', err);
+    process.exit(1);
 });
 
-process.on('unhandledRejection', (reason, promise) => {
-    console.error('🔥 REJEIÇÃO DE PROMISE NÃO TRATADA:', reason);
+process.on('unhandledRejection', (reason) => {
+    console.error('🔥 REJEIÇÃO DE PROMISE NÃO TRATADA; encerrando processo:', reason);
+    process.exit(1);
 });
 
 // ==========================================
@@ -1666,7 +1668,9 @@ app.post("/receber-sinal", async (req, res) => {
                         multiplicador: isTie ? mult : ''
                     };
                     emitirAlertaWebRobo('GREEN', est, st, extrasFinal);
-                    void enviarTelegramParaInscritos('GREEN', est, st, extrasFinal);
+                    void enviarTelegramParaInscritos('GREEN', est, st, extrasFinal).catch(e => {
+                        console.error(`⚠️ Falha inesperada no envio Telegram GREEN da estratégia ${est.id}:`, e.message);
+                    });
 
                     if (est.quarentena_restante <= 0) {
                         for (let trader of AUTO_TRADERS_MEMORIA) {
@@ -1691,7 +1695,9 @@ app.post("/receber-sinal", async (req, res) => {
                         st.galeAtual++;
                         const extrasGale = { nivel: st.galeAtual };
                         emitirAlertaWebRobo('GALE', est, st, extrasGale);
-                        void enviarTelegramParaInscritos('GALE', est, st, extrasGale);
+                        void enviarTelegramParaInscritos('GALE', est, st, extrasGale).catch(e => {
+                            console.error(`⚠️ Falha inesperada no envio Telegram GALE da estratégia ${est.id}:`, e.message);
+                        });
                         if (est.quarentena_restante <= 0) {
                             for (let trader of AUTO_TRADERS_MEMORIA) {
                                 let cf = trader.config;
@@ -1755,7 +1761,9 @@ app.post("/receber-sinal", async (req, res) => {
                         void (async () => {
                             await enviarTelegramParaInscritos('RED', est, st);
                             await enviarAvisosProtecaoTelegram(st, avisosProtecao);
-                        })();
+                        })().catch(e => {
+                            console.error(`⚠️ Falha inesperada no envio Telegram RED/proteção da estratégia ${est.id}:`, e.message);
+                        });
 
                         if (est.quarentena_restante <= 0) {
                             for (let trader of AUTO_TRADERS_MEMORIA) {
