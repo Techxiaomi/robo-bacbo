@@ -1,17 +1,19 @@
 name: BUG-014B apply
-# Trigger explícito após o workflow existir na própria branch.
 
 on:
   push:
     branches:
       - agent/bug-014b-executor-lifecycle
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
 
 jobs:
   apply:
-    if: github.actor != 'github-actions[bot]'
+    if: github.actor != 'github-actions[bot]' && (github.ref == 'refs/heads/agent/bug-014b-executor-lifecycle' || github.head_ref == 'agent/bug-014b-executor-lifecycle')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
