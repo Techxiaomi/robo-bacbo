@@ -781,24 +781,40 @@ function roboEmStandby(robo, agora = Date.now()) {
     return Number(estado.em_standby_ate || 0) > agora;
 }
 
-async function persistirProtecaoRobo(robo, estado) {
-    const greens = Math.max(0, Number(robo.greens_consecutivos) || 0);
-    const standbyAte = Math.max(0, Math.trunc(Number(estado.em_standby_ate) || 0));
-    const historicoJson = JSON.stringify(
-        (Array.isArray(estado.historico_reds) ? estado.historico_reds : [])
+function aplicarProtecaoRoboEmMemoria(robo, estado, greens) {
+    const estadoNormalizado = {
+        em_standby_ate: Math.max(0, Math.trunc(Number(estado.em_standby_ate) || 0)),
+        historico_reds: (Array.isArray(estado.historico_reds) ? estado.historico_reds : [])
             .map(Number)
             .filter(Number.isFinite)
-    );
+    };
+
+    robo.greens_consecutivos = Math.max(0, Number(greens) || 0);
+    robo.standby_ate = estadoNormalizado.em_standby_ate;
+    robo.historico_reds_json = JSON.stringify(estadoNormalizado.historico_reds);
+    estadoStandbyRobos[robo.id] = estadoNormalizado;
+}
+
+async function persistirProtecaoRobo(robo, estado, greens) {
+    const greensNormalizado = Math.max(0, Number(greens) || 0);
+    const standbyAte = Math.max(0, Math.trunc(Number(estado.em_standby_ate) || 0));
+    const historicoReds = (Array.isArray(estado.historico_reds) ? estado.historico_reds : [])
+        .map(Number)
+        .filter(Number.isFinite);
+    const historicoJson = JSON.stringify(historicoReds);
 
     await dbPool.query(
         `UPDATE robos_canais
          SET greens_consecutivos=?, standby_ate=?, historico_reds_json=?
          WHERE id=?`,
-        [greens, standbyAte, historicoJson, robo.id]
+        [greensNormalizado, standbyAte, historicoJson, robo.id]
     );
 
-    robo.standby_ate = standbyAte;
-    robo.historico_reds_json = historicoJson;
+    aplicarProtecaoRoboEmMemoria(
+        robo,
+        { em_standby_ate: standbyAte, historico_reds: historicoReds },
+        greensNormalizado
+    );
 }
 
 async function processarResultadoProtecaoRobos(estado, tipoResultado, timestampColeta) {
@@ -822,30 +838,45 @@ async function processarResultadoProtecaoRobos(estado, tipoResultado, timestampC
     for (const robo of ROBOS_MEMORIA) {
         if (!idsInscritos.has(String(robo.id))) continue;
 
-        const estadoRobo = estadoProtecaoDoRobo(robo);
+        const estadoAtual = estadoProtecaoDoRobo(robo);
+        const proximoEstado = {
+            em_standby_ate: Math.max(0, Number(estadoAtual.em_standby_ate) || 0),
+            historico_reds: [...(Array.isArray(estadoAtual.historico_reds) ? estadoAtual.historico_reds : [])]
+        };
         const cooldown = robo.config?.cooldown || {};
         const cooldownAtivo = cooldown.ativo === true || cooldown.ativo === 1;
+        const greensAtuais = Math.max(0, Number(robo.greens_consecutivos) || 0);
 
         if (tipoResultado !== 'RED') {
-            robo.greens_consecutivos = Math.max(0, Number(robo.greens_consecutivos) || 0) + 1;
+            const proximosGreens = greensAtuais + 1;
 
             if (!cooldownAtivo) {
-                estadoRobo.historico_reds = [];
+                proximoEstado.historico_reds = [];
             } else if (String(cooldown.tipo || 'CONSERVADOR').toUpperCase() === 'DINAMICO') {
                 const intervaloMin = Math.max(1, Number(cooldown.intervalo_min) || 30);
                 const limite = agoraResultado - (intervaloMin * 60 * 1000);
-                estadoRobo.historico_reds = estadoRobo.historico_reds.filter(ts => Number(ts) >= limite);
+                proximoEstado.historico_reds = proximoEstado.historico_reds.filter(ts => Number(ts) >= limite);
             }
 
-            await persistirProtecaoRobo(robo, estadoRobo);
+            try {
+                await persistirProtecaoRobo(robo, proximoEstado, proximosGreens);
+            } catch (e) {
+                console.error(`⚠️ Robô ${robo.id}: falha ao persistir streak/proteção após ${tipoResultado}; memória preservada no estado anterior.`, e.message);
+            }
             continue;
         }
 
-        robo.greens_consecutivos = 0;
+        const proximosGreens = 0;
 
         if (!cooldownAtivo) {
-            estadoRobo.historico_reds = [];
-            await persistirProtecaoRobo(robo, estadoRobo);
+            proximoEstado.historico_reds = [];
+
+            try {
+                await persistirProtecaoRobo(robo, proximoEstado, proximosGreens);
+            } catch (e) {
+                aplicarProtecaoRoboEmMemoria(robo, proximoEstado, proximosGreens);
+                console.error(`⚠️ Robô ${robo.id}: falha ao persistir RED; estado conservador mantido apenas em memória.`, e.message);
+            }
             continue;
         }
 
@@ -858,18 +889,18 @@ async function processarResultadoProtecaoRobos(estado, tipoResultado, timestampC
             const qtdReds = Math.max(2, Number(cooldown.reds) || 2);
             const limite = agoraResultado - (intervaloMin * 60 * 1000);
 
-            estadoRobo.historico_reds = estadoRobo.historico_reds
+            proximoEstado.historico_reds = proximoEstado.historico_reds
                 .filter(ts => Number(ts) >= limite);
-            estadoRobo.historico_reds.push(agoraResultado);
-            devePausar = estadoRobo.historico_reds.length >= qtdReds;
+            proximoEstado.historico_reds.push(agoraResultado);
+            devePausar = proximoEstado.historico_reds.length >= qtdReds;
         } else {
-            estadoRobo.historico_reds = [agoraResultado];
+            proximoEstado.historico_reds = [agoraResultado];
             devePausar = true;
         }
 
         if (devePausar) {
-            estadoRobo.em_standby_ate = Math.max(Date.now(), agoraResultado) + (pausaMin * 60 * 1000);
-            estadoRobo.historico_reds = [];
+            proximoEstado.em_standby_ate = Math.max(Date.now(), agoraResultado) + (pausaMin * 60 * 1000);
+            proximoEstado.historico_reds = [];
 
             avisosProtecao.push({
                 robo_id: robo.id,
@@ -878,11 +909,23 @@ async function processarResultadoProtecaoRobos(estado, tipoResultado, timestampC
                     .replaceAll('{minutos}', String(pausaMin)),
                 avisar_telegram: cooldown.aviso_telegram !== false
             });
-
-            console.log(`🛡️ Robô ${robo.id} em proteção por ${pausaMin} minuto(s).`);
         }
 
-        await persistirProtecaoRobo(robo, estadoRobo);
+        try {
+            await persistirProtecaoRobo(robo, proximoEstado, proximosGreens);
+
+            if (devePausar) {
+                console.log(`🛡️ Robô ${robo.id} em proteção por ${pausaMin} minuto(s).`);
+            }
+        } catch (e) {
+            aplicarProtecaoRoboEmMemoria(robo, proximoEstado, proximosGreens);
+
+            if (devePausar) {
+                console.error(`🚨 Robô ${robo.id}: falha ao persistir standby; proteção mantida em memória por segurança.`, e.message);
+            } else {
+                console.error(`⚠️ Robô ${robo.id}: falha ao persistir janela de REDs; estado conservador mantido apenas em memória.`, e.message);
+            }
+        }
     }
 
     ioServer.emit('atualizar_robos');
