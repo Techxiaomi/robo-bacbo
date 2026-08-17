@@ -104,13 +104,15 @@ A validação operacional do seletor CSS real permanece pendente. Stop Win/Stop 
 
 ### OBS-001 — Exceções críticas são frequentemente silenciadas
 
-Status: **parcialmente mitigado nos patches OBS-001A, OBS-001B, OBS-001C e OBS-001D**.
+Status: **parcialmente mitigado nos patches OBS-001A, OBS-001B, OBS-001C, OBS-001D e OBS-001E**.
 
 No Node, migrations incrementais deixam de silenciar erros inesperados: somente `ER_DUP_FIELDNAME`/errno 1060 continua tratado como condição normal de idempotência. Rotas CRUD críticas registram contexto técnico; `apagarEstrategiaEDados()` deixa o erro subir; e falhas em fechamento `LOSS`, `pulos_restantes`, rollback e processamento pós-ACK ficam visíveis.
 
 O OBS-001C torna a inicialização fail-closed. Enquanto banco/schema/memória ainda não terminaram, `/api/*` e `/receber-sinal` retornam 503 e Socket.IO rejeita handshake. Erro inesperado de migration ou carga inicial deixa de ser absorvido: a falha sobe até `iniciarApp()`, que fecha Socket.IO, HTTP e o pool MySQL e encerra o processo com código de erro, evitando um backend parcialmente inicializado.
 
 O OBS-001D torna visíveis as três persistências críticas que ainda estavam silenciosas no ciclo principal: inserção em `giros_recentes`, fechamento `WIN/TIE` em `auditoria_ordens` e persistência de `META_ATINGIDA`. O comportamento operacional não muda; apenas a falha deixa de desaparecer sem diagnóstico.
+
+O OBS-001E deixa de suprimir erros globais realmente não tratados: `uncaughtException` e `unhandledRejection` agora encerram o processo após registrar o erro, evitando continuar em estado potencialmente inconsistente. As três promises Telegram executadas em background recebem `catch` contextual próprio, para que falhas inesperadas de notificação sejam observadas localmente sem depender do handler global.
 
 No executor Python, o envio de resultado resolvido ao Node valida o status HTTP com `raise_for_status()` e registra falhas sem alterar o ciclo da mesa. Exceções inesperadas em `processar_resultado`, frames WebSocket, Auto-Login, loop principal do Playwright e restart externo também ficam visíveis. Logs de alta frequência usam limitação temporal de 30 segundos.
 
