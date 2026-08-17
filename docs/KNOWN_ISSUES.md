@@ -14,7 +14,7 @@ Risco residual: qualquer credencial que tenha sido compartilhada antes dessa ext
 
 ### BUG-014 — Lifecycle da ordem entre intenção, aceite e execução
 
-Status: **BUG-014A/014B mitigaram intenção, readiness, TTL e confirmação local da tentativa DOM; serialização das rodadas Node ainda pendente**.
+Status: **mitigado pelos patches BUG-014A/014B/014C, sujeito à ambiguidade externa residual descrita abaixo**.
 
 O BUG-014A passou a persistir `PREPARANDO` antes de qualquer POST externo. O BUG-014B acrescenta um lifecycle explícito entre Node e executor: ordem nova só é aceita quando o Playwright está pronto; cada aceite recebe timestamp e TTL; e o Python devolve o resultado da tentativa por callback autenticado em `/executor-status`.
 
@@ -22,7 +22,7 @@ O Node cria o waiter do `order_id` antes do POST, portanto um callback antecipad
 
 `EXECUTADA` não é uma garantia de exactly-once ou de aceite financeiro pela plataforma: significa somente que a automação local conseguiu completar todos os cliques planejados sem erro observável. Se o processo morrer exatamente durante a interação, a ambiguidade externa continua possível sem uma API transacional/idempotente do destino.
 
-Risco residual separado: `/receber-sinal` ainda responde antes de concluir todo o processamento da rodada e não possui serialização explícita do pós-ACK. Esse ponto deve ser tratado em BUG-014C sem misturar novamente o protocolo do executor.
+O BUG-014C mantém o ACK rápido de `/receber-sinal`, mas separa admissão de sequência e processamento: `coletor_sessao/coletor_seq` são reservados sincronamente antes do primeiro `await`, e toda mutação pós-ACK entra em uma fila FIFO. Assim uma rodada recebida durante MySQL/callback da anterior aguarda sua vez e não pode fechar/criar sinais sobre estado intermediário.
 
 ### BUG-001R — Restart do executor e exactly-once do efeito externo
 
@@ -74,7 +74,7 @@ Já implementado:
 - handshake Socket.IO real cobrindo rejeição sem sessão, aceitação com cookie administrativo válido e nova rejeição do cookie invalidado após logout;
 - verificação no MySQL de que as nove tabelas esperadas são criadas a partir de banco vazio e de que o smoke de infraestrutura não grava giro nem ordem financeira;
 - Chromium real em DOM controlado local validando parsing/leitura de saldo no DOM principal e em iframe, além dos seletores de ficha/alvo usados por `executar_aposta_na_tela`;
-- E2E controlado do ciclo coletor Python → Node → executor fake autenticado → MySQL: antes de responder ao POST, o executor fake comprova no banco a intenção `PREPARANDO` com o mesmo `order_id`; depois o backend promove a linha para `PENDENTE`, fecha em `WIN` e registra `historico_resultados=GREEN/DIRETO`;
+- E2E controlado do ciclo coletor Python → Node → executor fake autenticado → MySQL: o executor comprova `PREPARANDO`, atrasa o callback enquanto a rodada seguinte já chega ao Node e valida que a fila FIFO impede ultrapassagem; depois a mesma auditoria fecha em `WIN` e `historico_resultados` registra `GREEN/DIRETO`;
 - integração específica do executor recria o runtime Flask com o mesmo journal e valida deduplicação de `order_id` através de restart, conflito de payload e falha fechada com journal corrompido.
 
 Risco residual externo:

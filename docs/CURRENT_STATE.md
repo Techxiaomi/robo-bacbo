@@ -1,6 +1,6 @@
 # Estado Atual do Projeto
 
-Atualizado em 2026-08-17 após os patches BUG-001…BUG-014B, BUG-001R, SEC-002/003A/003B/004, OBS-001A…H e OBS-003A…H.
+Atualizado em 2026-08-17 após os patches BUG-001…BUG-014C, BUG-001R, SEC-002/003A/003B/004, OBS-001A…H e OBS-003A…H.
 
 Este arquivo descreve o estado atual do `main`, não o snapshot inicial.
 
@@ -76,7 +76,8 @@ O Python envia resultados autenticados para `POST /receber-sinal`. O Node envia 
 - `executar_aposta_na_tela()` retorna `EXECUTADA` somente quando todos os cliques DOM planejados terminam sem erro local, `FALHOU` quando nenhum clique de alvo ocorreu e `AMBIGUA` quando houve clique(s) de alvo antes de uma falha; isso confirma a tentativa local no DOM, não aceite transacional pela plataforma externa;
 - `FALHOU` marca `FALHA_EXECUCAO`, `EXPIRADA` marca `ORDEM_EXPIRADA`, callback `AMBIGUA`/timeout permanece `ENVIO_AMBIGUO`, e recusa explícita sem aceite permanece `FALHA_ENVIO`;
 - journal ilegível/corrompido bloqueia o startup do executor e falha de persistência impede a ordem de entrar na fila;
-- auditoria financeira usa estados explícitos, inclusive `DADOS_INCOMPLETOS` quando há buraco confirmado de coleta.
+- auditoria financeira usa estados explícitos, inclusive `DADOS_INCOMPLETOS` quando há buraco confirmado de coleta;
+- resultados autenticados mantêm ACK HTTP rápido, mas reservam `coletor_sessao/coletor_seq` sincronamente antes de qualquer I/O e executam todo o trabalho pós-ACK em uma fila FIFO única; uma rodada não pode ultrapassar outra enquanto a anterior aguarda MySQL ou callback do executor.
 
 ### Saldo da corretora
 
@@ -116,7 +117,7 @@ O Python envia resultados autenticados para `POST /receber-sinal`. O Node envia 
 - o mesmo smoke valida o handshake Socket.IO real: sem sessão é rejeitado, com cookie administrativo válido conecta e o cookie invalidado no logout deixa de conectar;
 - integração confirma as nove tabelas esperadas em banco vazio e garante que o próprio smoke de infraestrutura não cria giro nem ordem financeira;
 - job Playwright separado instala Chromium e executa DOM controlado local, validando parsing/saldo, `EXECUTADA` no fluxo completo, `FALHOU` sem clique e `AMBIGUA` quando a falha ocorre após o primeiro clique de alvo;
-- job E2E controlado usa a função real `processar_resultado` do Python, o backend Node real, MySQL 8.4 e executor HTTP fake autenticado; o fake comprova `PREPARANDO`, envia callback `EXECUTADA` antes do próprio ACK de fila e só então responde ao POST, validando que o waiter do Node já existia e que a linha avança para `PENDENTE`/`WIN`;
+- job E2E controlado usa a função real `processar_resultado` do Python, o backend Node real, MySQL 8.4 e executor HTTP fake autenticado; além de comprovar `PREPARANDO`/callback antecipado, o fake atrasa deliberadamente a execução enquanto a rodada seguinte já é enviada, validando que o FIFO pós-ACK preserva a ordem causal e ainda fecha a auditoria em `WIN`;
 - job `Executor restart idempotency integration` recria o runtime Flask com o mesmo journal e valida duplicata após restart, conflito de payload, nova ordem e falha fechada com journal corrompido.
 
 ## Riscos e trabalhos ainda pendentes
@@ -124,7 +125,6 @@ O Python envia resultados autenticados para `POST /receber-sinal`. O Node envia 
 - rotacionar operacionalmente credenciais que tenham sido compartilhadas antes da externalização para `.env`;
 - readiness, TTL e callback de resultado DOM já fecham a janela de ordem velha/não pronta e impedem promoção para `PENDENTE` sem `EXECUTADA`; ainda assim, `EXECUTADA` significa apenas que os cliques locais terminaram sem erro observável, não que a plataforma externa confirmou atomicamente a aposta;
 - deduplicação do `order_id` já sobrevive a restart, mas um crash exatamente durante o clique Playwright pode continuar deixando o efeito externo ambíguo; IDs persistidos não são reenfileirados automaticamente, priorizando evitar aposta duplicada;
-- o processamento pós-ACK de `/receber-sinal` ainda não é serializado explicitamente; essa concorrência deve ser tratada separadamente para não misturar protocolo Node↔Python com ordenação das rodadas;
 - métricas runtime e HTTP operacionais locais já existem, porém ainda não há agregador externo, histórico central de longo prazo nem alertas automáticos;
 - latência de consultas MySQL e tempos internos de operações de negócio pós-ACK ainda não são instrumentados separadamente; isso deve ser adicionado somente se houver necessidade operacional clara, para não envolver o pool/banco de forma invasiva;
 - mudanças no DOM/WebSocket, sessão e comportamento da plataforma de destino continuam sendo dependência externa operacional e podem divergir dos ambientes controlados validados no CI;
