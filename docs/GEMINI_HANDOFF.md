@@ -46,6 +46,7 @@ Também estão implementados:
 - testes Node, Python, contratos HTTP e logger;
 - integração real do backend com Express + Socket.IO + MySQL 8.4 descartável;
 - handshake Socket.IO real validado com sessão administrativa antes e depois do logout;
+- Playwright/Chromium real em DOM controlado local para leitura de saldo e seletores de execução;
 - GitHub Actions em PR/push para `main`.
 
 Consulte `CURRENT_STATE.md` para detalhes e riscos residuais.
@@ -91,9 +92,8 @@ Não misture correções independentes no mesmo patch.
 - rotação operacional de credenciais antigas compartilhadas;
 - idempotência de `order_id` não sobrevive a restart do executor;
 - métricas centralizadas ainda ausentes, apesar dos logs estruturados;
-- testes Playwright/DOM reais ainda ausentes;
 - ainda não existe E2E completo captura → Node → executor → auditoria;
-- dependência operacional da estrutura DOM/WebSocket do site de destino;
+- dependência operacional da estrutura DOM/WebSocket do site de destino, que pode divergir do ambiente controlado do CI;
 - modularização futura deve ser gradual e coberta por testes.
 
 ## Validação mínima esperada
@@ -118,4 +118,10 @@ Quando tocar Python:
 - `robo-sync-pilot/tests/test_pure_logic.py`;
 - GitHub Actions Python verde.
 
-Quando tocar integração operacional do site real (Playwright, saldo, DOM/WebSocket ou `.env`), complementar o CI com teste controlado no ambiente local sem publicar segredos.
+Quando tocar parsing monetário, `CASINO_BALANCE_SELECTOR`, seleção de frame, fichas ou alvos Playwright:
+
+- manter verde o job `Playwright controlled DOM integration`;
+- testar primeiro contra DOM local controlado com Chromium real e sem credenciais;
+- não usar o site real como gate de CI.
+
+Quando tocar integração operacional do site real (login, sessão, saldo, DOM/WebSocket ou `.env`), complementar o CI com teste controlado no ambiente local sem publicar segredos.
