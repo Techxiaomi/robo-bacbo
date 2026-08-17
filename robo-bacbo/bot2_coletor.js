@@ -208,6 +208,32 @@ let saldoGlobalAtualizadoEm = 0;
 // ==========================================
 // 3. SERVIDOR WEB E SOCKET
 // ==========================================
+function hostNodeEhLoopback(host) {
+    const normalizado = String(host || '').trim().toLowerCase();
+    return normalizado === '127.0.0.1' || normalizado === 'localhost' || normalizado === '::1';
+}
+
+function hostPermitidoParaNode(hostHeader, nodeHost, porta) {
+    const recebido = String(hostHeader || '').trim().toLowerCase();
+    if (!recebido) return false;
+
+    const hostConfigurado = String(nodeHost || '').trim().toLowerCase();
+    const portaTexto = String(porta);
+
+    if (hostNodeEhLoopback(hostConfigurado)) {
+        return new Set([
+            `127.0.0.1:${portaTexto}`,
+            `localhost:${portaTexto}`,
+            `[::1]:${portaTexto}`
+        ]).has(recebido);
+    }
+
+    const hostFormatado = hostConfigurado.includes(':') && !hostConfigurado.startsWith('[')
+        ? `[${hostConfigurado}]`
+        : hostConfigurado;
+    return recebido === `${hostFormatado}:${portaTexto}`;
+}
+
 function origemCombinaComHost(origin, host) {
     if (!origin) return true;
     if (!host) return false;
@@ -221,15 +247,14 @@ function origemCombinaComHost(origin, host) {
     }
 }
 
-function hostNodeEhLoopback(host) {
-    const normalizado = String(host || '').trim().toLowerCase();
-    return normalizado === '127.0.0.1' || normalizado === 'localhost' || normalizado === '::1';
-}
-
 const app = express();
 app.use((req, res, next) => {
-    if (!origemCombinaComHost(req.get('Origin'), req.get('Host'))) {
-        return res.status(403).json({ erro: 'Origem nao permitida' });
+    const host = req.get('Host');
+    const hostPermitido = hostPermitidoParaNode(host, NODE_HOST, PORTA);
+    const origemPermitida = origemCombinaComHost(req.get('Origin'), host);
+
+    if (!hostPermitido || !origemPermitida) {
+        return res.status(403).json({ erro: 'Origem ou host nao permitido' });
     }
     next();
 });
@@ -335,8 +360,10 @@ const server = app.listen(PORTA, NODE_HOST, () => {
 
 const ioServer = new Server(server, {
     allowRequest: (req, callback) => {
-        const permitido = origemCombinaComHost(req.headers.origin, req.headers.host);
-        callback(null, permitido);
+        const host = req.headers.host;
+        const hostPermitido = hostPermitidoParaNode(host, NODE_HOST, PORTA);
+        const origemPermitida = origemCombinaComHost(req.headers.origin, host);
+        callback(null, hostPermitido && origemPermitida);
     }
 });
 
