@@ -144,6 +144,16 @@ O BUG-012 torna a exclusão do robô transacional: históricos ligados aos padr�
 
 Para corrigir bancos já afetados, `prepararBancoDeDados()` executa no startup uma limpeza idempotente de estratégias `is_dinamico=true` cujo `robo_dono_id` é nulo ou não existe mais em `robos_canais`, removendo também seus históricos associados. Uma falha nessa limpeza aborta a inicialização pelo comportamento fail-closed já existente.
 
+### BUG-013 — Cards de padrões usam estatística operacional em vez de matching histórico
+
+Status: **mitigado no patch BUG-013**.
+
+A API `/api/estrategias` montava os cards a partir de `historico_resultados` e, em `geral`, ainda iniciava pelos contadores acumulados da própria tabela `estrategias`. Isso mede sinais já processados pela estratégia e não todas as ocorrências em que o padrão aparece no histórico bruto; também podia produzir números gerais inconsistentes após a introdução da persistência de resultados.
+
+O BUG-013 passa a usar `giros_recentes` como fonte analítica. O histórico é carregado para um cache em memória no startup e atualizado somente depois que um novo giro é persistido com sucesso. Para cada estratégia, o backend procura o padrão no histórico, impede match entre `id_sessao` diferentes e resolve DIRETO/G1/G2, TIE protegido e RED com a mesma semântica do Lab Padrões. Os intervalos 24H, Hoje, Semana, Mês e Geral são calculados a partir do início da ocorrência do padrão.
+
+Os cinco botões de período também voltam a aparecer nos cards cadastrados. Na lista de padrões, a escolha de período é global para manter todos os cards e a ordenação por assertividade/ocorrências comparando a mesma janela; o card de padrão ativo mantém seu período independente.
+
 ### OBS-001 — Exceções críticas são frequentemente silenciadas
 
 Status: **parcialmente mitigado nos patches OBS-001A, OBS-001B, OBS-001C, OBS-001D e OBS-001E**.
