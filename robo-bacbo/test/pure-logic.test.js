@@ -73,6 +73,7 @@ function carregarLogicaPura() {
             nivelHistoricoResultado,
             contarTiesLegados,
             roboSintonizaEstrategia,
+            avaliarStopRedsRobo,
             formatarPadraoTelegram,
             montarMensagemTelegram,
             horarioParaMinutos,
@@ -554,4 +555,65 @@ test("Trailing Stop persiste pico, reinicia ao mudar configuracao e possui contr
     assert.match(frontendSource, /id="at-trailing-recuo"/);
     assert.match(frontendSource, /toggleTrailingStopAutoTrader/);
     assert.match(frontendSource, /TRAILING_STOP/);
+});
+
+test("avaliarStopRedsRobo desliga somente no limite consecutivo e GREEN/TIE resetam", () => {
+    let r = logic.avaliarStopRedsRobo(
+        { stop_reds_seguidos: 3, reds_consecutivos: 1 },
+        "RED"
+    );
+    assert.equal(r.reds_consecutivos, 2);
+    assert.equal(r.desligar, false);
+    assert.equal(r.limite, 3);
+
+    r = logic.avaliarStopRedsRobo(
+        { stop_reds_seguidos: 3, reds_consecutivos: 2 },
+        "RED"
+    );
+    assert.equal(r.reds_consecutivos, 3);
+    assert.equal(r.desligar, true);
+
+    r = logic.avaliarStopRedsRobo(
+        { stop_reds_seguidos: 3, reds_consecutivos: 2 },
+        "GREEN"
+    );
+    assert.equal(r.reds_consecutivos, 0);
+    assert.equal(r.desligar, false);
+
+    r = logic.avaliarStopRedsRobo(
+        { stop_reds_seguidos: 3, reds_consecutivos: 2 },
+        "TIE"
+    );
+    assert.equal(r.reds_consecutivos, 0);
+    assert.equal(r.desligar, false);
+
+    r = logic.avaliarStopRedsRobo(
+        { stop_reds_seguidos: 0, reds_consecutivos: 9 },
+        "RED"
+    );
+    assert.equal(r.reds_consecutivos, 0);
+    assert.equal(r.desligar, false);
+});
+
+test("Stop Reds de Robos conta somente inscritos, precede cooldown e permanece independente do Auto-Trader", () => {
+    assert.match(
+        source,
+        /ALTER TABLE robos_canais ADD COLUMN reds_consecutivos INT DEFAULT 0/
+    );
+    assert.match(
+        source,
+        /const idsInscritos = new Set\([\s\S]*?if \(!idsInscritos\.has\(String\(robo\.id\)\)\) continue;/
+    );
+    assert.match(
+        source,
+        /if \(stopReds\.desligar\) \{[\s\S]*?SET ativo=false, greens_consecutivos=0, reds_consecutivos=\?[\s\S]*?continue;[\s\S]*?if \(!cooldownAtivo\)/
+    );
+    assert.match(
+        source,
+        /SELECT ativo, stop_reds_seguidos FROM robos_canais WHERE id=\? LIMIT 1[\s\S]*?reds_consecutivos=0/
+    );
+    assert.match(frontendSource, /id="robo-stop-red"/);
+    assert.match(frontendSource, /STOP REDS — DESLIGADO/);
+    assert.match(frontendSource, /id="at-stop-reds"/);
+    assert.match(frontendSource, /id="at-stop-reds-acao"/);
 });

@@ -69,7 +69,9 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - BUG-007C: implementado envio Telegram real por `sendMessage`, com destinos deduplicados, timeout, validação de `HTTP ok` + `ok=true` e mensagens configuráveis por cabeçalho/rodapé/flags do robô.
 - Telegram-only só entra em `robosInscritos`/histórico após confirmação da ENTRADA; Web+Telegram continua gerando um único histórico por robô, e GALE/fechamento usam somente destinos confirmados na entrada.
 - BUG-007D: Drawdown Control passa a aplicar `CONSERVADOR` (pausa no primeiro RED) e `DINAMICO` (X REDs em Y minutos), persistindo `standby_ate`/janela de REDs para sobreviver a restart e excluindo robôs em proteção da seleção de sinais.
-- `greens_consecutivos` passa a ser atualizado por resultado efetivamente recebido pelo robô; aviso Telegram de proteção é encadeado após o RED. `stop_reds_seguidos` separado permanece pendente por não possuir regra de recuperação definida no painel.
+- `greens_consecutivos` passa a ser atualizado por resultado efetivamente recebido pelo robô; aviso Telegram de proteção é encadeado após o RED.
+- BUG-007E: `stop_reds_seguidos` dos Robôs/Canais passa a contar somente sinais efetivamente recebidos pelo robô; GREEN/TIE zera o streak e RED final incrementa uma vez.
+- Ao atingir o limite, o Robô/Canal é desligado (`ativo=false`) antes do Drawdown Control daquele resultado e exige reativação manual. O controle permanece independente do Stop Reds financeiro do Auto-Trader.
 - BUG-009: `prepararBancoDeDados()` passa a criar também `origens` e `estrategias` antes das migrations, tornando o bootstrap compatível com banco vazio sem depender de dump legado.
 - O schema inicial contém somente os campos comprovadamente usados pelo CRUD, estatísticas legadas e metadados dinâmicos atuais; bancos existentes continuam preservados por `CREATE TABLE IF NOT EXISTS`.
 - BUG-008B: criação ativa e reativação de Auto-Trader passam a capturar `saldo_inicial` exclusivamente do saldo global recente no backend; o frontend deixa de enviar baseline financeiro.
