@@ -9,10 +9,10 @@ const vm = require("node:vm");
 const backendPath = path.join(__dirname, "..", "bot2_coletor.js");
 const source = fs.readFileSync(backendPath, "utf8").replace(/\r\n/g, "\n");
 
-function carregarTransporte(fetchImpl) {
-    const inicio = source.indexOf("async function enviarOrdemAoExecutor");
-    const fim = source.indexOf("if (!hostNodeEhLoopback(NODE_HOST))", inicio);
-    assert.ok(inicio >= 0 && fim > inicio, "trecho de transporte do executor deve existir");
+function carregarTransporte(fetchImpl, executionTimeout = 60) {
+    const inicio = source.indexOf("function criarEsperaResultadoExecutor");
+    const fim = source.indexOf("async function criarIntencaoOrdem", inicio);
+    assert.ok(inicio >= 0 && fim > inicio, "trecho de lifecycle do executor deve existir");
     const trecho = source.slice(inicio, fim);
 
     const contexto = {
@@ -24,31 +24,41 @@ function carregarTransporte(fetchImpl) {
         clearTimeout,
         fetch: fetchImpl,
         console: { log() {}, warn() {}, error() {} },
-        dbPool: { query: async () => [{ affectedRows: 1 }] },
         Number,
         String,
-        Error
+        Error,
+        Map,
+        Set,
+        Date,
+        Promise
     };
     vm.createContext(contexto);
     vm.runInContext(`
         const EXECUTOR_URL = "http://executor.test/apostar";
         const EXECUTOR_MAX_ATTEMPTS = 2;
-        const EXECUTOR_TIMEOUT_MS = 50;
+        const EXECUTOR_TIMEOUT_MS = 40;
+        const EXECUTOR_EXECUTION_TIMEOUT_MS = ${executionTimeout};
+        const CONFIRMACOES_EXECUTOR_PENDENTES = new Map();
         function headersInternos() { return { "Content-Type": "application/json", "X-Internal-Token": "test" }; }
         ${trecho}
-        module.exports = { enviarOrdemAoExecutor, classificarStatusFalhaEnvioExecutor };
-    `, contexto, { filename: "bug014a-transport.js" });
+        module.exports = {
+            enviarOrdemAoExecutor,
+            registrarResultadoExecucaoExecutor,
+            classificarStatusFalhaEnvioExecutor,
+            CONFIRMACOES_EXECUTOR_PENDENTES
+        };
+    `, contexto, { filename: "bug014b-lifecycle.js" });
     return contexto.module.exports;
 }
 
-test("HTTP 4xx do executor e falha definitiva e nao faz retry", async () => {
+test("503 aceita=false e recusa definitiva sem retry", async () => {
     let chamadas = 0;
     const logic = carregarTransporte(async () => {
         chamadas++;
         return {
             ok: false,
-            status: 400,
-            json: async () => ({ erro: "payload recusado" })
+            status: 503,
+            json: async () => ({ erro: "Executor Playwright nao esta pronto", aceita: false })
         };
     });
 
@@ -57,32 +67,74 @@ test("HTTP 4xx do executor e falha definitiva e nao faz retry", async () => {
         erro => erro && erro.envio_ambiguo === false
     );
     assert.equal(chamadas, 1);
-    assert.equal(logic.classificarStatusFalhaEnvioExecutor({ envio_ambiguo: false }), "FALHA_ENVIO");
+    assert.equal(logic.CONFIRMACOES_EXECUTOR_PENDENTES.size, 0);
 });
 
-test("HTTP 5xx do executor e ambiguo, repete uma vez com o mesmo order_id", async () => {
+test("5xx sem aceita=false continua ambiguo, repete o mesmo ID e aceita callback tardio", async () => {
     let chamadas = 0;
+    let registrar = null;
     const corpos = [];
+    const orderId = "22222222-2222-4222-8222-222222222222";
     const logic = carregarTransporte(async (_url, options) => {
         chamadas++;
         corpos.push(JSON.parse(options.body));
-        return {
-            ok: false,
-            status: 503,
-            json: async () => ({ erro: "indisponivel" })
-        };
+        if (chamadas === 2) {
+            assert.equal(registrar({ order_id: orderId, status: "AMBIGUA", motivo: "resposta HTTP perdida" }), true);
+        }
+        return { ok: false, status: 503, json: async () => ({ erro: "indisponivel" }) };
     });
+    registrar = logic.registrarResultadoExecucaoExecutor;
 
     await assert.rejects(
-        () => logic.enviarOrdemAoExecutor("PlayerWon", 15, "22222222-2222-4222-8222-222222222222"),
-        erro => erro && erro.envio_ambiguo === true
+        () => logic.enviarOrdemAoExecutor("PlayerWon", 15, orderId),
+        erro => erro && erro.envio_ambiguo === true && erro.status_executor === "AMBIGUA"
     );
     assert.equal(chamadas, 2);
     assert.equal(corpos[0].order_id, corpos[1].order_id);
-    assert.equal(logic.classificarStatusFalhaEnvioExecutor({ envio_ambiguo: true }), "ENVIO_AMBIGUO");
 });
 
-test("DIRETO e GALE persistem PREPARANDO antes do POST ao executor", () => {
+test("callback EXECUTADA pode chegar antes do ACK HTTP", async () => {
+    let registrar = null;
+    const orderId = "33333333-3333-4333-8333-333333333333";
+    const logic = carregarTransporte(async (_url, options) => {
+        const payload = JSON.parse(options.body);
+        assert.equal(payload.order_id, orderId);
+        assert.equal(registrar({ order_id: orderId, status: "EXECUTADA", motivo: "DOM ok" }), true);
+        return {
+            ok: true,
+            status: 200,
+            json: async () => ({ status: "fila", duplicada: false, dados: payload })
+        };
+    });
+    registrar = logic.registrarResultadoExecucaoExecutor;
+
+    const resultado = await logic.enviarOrdemAoExecutor("BankerWon", 10, orderId);
+    assert.equal(resultado.execucao.status, "EXECUTADA");
+    assert.equal(resultado.dados.order_id, orderId);
+    assert.equal(logic.CONFIRMACOES_EXECUTOR_PENDENTES.size, 0);
+});
+
+test("callback FALHOU vira FALHA_EXECUCAO e callback EXPIRADA vira ORDEM_EXPIRADA", async () => {
+    for (const [status, esperado] of [["FALHOU", "FALHA_EXECUCAO"], ["EXPIRADA", "ORDEM_EXPIRADA"]]) {
+        let registrar = null;
+        const orderId = status === "FALHOU"
+            ? "44444444-4444-4444-8444-444444444444"
+            : "55555555-5555-4555-8555-555555555555";
+        const logic = carregarTransporte(async (_url, options) => {
+            const payload = JSON.parse(options.body);
+            registrar({ order_id: orderId, status, motivo: status });
+            return { ok: true, status: 200, json: async () => ({ dados: payload, duplicada: false }) };
+        });
+        registrar = logic.registrarResultadoExecucaoExecutor;
+
+        await assert.rejects(
+            () => logic.enviarOrdemAoExecutor("PlayerWon", 10, orderId),
+            erro => erro && logic.classificarStatusFalhaEnvioExecutor(erro) === esperado
+        );
+    }
+});
+
+test("DIRETO e GALE continuam persistindo PREPARANDO antes do POST ao executor", () => {
     const diretoIntent = source.indexOf("intencaoDireto = await criarIntencaoOrdem(dbPool");
     const diretoSend = source.indexOf(
         "await enviarOrdemAoExecutor(alvoPython, valorArredondado, ordemExecutorIdDireto)",
@@ -97,8 +149,6 @@ test("DIRETO e GALE persistem PREPARANDO antes do POST ao executor", () => {
         galeIntent
     );
     assert.ok(galeIntent >= 0 && galeCommit > galeIntent && galeSend > galeCommit);
-
-    assert.match(source, /VALUES \(\?, \?, \?, \?, \?, \?, \?, \?, 'PREPARANDO'\)/);
-    assert.match(source, /FALHA_ENVIO/);
-    assert.match(source, /ENVIO_AMBIGUO/);
+    assert.match(source, /FALHA_EXECUCAO/);
+    assert.match(source, /ORDEM_EXPIRADA/);
 });

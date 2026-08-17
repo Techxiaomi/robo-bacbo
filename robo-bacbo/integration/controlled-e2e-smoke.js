@@ -81,11 +81,29 @@ function startFakeExecutor(getDb) {
                 assert.equal(intent.alvo, payload.alvo);
                 assert.equal(Number(intent.valor_entrada), Number(payload.valor));
 
+                const callbackResponse = await fetch(`${BASE_URL}/executor-status`, {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "X-Internal-Token": TOKEN
+                    },
+                    body: JSON.stringify({
+                        order_id: payload.order_id,
+                        status: "EXECUTADA",
+                        motivo: "DOM controlado concluído"
+                    })
+                });
+                const callbackData = await callbackResponse.json();
+                assert.equal(callbackResponse.status, 200);
+                assert.equal(callbackData.recebido, true);
+                assert.equal(callbackData.orfa, false, "callback antecipado deve encontrar waiter do Node");
+
                 orders.push({
                     payload,
                     token: req.headers["x-internal-token"],
                     intentStatusBeforeAck: intent.status_ordem,
-                    intentIdBeforeAck: Number(intent.id)
+                    intentIdBeforeAck: Number(intent.id),
+                    callbackBeforeAck: true
                 });
                 res.writeHead(200, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({
@@ -190,7 +208,8 @@ async function main() {
             ADMIN_USERNAME: "",
             ADMIN_PASSWORD: "",
             BALANCE_SYNC_MAX_AGE_SECONDS: "90",
-            LOG_FILE_ENABLED: "false"
+            LOG_FILE_ENABLED: "false",
+            EXECUTOR_EXECUTION_TIMEOUT_MS: "5000"
         },
         stdio: ["ignore", "pipe", "pipe"]
     });
@@ -307,6 +326,7 @@ async function main() {
         assert.equal(Number(order.payload.valor), 10);
         assert.equal(order.intentStatusBeforeAck, "PREPARANDO");
         assert.ok(order.intentIdBeforeAck > 0);
+        assert.equal(order.callbackBeforeAck, true);
 
         const pending = await waitUntil("auditoria PENDENTE", async () => {
             const [[row]] = await db.query(

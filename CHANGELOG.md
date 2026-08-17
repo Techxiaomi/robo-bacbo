@@ -47,6 +47,8 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - BUG-001B: cada ordem Node→Python recebe `order_id` UUID; falhas ambíguas são repetidas uma vez com o mesmo ID e o executor responde idempotentemente sem duplicar a fila.
 - BUG-014A: DIRETO e GALE passam a persistir uma intenção `PREPARANDO` em `auditoria_ordens` com o mesmo `order_id` antes de qualquer POST ao executor; rejeição definitiva vira `FALHA_ENVIO`, falha ambígua vira `ENVIO_AMBIGUO` e ACK seguido de falha de finalização preserva `PREPARANDO` para reconciliação.
 - No GALE, o encerramento `LOSS` da exposição anterior e a criação da nova intenção são transacionais antes do efeito externo; no DIRETO, `entradas_feitas` continua sendo incrementado somente após ACK e promoção da intenção para `PENDENTE`.
+- BUG-014B: executor passa a rejeitar IDs novos enquanto o Playwright não está pronto, atribuir TTL à fila e reportar por callback autenticado `EXECUTADA`, `FALHOU`, `EXPIRADA` ou `AMBIGUA`; o Node cria o waiter antes do POST e só considera a ordem executada após `EXECUTADA`.
+- `executar_aposta_na_tela` retorna estado estruturado: falha antes de qualquer clique de alvo é definitiva, falha após clique parcial é ambígua, e sucesso significa somente conclusão local dos cliques — não confirmação transacional do site externo.
 - O executor rejeita reutilização do mesmo `order_id` com payload diferente (409), mantém uma janela em memória dos últimos 5000 IDs e a auditoria passa a registrar `executor_order_id`.
 - BUG-002: Auto-Traders ativos em `STANDBY` passam para `OPERANDO` ao primeiro resultado de rodada válido e autenticado recebido da mesa.
 - A transição é persistida no MySQL antes de atualizar o estado em memória; traders desligados ou em outros estados não são alterados.

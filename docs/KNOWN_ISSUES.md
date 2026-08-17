@@ -14,13 +14,15 @@ Risco residual: qualquer credencial que tenha sido compartilhada antes dessa ext
 
 ### BUG-014 — Lifecycle da ordem entre intenção, aceite e execução
 
-Status: **BUG-014A mitigou a janela sem auditoria durável; confirmação efetiva do executor e serialização de rodadas ainda pendentes**.
+Status: **BUG-014A/014B mitigaram intenção, readiness, TTL e confirmação local da tentativa DOM; serialização das rodadas Node ainda pendente**.
 
-Antes do BUG-014A, DIRETO e GALE podiam chegar ao executor antes de existir a linha correspondente em `auditoria_ordens`. Se o efeito externo fosse aceito e o MySQL falhasse logo depois, a exposição poderia existir sem uma intenção durável local.
+O BUG-014A passou a persistir `PREPARANDO` antes de qualquer POST externo. O BUG-014B acrescenta um lifecycle explícito entre Node e executor: ordem nova só é aceita quando o Playwright está pronto; cada aceite recebe timestamp e TTL; e o Python devolve o resultado da tentativa por callback autenticado em `/executor-status`.
 
-Agora o Node cria `PREPARANDO` com `executor_order_id`, trader, estratégia, alvo, nível, risco e valor antes de qualquer `POST /apostar`. No DIRETO, `entradas_feitas` continua aumentando somente depois do ACK e da transição da mesma linha para `PENDENTE`. No GALE, o `LOSS` anterior e a nova intenção são atômicos antes do envio. Rejeições definitivas viram `FALHA_ENVIO`; falhas ambíguas de transporte/timeout/5xx/confirmação inválida viram `ENVIO_AMBIGUO`. Se o executor já confirmou e a finalização no banco falhar, `PREPARANDO` é preservado como estado conservador para futura reconciliação.
+O Node cria o waiter do `order_id` antes do POST, portanto um callback antecipado não se perde. `enviarOrdemAoExecutor()` só resolve com `EXECUTADA`. Uma tentativa sem clique de alvo retorna `FALHOU` e vira `FALHA_EXECUCAO`; ordem que vence na fila retorna `EXPIRADA` e vira `ORDEM_EXPIRADA`; falha após algum clique de alvo retorna `AMBIGUA`; ausência de callback continua `ENVIO_AMBIGUO`. Recusa `503` com `aceita=false` significa que o executor não persistiu/enfileirou um ID novo e é tratada como `FALHA_ENVIO` definitiva.
 
-Riscos residuais: `/apostar` ainda confirma entrada na fila, não execução real dos cliques; o executor ainda não expõe readiness nem TTL de ordem; e o processamento pós-ACK de `/receber-sinal` ainda pode se sobrepor. Esses pontos devem ser corrigidos em patches separados para preservar rollback isolado e não fingir garantia de exactly-once do efeito externo.
+`EXECUTADA` não é uma garantia de exactly-once ou de aceite financeiro pela plataforma: significa somente que a automação local conseguiu completar todos os cliques planejados sem erro observável. Se o processo morrer exatamente durante a interação, a ambiguidade externa continua possível sem uma API transacional/idempotente do destino.
+
+Risco residual separado: `/receber-sinal` ainda responde antes de concluir todo o processamento da rodada e não possui serialização explícita do pós-ACK. Esse ponto deve ser tratado em BUG-014C sem misturar novamente o protocolo do executor.
 
 ### BUG-001R — Restart do executor e exactly-once do efeito externo
 

@@ -28,6 +28,10 @@ ARQUIVO_SESSAO = os.getenv("SESSION_STATE_FILE", os.path.join(BASE_DIR, "sessao_
 USUARIO_CASSINO = os.getenv("CASINO_USER", "")
 SENHA_CASSINO = os.getenv("CASINO_PASSWORD", "")
 WEBHOOK_JS = os.getenv("NODE_WEBHOOK_URL", "http://127.0.0.1:3000/receber-sinal")
+EXECUTOR_STATUS_URL = (
+    os.getenv("NODE_EXECUTOR_STATUS_URL", "http://127.0.0.1:3000/executor-status").strip()
+    or "http://127.0.0.1:3000/executor-status"
+)
 INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN", "").strip()
 EXECUTOR_HOST = os.getenv("EXECUTOR_HOST", "127.0.0.1").strip() or "127.0.0.1"
 EXECUTOR_PORT = int(os.getenv("EXECUTOR_PORT", "5000"))
@@ -37,6 +41,11 @@ EXECUTOR_ORDER_JOURNAL_FILE = (
     os.getenv("EXECUTOR_ORDER_JOURNAL_FILE", EXECUTOR_ORDER_JOURNAL_DEFAULT).strip()
     or EXECUTOR_ORDER_JOURNAL_DEFAULT
 )
+
+try:
+    EXECUTOR_ORDER_TTL_SECONDS = max(1.0, min(60.0, float(os.getenv("EXECUTOR_ORDER_TTL_SECONDS", "8"))))
+except ValueError:
+    EXECUTOR_ORDER_TTL_SECONDS = 8.0
 
 try:
     BALANCE_SYNC_INTERVAL_SECONDS = max(0.5, float(os.getenv("BALANCE_SYNC_INTERVAL_SECONDS", "2")))
@@ -60,6 +69,7 @@ if not INTERNAL_API_TOKEN:
 fila_apostas = queue.Queue()
 ordens_executor_recebidas = {}
 ordens_executor_lock = threading.Lock()
+executor_pronto = threading.Event()
 ORDEM_ID_LIMITE_MEMORIA = 5000
 app = Flask(__name__)
 log = logging.getLogger('werkzeug')
@@ -143,7 +153,7 @@ def carregar_ordens_executor_persistidas():
 
     return len(carregadas)
 
-def registrar_ordem_idempotente(dados):
+def registrar_ordem_idempotente(dados, aceitar_nova=True):
     order_id = dados["order_id"]
     alvo = dados["alvo"]
     valor = float(dados["valor"])
@@ -162,6 +172,10 @@ def registrar_ordem_idempotente(dados):
             )
             return ("duplicada" if mesmo_payload else "conflito"), existente
 
+        if not aceitar_nova:
+            return "indisponivel", ordem_normalizada
+
+        ordem_normalizada["aceita_em_ms"] = int(time.time() * 1000)
         novo_estado = dict(ordens_executor_recebidas)
         novo_estado[order_id] = ordem_normalizada
         while len(novo_estado) > ORDEM_ID_LIMITE_MEMORIA:
@@ -182,7 +196,7 @@ if ordens_persistidas:
 
 @app.route('/apostar', methods=['POST'])
 def receber_aposta():
-    """Recebe uma ordem autenticada do Node.js e coloca na fila do Playwright."""
+    """Recebe ordem autenticada; nova exposição só entra na fila quando o Playwright está pronto."""
     if not requisicao_interna_autorizada():
         return jsonify({"erro": "Nao autorizado"}), 401
 
@@ -206,28 +220,41 @@ def receber_aposta():
             "order_id": order_id,
             "alvo": alvo,
             "valor": valor
-        })
+        }, aceitar_nova=executor_pronto.is_set())
     except Exception as e:
         print(f"❌ Falha ao persistir idempotencia da ordem {order_id}: {type(e).__name__}: {e}")
-        return jsonify({"erro": "Falha ao persistir idempotencia da ordem"}), 503
+        return jsonify({"erro": "Falha ao persistir idempotencia da ordem", "aceita": False}), 503
 
     if resultado_idempotencia == "conflito":
         return jsonify({
             "erro": "order_id reutilizado com payload diferente",
+            "aceita": False,
             "dados": ordem
         }), 409
 
+    # Duplicata já persistida continua idempotente mesmo se o Playwright caiu depois do aceite original.
     if resultado_idempotencia == "duplicada":
         print(f"\n♻️ ORDEM JA RECEBIDA: {order_id} - fila preservada sem duplicar aposta")
         return jsonify({
             "status": "Ordem ja recebida; fila preservada",
+            "aceita": True,
             "duplicada": True,
             "dados": ordem
         }), 200
 
+    if resultado_idempotencia == "indisponivel":
+        print(f"⚠️ ORDEM RECUSADA SEM ACEITE: {order_id} - Playwright ainda não está pronto")
+        return jsonify({
+            "erro": "Executor Playwright nao esta pronto",
+            "aceita": False,
+            "duplicada": False,
+            "dados": ordem
+        }), 503
+
     print(f"\n📥 ORDEM AUTENTICADA DO NODE.JS: {order_id} - Apostar R$ {valor} no alvo {alvo}")
     return jsonify({
-        "status": "Aposta na fila de execucao!",
+        "status": "Aposta aceita na fila; aguardando resultado da interacao DOM",
+        "aceita": True,
         "duplicada": False,
         "dados": ordem
     }), 200
@@ -237,6 +264,70 @@ def iniciar_servidor_flask():
 
 # Inicia o Flask em segundo plano para não travar o robô principal
 threading.Thread(target=iniciar_servidor_flask, daemon=True).start()
+
+def ordem_executor_expirada(ordem, agora_ms=None):
+    aceita_em_ms = float(ordem.get("aceita_em_ms") or 0)
+    if aceita_em_ms <= 0:
+        return True
+    referencia = float(agora_ms) if agora_ms is not None else time.time() * 1000
+    return (referencia - aceita_em_ms) > (EXECUTOR_ORDER_TTL_SECONDS * 1000)
+
+
+def reportar_status_execucao_node(ordem, resultado):
+    order_id = str(ordem.get("order_id") or "").strip().lower()
+    status = str((resultado or {}).get("status") or "AMBIGUA").strip().upper()
+    if status not in {"EXECUTADA", "FALHOU", "EXPIRADA", "AMBIGUA"}:
+        status = "AMBIGUA"
+    motivo = str((resultado or {}).get("motivo") or "").strip()[:300]
+    payload = {"order_id": order_id, "status": status, "motivo": motivo}
+
+    ultimo_erro = None
+    for _ in range(2):
+        try:
+            resposta = requests.post(
+                EXECUTOR_STATUS_URL,
+                json=payload,
+                headers={"X-Internal-Token": INTERNAL_API_TOKEN},
+                timeout=2
+            )
+            resposta.raise_for_status()
+            return True
+        except Exception as e:
+            ultimo_erro = e
+
+    registrar_erro_limitado(
+        "executor_status_node",
+        f"⚠️ Falha ao reportar status {status} da ordem {order_id} ao Node: {type(ultimo_erro).__name__}: {ultimo_erro}",
+        30
+    )
+    return False
+
+
+def processar_ordem_executor(page, ordem):
+    if ordem_executor_expirada(ordem):
+        resultado = {
+            "status": "EXPIRADA",
+            "motivo": f"Ordem excedeu TTL de {EXECUTOR_ORDER_TTL_SECONDS:g}s antes da interação DOM",
+            "cliques_alvo": 0
+        }
+    elif not executor_pronto.is_set():
+        resultado = {
+            "status": "FALHOU",
+            "motivo": "Executor ficou indisponivel antes da interação DOM",
+            "cliques_alvo": 0
+        }
+    else:
+        resultado = executar_aposta_na_tela(page, ordem)
+        if not isinstance(resultado, dict) or resultado.get("status") not in {"EXECUTADA", "FALHOU", "AMBIGUA"}:
+            resultado = {
+                "status": "AMBIGUA",
+                "motivo": "Resultado local da tentativa DOM ficou indeterminado",
+                "cliques_alvo": 0
+            }
+
+    reportar_status_execucao_node(ordem, resultado)
+    return resultado
+
 
 ultimo_tempo_rodada = 0
 COLETOR_SESSAO = str(uuid.uuid4())
@@ -338,10 +429,15 @@ def renovar_sessao_automaticamente(page, context):
         return False
 
 def executar_aposta_na_tela(page, aposta):
-    """Cérebro de Apostas com Bypass do Strict Mode (adicionado .first)."""
+    """Executa a tentativa DOM e retorna um estado local explícito; não prova aceite transacional externo."""
+    cliques_alvo = 0
     try:
         alvo_bruto = aposta.get("alvo")
-        valor_total = int(aposta.get("valor", 0))
+        valor_bruto = float(aposta.get("valor", 0))
+        valor_total = int(valor_bruto)
+
+        if valor_bruto <= 0 or valor_bruto != valor_total:
+            return {"status": "FALHOU", "motivo": "Valor incompatível com fichas inteiras", "cliques_alvo": 0}
 
         mapa_alvos = {
             "PlayerWon": "bacbo-bet-spot-Player",
@@ -349,21 +445,20 @@ def executar_aposta_na_tela(page, aposta):
             "Tie": "bacbo-bet-spot-Tie"
         }
         seletor_alvo = mapa_alvos.get(alvo_bruto)
-        
         if not seletor_alvo:
             print(f"❌ Erro: Alvo '{alvo_bruto}' não mapeado.")
-            return
+            return {"status": "FALHOU", "motivo": "Alvo não mapeado", "cliques_alvo": 0}
 
         frame_jogo = None
         for frame in page.frames:
             if "evolution" in frame.url.lower() or "evocdn" in frame.url.lower() or "game" in frame.url.lower():
-                frame_jogo = frame
                 if frame.locator("div[data-role='chip']").count() > 0:
+                    frame_jogo = frame
                     break
-                
+
         if not frame_jogo:
             print("❌ Erro: Iframe da mesa não encontrado! A tela pode estar carregando.")
-            return
+            return {"status": "FALHOU", "motivo": "Iframe da mesa não encontrado", "cliques_alvo": 0}
 
         fichas_disponiveis = [5000, 2500, 500, 125, 25, 10, 5]
         valor_restante = valor_total
@@ -375,48 +470,58 @@ def executar_aposta_na_tela(page, aposta):
                 cliques_necessarios.append((ficha, qtd))
                 valor_restante %= ficha
 
-        if valor_restante > 0 and not cliques_necessarios:
-            print(f"⚠️ Aposta ignorada: R$ {valor_total} é menor que a ficha mínima da mesa.")
-            return
-
-        sucesso_total = True
+        if valor_restante > 0 or not cliques_necessarios:
+            print(f"⚠️ Aposta ignorada: R$ {valor_total} não pode ser representado exatamente pelas fichas disponíveis.")
+            return {"status": "FALHOU", "motivo": "Valor não representável pelas fichas", "cliques_alvo": 0}
 
         for ficha, qtd in cliques_necessarios:
             seletor_ficha = f"div[data-role='chip'][data-value='{ficha}']"
-            
             try:
-                # CORREÇÃO AQUI: Adicionado o .first para pegar apenas a primeira ficha da tela
                 ficha_elemento = frame_jogo.locator(seletor_ficha).first
-                
-                # Aguarda a primeira ficha ficar visível
                 ficha_elemento.wait_for(state="visible", timeout=3000)
-                
-                # Clica na ficha selecionada
-                ficha_elemento.click(force=True)
-                page.wait_for_timeout(200) # Pausa humanizada
-                
-                # CORREÇÃO AQUI: Adicionado o .first para pegar apenas o primeiro alvo da tela
+                ficha_elemento.click(force=True, timeout=3000)
+                page.wait_for_timeout(200)
+
                 alvo_elemento = frame_jogo.locator(f"[data-role='{seletor_alvo}']").first
+                alvo_elemento.wait_for(state="visible", timeout=3000)
                 for _ in range(qtd):
-                    alvo_elemento.click(force=True)
-                    page.wait_for_timeout(150) # Pausa humanizada entre cliques
-                    
-            except PlaywrightTimeoutError:
-                sucesso_total = False
-                print(f"⚠️ Tempo esgotado: A ficha de {ficha} não apareceu. (As apostas fecharam?)")
+                    alvo_elemento.click(force=True, timeout=3000)
+                    cliques_alvo += 1
+                    page.wait_for_timeout(150)
+            except PlaywrightTimeoutError as e:
+                status = "AMBIGUA" if cliques_alvo > 0 else "FALHOU"
+                print(f"⚠️ Timeout durante tentativa DOM da ficha {ficha}: {e}")
+                return {
+                    "status": status,
+                    "motivo": f"Timeout DOM após {cliques_alvo} clique(s) de alvo",
+                    "cliques_alvo": cliques_alvo
+                }
             except Exception as e:
-                sucesso_total = False
-                print(f"⚠️ Falha inesperada ao clicar na mesa: {e}")
+                status = "AMBIGUA" if cliques_alvo > 0 else "FALHOU"
+                print(f"⚠️ Falha durante tentativa DOM da ficha {ficha}: {e}")
+                return {
+                    "status": status,
+                    "motivo": f"Falha DOM após {cliques_alvo} clique(s) de alvo",
+                    "cliques_alvo": cliques_alvo
+                }
 
-        # Mensagem final de sucesso
-        if sucesso_total:
-            valor_final_apostado = valor_total - valor_restante
-            print(f"🎯 SUCESSO! Aposta de R$ {valor_final_apostado} no {alvo_bruto} confirmada com clique duplo!")
-        else:
-            print("❌ Aposta abortada ou incompleta devido a bloqueios na mesa.")
-
+        print(
+            f"🎯 INTERAÇÃO DOM CONCLUÍDA: R$ {valor_total} no {alvo_bruto}; "
+            f"{cliques_alvo} clique(s) de alvo executado(s)."
+        )
+        return {
+            "status": "EXECUTADA",
+            "motivo": "Interação DOM concluída sem erro local",
+            "cliques_alvo": cliques_alvo
+        }
     except Exception as e:
+        status = "AMBIGUA" if cliques_alvo > 0 else "FALHOU"
         print(f"❌ Erro grave na engine de aposta: {e}")
+        return {
+            "status": status,
+            "motivo": f"Erro inesperado após {cliques_alvo} clique(s) de alvo",
+            "cliques_alvo": cliques_alvo
+        }
 
 def parsear_valor_monetario(texto):
     if texto is None:
@@ -587,6 +692,7 @@ def processar_resultado(dados):
         )
 
 def iniciar_robo_blindado():
+    executor_pronto.clear()
     with sync_playwright() as p:
         args_camuflagem = [
             '--disable-blink-features=AutomationControlled',
@@ -628,7 +734,12 @@ def iniciar_robo_blindado():
                 status_conexao["ativa"] = True
                 status_conexao["ws_conectado"] = True
                 ws.on("framereceived", capturar_frame)
-                ws.on("close", lambda ws: status_conexao.update({"ativa": False, "ws_conectado": False}))
+
+                def websocket_fechado(_ws):
+                    executor_pronto.clear()
+                    status_conexao.update({"ativa": False, "ws_conectado": False})
+
+                ws.on("close", websocket_fechado)
 
         def capturar_frame(texto):
             try:
@@ -651,6 +762,7 @@ def iniciar_robo_blindado():
 
         while True:
             try:
+                executor_pronto.clear()
                 status_conexao["ws_conectado"] = False
                 page.goto(URL_CASSINO, wait_until="domcontentloaded", timeout=60000)
                 fechar_popups(page)
@@ -669,7 +781,8 @@ def iniciar_robo_blindado():
                         page.wait_for_timeout(60000)
                         continue
 
-                print("✅ Acesso validado! Tudo pronto.")
+                executor_pronto.set()
+                print("✅ Acesso validado! Executor liberado para novas ordens.")
                 
                 tempo_passado = 0
                 while tempo_passado < (2 * 60 * 60 * 1000): # Reinicia a cada 2 horas
@@ -680,7 +793,7 @@ def iniciar_robo_blindado():
                         sincronizar_saldo_com_node(page, estado_saldo)
                         if not fila_apostas.empty():
                             ordem = fila_apostas.get()
-                            executar_aposta_na_tela(page, ordem)
+                            processar_ordem_executor(page, ordem)
                         page.wait_for_timeout(500)
                     
                     # Clica no botão 'Continuar' caso a mesa fique inativa para você
@@ -692,8 +805,11 @@ def iniciar_robo_blindado():
                             except: pass
                     
                     tempo_passado += 10000
+
+                executor_pronto.clear()
                 
             except PlaywrightTimeoutError as e:
+                executor_pronto.clear()
                 registrar_erro_limitado(
                     "loop_timeout",
                     f"⚠️ Timeout no loop principal do Playwright: {e}",
@@ -701,6 +817,7 @@ def iniciar_robo_blindado():
                 )
                 time.sleep(10)
             except Exception as e:
+                executor_pronto.clear()
                 registrar_erro_limitado(
                     "loop_principal",
                     f"❌ Falha inesperada no loop principal do executor: {type(e).__name__}: {e}",
@@ -714,8 +831,10 @@ if __name__ == "__main__":
         try:
             iniciar_robo_blindado()
         except KeyboardInterrupt:
+            executor_pronto.clear()
             print("\n👋 Robô desligado com sucesso.")
             break
         except Exception as e:
+            executor_pronto.clear()
             print(f"🔥 Executor reiniciando após falha não tratada: {type(e).__name__}: {e}")
             time.sleep(15)
