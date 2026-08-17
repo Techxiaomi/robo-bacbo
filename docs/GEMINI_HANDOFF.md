@@ -48,6 +48,7 @@ Também estão implementados:
 - handshake Socket.IO real validado com sessão administrativa antes e depois do logout;
 - Playwright/Chromium real em DOM controlado local para leitura de saldo e seletores de execução;
 - E2E controlado coletor Python → Node → executor fake autenticado → auditoria MySQL, incluindo ordem DIRETO e fechamento `WIN`;
+- deduplicação de `order_id` persistida em journal local atômico, sobrevivendo a restart do executor e falhando fechado com journal inválido/indisponível;
 - GitHub Actions em PR/push para `main`.
 
 Consulte `CURRENT_STATE.md` para detalhes e riscos residuais.
@@ -91,7 +92,7 @@ Não misture correções independentes no mesmo patch.
 ## Riscos residuais prioritários
 
 - rotação operacional de credenciais antigas compartilhadas;
-- idempotência de `order_id` não sobrevive a restart do executor;
+- deduplicação do `order_id` sobrevive a restart, mas um crash exatamente durante o clique Playwright mantém ambiguidade sobre o efeito externo; IDs já persistidos não são reenfileirados automaticamente para priorizar prevenção de duplicidade;
 - métricas centralizadas ainda ausentes, apesar dos logs estruturados;
 - dependência operacional da estrutura DOM/WebSocket, sessão e comportamento do site de destino, que pode divergir dos ambientes controlados do CI;
 - modularização futura deve ser gradual e coberta por testes.
@@ -117,6 +118,12 @@ Quando a alteração tocar matching de padrão, transição do Auto-Trader, envi
 - manter verde o job `Controlled collector + Node + executor + MySQL E2E`;
 - o E2E deve permanecer totalmente controlado, usando executor fake autenticado e MySQL descartável;
 - nunca apontar esse job para site, executor ou conta real.
+
+Quando a alteração tocar recepção `/apostar`, `order_id`, journal ou idempotência do executor:
+
+- manter verde o job `Executor restart idempotency integration`;
+- validar pelo menos nova ordem, duplicata após recriação do runtime, conflito de payload e journal corrompido fail-closed;
+- não afirmar exactly-once absoluto do clique externo: a garantia local é deduplicação durável do ID aceito.
 
 Quando tocar Python:
 
