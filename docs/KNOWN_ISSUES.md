@@ -20,7 +20,11 @@ As duas rotas internas (`/apostar` e `/receber-sinal`) passam a exigir `INTERNAL
 
 ### SEC-003 — APIs Node sem autenticação e CORS amplo
 
-O backend expõe operações administrativas e dados do sistema. A superfície depende da rede/firewall, mas precisa de hardening antes de exposição fora de localhost.
+Status: **parcialmente mitigado no patch SEC-003A**.
+
+O Node passa a escutar em `127.0.0.1` por padrão via `NODE_HOST`, em vez de depender do bind implícito de `app.listen()`. O CORS aberto é removido e requisições HTTP com header `Origin` diferente do `Host` são rejeitadas. O handshake Socket.IO usa a mesma regra de mesma origem. Clientes internos sem `Origin`, como o executor Python autenticado, continuam permitidos.
+
+É possível optar deliberadamente por outro `NODE_HOST` para acesso em rede, mas o backend emite aviso porque as rotas administrativas ainda não possuem autenticação de usuário. Portanto, **não considerar o painel seguro para Internet ou rede não confiável** até uma etapa separada de autenticação/autorização administrativa (SEC-003B).
 
 ### SEC-004 — Token Telegram pode ser devolvido pelo `GET /api/robos`
 

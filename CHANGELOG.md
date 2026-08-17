@@ -21,6 +21,8 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - Validação mínima do payload antes de enfileirar uma ordem de aposta.
 - SEC-004: `GET /api/robos` deixa de expor `telegram_token`; o navegador recebe somente `telegram_configurado`.
 - Edições e toggles preservam o token armazenado quando o campo chega vazio/ausente, evitando retransmitir o segredo ao frontend.
+- SEC-003A: backend Node passa a usar `NODE_HOST=127.0.0.1` por padrão, remove CORS aberto e rejeita origem HTTP/Socket.IO diferente do host do próprio painel.
+- Exposição deliberada fora de loopback gera aviso; autenticação administrativa permanece pendente como SEC-003B.
 
 ### Fixed
 - BUG-001: o Node agora aguarda e valida a confirmação HTTP do executor antes de contabilizar uma entrada direta ou criar a nova ordem `PENDENTE` de Gale.
