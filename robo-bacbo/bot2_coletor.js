@@ -1619,7 +1619,9 @@ app.post("/receber-sinal", async (req, res) => {
 
         try { 
             await dbPool.query('INSERT INTO giros_recentes (resultado, p_d1, p_d2, b_d1, b_d2, numero_empate, multiplicador, id_sessao, data_hora) VALUES (?,?,?,?,?,?,?,?,FROM_UNIXTIME(?))', [vencedor, p1, p2, b1, b2, nEmp, mult, idSessaoContinua, (dados.timestamp_coleta || Date.now()) / 1000]); 
-        } catch(e){}
+        } catch(e) {
+            console.error('❌ Falha ao persistir giro recente:', e.message);
+        }
 
         historicoRecente.push({ resultado: vencedor, placarStr: `[P:${p1+p2} B:${b1+b2}]`, id_sessao: idSessaoContinua }); 
         if (historicoRecente.length > 30) historicoRecente.shift(); 
@@ -1674,7 +1676,11 @@ app.post("/receber-sinal", async (req, res) => {
                                 if (pendentes.length > 0) {
                                     let vEntrada = parseFloat(pendentes[0].valor_entrada);
                                     let vLucro = isTie ? (vEntrada * parseInt(mult.replace('x', ''))) - vEntrada : vEntrada;
-                                    try { await dbPool.query(`UPDATE auditoria_ordens SET status_ordem = ?, lucro_prejuizo = ?, saldo_pos = ?, placar_mesa = ? WHERE id = ?`, [isTie ? 'TIE' : 'WIN', vLucro, trader.saldo_atual, `[P:${p1+p2} B:${b1+b2}]`, pendentes[0].id]); } catch(e){}
+                                    try {
+                                        await dbPool.query(`UPDATE auditoria_ordens SET status_ordem = ?, lucro_prejuizo = ?, saldo_pos = ?, placar_mesa = ? WHERE id = ?`, [isTie ? 'TIE' : 'WIN', vLucro, trader.saldo_atual, `[P:${p1+p2} B:${b1+b2}]`, pendentes[0].id]);
+                                    } catch(e) {
+                                        console.error(`❌ Falha ao fechar ordem ${pendentes[0].id} como ${isTie ? 'TIE' : 'WIN'} do trader ${trader.id}:`, e.message);
+                                    }
                                 }
                             }
                         }
@@ -1817,7 +1823,11 @@ app.post("/receber-sinal", async (req, res) => {
                                     
                                     if (cf.limite_entradas && trader.entradas_feitas >= cf.limite_entradas) {
                                         trader.status_operacao = 'META_ATINGIDA';
-                                        try { await dbPool.query('UPDATE auto_traders SET status_operacao=? WHERE id=?', ['META_ATINGIDA', trader.id]); } catch(e){}
+                                        try {
+                                            await dbPool.query('UPDATE auto_traders SET status_operacao=? WHERE id=?', ['META_ATINGIDA', trader.id]);
+                                        } catch(e) {
+                                            console.error(`❌ Falha ao persistir META_ATINGIDA do trader ${trader.id}:`, e.message);
+                                        }
                                         continue;
                                     }
 
