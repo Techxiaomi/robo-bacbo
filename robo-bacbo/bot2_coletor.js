@@ -163,8 +163,13 @@ async function prepararBancoDeDados() {
             )
         `);
 
-        const adicionarColuna = async (query) => { 
-            try { await dbPool.query(query); } catch(e) {} 
+        const adicionarColuna = async (query) => {
+            try {
+                await dbPool.query(query);
+            } catch (e) {
+                if (e && (e.code === 'ER_DUP_FIELDNAME' || Number(e.errno) === 1060)) return;
+                console.error(`❌ Falha em migration incremental: ${query}`, e.message);
+            }
         };
 
         await adicionarColuna("ALTER TABLE robos_canais ADD COLUMN config_json TEXT");
@@ -453,8 +458,9 @@ app.get("/api/estrategias", async (req, res) => {
         });
 
         res.json(linhas.map(est => ({ ...est, detalhes: historyMap[est.id] })));
-    } catch (erro) { 
-        res.status(500).json({ erro: "Erro ao buscar estratégias" }); 
+    } catch (erro) {
+        console.error('❌ GET /api/estrategias falhou:', erro.message);
+        res.status(500).json({ erro: "Erro ao buscar estratégias" });
     }
 });
 
@@ -488,6 +494,7 @@ app.get("/api/dashboard-stats", async (req, res) => {
         let assertividade = (sinais > 0) ? ((greens / sinais) * 100).toFixed(1) : 0;
         res.json({ sinais, greens, reds, assertividade: assertividade + '%' });
     } catch (e) {
+        console.error('❌ GET /api/dashboard-stats falhou:', e.message);
         res.status(500).json({ sinais: 0, greens: 0, reds: 0, assertividade: '0%' });
     }
 });
@@ -499,6 +506,7 @@ app.get("/api/historico-giros", async (req, res) => {
         const [linhas] = await dbPool.query(`SELECT resultado, multiplicador, data_hora, id_sessao FROM giros_recentes ORDER BY id DESC LIMIT ${limit}`);
         res.json(linhas.reverse());
     } catch (e) {
+        console.error('❌ GET /api/historico-giros falhou:', e.message);
         res.status(500).json([]);
     }
 });
@@ -568,7 +576,10 @@ app.post("/api/simular-banca", async (req, res) => {
         let lucro_liquido = saldo - parseFloat(banca_inicial); let lucro_perc = ((lucro_liquido / parseFloat(banca_inicial)) * 100).toFixed(2);
 
         res.json({ sucesso: true, banca_inicial: parseFloat(banca_inicial), saldo_final: saldo, lucro_liquido, lucro_perc, max_drawdown: max_dd, max_drawdown_perc: ((max_dd / peak) * 100).toFixed(2), win_rate, total_sinais, equity_curve, dates });
-    } catch (e) { res.status(500).json({ sucesso: false, erro: e.message }); }
+    } catch (e) {
+        console.error('❌ POST /api/simular-banca falhou:', e.message);
+        res.status(500).json({ sucesso: false, erro: e.message });
+    }
 });
 
 app.post("/api/novo-padrao", async (req, res) => {
@@ -579,7 +590,10 @@ app.post("/api/novo-padrao", async (req, res) => {
         const tiesZerado = JSON.stringify({ direto: { '88x': 0, '25x': 0, '10x': 0, '6x': 0, '4x': 0 }, gale1: { '88x': 0, '25x': 0, '10x': 0, '6x': 0, '4x': 0 }, gale2: { '88x': 0, '25x': 0, '10x': 0, '6x': 0, '4x': 0 } });
         await dbPool.query('INSERT INTO estrategias (id, nome, origem, padrao, entrada, gales, proteger_empate, ativo, green_direto, gale1, gale2, red, ties_json, is_dinamico) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, ?, false)', [id, nome, origem, padraoJson, entrada, parseInt(gales), protegerEmpate ? 1 : 0, ativo ? 1 : 0, tiesZerado]);
         await carregarSistemasParaMemoria(); ioServer.emit('atualizar_interface'); res.json({ sucesso: true });
-    } catch (erro) { res.status(500).json({ sucesso: false }); }
+    } catch (erro) {
+        console.error('❌ POST /api/novo-padrao falhou:', erro.message);
+        res.status(500).json({ sucesso: false });
+    }
 });
 
 app.put("/api/estrategia/:id", async (req, res) => {
@@ -588,27 +602,31 @@ app.put("/api/estrategia/:id", async (req, res) => {
         const padraoJson = JSON.stringify(padrao.split(',').map(s => s.trim()));
         await dbPool.query('UPDATE estrategias SET nome = ?, origem = ?, padrao = ?, entrada = ?, gales = ?, proteger_empate = ?, ativo = ? WHERE id = ? AND is_dinamico = false', [nome, origem, padraoJson, entrada, parseInt(gales), protegerEmpate ? 1 : 0, ativo ? 1 : 0, req.params.id]);
         await carregarSistemasParaMemoria(); ioServer.emit('atualizar_interface'); res.json({ sucesso: true });
-    } catch (erro) { res.status(500).json({ sucesso: false }); }
+    } catch (erro) {
+        console.error(`❌ PUT /api/estrategia/${req.params.id} falhou:`, erro.message);
+        res.status(500).json({ sucesso: false });
+    }
 });
 
 app.delete("/api/estrategia/:id", async (req, res) => {
     try {
         await apagarEstrategiaEDados(req.params.id);
         await carregarSistemasParaMemoria(); ioServer.emit('atualizar_interface'); res.json({ sucesso: true });
-    } catch (erro) { res.status(500).json({ sucesso: false }); }
+    } catch (erro) {
+        console.error(`❌ DELETE /api/estrategia/${req.params.id} falhou:`, erro.message);
+        res.status(500).json({ sucesso: false });
+    }
 });
 
 async function apagarEstrategiaEDados(id) {
-    try {
-        await dbPool.query('DELETE FROM estrategias WHERE id = ?', [id]);
-        await dbPool.query('DELETE FROM historico_resultados WHERE estrategia_id = ?', [id]);
-    } catch (e) {}
+    await dbPool.query('DELETE FROM estrategias WHERE id = ?', [id]);
+    await dbPool.query('DELETE FROM historico_resultados WHERE estrategia_id = ?', [id]);
 }
 
-app.get("/api/origens", async (req, res) => { try { const [linhas] = await dbPool.query('SELECT * FROM origens ORDER BY nome ASC'); res.json(linhas); } catch(e) { res.status(500).json([]); } });
-app.post("/api/nova-origem", async (req, res) => { try { await dbPool.query('INSERT INTO origens (nome) VALUES (?)', [req.body.nome]); ioServer.emit('atualizar_interface'); res.json({ sucesso: true }); } catch(e) { res.status(500).json({sucesso: false}); } });
-app.put("/api/origem/:id", async (req, res) => { try { await dbPool.query('UPDATE origens SET nome = ? WHERE id = ?', [req.body.novoNome, req.params.id]); await dbPool.query('UPDATE estrategias SET origem = ? WHERE origem = ? AND is_dinamico = false', [req.body.novoNome, req.body.nomeAntigo]); await carregarSistemasParaMemoria(); ioServer.emit('atualizar_interface'); res.json({ sucesso: true }); } catch(e) { res.status(500).json({sucesso:false}); } });
-app.delete("/api/origem/:id", async (req, res) => { try { await dbPool.query('DELETE FROM origens WHERE id = ?', [req.params.id]); ioServer.emit('atualizar_interface'); res.json({ sucesso: true }); } catch(e) { res.status(500).json({sucesso:false}); } });
+app.get("/api/origens", async (req, res) => { try { const [linhas] = await dbPool.query('SELECT * FROM origens ORDER BY nome ASC'); res.json(linhas); } catch(e) { console.error('❌ GET /api/origens falhou:', e.message); res.status(500).json([]); } });
+app.post("/api/nova-origem", async (req, res) => { try { await dbPool.query('INSERT INTO origens (nome) VALUES (?)', [req.body.nome]); ioServer.emit('atualizar_interface'); res.json({ sucesso: true }); } catch(e) { console.error('❌ POST /api/nova-origem falhou:', e.message); res.status(500).json({sucesso: false}); } });
+app.put("/api/origem/:id", async (req, res) => { try { await dbPool.query('UPDATE origens SET nome = ? WHERE id = ?', [req.body.novoNome, req.params.id]); await dbPool.query('UPDATE estrategias SET origem = ? WHERE origem = ? AND is_dinamico = false', [req.body.novoNome, req.body.nomeAntigo]); await carregarSistemasParaMemoria(); ioServer.emit('atualizar_interface'); res.json({ sucesso: true }); } catch(e) { console.error(`❌ PUT /api/origem/${req.params.id} falhou:`, e.message); res.status(500).json({sucesso:false}); } });
+app.delete("/api/origem/:id", async (req, res) => { try { await dbPool.query('DELETE FROM origens WHERE id = ?', [req.params.id]); ioServer.emit('atualizar_interface'); res.json({ sucesso: true }); } catch(e) { console.error(`❌ DELETE /api/origem/${req.params.id} falhou:`, e.message); res.status(500).json({sucesso:false}); } });
 
 // ==========================================
 // 6. API: GESTÃO DE ROBÔS E AUTO-TRADERS
@@ -677,7 +695,7 @@ app.get("/api/robos", async (req, res) => {
         });
 
         res.json(robosSanitizados);
-    } catch(e) { res.status(500).json([]); }
+    } catch(e) { console.error('❌ GET /api/robos falhou:', e.message); res.status(500).json([]); }
 });
 
 app.post("/api/robo", async (req, res) => {
@@ -688,7 +706,7 @@ app.post("/api/robo", async (req, res) => {
         let roboId = result.insertId;
         if (destinatarios && Array.isArray(destinatarios)) { for (let d of destinatarios) { if (d.chat_id && d.chat_id.trim() !== '') await dbPool.query('INSERT INTO destinatarios_robo (robo_id, nome_cliente, chat_id) VALUES (?, ?, ?)', [roboId, d.nome_cliente || 'Cliente', d.chat_id.trim()]); } }
         await carregarSistemasParaMemoria(); ioServer.emit('atualizar_robos'); res.json({ sucesso: true });
-    } catch(e) { res.status(500).json({ sucesso: false }); }
+    } catch(e) { console.error('❌ POST /api/robo falhou:', e.message); res.status(500).json({ sucesso: false }); }
 });
 
 app.put("/api/robo/:id", async (req, res) => {
@@ -700,7 +718,7 @@ app.put("/api/robo/:id", async (req, res) => {
         await dbPool.query('DELETE FROM destinatarios_robo WHERE robo_id = ?', [id]);
         if (destinatarios && Array.isArray(destinatarios)) { for (let d of destinatarios) { if (d.chat_id && d.chat_id.trim() !== '') await dbPool.query('INSERT INTO destinatarios_robo (robo_id, nome_cliente, chat_id) VALUES (?, ?, ?)', [id, d.nome_cliente || 'Cliente', d.chat_id.trim()]); } }
         await carregarSistemasParaMemoria(); ioServer.emit('atualizar_robos'); res.json({ sucesso: true });
-    } catch(e) { res.status(500).json({ sucesso: false }); }
+    } catch(e) { console.error(`❌ PUT /api/robo/${req.params.id} falhou:`, e.message); res.status(500).json({ sucesso: false }); }
 });
 
 app.delete("/api/robo/:id", async (req, res) => {
@@ -709,7 +727,7 @@ app.delete("/api/robo/:id", async (req, res) => {
         await dbPool.query('DELETE FROM destinatarios_robo WHERE robo_id=?', [roboId]); 
         await dbPool.query('DELETE FROM robos_canais WHERE id=?', [roboId]); 
         await carregarSistemasParaMemoria(); ioServer.emit('atualizar_robos'); ioServer.emit('atualizar_interface'); res.json({ sucesso: true }); 
-    } catch(e) { res.status(500).json({ sucesso: false }); }
+    } catch(e) { console.error(`❌ DELETE /api/robo/${req.params.id} falhou:`, e.message); res.status(500).json({ sucesso: false }); }
 });
 
 app.get("/api/auto-traders", async (req, res) => {
@@ -720,7 +738,7 @@ app.get("/api/auto-traders", async (req, res) => {
             return { id: at.id, nome: at.nome, ativo: at.ativo === 1, config: confObj, saldo_inicial: parseFloat(at.saldo_inicial), saldo_atual: parseFloat(at.saldo_atual), status_operacao: at.status_operacao, entradas_feitas: at.entradas_feitas, pulos_restantes: at.pulos_restantes };
         });
         res.json(sanitizados);
-    } catch (e) { res.status(500).json([]); }
+    } catch (e) { console.error('❌ GET /api/auto-traders falhou:', e.message); res.status(500).json([]); }
 });
 
 app.post("/api/auto-trader", async (req, res) => {
@@ -747,6 +765,7 @@ app.post("/api/auto-trader", async (req, res) => {
         await carregarSistemasParaMemoria();
         res.json({ sucesso: true, saldo_inicial: saldoBaseline });
     } catch (e) {
+        console.error('❌ POST /api/auto-trader falhou:', e.message);
         res.status(500).json({ sucesso: false });
     }
 });
@@ -796,16 +815,17 @@ app.put("/api/auto-trader/:id", async (req, res) => {
         await carregarSistemasParaMemoria();
         res.json({ sucesso: true, baseline_recapturado: reativando });
     } catch (e) {
+        console.error(`❌ PUT /api/auto-trader/${req.params.id} falhou:`, e.message);
         res.status(500).json({ sucesso: false });
     }
 });
 
-app.delete("/api/auto-trader/:id", async (req, res) => { 
-    try { await dbPool.query('DELETE FROM auto_traders WHERE id=?', [req.params.id]); await carregarSistemasParaMemoria(); res.json({ sucesso: true }); } catch (e) { res.status(500).json({ sucesso: false }); } 
+app.delete("/api/auto-trader/:id", async (req, res) => {
+    try { await dbPool.query('DELETE FROM auto_traders WHERE id=?', [req.params.id]); await carregarSistemasParaMemoria(); res.json({ sucesso: true }); } catch (e) { console.error(`❌ DELETE /api/auto-trader/${req.params.id} falhou:`, e.message); res.status(500).json({ sucesso: false }); }
 });
 
-app.get("/api/auditoria-ordens/:trader_id", async (req, res) => { 
-    try { const [ordens] = await dbPool.query(`SELECT * FROM auditoria_ordens WHERE trader_id = ? ORDER BY id DESC LIMIT 500`, [req.params.trader_id]); res.json(ordens); } catch (e) { res.status(500).json([]); } 
+app.get("/api/auditoria-ordens/:trader_id", async (req, res) => {
+    try { const [ordens] = await dbPool.query(`SELECT * FROM auditoria_ordens WHERE trader_id = ? ORDER BY id DESC LIMIT 500`, [req.params.trader_id]); res.json(ordens); } catch (e) { console.error(`❌ GET /api/auditoria-ordens/${req.params.trader_id} falhou:`, e.message); res.status(500).json([]); }
 });
 
 // ==========================================
@@ -1694,7 +1714,7 @@ app.post("/receber-sinal", async (req, res) => {
                                     const [pendentes] = await dbPool.query(`SELECT id, risco_total FROM auditoria_ordens WHERE trader_id = ? AND status_ordem = 'PENDENTE' LIMIT 1`, [trader.id]);
                                     if (pendentes.length > 0) {
                                         let prejuizo = -Math.abs(parseFloat(pendentes[0].risco_total));
-                                        try { await dbPool.query(`UPDATE auditoria_ordens SET status_ordem = 'LOSS', lucro_prejuizo = ?, saldo_pos = ?, placar_mesa = ? WHERE id = ?`, [prejuizo, trader.saldo_atual, `[P:${p1+p2} B:${b1+b2}]`, pendentes[0].id]); } catch(e){}
+                                        try { await dbPool.query(`UPDATE auditoria_ordens SET status_ordem = 'LOSS', lucro_prejuizo = ?, saldo_pos = ?, placar_mesa = ? WHERE id = ?`, [prejuizo, trader.saldo_atual, `[P:${p1+p2} B:${b1+b2}]`, pendentes[0].id]); } catch(e) { console.error(`❌ Falha ao fechar ordem LOSS ${pendentes[0].id} do trader ${trader.id}:`, e.message); }
                                     }
                                 }
                             }
@@ -1760,13 +1780,13 @@ app.post("/receber-sinal", async (req, res) => {
                                     if (cf.modo_camuflagem === 'PULOS') {
                                         if (trader.pulos_restantes > 0) {
                                             trader.pulos_restantes--;
-                                            try { await dbPool.query('UPDATE auto_traders SET pulos_restantes=? WHERE id=?', [trader.pulos_restantes, trader.id]); } catch(e){}
+                                            try { await dbPool.query('UPDATE auto_traders SET pulos_restantes=? WHERE id=?', [trader.pulos_restantes, trader.id]); } catch(e) { console.error(`❌ Falha ao persistir pulos_restantes do trader ${trader.id}:`, e.message); }
                                             continue; 
                                         } else {
                                             let pMin = cf.camuflagem_pulos_min || 1; 
                                             let pMax = cf.camuflagem_pulos_max || 3;
                                             trader.pulos_restantes = Math.floor(Math.random() * (pMax - pMin + 1)) + pMin;
-                                            try { await dbPool.query('UPDATE auto_traders SET pulos_restantes=? WHERE id=?', [trader.pulos_restantes, trader.id]); } catch(e){}
+                                            try { await dbPool.query('UPDATE auto_traders SET pulos_restantes=? WHERE id=?', [trader.pulos_restantes, trader.id]); } catch(e) { console.error(`❌ Falha ao persistir novo ciclo de pulos do trader ${trader.id}:`, e.message); }
                                         }
                                     }
 
@@ -1787,7 +1807,7 @@ app.post("/receber-sinal", async (req, res) => {
                                             await conexao.commit();
                                             trader.entradas_feitas = novasEntradas;
                                         } catch(e) {
-                                            try { await conexao.rollback(); } catch(rollbackError) {}
+                                            try { await conexao.rollback(); } catch(rollbackError) { console.error(`❌ Rollback falhou para o trader ${trader.id}:`, rollbackError.message); }
                                             throw e;
                                         } finally {
                                             conexao.release();
@@ -1807,7 +1827,9 @@ app.post("/receber-sinal", async (req, res) => {
                 }
             }
         }
-    } catch(erroGeral) {}
+    } catch(erroGeral) {
+        console.error('🔥 Falha no processamento de /receber-sinal após o ACK:', erroGeral);
+    }
 });
 
 async function iniciarApp() {

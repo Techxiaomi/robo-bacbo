@@ -23,6 +23,8 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - Edições e toggles preservam o token armazenado quando o campo chega vazio/ausente, evitando retransmitir o segredo ao frontend.
 - SEC-003A: backend Node passa a usar `NODE_HOST=127.0.0.1` por padrão, remove CORS aberto e rejeita origem HTTP/Socket.IO diferente do host do próprio painel.
 - Exposição deliberada fora de loopback gera aviso; autenticação administrativa permanece pendente como SEC-003B.
+- OBS-001A: falhas inesperadas em migrations e CRUDs críticos deixam de ser silenciosas; erros passam a ser registrados com contexto sem expor detalhes técnicos nas respostas HTTP.
+- Falhas em exclusão de estratégia, fechamento `LOSS`, persistência de camuflagem, rollback e processamento pós-ACK de `/receber-sinal` também passam a ficar visíveis nos logs.
 
 ### Fixed
 - BUG-001: o Node agora aguarda e valida a confirmação HTTP do executor antes de contabilizar uma entrada direta ou criar a nova ordem `PENDENTE` de Gale.
