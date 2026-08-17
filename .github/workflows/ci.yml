@@ -103,3 +103,30 @@ jobs:
       - name: Run real backend integration smoke
         run: node integration/http-mysql-smoke.js
         working-directory: robo-bacbo
+
+  playwright-dom:
+    name: Playwright controlled DOM integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install isolated Playwright dependency
+        run: python -m pip install --disable-pip-version-check playwright==1.62.0
+
+      - name: Install Chromium for Playwright
+        run: python -m playwright install --with-deps chromium
+
+      - name: Check Playwright DOM test syntax
+        run: python -m py_compile tests/test_playwright_dom.py
+        working-directory: robo-sync-pilot
+
+      - name: Run controlled Playwright DOM integration
+        run: python tests/test_playwright_dom.py
+        working-directory: robo-sync-pilot
