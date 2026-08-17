@@ -3,6 +3,7 @@
 const fs = require("fs");
 const path = require("path");
 const util = require("util");
+const metricasRuntime = require("./metrics");
 
 let instalado = false;
 let ultimoAvisoFalhaEm = 0;
@@ -189,6 +190,7 @@ function instalarLoggingEstruturado(opcoes = {}) {
                 maxArquivos: config.maxArquivos
             });
         } catch (e) {
+            metricasRuntime.registrarFalhaSinkLog();
             const agora = Date.now();
             if ((agora - ultimoAvisoFalhaEm) >= 30000) {
                 ultimoAvisoFalhaEm = agora;
@@ -200,6 +202,7 @@ function instalarLoggingEstruturado(opcoes = {}) {
     const envolver = (nivel) => {
         const saidaConsole = consoleOriginal[nivel] || consoleOriginal.log;
         console[nivel] = (...args) => {
+            metricasRuntime.registrarLog(nivel);
             saidaConsole(...args);
             escrever(nivel, args);
         };
