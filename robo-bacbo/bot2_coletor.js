@@ -678,7 +678,7 @@ app.post("/api/auto-trader", async (req, res) => {
             });
         }
 
-        const saldoBaseline = saldoFresco === null ? 0 : saldoFresco;
+        const saldoBaseline = novoAtivo ? saldoFresco : 0;
         await dbPool.query(
             `INSERT INTO auto_traders (nome, ativo, config_json, saldo_inicial, saldo_atual, status_operacao, entradas_feitas, pulos_restantes)
              VALUES (?, ?, ?, ?, ?, 'STANDBY', 0, 0)`,
