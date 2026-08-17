@@ -104,11 +104,13 @@ A validação operacional do seletor CSS real permanece pendente. Stop Win/Stop 
 
 ### OBS-001 — Exceções críticas são frequentemente silenciadas
 
-Status: **parcialmente mitigado nos patches OBS-001A e OBS-001B**.
+Status: **parcialmente mitigado nos patches OBS-001A, OBS-001B e OBS-001C**.
 
 No Node, migrations incrementais deixam de silenciar erros inesperados: somente `ER_DUP_FIELDNAME`/errno 1060 continua tratado como condição normal de idempotência. Rotas CRUD críticas registram contexto técnico; `apagarEstrategiaEDados()` deixa o erro subir; e falhas em fechamento `LOSS`, `pulos_restantes`, rollback e processamento pós-ACK ficam visíveis.
 
-No executor Python, o envio de resultado resolvido ao Node passa a validar o status HTTP com `raise_for_status()` e registrar falhas sem alterar o ciclo da mesa. Exceções inesperadas em `processar_resultado`, frames WebSocket, Auto-Login, loop principal do Playwright e restart externo também passam a ser visíveis. Logs de alta frequência usam limitação temporal de 30 segundos.
+O OBS-001C torna a inicialização fail-closed. Enquanto banco/schema/memória ainda não terminaram, `/api/*` e `/receber-sinal` retornam 503 e Socket.IO rejeita handshake. Erro inesperado de migration ou carga inicial deixa de ser absorvido: a falha sobe até `iniciarApp()`, que fecha Socket.IO, HTTP e o pool MySQL e encerra o processo com código de erro, evitando um backend parcialmente inicializado.
+
+No executor Python, o envio de resultado resolvido ao Node valida o status HTTP com `raise_for_status()` e registra falhas sem alterar o ciclo da mesa. Exceções inesperadas em `processar_resultado`, frames WebSocket, Auto-Login, loop principal do Playwright e restart externo também ficam visíveis. Logs de alta frequência usam limitação temporal de 30 segundos.
 
 Ruído esperado continua tolerado: frames WebSocket que não são JSON, falhas em pop-ups opcionais, fallback de stealth, varredura de frames para saldo e o botão opcional “Continuar” não viram erro fatal. O item permanece parcial porque ainda não existe logging estruturado/arquivo rotativo nem métricas centralizadas.
 
