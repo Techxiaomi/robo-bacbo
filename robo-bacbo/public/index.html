@@ -1901,6 +1901,7 @@
             preencherCampoRobo('robo-tag', '');
             preencherCampoRobo('robo-cor', '#007bff');
             preencherCampoRobo('robo-token', '');
+            document.getElementById('robo-token').placeholder = '123456:ABC...';
             preencherCampoRobo('robo-min-assert', 0);
             preencherCampoRobo('robo-stop-red', 0);
             preencherCheckRobo('robo-ativo', true);
@@ -1966,7 +1967,10 @@
             preencherCampoRobo('robo-nome', robo.nome || '');
             preencherCampoRobo('robo-tag', robo.tag_visual || '');
             preencherCampoRobo('robo-cor', robo.cor_hex || '#007bff');
-            preencherCampoRobo('robo-token', robo.telegram_token || '');
+            preencherCampoRobo('robo-token', '');
+            document.getElementById('robo-token').placeholder = robo.telegram_configurado
+                ? 'Token já configurado — deixe em branco para manter'
+                : 'Informe o Token do Bot';
             preencherCampoRobo('robo-min-assert', robo.min_assertividade ?? 0);
             preencherCampoRobo('robo-stop-red', robo.stop_reds_seguidos ?? 0);
             preencherCheckRobo('robo-ativo', boolRobo(robo.ativo));
@@ -2086,7 +2090,8 @@
             const payload = construirPayloadRobo(roboBase);
 
             if (!payload.nome) return alert('Preencha o Nome do Robô / Sala.');
-            if (payload.enviar_telegram && !payload.telegram_token) {
+            const tokenJaConfigurado = !!roboBase?.telegram_configurado;
+            if (payload.enviar_telegram && !payload.telegram_token && !tokenJaConfigurado) {
                 return alert('Informe o Token do Bot ou desative "Enviar para Telegram".');
             }
 
@@ -2127,7 +2132,7 @@
                 nome: robo.nome || '',
                 tag: robo.tag_visual || '',
                 cor: robo.cor_hex || '#007bff',
-                telegram_token: robo.telegram_token || '',
+                telegram_token: '',
                 telegram_chat_id: robo.telegram_chat_id || '',
                 enviar_telegram: boolRobo(robo.enviar_telegram),
                 enviar_web: boolRobo(robo.enviar_web),
