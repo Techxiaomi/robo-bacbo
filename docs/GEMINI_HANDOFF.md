@@ -44,7 +44,8 @@ Também estão implementados:
 - Robôs/Canais Web + Telegram, filtros, Drawdown Control e Stop Reds;
 - logging estruturado JSONL rotativo com redaction de segredos;
 - métricas runtime locais em snapshot JSON atômico, incluindo uptime, memória, event-loop delay, níveis de log e falhas dos sinks;
-- testes Node, Python, contratos HTTP, logger e métricas;
+- métricas operacionais locais em `backend.operations.json`: HTTP inbound por rota normalizada, outbound agregado por executor/Telegram/outros e freshness do último resultado/saldo aceitos, sem payloads ou URLs sensíveis;
+- testes Node, Python, contratos HTTP, logger, métricas runtime e métricas operacionais;
 - integração real do backend com Express + Socket.IO + MySQL 8.4 descartável;
 - handshake Socket.IO real validado com sessão administrativa antes e depois do logout;
 - Playwright/Chromium real em DOM controlado local para leitura de saldo e seletores de execução;
@@ -94,7 +95,8 @@ Não misture correções independentes no mesmo patch.
 
 - rotação operacional de credenciais antigas compartilhadas;
 - deduplicação do `order_id` sobrevive a restart, mas um crash exatamente durante o clique Playwright mantém ambiguidade sobre o efeito externo; IDs já persistidos não são reenfileirados automaticamente para priorizar prevenção de duplicidade;
-- métricas runtime locais existem, porém agregação externa, retenção histórica central, alertas automáticos e métricas de latência por operação/HTTP ainda não existem;
+- métricas runtime e HTTP operacionais locais existem, porém agregação externa, retenção histórica central e alertas automáticos ainda não existem;
+- latência MySQL e tempos internos de operações de negócio pós-ACK ainda não são instrumentados separadamente; só envolver o pool/banco se houver necessidade operacional real;
 - dependência operacional da estrutura DOM/WebSocket, sessão e comportamento do site de destino, que pode divergir dos ambientes controlados do CI;
 - modularização futura deve ser gradual e coberta por testes.
 
@@ -107,13 +109,21 @@ Quando a alteração tocar Node:
 - `git diff --check` ou equivalente remoto;
 - GitHub Actions Node verde.
 
-Quando tocar `logger.js`, `metrics.js`, `env_loader.js` ou configuração de observabilidade:
+Quando tocar `logger.js`, `metrics.js`, `operations_metrics.js`, `env_loader.js` ou configuração de observabilidade:
 
-- manter verdes os testes de logger e métricas;
+- manter verdes os testes de logger, métricas runtime e métricas operacionais;
 - preservar o console original e o fail-safe dos sinks;
 - não introduzir dependência externa apenas para coletar métricas locais;
-- timer de telemetria local não deve impedir encerramento normal do processo;
-- métricas/snapshots não podem incluir segredos do `.env` nem payloads sensíveis.
+- timers de telemetria local não devem impedir encerramento normal do processo;
+- métricas/snapshots não podem incluir segredos do `.env`, payloads, query strings sensíveis nem URLs com credenciais/tokens;
+- manter cardinalidade e memória limitadas; IDs variáveis devem ser normalizados nas rotas.
+
+Quando a alteração tocar hook HTTP/fetch ou classificação outbound:
+
+- manter verde o teste real `http.createServer + fetch` em `operations_metrics.test.js`;
+- manter verde o job `Backend HTTP + Socket.IO + MySQL integration` para provar transparência em login, APIs, webhook e Socket.IO;
+- manter verde o `Controlled collector + Node + executor + MySQL E2E` quando a instrumentação puder observar chamadas ao executor;
+- nunca registrar corpo de requisição/resposta, `INTERNAL_API_TOKEN`, token Telegram, `order_id`, valores financeiros ou URL completa do Telegram.
 
 Quando a alteração puder afetar bootstrap, rotas HTTP, autenticação, Socket.IO ou schema MySQL:
 
