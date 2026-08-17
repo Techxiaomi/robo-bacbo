@@ -134,6 +134,16 @@ Toda quebra aceita rotaciona `id_sessao` antes de persistir a rodada seguinte, p
 
 Intervalos superiores a 60 segundos continuam provocando apenas quebra de sessão quando a sequência do coletor permanece íntegra. Isso preserva o comportamento anterior para uma mesa lenta/pausada e evita classificar apenas demora temporal como perda financeira confirmada. A estatística visual de maiores sequências também passa a zerar streaks na fronteira de `id_sessao`.
 
+### BUG-012 — Padrões IA sobrevivem à exclusão do Robô/Canal proprietário
+
+Status: **mitigado no patch BUG-012**.
+
+Os cards de padrões dinâmicos são deliberadamente bloqueados no frontend porque pertencem ao Robô/Canal indicado por `robo_dono_id`. Porém, o endpoint `DELETE /api/robo/:id` removia somente destinatários e a linha de `robos_canais`, deixando os padrões `is_dinamico=true` órfãos no banco e ainda visíveis na área de padrões.
+
+O BUG-012 torna a exclusão do robô transacional: históricos ligados aos padrões IA filhos, os próprios padrões dinâmicos, o histórico de distribuição do robô, destinatários e o registro do Robô/Canal são removidos como uma única operação lógica. Padrões manuais não são selecionados por essa cascata.
+
+Para corrigir bancos já afetados, `prepararBancoDeDados()` executa no startup uma limpeza idempotente de estratégias `is_dinamico=true` cujo `robo_dono_id` é nulo ou não existe mais em `robos_canais`, removendo também seus históricos associados. Uma falha nessa limpeza aborta a inicialização pelo comportamento fail-closed já existente.
+
 ### OBS-001 — Exceções críticas são frequentemente silenciadas
 
 Status: **parcialmente mitigado nos patches OBS-001A, OBS-001B, OBS-001C, OBS-001D e OBS-001E**.

@@ -30,6 +30,64 @@ const dbPool = mysql.createPool({
     queueLimit: 0
 });
 
+async function limparPadroesDinamicosOrfaos() {
+    const conexao = await dbPool.getConnection();
+    try {
+        await conexao.beginTransaction();
+
+        const [orfaos] = await conexao.query(`
+            SELECT e.id
+            FROM estrategias e
+            LEFT JOIN robos_canais r ON r.id = e.robo_dono_id
+            WHERE e.is_dinamico = true
+              AND (e.robo_dono_id IS NULL OR r.id IS NULL)
+        `);
+
+        const ids = orfaos.map(row => String(row.id));
+        if (ids.length > 0) {
+            const placeholders = ids.map(() => '?').join(',');
+            await conexao.query(
+                `DELETE FROM historico_resultados WHERE estrategia_id IN (${placeholders})`,
+                ids
+            );
+            await conexao.query(
+                `DELETE FROM historico_disparos_robos WHERE estrategia_id IN (${placeholders})`,
+                ids
+            );
+            await conexao.query(
+                `DELETE FROM estrategias WHERE id IN (${placeholders}) AND is_dinamico = true`,
+                ids
+            );
+        }
+
+        const [historicosOrfaos] = await conexao.query(`
+            DELETE h
+            FROM historico_disparos_robos h
+            LEFT JOIN robos_canais r ON r.id = h.robo_id
+            WHERE r.id IS NULL
+        `);
+
+        await conexao.commit();
+
+        const historicosRemovidos = Math.max(0, Number(historicosOrfaos.affectedRows) || 0);
+        if (ids.length > 0 || historicosRemovidos > 0) {
+            console.log(
+                `🧹 Limpeza IA: ${ids.length} padrão(ões) dinâmico(s) órfão(s) e `
+                + `${historicosRemovidos} histórico(s) de robô órfão(s) removido(s).`
+            );
+        }
+
+        return { padroes: ids.length, historicos_robos: historicosRemovidos };
+    } catch (e) {
+        try { await conexao.rollback(); } catch (rollbackError) {
+            console.error('❌ Rollback falhou na limpeza de padrões IA órfãos:', rollbackError.message);
+        }
+        throw e;
+    } finally {
+        conexao.release();
+    }
+}
+
 async function prepararBancoDeDados() {
     try {
         await dbPool.query(`
@@ -207,6 +265,10 @@ async function prepararBancoDeDados() {
              SET status_operacao='DESLIGADO'
              WHERE ativo=false AND status_operacao IN ('OPERANDO', 'STANDBY')`
         );
+
+        // BUG-012: padrões IA não podem sobreviver sem o Robô/Canal proprietário.
+        // A limpeza é idempotente e também corrige órfãos deixados por versões anteriores.
+        await limparPadroesDinamicosOrfaos();
 
         console.log("\n========================================================");
         console.log("🚀 MÓDULO BACKEND V12.0 PRO - MOTOR DE EXECUÇÃO INTEGRADO");
@@ -863,12 +925,82 @@ app.put("/api/robo/:id", async (req, res) => {
 });
 
 app.delete("/api/robo/:id", async (req, res) => {
-    try { 
-        const roboId = req.params.id;
-        await dbPool.query('DELETE FROM destinatarios_robo WHERE robo_id=?', [roboId]); 
-        await dbPool.query('DELETE FROM robos_canais WHERE id=?', [roboId]); 
-        await carregarSistemasParaMemoria(); ioServer.emit('atualizar_robos'); ioServer.emit('atualizar_interface'); res.json({ sucesso: true }); 
-    } catch(e) { console.error(`❌ DELETE /api/robo/${req.params.id} falhou:`, e.message); res.status(500).json({ sucesso: false }); }
+    const roboId = Number(req.params.id);
+    if (!Number.isInteger(roboId) || roboId <= 0) {
+        return res.status(400).json({ sucesso: false, erro: 'robo_id_invalido' });
+    }
+
+    let conexao = null;
+    let padroesIaExcluidos = 0;
+
+    try {
+        conexao = await dbPool.getConnection();
+        await conexao.beginTransaction();
+
+        const [robos] = await conexao.query(
+            'SELECT id FROM robos_canais WHERE id=? FOR UPDATE',
+            [roboId]
+        );
+        if (robos.length === 0) {
+            await conexao.rollback();
+            return res.status(404).json({ sucesso: false, erro: 'robo_nao_encontrado' });
+        }
+
+        const [padroesIa] = await conexao.query(
+            'SELECT id FROM estrategias WHERE is_dinamico = true AND robo_dono_id = ?',
+            [roboId]
+        );
+        const idsPadroes = padroesIa.map(row => String(row.id));
+
+        if (idsPadroes.length > 0) {
+            const placeholders = idsPadroes.map(() => '?').join(',');
+            await conexao.query(
+                `DELETE FROM historico_resultados WHERE estrategia_id IN (${placeholders})`,
+                idsPadroes
+            );
+            await conexao.query(
+                `DELETE FROM historico_disparos_robos WHERE estrategia_id IN (${placeholders})`,
+                idsPadroes
+            );
+            const [resultadoPadroes] = await conexao.query(
+                'DELETE FROM estrategias WHERE is_dinamico = true AND robo_dono_id = ?',
+                [roboId]
+            );
+            padroesIaExcluidos = Math.max(0, Number(resultadoPadroes.affectedRows) || 0);
+        }
+
+        // Ao excluir o Robô/Canal, seu histórico de distribuição também deixa de ter proprietário.
+        await conexao.query('DELETE FROM historico_disparos_robos WHERE robo_id=?', [roboId]);
+        await conexao.query('DELETE FROM destinatarios_robo WHERE robo_id=?', [roboId]);
+        await conexao.query('DELETE FROM robos_canais WHERE id=?', [roboId]);
+
+        await conexao.commit();
+    } catch (e) {
+        try { await conexao.rollback(); } catch (rollbackError) {
+            console.error(`❌ Rollback falhou ao excluir Robô/Canal ${roboId}:`, rollbackError.message);
+        }
+        console.error(`❌ DELETE /api/robo/${roboId} falhou:`, e.message);
+        return res.status(500).json({ sucesso: false });
+    } finally {
+        if (conexao) conexao.release();
+    }
+
+    delete estadoStandbyRobos[roboId];
+
+    try {
+        await carregarSistemasParaMemoria();
+        ioServer.emit('atualizar_robos');
+        ioServer.emit('atualizar_interface');
+        console.log(`🗑️ Robô/Canal ${roboId} excluído com ${padroesIaExcluidos} padrão(ões) IA filho(s).`);
+        return res.json({ sucesso: true, padroes_ia_excluidos: padroesIaExcluidos });
+    } catch (e) {
+        console.error(`❌ Robô/Canal ${roboId} foi excluído no banco, mas a recarga de memória falhou:`, e.message);
+        return res.status(500).json({
+            sucesso: false,
+            erro: 'robo_excluido_recarga_memoria_falhou',
+            padroes_ia_excluidos: padroesIaExcluidos
+        });
+    }
 });
 
 app.get("/api/auto-traders", async (req, res) => {
