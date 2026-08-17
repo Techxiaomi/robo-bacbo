@@ -34,7 +34,9 @@ jobs:
           python-version: '3.12'
 
       - name: Apply guarded patch
-        run: python scripts/apply_bug014b.py
+        run: |
+          python scripts/apply_bug014b.py
+          python scripts/fix_bug014b_generated_test.py
 
       - name: Syntax checks
         run: |
