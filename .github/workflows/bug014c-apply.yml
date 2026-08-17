@@ -26,7 +26,10 @@ jobs:
           node-version: '20'
 
       - name: Apply guarded patch
-        run: python scripts/apply_bug014c.py
+        run: |
+          python scripts/fix_apply_bug014c.py
+          python -m py_compile scripts/apply_bug014c.py
+          python scripts/apply_bug014c.py
 
       - name: Syntax checks
         run: |
