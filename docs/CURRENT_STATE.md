@@ -1,6 +1,6 @@
 # Estado Atual do Projeto
 
-Atualizado em 2026-08-17 após os patches BUG-001…BUG-013, BUG-001R, SEC-002/003A/003B/004, OBS-001A…F e OBS-003A…H.
+Atualizado em 2026-08-17 após os patches BUG-001…BUG-013, BUG-001R, SEC-002/003A/003B/004, OBS-001A…G e OBS-003A…H.
 
 Este arquivo descreve o estado atual do `main`, não o snapshot inicial.
 
@@ -86,13 +86,16 @@ O Python envia resultados autenticados para `POST /receber-sinal`. O Node envia 
 - executor Python registra falhas HTTP, WebSocket, Auto-Login, Playwright e restart externo;
 - logging estruturado JSONL no Node com rotação por tamanho e retenção configurável;
 - redaction de chaves sensíveis e segredos conhecidos do `.env`;
-- falha do sink de arquivo não derruba o backend e o console original continua disponível.
+- falha do sink de arquivo não derruba o backend e o console original continua disponível;
+- snapshot runtime local em `logs/backend.metrics.json` por padrão, gravado de forma atômica e configurável por ambiente;
+- métricas runtime incluem uptime, RSS/heap/external/array buffers, event-loop delay p50/p95/p99/max/média, contagem de logs por nível, último warn/error e falhas dos sinks;
+- timer de métricas usa `unref()`, portanto não mantém o processo Node aberto; falha do sink de métricas também não derruba o backend.
 
 ### Testes e CI
 
 - suíte Node com `node:test` para lógica pura;
 - testes de contrato HTTP para login/logout e middleware administrativo;
-- testes do logger estruturado/rotativo;
+- testes do logger estruturado/rotativo e das métricas runtime/persistência atômica;
 - suíte Python `unittest` sobre parsing, payloads, transporte interno e persistência de `order_id`;
 - GitHub Actions executa sintaxe + Node + Python em PRs e pushes para `main`;
 - job separado sobe MySQL 8.4 descartável e inicia o `bot2_coletor.js` real com Express/MySQL2/Socket.IO;
@@ -107,7 +110,7 @@ O Python envia resultados autenticados para `POST /receber-sinal`. O Node envia 
 
 - rotacionar operacionalmente credenciais que tenham sido compartilhadas antes da externalização para `.env`;
 - deduplicação do `order_id` já sobrevive a restart, mas um crash exatamente durante o clique Playwright deixa o efeito externo ambíguo; IDs já persistidos não são reenfileirados automaticamente, priorizando evitar aposta duplicada;
-- não existem métricas centralizadas/telemetria agregada; os logs estruturados já existem, mas métricas continuam pendentes;
+- métricas runtime locais já existem, porém ainda não há agregador externo, histórico central de longo prazo, alertas automáticos nem métricas de latência por operação/HTTP;
 - mudanças no DOM/WebSocket, sessão e comportamento da plataforma de destino continuam sendo dependência externa operacional e podem divergir dos ambientes controlados validados no CI;
 - arquivos grandes e multifuncionais ainda merecem modularização gradual, porém somente com cobertura suficiente e patches pequenos.
 

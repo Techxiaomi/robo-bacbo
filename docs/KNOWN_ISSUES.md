@@ -24,7 +24,7 @@ Risco residual: o journal protege contra replay duplicado, mas não consegue pro
 
 ### OBS-001 — Observabilidade
 
-Status: **amplamente mitigado pelos patches OBS-001A…OBS-001F; métricas centralizadas ainda pendentes**.
+Status: **amplamente mitigado pelos patches OBS-001A…OBS-001G; agregação externa e alertas ainda pendentes**.
 
 Já implementado:
 
@@ -36,9 +36,11 @@ Já implementado:
 - executor Python registra falhas de HTTP, WebSocket, Auto-Login e Playwright;
 - logging Node estruturado em JSONL com rotação por tamanho;
 - redaction de chaves sensíveis e segredos conhecidos do `.env`;
-- falha do sink de arquivo não derruba o backend e o console original é preservado.
+- falha do sink de arquivo não derruba o backend e o console original é preservado;
+- snapshot local `backend.metrics.json` com uptime, memória, event-loop delay p50/p95/p99/max/média, contagem de logs, último warn/error e falhas dos sinks;
+- persistência de métricas é atômica, configurável e usa timer `unref()` para não manter o processo aberto.
 
-Risco residual: não há métricas/telemetria centralizada para agregação de saúde, latência, contagem de falhas ou alertas automáticos.
+Risco residual: as métricas ainda são locais ao processo/host. Não há agregador externo, retenção histórica central, alertas automáticos nem métricas de latência por operação/HTTP. Esses itens devem ser tratados separadamente caso haja necessidade operacional real.
 
 ### OBS-003 — Cobertura automatizada
 
@@ -50,7 +52,7 @@ Já implementado:
 - suíte Python `unittest` sem iniciar Flask/Playwright;
 - GitHub Actions em PR/push para `main`;
 - testes de contrato HTTP usando handlers reais de login/logout/middleware com `req`/`res`/`app` simulados;
-- testes do logger estruturado/rotativo;
+- testes do logger estruturado/rotativo e das métricas runtime;
 - integração real do `bot2_coletor.js` com Express + MySQL 8.4 descartável no CI;
 - smoke HTTP real cobrindo bootstrap de banco/schema/memória, login/logout, sessão administrativa, validação de Origin, APIs e `/receber-sinal` com `INTERNAL_API_TOKEN`;
 - handshake Socket.IO real cobrindo rejeição sem sessão, aceitação com cookie administrativo válido e nova rejeição do cookie invalidado após logout;
@@ -137,7 +139,7 @@ Executor lê saldo por seletor CSS explícito, envia mudança/heartbeat ao Node 
 
 Status: **mitigado**.
 
-O backend cria as tabelas necessárias antes das migrations incrementais, permitindo inicialização de banco vazio sem depender de dump externo para as estruturas conhecidas. O OBS-003E passa a validar esse bootstrap automaticamente contra MySQL 8.4 vazio no CI.
+O backend cria as tabelas necessárias antes das migrations incrementais, permitindo inicialização de banco vazio sem depender de dump legado para as estruturas conhecidas. O OBS-003E passa a validar esse bootstrap automaticamente contra MySQL 8.4 vazio no CI.
 
 ### BUG-010 — Auto-Trader desligado permanecia `OPERANDO`
 
