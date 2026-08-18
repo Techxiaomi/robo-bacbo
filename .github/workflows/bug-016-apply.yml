@@ -1,0 +1,158 @@
+name: Apply BUG-016 dashboard patch
+
+on:
+  push:
+    branches:
+      - agent/bug-016-dashboard-real-dispatches
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/bug-016-dashboard-real-dispatches
+
+      - name: Apply dashboard frontend patch
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path('robo-bacbo/public/index.html')
+          text = path.read_text(encoding='utf-8')
+
+          marker = "        function mudarAbaAT(aba) {"
+          if marker not in text:
+              raise SystemExit('BUG-016 anchor not found')
+
+          patch = r'''        let dashboardAtualizacaoSeq = 0;
+
+        function atualizarBotoesPeriodoDashboard() {
+            const periodosValidos = new Set(['24h', 'hoje', 'semana', 'mes', 'geral']);
+            if (!periodosValidos.has(dashPeriodoAtual)) dashPeriodoAtual = '24h';
+
+            document.querySelectorAll('.btn-dash').forEach(btn => {
+                const ativo = btn.id === `btn-dash-${dashPeriodoAtual}`;
+                btn.style.background = ativo ? '#007bff' : 'transparent';
+                btn.style.color = ativo ? '#fff' : '#888';
+                btn.setAttribute('aria-pressed', ativo ? 'true' : 'false');
+            });
+        }
+
+        function renderizarDashboardIndisponivel() {
+            ['dash-sinais', 'dash-greens', 'dash-reds', 'dash-assertividade'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.innerText = '—';
+            });
+            const boxAssert = document.getElementById('box-assertividade');
+            const labelAssert = document.getElementById('label-assertividade');
+            if (boxAssert) boxAssert.style.borderColor = '#666';
+            if (labelAssert) labelAssert.style.color = '#888';
+        }
+
+        async function atualizarDashboardValores() {
+            atualizarBotoesPeriodoDashboard();
+
+            const roboId = document.getElementById('select-robo-dash')?.value || 'TODOS';
+            const origem = document.getElementById('select-origem-dash')?.value || 'TODAS';
+            const periodosValidos = new Set(['24h', 'hoje', 'semana', 'mes', 'geral']);
+            const periodo = periodosValidos.has(dashPeriodoAtual) ? dashPeriodoAtual : '24h';
+            dashPeriodoAtual = periodo;
+
+            const params = new URLSearchParams();
+            params.set('robo_id', roboId);
+            params.set('periodo', periodo);
+            params.set('origem', origem);
+            params.set('_t', String(Date.now()));
+
+            const requestSeq = ++dashboardAtualizacaoSeq;
+            try {
+                const res = await fetch(`/api/dashboard-stats?${params.toString()}`);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+                if (requestSeq !== dashboardAtualizacaoSeq) return;
+
+                const inteiroSeguro = valor => {
+                    const numero = Number(valor);
+                    return Number.isFinite(numero) && numero >= 0 ? Math.floor(numero) : 0;
+                };
+                const sinais = inteiroSeguro(data.sinais);
+                const greens = inteiroSeguro(data.greens);
+                const reds = inteiroSeguro(data.reds);
+                const assertNumero = Number.parseFloat(String(data.assertividade ?? '').replace('%', ''));
+                const assertividade = Number.isFinite(assertNumero) && assertNumero >= 0
+                    ? Math.min(100, assertNumero)
+                    : (sinais > 0 ? (greens / sinais) * 100 : 0);
+                const assertTexto = `${assertividade.toFixed(1)}%`;
+
+                document.getElementById('dash-sinais').innerText = sinais;
+                document.getElementById('dash-greens').innerText = greens;
+                document.getElementById('dash-reds').innerText = reds;
+                document.getElementById('dash-assertividade').innerText = assertTexto;
+
+                const corAssert = getCor(assertividade);
+                document.getElementById('dash-assertividade').style.color = corAssert;
+                document.getElementById('box-assertividade').style.borderColor = corAssert;
+                document.getElementById('label-assertividade').style.color = corAssert;
+            } catch (erro) {
+                if (requestSeq !== dashboardAtualizacaoSeq) return;
+                console.error('Falha ao atualizar Resumo Executivo:', erro);
+                renderizarDashboardIndisponivel();
+            }
+        }
+
+        async function mudarDashGeral(periodo) {
+            const periodosValidos = new Set(['24h', 'hoje', 'semana', 'mes', 'geral']);
+            if (!periodosValidos.has(periodo)) return;
+            dashPeriodoAtual = periodo;
+            atualizarBotoesPeriodoDashboard();
+            atualizarCardAtivoDinamicamente();
+            await atualizarDashboardValores();
+        }
+
+        async function mudarFiltrosDash() {
+            await atualizarDashboardValores();
+        }
+
+'''
+
+          if 'async function atualizarDashboardValores()' not in text:
+              text = text.replace(marker, patch + marker, 1)
+
+          antigo = """            if (tipoCard === 'ativo') {
+                dashPeriodoAtual = periodo;
+                atualizarCardAtivoDinamicamente();
+                return;
+            }
+"""
+          novo = """            if (tipoCard === 'ativo') {
+                dashPeriodoAtual = periodo;
+                atualizarCardAtivoDinamicamente();
+                atualizarBotoesPeriodoDashboard();
+                atualizarDashboardValores();
+                return;
+            }
+"""
+          if antigo in text:
+              text = text.replace(antigo, novo, 1)
+          elif novo not in text:
+              raise SystemExit('BUG-016 active-card period anchor not found')
+
+          path.write_text(text, encoding='utf-8')
+
+      - name: Commit patch
+        shell: bash
+        run: |
+          if git diff --quiet -- robo-bacbo/public/index.html; then
+            echo "BUG-016 already applied."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add robo-bacbo/public/index.html
+          git commit -m "BUG-016: restaurar dashboard de disparos reais"
+          git push origin HEAD:agent/bug-016-dashboard-real-dispatches
