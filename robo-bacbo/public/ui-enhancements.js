@@ -241,8 +241,16 @@
         }
     }
 
+    function ajustarIconeAutoTrader() {
+        const botao = document.getElementById('nav-btn-autotrader');
+        if (!botao) return;
+        botao.textContent = '📈 Auto-Trader';
+        botao.title = 'Motor de execução automática';
+    }
+
     function aplicarAprimoramentosUI() {
         garantirDashboardDetalhado();
+        ajustarIconeAutoTrader();
         window.renderizarCardsRobos = renderizarCardsRobosAprimorado;
         window.mudarPeriodoCardRobo = mudarPeriodoCardRobo;
 
