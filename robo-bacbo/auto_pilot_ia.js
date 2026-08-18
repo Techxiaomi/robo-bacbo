@@ -37,6 +37,8 @@ function normalizarConfigAutoTuning(config = {}) {
         proteger_empate: config.proteger_empate !== false,
         blacklist: String(config.blacklist || '').trim(),
         shadow_giros: inteiroLimitado(config.shadow_giros, 0, 0, 5000),
+        shadow_live_ocorrencias: inteiroLimitado(config.shadow_live_ocorrencias, 0, 0, 100),
+        shadow_live_max_candidatos: inteiroLimitado(config.shadow_live_max_candidatos, 10, 1, 50),
         max_padroes: inteiroLimitado(config.max_padroes, 4, 1, 100),
         drop_reds: inteiroLimitado(config.drop_reds, 2, 0, 100),
         drop_assert: numeroLimitado(config.drop_assert, 85, 0, 100),
@@ -344,12 +346,24 @@ function minerarCandidatos(dados, configBruta = {}, opcoes = {}) {
     const limiteTreino = shadow > 0 ? arr.length - shadow : arr.length;
     const padroes = gerarPadroesUnicos(arr, config, 0, limiteTreino);
     const candidatos = [];
+    const diagnostico = {
+        janela: arr.length,
+        treino: limiteTreino,
+        shadow_historico: shadow,
+        padroes_unicos: padroes.length,
+        combinacoes_avaliadas: padroes.length * ALVOS.length,
+        reprovados_ocorrencias: 0,
+        reprovados_assertividade: 0,
+        reprovados_shadow_historico: 0,
+        blacklist_configurados: parseBlacklist(config.blacklist).size
+    };
 
     for (const padrao of padroes) {
         for (const entrada of ALVOS) {
             const id = idCandidato(opcoes.robo_id || 0, padrao, entrada, config);
             const treino = ocorrenciasPadrao(arr, padrao, entrada, config, 0, limiteTreino);
-            if (treino.ocorrencias < config.ocorr_min || treino.assertividade < config.assert_min) continue;
+            if (treino.ocorrencias < config.ocorr_min) { diagnostico.reprovados_ocorrencias++; continue; }
+            if (treino.assertividade < config.assert_min) { diagnostico.reprovados_assertividade++; continue; }
 
             let shadowMetricas = null;
             let shadowOk = true;
@@ -369,6 +383,7 @@ function minerarCandidatos(dados, configBruta = {}, opcoes = {}) {
                 shadowOk = resultadosShadow.length >= minShadow
                     && assertShadow >= Math.max(config.drop_assert, config.assert_min - 10);
                 quarentenaRestante = Math.max(0, minShadow - resultadosShadow.length);
+                if (!shadowOk) diagnostico.reprovados_shadow_historico++;
                 shadowMetricas = {
                     ocorrencias: resultadosShadow.length,
                     greens: winsShadow,
@@ -408,7 +423,9 @@ function minerarCandidatos(dados, configBruta = {}, opcoes = {}) {
         }
     }
 
-    return candidatos.sort((a, b) => b.score - a.score || b.ocorrencias - a.ocorrencias || a.id.localeCompare(b.id));
+    candidatos.sort((a, b) => b.score - a.score || b.ocorrencias - a.ocorrencias || a.id.localeCompare(b.id));
+    Object.defineProperty(candidatos, 'diagnostico', { value: diagnostico, enumerable: false, configurable: true });
+    return candidatos;
 }
 
 function descreverPadrao(padrao) {
@@ -440,6 +457,66 @@ function avaliarDescarteLive(resultados, config) {
         return { descartar: true, motivo: 'DROP_ASSERT', assertividade, streak_red: streakRed };
     }
     return { descartar: false, motivo: null, assertividade, streak_red: streakRed };
+}
+
+
+function normalizarMetricasShadowLive(metricas = {}) {
+    const ocorrencias = Math.max(0, Math.trunc(Number(metricas.ocorrencias) || 0));
+    const greens = Math.max(0, Math.trunc(Number(metricas.greens) || 0));
+    const ties = Math.max(0, Math.trunc(Number(metricas.ties) || 0));
+    const reds = Math.max(0, Math.trunc(Number(metricas.reds) || 0));
+    const vitorias = greens + ties;
+    const assertividade = ocorrencias > 0 ? (vitorias / ocorrencias) * 100 : 0;
+    const wilson = wilsonLowerBound(vitorias, ocorrencias) * 100;
+    return { ocorrencias, greens, ties, reds, vitorias, assertividade, wilson };
+}
+
+function avaliarShadowLive(metricasBrutas, configBruta = {}) {
+    const config = normalizarConfigAutoTuning(configBruta);
+    const metricas = normalizarMetricasShadowLive(metricasBrutas);
+    const minimo = Math.max(0, Number(config.shadow_live_ocorrencias) || 0);
+    if (minimo <= 0) {
+        return {
+            ativo: false,
+            ok: true,
+            aprovado: true,
+            rejeitado: false,
+            concluido: true,
+            minimo: 0,
+            restantes: 0,
+            limiar: 0,
+            ...metricas
+        };
+    }
+
+    const limiar = Math.max(config.drop_assert, config.assert_min - 10);
+    const restantes = Math.max(0, minimo - metricas.ocorrencias);
+    const concluido = metricas.ocorrencias >= minimo;
+    const aprovado = concluido && metricas.assertividade >= limiar;
+    const rejeitado = concluido && !aprovado;
+    return {
+        ativo: true,
+        ok: aprovado,
+        aprovado,
+        rejeitado,
+        concluido,
+        minimo,
+        restantes,
+        limiar,
+        ...metricas
+    };
+}
+
+function combinarScoreShadowLive(scoreAnterior, metricasBrutas, assertividadeTreino) {
+    const metricas = normalizarMetricasShadowLive(metricasBrutas);
+    if (metricas.ocorrencias <= 0) return Math.max(0, Math.min(100, Number(scoreAnterior) || 0));
+
+    const base = Math.max(0, Math.min(100, Number(scoreAnterior) || 0));
+    const treino = Math.max(0, Math.min(100, Number(assertividadeTreino) || 0));
+    const degradacao = Math.max(0, treino - metricas.assertividade - 5);
+    const penalidadeDegradacao = degradacao * 0.15;
+    const score = (base * 0.70) + (metricas.wilson * 0.20) + (metricas.assertividade * 0.10) - penalidadeDegradacao;
+    return Math.max(0, Math.min(100, score));
 }
 
 function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notificar, log = console }) {
@@ -500,6 +577,166 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
         return resultado;
     }
 
+
+    async function metricasShadowLive(ids) {
+        const mapa = new Map();
+        if (!Array.isArray(ids) || ids.length === 0) return mapa;
+        const placeholders = ids.map(() => '?').join(',');
+        const [linhas] = await dbPool.query(
+            `SELECT estrategia_id,
+                    COUNT(*) AS ocorrencias,
+                    SUM(tipo_resultado='GREEN') AS greens,
+                    SUM(tipo_resultado='TIE') AS ties,
+                    SUM(tipo_resultado='RED') AS reds
+             FROM historico_shadow_ia
+             WHERE estrategia_id IN (${placeholders})
+             GROUP BY estrategia_id`,
+            ids
+        );
+        for (const row of linhas) {
+            mapa.set(String(row.estrategia_id), normalizarMetricasShadowLive(row));
+        }
+        return mapa;
+    }
+
+    async function aplicarShadowLiveAosCandidatos(candidatos, config) {
+        const lista = Array.isArray(candidatos) ? candidatos : [];
+        const mapa = await metricasShadowLive(lista.map(c => String(c.id)));
+        for (const candidato of lista) {
+            candidato.shadow_historico_ok = candidato.shadow_ok === true;
+            if (!candidato.shadow_historico_ok) {
+                candidato.shadow_live = avaliarShadowLive({}, { ...config, shadow_live_ocorrencias: 0 });
+                continue;
+            }
+            const avaliacao = avaliarShadowLive(mapa.get(String(candidato.id)) || {}, config);
+            candidato.shadow_live = avaliacao;
+            candidato.shadow_live_rejeitado = avaliacao.rejeitado === true;
+            if (avaliacao.ativo) {
+                candidato.shadow_ok = avaliacao.aprovado === true;
+                candidato.quarentena_restante = avaliacao.concluido ? 0 : avaliacao.restantes;
+                if (avaliacao.ocorrencias > 0) {
+                    candidato.score = combinarScoreShadowLive(candidato.score, avaliacao, candidato.assertividade);
+                }
+            }
+        }
+        lista.sort((x, y) => y.score - x.score || y.ocorrencias - x.ocorrencias || x.id.localeCompare(y.id));
+        return lista;
+    }
+
+    function logarTelemetriaMineracao(robo, config, candidatos, resumo, motivo) {
+        const d = candidatos?.diagnostico || {};
+        const linhas = [
+            '',
+            `🧠 AUTO PILOT IA ${robo.id} — ${String(motivo || 'mineração').toUpperCase()}`,
+            `   Janela: ${d.janela ?? '?'} | treino: ${d.treino ?? '?'} | validação histórica: ${d.shadow_historico ?? 0}`,
+            `   Padrões únicos: ${d.padroes_unicos ?? '?'} | combinações avaliadas: ${d.combinacoes_avaliadas ?? '?'}`,
+            `   Reprovados: ocorrências=${d.reprovados_ocorrencias ?? 0}, assertividade=${d.reprovados_assertividade ?? 0}, shadow histórico=${d.reprovados_shadow_historico ?? 0}`,
+            `   Blacklist configurada: ${d.blacklist_configurados ?? 0}`,
+            `   Pool: ${resumo.ativos.length}/${config.max_padroes} ativos | ${resumo.reservas} reservas | ${resumo.shadow_historico || 0} shadow histórico | ${resumo.shadow_live || 0} shadow live | ${resumo.rejeitados_shadow_live || 0} rejeitados live | ${resumo.fora_pool || 0} fora do pool`
+        ];
+
+        if (resumo.ativos.length > 0) {
+            linhas.push('   🏆 ATIVOS');
+            resumo.ativos.forEach((c, i) => linhas.push(
+                `      #${i + 1} ${c.padrao} → ${c.entrada} | score=${c.score.toFixed(1)} | assert=${c.assertividade.toFixed(1)}% | n=${c.ocorrencias} | Wilson=${c.wilson.toFixed(1)}%${c.shadow_live_ocorrencias > 0 ? ` | live=${c.shadow_live_assertividade.toFixed(1)}% (${c.shadow_live_ocorrencias})` : ''}`
+            ));
+        }
+        if (Array.isArray(resumo.reservas_top) && resumo.reservas_top.length > 0) {
+            linhas.push('   📦 TOP RESERVAS');
+            resumo.reservas_top.forEach((c, i) => linhas.push(
+                `      #${i + 1} ${c.padrao} → ${c.entrada} | score=${c.score.toFixed(1)} | assert=${c.assertividade.toFixed(1)}% | n=${c.ocorrencias}`
+            ));
+        }
+        log.log(linhas.join('\n'));
+    }
+
+    async function registrarResultadosShadowLive(giroId) {
+        const idGiro = Number(giroId);
+        if (!Number.isInteger(idGiro) || idGiro <= 0) return { registrados: 0, robos: [] };
+
+        const [linhas] = await dbPool.query(
+            `SELECT e.id, e.padrao, e.entrada, e.gales, e.proteger_empate, e.robo_dono_id, r.config_json
+             FROM estrategias e
+             JOIN robos_canais r ON r.id=e.robo_dono_id
+             WHERE e.is_dinamico=true
+               AND e.ativo=false
+               AND e.ia_status='SHADOW_LIVE'
+               AND r.ativo=true`
+        );
+        if (linhas.length === 0) return { registrados: 0, robos: [] };
+
+        const historico = await carregarHistorico(16);
+        if (historico.length === 0 || Number(historico[historico.length - 1]?.id) !== idGiro) {
+            return { registrados: 0, robos: [] };
+        }
+
+        let registrados = 0;
+        const candidatosAlterados = [];
+        for (const row of linhas) {
+            let configRobo = {};
+            try { configRobo = JSON.parse(row.config_json || '{}'); } catch (e) {}
+            const ia = normalizarConfigAutoTuning(configRobo.auto_tuning || {});
+            if (!ia.ativo || ia.shadow_live_ocorrencias <= 0) continue;
+
+            let padrao = [];
+            try { padrao = JSON.parse(row.padrao || '[]'); } catch (e) {}
+            if (!Array.isArray(padrao) || padrao.length === 0) continue;
+
+            const cfgOcorrencia = { gales: Number(row.gales) || 0, proteger_empate: row.proteger_empate === true || row.proteger_empate === 1 };
+            const ocorrencias = ocorrenciasPadrao(historico, padrao, row.entrada, cfgOcorrencia);
+            const fechamentos = ocorrencias.resultados.filter(r => r.indice === historico.length - 1);
+            if (fechamentos.length === 0) continue;
+            const fechamento = fechamentos[fechamentos.length - 1];
+            const ultimo = historico[historico.length - 1];
+            const [resultado] = await dbPool.query(
+                `INSERT IGNORE INTO historico_shadow_ia
+                    (estrategia_id, robo_id, giro_resultado_id, tipo_resultado, nivel, multiplicador, data_hora)
+                 VALUES (?, ?, ?, ?, ?, ?, FROM_UNIXTIME(?))`,
+                [
+                    row.id,
+                    row.robo_dono_id,
+                    idGiro,
+                    fechamento.tipo,
+                    fechamento.nivel === 0 ? 'DIRETO' : `GALE${fechamento.nivel}`,
+                    fechamento.tipo === 'TIE' ? String(ultimo.multiplicador || '') : '',
+                    (Number(ultimo.timestamp_ms) || Date.now()) / 1000
+                ]
+            );
+            if (Number(resultado.affectedRows) === 1) {
+                registrados++;
+                candidatosAlterados.push({ id: String(row.id), robo_id: Number(row.robo_dono_id), config: ia });
+            }
+        }
+
+        if (candidatosAlterados.length === 0) return { registrados, robos: [] };
+        const mapa = await metricasShadowLive(candidatosAlterados.map(c => c.id));
+        const robosReavaliacao = new Set();
+        for (const item of candidatosAlterados) {
+            const avaliacao = avaliarShadowLive(mapa.get(item.id) || {}, item.config);
+            const status = avaliacao.aprovado
+                ? 'APROVADO'
+                : (avaliacao.rejeitado
+                    ? 'REJEITADO'
+                    : `pendente (${avaliacao.restantes} restante(s))`);
+
+            log.log(
+                `👻 Shadow Live ${item.id}: ${avaliacao.ocorrencias}/${avaliacao.minimo} ocorrência(s), `
+                + `assert=${avaliacao.assertividade.toFixed(1)}%, Wilson=${avaliacao.wilson.toFixed(1)}%, ${status}.`
+            );
+
+            if (avaliacao.rejeitado) {
+                await dbPool.query(
+                    `UPDATE estrategias
+                     SET ativo=false, ia_status='REJEITADO', quarentena_restante=0
+                     WHERE id=? AND is_dinamico=true AND robo_dono_id=?`,
+                    [item.id, item.robo_id]
+                );
+            }
+            if (avaliacao.concluido) robosReavaliacao.add(item.robo_id);
+        }
+        return { registrados, robos: [...robosReavaliacao] };
+    }
+
     async function reconciliar(robo, config, candidatos) {
         const [existentes] = await dbPool.query(
             `SELECT id, padrao, entrada, ativo, criado_em, quarentena_restante
@@ -534,9 +771,16 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
         const reservas = elegiveisSemDrop
             .filter(c => !ativosIds.has(c.id))
             .slice(0, config.max_reservas);
-        const sombra = candidatos
-            .filter(c => !c.shadow_ok)
+        const rejeitadosShadowLive = candidatos
+            .filter(c => c.shadow_live_rejeitado === true);
+        const rejeitadosIds = new Set(rejeitadosShadowLive.map(c => String(c.id)));
+        const shadowLive = candidatos
+            .filter(c => c.shadow_historico_ok === true && !c.shadow_ok && !c.shadow_live_rejeitado)
+            .slice(0, config.shadow_live_max_candidatos);
+        const shadowHistorico = candidatos
+            .filter(c => c.shadow_historico_ok === false)
             .slice(0, Math.max(config.max_padroes, Math.min(20, config.max_reservas)));
+        const sombra = [...shadowLive, ...shadowHistorico];
         const reter = [...ativos, ...reservas, ...sombra];
         const reterIds = new Set(reter.map(c => c.id));
         const agora = Date.now();
@@ -554,20 +798,25 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
                 const revalidacaoVencida = criadoAnterior <= 0 || (agora - criadoAnterior) >= ttlMs;
                 const criadoEm = revalidacaoVencida ? agora : criadoAnterior;
                 const ativo = ativosIds.has(candidato.id) && candidato.shadow_ok;
-                const status = ativo ? 'ATIVO' : (candidato.shadow_ok ? 'RESERVA' : 'SOMBRA');
+                const status = ativo
+                    ? 'ATIVO'
+                    : (candidato.shadow_ok
+                        ? 'RESERVA'
+                        : (candidato.shadow_historico_ok === true ? 'SHADOW_LIVE' : 'SHADOW_HISTORICO')) ;
                 const nome = `${robo.nome} • IA ${descreverPadrao(candidato.padrao)} → ${simboloCurto(candidato.entrada)} [${status}]`;
 
                 await conexao.query(
                     `INSERT INTO estrategias
                         (id, nome, origem, padrao, entrada, gales, proteger_empate, ativo,
                          green_direto, gale1, gale2, red, ties_json,
-                         is_dinamico, robo_dono_id, criado_em, quarentena_restante)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, ?, true, ?, ?, ?)
+                         is_dinamico, robo_dono_id, criado_em, quarentena_restante, ia_status)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, ?, true, ?, ?, ?, ?)
                      ON DUPLICATE KEY UPDATE
                         nome=VALUES(nome), origem=VALUES(origem), padrao=VALUES(padrao),
                         entrada=VALUES(entrada), gales=VALUES(gales), proteger_empate=VALUES(proteger_empate),
                         ativo=VALUES(ativo), robo_dono_id=VALUES(robo_dono_id),
-                        criado_em=VALUES(criado_em), quarentena_restante=VALUES(quarentena_restante)`,
+                        criado_em=VALUES(criado_em), quarentena_restante=VALUES(quarentena_restante),
+                        ia_status=VALUES(ia_status)`,
                     [
                         candidato.id,
                         nome,
@@ -580,7 +829,8 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
                         tiesZerado,
                         robo.id,
                         criadoEm,
-                        candidato.shadow_ok ? 0 : Math.max(1, candidato.quarentena_restante)
+                        candidato.shadow_ok ? 0 : Math.max(1, candidato.quarentena_restante),
+                        status
                     ]
                 );
             }
@@ -588,6 +838,15 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
             for (const existente of existentes) {
                 const id = String(existente.id);
                 if (reterIds.has(id)) continue;
+                if (rejeitadosIds.has(id)) {
+                    await conexao.query(
+                        `UPDATE estrategias
+                         SET ativo=false, ia_status='REJEITADO', quarentena_restante=0
+                         WHERE id=? AND is_dinamico=true AND robo_dono_id=?`,
+                        [id, robo.id]
+                    );
+                    continue;
+                }
 
                 const criadoEm = Math.max(0, Number(existente.criado_em) || 0);
                 const expirado = criadoEm <= 0 || (agora - criadoEm) >= ttlMs;
@@ -610,10 +869,26 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
             conexao.release();
         }
 
+        const resumoCandidato = c => ({
+            id: c.id,
+            padrao: descreverPadrao(c.padrao),
+            entrada: simboloCurto(c.entrada),
+            score: Number(c.score) || 0,
+            assertividade: Number(c.assertividade) || 0,
+            ocorrencias: Number(c.ocorrencias) || 0,
+            wilson: Number(c.wilson) || 0,
+            shadow_live_ocorrencias: Number(c.shadow_live?.ocorrencias) || 0,
+            shadow_live_assertividade: Number(c.shadow_live?.assertividade) || 0
+        });
         return {
-            ativos: ativos.map(c => ({ id: c.id, score: c.score, assertividade: c.assertividade, ocorrencias: c.ocorrencias })),
+            ativos: ativos.map(resumoCandidato),
             reservas: reservas.length,
+            reservas_top: reservas.slice(0, 5).map(resumoCandidato),
             sombra: sombra.length,
+            shadow_historico: shadowHistorico.length,
+            shadow_live: shadowLive.length,
+            rejeitados_shadow_live: rejeitadosShadowLive.length,
+            fora_pool: Math.max(0, candidatos.length - reter.length - rejeitadosShadowLive.length),
             candidatos: candidatos.length
         };
     }
@@ -670,15 +945,13 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
             robo_id: robo.id,
             incumbentes: existentes.map(e => String(e.id))
         });
+        await aplicarShadowLiveAosCandidatos(candidatos, config);
         const resumo = await reconciliar(robo, config, candidatos);
         contadores.set(Number(robo.id), 0);
 
         if (typeof recarregarMemoria === 'function') await recarregarMemoria();
         if (typeof notificar === 'function') notificar(robo.id, resumo);
-        log.log(
-            `🤖 Auto Pilot IA ${robo.id} (${motivo}): ${resumo.candidatos} candidato(s), `
-            + `${resumo.ativos.length}/${config.max_padroes} ativo(s), ${resumo.reservas} reserva(s), ${resumo.sombra} sombra.`
-        );
+        logarTelemetriaMineracao(robo, config, candidatos, resumo, motivo);
         return { executado: true, config, ...resumo };
     }
 
@@ -715,7 +988,17 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
         return serializar(() => executarTodosInterno(opcoes));
     }
 
-    async function registrarNovoGiro() {
+    async function registrarNovoGiro(contexto = {}) {
+        const resultadoShadow = await registrarResultadosShadowLive(contexto.giro_id);
+        if (resultadoShadow.robos.length > 0) {
+            for (const roboId of resultadoShadow.robos) {
+                if (typeof estaOcupado === 'function' && estaOcupado()) {
+                    pendenciasForcadas.set(Number(roboId), 'shadow_live_aprovado');
+                } else {
+                    await executarRobo(roboId, { forcar: true, motivo: 'shadow_live_aprovado' });
+                }
+            }
+        }
         const ocupadoAgora = typeof estaOcupado === 'function' && estaOcupado();
         if (!ocupadoAgora && pendenciasForcadas.size > 0) {
             const pendentes = [...pendenciasForcadas.entries()];
@@ -815,6 +1098,8 @@ module.exports = {
     selecionarPortfolio,
     minerarCandidatos,
     avaliarDescarteLive,
+    avaliarShadowLive,
+    combinarScoreShadowLive,
     criarAutoPilotService,
     idCandidato
 };
