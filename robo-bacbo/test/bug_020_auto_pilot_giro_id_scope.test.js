@@ -8,34 +8,41 @@ const path = require('node:path');
 const backendPath = path.join(__dirname, '..', 'bot2_coletor.js');
 const src = fs.readFileSync(backendPath, 'utf8');
 
-test('BUG-020: insertId persistido sobrevive ao escopo do try e alimenta a IA', () => {
-    assert.match(src, /let\s+giroIdPersistidoParaIA\s*=\s*0\s*;/);
-    assert.match(
-        src,
-        /giroIdPersistidoParaIA\s*=\s*Number\s*\(\s*resultadoInsertGiro\.insertId\s*\)\s*\|\|\s*0\s*;/
+test('BUG-020: insertId do giro sobrevive ao try e alimenta registrarNovoGiro', () => {
+    const declaracaoFlag = src.indexOf('let giroPersistidoParaIA = false;');
+    const declaracaoId = src.indexOf('let giroIdPersistidoParaIA = 0;', declaracaoFlag);
+    const capturaId = src.indexOf(
+        'giroIdPersistidoParaIA = Number(resultadoInsertGiro.insertId) || 0;',
+        declaracaoId
     );
-    assert.match(src, /id\s*:\s*giroIdPersistidoParaIA\s*,/);
-    assert.match(
-        src,
-        /if\s*\(\s*giroPersistidoParaIA\s*&&\s*giroIdPersistidoParaIA\s*>\s*0\s*\)/
+    const historicoId = src.indexOf('id: giroIdPersistidoParaIA,', capturaId);
+    const registrar = src.indexOf(
+        'if (giroPersistidoParaIA && giroIdPersistidoParaIA > 0)',
+        historicoId
     );
-    assert.match(
-        src,
-        /autoPilotIA\.registrarNovoGiro\s*\(\s*\{\s*giro_id\s*:\s*giroIdPersistidoParaIA\s*\}\s*\)/
-    );
+    const callbackId = src.indexOf('giro_id: giroIdPersistidoParaIA', registrar);
+
+    assert.ok(declaracaoFlag >= 0, 'flag de persistência precisa existir antes do INSERT');
+    assert.ok(declaracaoId > declaracaoFlag, 'ID persistido precisa ser declarado fora do try do INSERT');
+    assert.ok(capturaId > declaracaoId, 'insertId deve ser copiado para a variável externa após o INSERT');
+    assert.ok(historicoId > capturaId, 'histórico em memória deve usar o mesmo ID persistido');
+    assert.ok(registrar > historicoId, 'Auto Pilot só deve rodar após o giro ser persistido');
+    assert.ok(callbackId > registrar, 'registrarNovoGiro deve receber o mesmo ID persistido');
 });
 
-test('BUG-020: callback periódico não referencia resultadoInsertGiro fora do try', () => {
-    const chamadas = [
-        ...src.matchAll(/autoPilotIA\.registrarNovoGiro\s*\(\s*\{[\s\S]{0,300}?\}\s*\)/g)
-    ].map((match) => match[0]);
+test('BUG-020: callback periódico não referencia resultadoInsertGiro fora do bloco de persistência', () => {
+    const marcador = 'if (giroPersistidoParaIA && giroIdPersistidoParaIA > 0)';
+    const inicioCallback = src.indexOf(marcador);
 
-    assert.ok(chamadas.length >= 1, 'registrarNovoGiro deve existir no backend');
+    assert.ok(inicioCallback >= 0, 'guard do callback periódico precisa existir');
 
-    const chamadaComGiroPersistido = chamadas.find((chamada) =>
-        chamada.includes('giro_id: giroIdPersistidoParaIA')
+    const trechoCallback = src.slice(inicioCallback, inicioCallback + 700);
+    assert.ok(
+        trechoCallback.includes('giro_id: giroIdPersistidoParaIA'),
+        'callback periódico precisa usar o ID persistido fora do try'
     );
-
-    assert.ok(chamadaComGiroPersistido, 'callback deve usar giroIdPersistidoParaIA');
-    assert.equal(chamadaComGiroPersistido.includes('resultadoInsertGiro'), false);
+    assert.ok(
+        !trechoCallback.includes('resultadoInsertGiro.insertId'),
+        'callback periódico não pode depender da variável block-scoped resultadoInsertGiro'
+    );
 });
