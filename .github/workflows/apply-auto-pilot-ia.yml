@@ -1,0 +1,60 @@
+name: Apply Auto Pilot IA
+
+on:
+  push:
+    branches:
+      - agent/auto-pilot-ia-selection-engine
+    paths:
+      - .github/scripts/apply_auto_pilot_ia.py
+      - .github/workflows/apply-auto-pilot-ia.yml
+      - robo-bacbo/auto_pilot_ia.js
+      - robo-bacbo/test/auto_pilot_ia.test.js
+      - docs/AUTO_PILOT_IA.md
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-validate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/auto-pilot-ia-selection-engine
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Apply integration patch
+        run: python .github/scripts/apply_auto_pilot_ia.py
+
+      - name: Syntax checks
+        run: |
+          node --check robo-bacbo/auto_pilot_ia.js
+          node --check robo-bacbo/bot2_coletor.js
+
+      - name: Node regression suite
+        working-directory: robo-bacbo
+        run: npm test
+
+      - name: Diff check
+        run: git diff --check
+
+      - name: Remove temporary applicator
+        run: |
+          rm .github/scripts/apply_auto_pilot_ia.py
+          rm .github/workflows/apply-auto-pilot-ia.yml
+
+      - name: Commit applied production changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add robo-bacbo/bot2_coletor.js robo-bacbo/public/dashboard-app.html robo-bacbo/auto_pilot_ia.js robo-bacbo/test/auto_pilot_ia.test.js docs/AUTO_PILOT_IA.md .github/scripts/apply_auto_pilot_ia.py .github/workflows/apply-auto-pilot-ia.yml
+          git diff --cached --check
+          git commit -m "AUTO-PILOT: integrar seleção estatística IA"
+          git push origin HEAD:agent/auto-pilot-ia-selection-engine
