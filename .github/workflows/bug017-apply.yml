@@ -1,0 +1,107 @@
+name: BUG-017 Apply Native Dashboard
+
+on:
+  push:
+    branches:
+      - agent/bug-017-restore-dashboard-lifecycle
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: ${{ !contains(github.event.head_commit.message, '[bug017-applied]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Restore native dashboard document and strengthen regression tests
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          root = Path('robo-bacbo')
+          public = root / 'public'
+          index = public / 'index.html'
+          app = public / 'dashboard-app.html'
+          test = root / 'test' / 'dashboard-ui-contract.test.js'
+
+          html = app.read_text(encoding='utf-8')
+          socket_tag = '<script src="/socket.io/socket.io.js"></script>'
+          dashboard_tag = '<script src="/dashboard-ui.js"></script>'
+
+          if socket_tag not in html:
+              raise SystemExit('BUG-017: marcador do Socket.IO nao encontrado')
+          if dashboard_tag in html:
+              raise SystemExit('BUG-017: dashboard-ui ja estava injetado inesperadamente')
+
+          html = html.replace(socket_tag, socket_tag + '\n    ' + dashboard_tag, 1)
+          index.write_text(html, encoding='utf-8')
+          app.unlink()
+
+          source = test.read_text(encoding='utf-8')
+          source = source.replace(
+              "const loaderHtml = fs.readFileSync(path.join(root, 'public', 'index.html'), 'utf8');\n"
+              "const appHtml = fs.readFileSync(path.join(root, 'public', 'dashboard-app.html'), 'utf8');",
+              "const appHtml = fs.readFileSync(path.join(root, 'public', 'index.html'), 'utf8');"
+          )
+
+          source = re.sub(
+              r"test\('BUG-016: bootstrap carrega a UI principal e injeta o controlador do dashboard', \(\) => \{.*?\n\}\);\n",
+              """test('BUG-017: painel volta a ser um documento nativo com ordem de scripts deterministica', () => {\n"
+              "    assert.doesNotMatch(appHtml, /fetch\\('\\/dashboard-app\\.html/);\n"
+              "    assert.doesNotMatch(appHtml, /document\\.write\\(/);\n"
+              "    const posSocket = appHtml.indexOf('/socket.io/socket.io.js');\n"
+              "    const posDashboard = appHtml.indexOf('/dashboard-ui.js');\n"
+              "    const posMain = appHtml.indexOf('const socketWeb = io();');\n"
+              "    assert.ok(posSocket >= 0, 'cliente Socket.IO ausente');\n"
+              "    assert.ok(posDashboard > posSocket, 'dashboard-ui deve carregar depois do cliente Socket.IO');\n"
+              "    assert.ok(posMain > posDashboard, 'JavaScript principal deve iniciar depois dos scripts externos');\n"
+              "});\n""",
+              source,
+              count=1,
+              flags=re.S
+          )
+
+          marcador = "test('BUG-016: filtros do dashboard chamam funções globais implementadas', () => {"
+          if marcador not in source:
+              raise SystemExit('BUG-017: marcador de regressao do dashboard nao encontrado')
+
+          novo_teste = """
+          test('BUG-017: seletores e card de sinal continuam ligados ao ciclo principal da aplicacao', () => {
+              assert.match(appHtml, /fetch\('\/api\/estrategias'\+q\)/);
+              assert.match(appHtml, /fetch\('\/api\/origens'\+q\)/);
+              assert.match(appHtml, /fetch\('\/api\/robos\?_t=' \+ Date\.now\(\)\)/);
+              assert.match(appHtml, /document\.getElementById\('select-origem-filtro'\)\.innerHTML = ops/);
+              assert.match(appHtml, /document\.getElementById\('select-origem-dash'\)\.innerHTML = ops/);
+              assert.match(appHtml, /atualizarFiltrosRoboUI\(\); await atualizarDashboardValores\(\)/);
+              assert.match(appHtml, /sintonizador\.innerHTML = '<option value="TODOS">Todos os Robôs<\/option>'/);
+              assert.match(appHtml, /filtroDash\.innerHTML = '<option value="TODOS">🤖 Todos os Robôs<\/option>'/);
+              assert.match(appHtml, /socketWeb\.on\('alerta_painel', \(dados\) => \{/);
+              assert.match(appHtml, /document\.getElementById\('conteudo-card-ativo'\)\.innerHTML = gerarHtmlCardEstrategia/);
+              assert.match(appHtml, /document\.getElementById\('container-card-ativo'\)\.style\.display = 'block'/);
+          });
+
+          """
+          source = source.replace(marcador, novo_teste + marcador, 1)
+          test.write_text(source, encoding='utf-8')
+          PY
+
+          node --test robo-bacbo/test/dashboard-ui-contract.test.js
+
+      - name: Commit applied BUG-017 patch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add robo-bacbo/public/index.html robo-bacbo/public/dashboard-app.html robo-bacbo/test/dashboard-ui-contract.test.js
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "BUG-017: restaurar ciclo nativo do dashboard [bug017-applied]"
+          git push origin HEAD:agent/bug-017-restore-dashboard-lifecycle
