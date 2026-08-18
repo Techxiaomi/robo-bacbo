@@ -8,15 +8,25 @@ ROOT = Path(__file__).resolve().parents[1]
 PUBLIC = ROOT / "public"
 
 
-def detalhes_periodo():
+def detalhes_periodo(green=1, gale1=1, gale2=0, red=1, tie=1, max_green=3, max_red=1):
     return {
-        "green_direto": 1,
-        "gale1": 1,
-        "gale2": 0,
-        "red": 1,
-        "ties": {"direto": {"4x": 1}, "gale1": {}, "gale2": {}},
-        "max_green_seq": 3,
-        "max_red_seq": 1,
+        "green_direto": green,
+        "gale1": gale1,
+        "gale2": gale2,
+        "red": red,
+        "ties": {"direto": {"4x": tie} if tie else {}, "gale1": {}, "gale2": {}},
+        "max_green_seq": max_green,
+        "max_red_seq": max_red,
+    }
+
+
+def detalhes_todos(periodo):
+    return {
+        "24h": periodo,
+        "hoje": periodo,
+        "semana": periodo,
+        "mes": periodo,
+        "geral": periodo,
     }
 
 
@@ -45,14 +55,9 @@ def main():
         "proteger_empate": True,
         "ativo": True,
         "is_dinamico": False,
-        "detalhes": {
-            "24h": detalhes_periodo(),
-            "hoje": detalhes_periodo(),
-            "semana": detalhes_periodo(),
-            "mes": detalhes_periodo(),
-            "geral": detalhes_periodo(),
-        },
+        "detalhes": detalhes_todos(detalhes_periodo()),
     }
+
     robo = {
         "id": 7,
         "nome": "Robo Teste",
@@ -67,14 +72,25 @@ def main():
         "config": {"origens": ["Origem A"], "avulsos": [], "excecoes": []},
         "destinatarios": [],
         "qtd_padroes_ia": 0,
-        "detalhes": {
-            "24h": detalhes_periodo(),
-            "hoje": detalhes_periodo(),
-            "semana": detalhes_periodo(),
-            "mes": detalhes_periodo(),
-            "geral": detalhes_periodo(),
-        },
+        "detalhes": detalhes_todos(detalhes_periodo()),
     }
+    robo_alpha = {
+        **robo,
+        "id": 8,
+        "nome": "Alpha",
+        "tag_visual": "[ALPHA]",
+        "ativo": False,
+        "detalhes": detalhes_todos(detalhes_periodo(green=4, gale1=0, red=0, tie=0, max_green=4, max_red=0)),
+    }
+    robo_charlie = {
+        **robo,
+        "id": 9,
+        "nome": "Charlie",
+        "tag_visual": "[CHARLIE]",
+        "ativo": True,
+        "detalhes": detalhes_todos(detalhes_periodo(green=1, gale1=0, red=4, tie=0, max_green=1, max_red=4)),
+    }
+    robos_ordenacao = [robo, robo_alpha, robo_charlie]
 
     socket_stub = """
         window.__socketHandlers = Object.create(null);
@@ -128,6 +144,8 @@ def main():
                 responder_json(route, [{"id": 1, "nome": "Origem A"}])
                 return
             if path == "http://bacbo.test/api/robos":
+                # Mantém o fixture histórico dos seletores; os robôs adicionais são
+                # injetados depois somente para provar a ordenação dos cards.
                 responder_json(route, [robo])
                 return
             if path == "http://bacbo.test/api/auto-traders":
@@ -185,7 +203,8 @@ def main():
                     && texto.includes('Geral')
                     && texto.includes('Maior sequência Green')
                     && texto.includes('Maior sequência Red')
-                    && texto.includes('🔥 3');
+                    && texto.includes('🔥 3')
+                    && document.querySelectorAll('#select-ordem-robos option').length === 8;
             }
             """,
             timeout=10000,
@@ -220,6 +239,8 @@ def main():
                 assertividade: document.getElementById('dash-assertividade').innerText,
                 dashboardOrdem: Array.from(document.querySelectorAll('#dashboard-resumo-grid > .dash-box')).map(card => card.querySelector('span')?.textContent.trim()),
                 cardRobo: document.getElementById('lista-robos').innerText,
+                ordemRobos: Array.from(document.querySelectorAll('#select-ordem-robos option')).map(o => ({ value:o.value, label:o.textContent.trim() })),
+                ordemRobosSelecionada: document.getElementById('select-ordem-robos').value,
                 autoTraderTexto: document.getElementById('nav-btn-autotrader').innerText.trim(),
                 labModos: Array.from(document.querySelectorAll('#bk-entrada option')).map(o => ({ value: o.value, label: o.textContent.trim() })),
                 labSelecionado: document.getElementById('bk-entrada').value,
@@ -250,6 +271,10 @@ def main():
         assert "Entradas: 4" in opcoes["cardRobo"], opcoes
         assert "Empates: 1" in opcoes["cardRobo"], opcoes
         assert "Reds: 1" in opcoes["cardRobo"], opcoes
+        assert [item["value"] for item in opcoes["ordemRobos"]] == [
+            "status", "nome", "assert", "entradas", "max_green", "max_red", "recentes", "antigos"
+        ], opcoes
+        assert opcoes["ordemRobosSelecionada"] == "status", opcoes
         assert opcoes["autoTraderTexto"] == "📈 Auto-Trader", opcoes
         assert [item["value"] for item in opcoes["labModos"]] == [
             "AUTO", "PLAYER", "PLAYER_TIE", "BANKER", "BANKER_TIE"
@@ -266,6 +291,44 @@ def main():
         assert opcoes["minerSelecionado"] == "1000", opcoes
         assert opcoes["dashboardBacktestSelecionado"] == "MAX", opcoes
         assert opcoes["socketRegistrado"] is True, opcoes
+
+        # Isola a prova de ordenação dos cards da regra dos seletores globais.
+        page.evaluate(
+            """robos => {
+                robosGlobais = robos;
+                window.renderizarCardsRobos();
+            }""",
+            robos_ordenacao,
+        )
+        page.wait_for_function("() => document.querySelectorAll('#lista-robos > .card').length === 3", timeout=5000)
+
+        def ordem_cards():
+            return page.evaluate(
+                "() => Array.from(document.querySelectorAll('#lista-robos > .card')).map(card => card.dataset.roboNome)"
+            )
+
+        assert ordem_cards() == ["Charlie", "Robo Teste", "Alpha"]
+
+        def mudar_ordem(criterio, esperado):
+            page.evaluate(
+                """criterio => {
+                    const select = document.getElementById('select-ordem-robos');
+                    select.value = criterio;
+                    select.dispatchEvent(new Event('change'));
+                }""",
+                criterio,
+            )
+            atual = ordem_cards()
+            assert atual == esperado, {"criterio": criterio, "ordem": atual}
+
+        mudar_ordem("nome", ["Alpha", "Charlie", "Robo Teste"])
+        mudar_ordem("assert", ["Alpha", "Robo Teste", "Charlie"])
+        mudar_ordem("entradas", ["Charlie", "Alpha", "Robo Teste"])
+        mudar_ordem("max_green", ["Alpha", "Robo Teste", "Charlie"])
+        mudar_ordem("max_red", ["Charlie", "Robo Teste", "Alpha"])
+        mudar_ordem("recentes", ["Charlie", "Alpha", "Robo Teste"])
+        mudar_ordem("antigos", ["Robo Teste", "Alpha", "Charlie"])
+        mudar_ordem("status", ["Charlie", "Robo Teste", "Alpha"])
 
         page.evaluate(
             """
@@ -417,7 +480,7 @@ def main():
         assert not page_errors, f"Erros JavaScript na pagina: {page_errors}"
         browser.close()
 
-    print("UX-006A Backtest ranges, dashboard filter and Auto-Trader icon browser smoke: PASS")
+    print("UX-006B robot card ordering + prior dashboard/backtest smoke: PASS")
 
 
 if __name__ == "__main__":

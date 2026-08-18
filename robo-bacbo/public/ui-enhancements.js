@@ -2,7 +2,18 @@
     'use strict';
 
     const PERIODOS_ROBO = ['24h', 'hoje', 'semana', 'mes', 'geral'];
+    const ORDENACOES_ROBO = Object.freeze([
+        { value: 'status', label: 'Ativos primeiro' },
+        { value: 'nome', label: 'Nome (A–Z)' },
+        { value: 'assert', label: 'Assertividade (maior)' },
+        { value: 'entradas', label: 'Entradas (mais)' },
+        { value: 'max_green', label: 'Maior sequência Green' },
+        { value: 'max_red', label: 'Maior sequência Red' },
+        { value: 'recentes', label: 'Mais recentes' },
+        { value: 'antigos', label: 'Mais antigos' }
+    ]);
     let roboPeriodoAtual = '24h';
+    let roboOrdenacaoAtual = 'status';
 
     function numeroSeguro(valor) {
         const numero = Number(valor);
@@ -73,6 +84,53 @@
         };
     }
 
+    function nomeRobo(robo) {
+        return String(robo?.nome || '').trim();
+    }
+
+    function ordenarRobos(lista, criterio = roboOrdenacaoAtual, periodo = roboPeriodoAtual) {
+        if (!Array.isArray(lista)) return [];
+        const criterioValido = ORDENACOES_ROBO.some(item => item.value === criterio) ? criterio : 'status';
+        const decorados = lista.map((robo, indiceOriginal) => ({ robo, indiceOriginal }));
+
+        const desempatar = (a, b) => {
+            const porNome = nomeRobo(a.robo).localeCompare(nomeRobo(b.robo), 'pt-BR', { sensitivity: 'base' });
+            if (porNome !== 0) return porNome;
+            const porId = numeroSeguro(a.robo?.id) - numeroSeguro(b.robo?.id);
+            return porId !== 0 ? porId : a.indiceOriginal - b.indiceOriginal;
+        };
+
+        decorados.sort((a, b) => {
+            const roboA = a.robo;
+            const roboB = b.robo;
+            const statsA = resumoPeriodoRobo(roboA, periodo);
+            const statsB = resumoPeriodoRobo(roboB, periodo);
+            let diferenca = 0;
+
+            if (criterioValido === 'status') {
+                diferenca = Number(boolSeguro(roboB?.ativo)) - Number(boolSeguro(roboA?.ativo));
+            } else if (criterioValido === 'nome') {
+                return desempatar(a, b);
+            } else if (criterioValido === 'assert') {
+                diferenca = Number(statsB.assertividade) - Number(statsA.assertividade);
+            } else if (criterioValido === 'entradas') {
+                diferenca = statsB.total - statsA.total;
+            } else if (criterioValido === 'max_green') {
+                diferenca = statsB.maxGreen - statsA.maxGreen;
+            } else if (criterioValido === 'max_red') {
+                diferenca = statsB.maxRed - statsA.maxRed;
+            } else if (criterioValido === 'recentes') {
+                diferenca = numeroSeguro(roboB?.id) - numeroSeguro(roboA?.id);
+            } else if (criterioValido === 'antigos') {
+                diferenca = numeroSeguro(roboA?.id) - numeroSeguro(roboB?.id);
+            }
+
+            return diferenca !== 0 ? diferenca : desempatar(a, b);
+        });
+
+        return decorados.map(item => item.robo);
+    }
+
     function corAssertividade(valor) {
         return typeof window.getCor === 'function' ? window.getCor(valor) : '#007bff';
     }
@@ -122,6 +180,31 @@
         }).join('')}</div>`;
     }
 
+    function garantirOrdenacaoRobos() {
+        const lista = document.getElementById('lista-robos');
+        if (!lista?.parentElement) return;
+        let box = document.getElementById('robo-ordenacao-box');
+        if (!box) {
+            box = document.createElement('div');
+            box.id = 'robo-ordenacao-box';
+            box.style.cssText = 'display:flex; justify-content:flex-end; align-items:center; gap:8px; margin:-3px 0 12px;';
+            box.innerHTML = `
+                <label for="select-ordem-robos" style="font-size:9px; color:#777; text-transform:uppercase; font-weight:bold;">Ordenar:</label>
+                <select id="select-ordem-robos" style="width:auto; min-width:180px; padding:5px 8px; font-size:11px; margin:0;">
+                    ${ORDENACOES_ROBO.map(item => `<option value="${item.value}">${item.label}</option>`).join('')}
+                </select>`;
+            lista.parentElement.insertBefore(box, lista);
+        }
+
+        const select = document.getElementById('select-ordem-robos');
+        if (!select) return;
+        select.value = roboOrdenacaoAtual;
+        if (!select.dataset.ux006bBound) {
+            select.dataset.ux006bBound = '1';
+            select.addEventListener('change', () => mudarOrdenacaoRobos(select.value));
+        }
+    }
+
     function renderizarCardsRobosAprimorado() {
         const div = document.getElementById('lista-robos');
         if (!div) return;
@@ -132,7 +215,7 @@
             return;
         }
 
-        robosGlobais.forEach(robo => {
+        ordenarRobos(robosGlobais).forEach(robo => {
             const cf = robo.config || {};
             const ativo = boolSeguro(robo.ativo);
             const web = boolSeguro(robo.enviar_web);
@@ -160,7 +243,7 @@
                         : '<span style="color:#28a745; font-size:11px; font-weight:bold;">🟢 ATIVO</span>';
 
             div.innerHTML += `
-                <div class="card" style="border-left:4px solid ${cor}; ${ativo ? '' : 'opacity:0.6; filter:grayscale(30%);'}">
+                <div class="card" data-robo-id="${Number(robo.id) || 0}" data-robo-nome="${escapar(robo.nome || 'Robô')}" style="border-left:4px solid ${cor}; ${ativo ? '' : 'opacity:0.6; filter:grayscale(30%);'}">
                     <div style="display:flex; justify-content:space-between; gap:10px; align-items:flex-start;">
                         <div>
                             <h3 style="margin:0 0 5px 0; font-size:14px; display:flex; align-items:center; gap:8px;">🤖 ${escapar(robo.nome || 'Robô')} ${robo.tag_visual ? `<span class="robo-tag-badge" style="background:${cor};">${escapar(robo.tag_visual)}</span>` : ''}</h3>
@@ -196,6 +279,14 @@
     function mudarPeriodoCardRobo(periodo) {
         if (!PERIODOS_ROBO.includes(periodo)) return;
         roboPeriodoAtual = periodo;
+        renderizarCardsRobosAprimorado();
+    }
+
+    function mudarOrdenacaoRobos(criterio) {
+        if (!ORDENACOES_ROBO.some(item => item.value === criterio)) return;
+        roboOrdenacaoAtual = criterio;
+        const select = document.getElementById('select-ordem-robos');
+        if (select) select.value = criterio;
         renderizarCardsRobosAprimorado();
     }
 
@@ -251,8 +342,10 @@
     function aplicarAprimoramentosUI() {
         garantirDashboardDetalhado();
         ajustarIconeAutoTrader();
+        garantirOrdenacaoRobos();
         window.renderizarCardsRobos = renderizarCardsRobosAprimorado;
         window.mudarPeriodoCardRobo = mudarPeriodoCardRobo;
+        window.mudarOrdenacaoRobos = mudarOrdenacaoRobos;
 
         if (typeof robosGlobais !== 'undefined' && Array.isArray(robosGlobais) && robosGlobais.length > 0) {
             renderizarCardsRobosAprimorado();
@@ -265,4 +358,7 @@
     window.aplicarAprimoramentosUI = aplicarAprimoramentosUI;
     window.renderizarCardsRobosAprimorado = renderizarCardsRobosAprimorado;
     window.mudarPeriodoCardRobo = mudarPeriodoCardRobo;
+    window.mudarOrdenacaoRobos = mudarOrdenacaoRobos;
+    window.ux006OrdenarRobos = ordenarRobos;
+    window.ux006ResumoPeriodoRobo = resumoPeriodoRobo;
 })();
