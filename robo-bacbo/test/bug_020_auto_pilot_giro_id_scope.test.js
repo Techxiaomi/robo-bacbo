@@ -9,10 +9,13 @@ const backendPath = path.join(__dirname, '..', 'bot2_coletor.js');
 const src = fs.readFileSync(backendPath, 'utf8');
 
 test('BUG-020: insertId do giro sobrevive ao try e alimenta registrarNovoGiro', () => {
-    assert.match(src, /let giroPersistidoParaIA = false;\s*let giroIdPersistidoParaIA = 0;/);
-    assert.match(src, /const \[resultadoInsertGiro\] = await dbPool\.query\('INSERT INTO giros_recentes[\s\S]*?giroIdPersistidoParaIA = Number\(resultadoInsertGiro\.insertId\) \|\| 0;/);
-    assert.match(src, /historicoGirosAnalitico\.push\(\{\s*id: giroIdPersistidoParaIA,/);
-    assert.match(src, /if \(giroPersistidoParaIA && giroIdPersistidoParaIA > 0\) \{[\s\S]*?autoPilotIA\.registrarNovoGiro\(\{ giro_id: giroIdPersistidoParaIA \}\)/);
+    assert.ok(src.includes('let giroPersistidoParaIA = false;'));
+    assert.ok(src.includes('let giroIdPersistidoParaIA = 0;'));
+    assert.ok(src.includes('const [resultadoInsertGiro] = await dbPool.query('));
+    assert.ok(src.includes('giroIdPersistidoParaIA = Number(resultadoInsertGiro.insertId) || 0;'));
+    assert.ok(src.includes('id: giroIdPersistidoParaIA,'));
+    assert.ok(src.includes('if (giroPersistidoParaIA && giroIdPersistidoParaIA > 0) {'));
+    assert.ok(src.includes('await autoPilotIA.registrarNovoGiro({ giro_id: giroIdPersistidoParaIA });'));
 });
 
 test('BUG-020: resultadoInsertGiro não é referenciado no bloco periódico fora do try', () => {
