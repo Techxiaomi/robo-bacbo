@@ -2,6 +2,11 @@ const mysql = require("mysql2/promise");
 const express = require("express");
 const path = require("path");
 const crypto = require("crypto");
+const {
+    validarPoliticaProtecao,
+    calcularPlanoAposta,
+    calcularPnLEtapa
+} = require("./tie_protection");
 const { Server } = require("socket.io");
 require("./env_loader").loadEnvFile(path.join(__dirname, "..", ".env"));
 
@@ -218,6 +223,7 @@ async function prepararBancoDeDados() {
                 nivel VARCHAR(20),
                 risco_total DECIMAL(12,2),
                 valor_entrada DECIMAL(12,2),
+                valor_empate DECIMAL(12,2) DEFAULT 0,
                 executor_order_id VARCHAR(64) DEFAULT NULL,
                 status_ordem VARCHAR(20) DEFAULT 'PENDENTE',
                 placar_mesa VARCHAR(50) DEFAULT '',
@@ -254,6 +260,7 @@ async function prepararBancoDeDados() {
         await adicionarColuna("ALTER TABLE estrategias ADD COLUMN quarentena_restante INT DEFAULT 0");
         await adicionarColuna("ALTER TABLE historico_disparos_robos ADD COLUMN estrategia_origem VARCHAR(100) DEFAULT ''");
         await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN executor_order_id VARCHAR(64) DEFAULT NULL");
+        await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN valor_empate DECIMAL(12,2) DEFAULT 0");
         await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN reds_consecutivos INT DEFAULT 0");
         await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN stop_reds_pausado_ate BIGINT DEFAULT 0");
         await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN trailing_pico_lucro DECIMAL(12,2) DEFAULT 0");
@@ -664,7 +671,7 @@ function erroResultadoExecucaoExecutor(resultado) {
     return erro;
 }
 
-async function enviarOrdemAoExecutor(alvo, valor, orderId = crypto.randomUUID()) {
+async function enviarOrdemAoExecutor(alvo, valor, orderId = crypto.randomUUID(), apostas = null) {
     const esperaExecucao = criarEsperaResultadoExecutor(orderId);
     let ultimoErro = null;
     let confirmacaoAceite = null;
@@ -678,7 +685,9 @@ async function enviarOrdemAoExecutor(alvo, valor, orderId = crypto.randomUUID())
                 const resposta = await fetch(EXECUTOR_URL, {
                     method: 'POST',
                     headers: headersInternos(),
-                    body: JSON.stringify({ order_id: orderId, alvo, valor }),
+                    body: JSON.stringify(Array.isArray(apostas) && apostas.length > 0
+                        ? { order_id: orderId, apostas }
+                        : { order_id: orderId, alvo, valor }),
                     signal: controller.signal
                 });
 
@@ -783,8 +792,8 @@ async function criarIntencaoOrdem(queryable, dados) {
     const [resultado] = await queryable.query(
         `INSERT INTO auditoria_ordens
             (trader_id, estrategia_nome, fonte_sinal, alvo, nivel, risco_total,
-             valor_entrada, executor_order_id, status_ordem)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PREPARANDO')`,
+             valor_entrada, valor_empate, executor_order_id, status_ordem)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PREPARANDO')`,
         [
             dados.trader_id,
             dados.estrategia_nome,
@@ -793,6 +802,7 @@ async function criarIntencaoOrdem(queryable, dados) {
             dados.nivel,
             dados.risco_total,
             dados.valor_entrada,
+            Math.max(0, Number(dados.valor_empate) || 0),
             orderId
         ]
     );
@@ -1592,6 +1602,12 @@ app.post("/api/auto-trader", async (req, res) => {
         const { nome, ativo, config } = req.body;
         const configJson = JSON.stringify(config || {});
         const novoAtivo = ativo === true || ativo === 1;
+        if (novoAtivo) {
+            const politicaEmpate = validarPoliticaProtecao(config || {});
+            if (!politicaEmpate.ok) {
+                return res.status(400).json({ sucesso: false, erro: 'protecao_empate_invalida', mensagem: politicaEmpate.motivo });
+            }
+        }
         const saldoFresco = obterSaldoGlobalFresco();
 
         if (novoAtivo && saldoFresco === null) {
@@ -1623,6 +1639,12 @@ app.put("/api/auto-trader/:id", async (req, res) => {
         const { nome, ativo, config } = req.body;
         const configJson = JSON.stringify(config || {});
         const novoAtivo = ativo === true || ativo === 1;
+        if (novoAtivo) {
+            const politicaEmpate = validarPoliticaProtecao(config || {});
+            if (!politicaEmpate.ok) {
+                return res.status(400).json({ sucesso: false, erro: 'protecao_empate_invalida', mensagem: politicaEmpate.motivo });
+            }
+        }
 
         const [existentes] = await dbPool.query(
             'SELECT ativo, config_json, status_operacao FROM auto_traders WHERE id=? LIMIT 1',
@@ -3167,10 +3189,17 @@ app.post("/receber-sinal", async (req, res) => {
                         for (let trader of AUTO_TRADERS_MEMORIA) {
                             let cf = trader.config;
                             if (trader.ativo && (trader.status_operacao === 'OPERANDO' || trader.status_operacao === 'STANDBY') && cf.fontes_sinal && cf.fontes_sinal.includes(est.origem)) {
-                                const [pendentes] = await dbPool.query(`SELECT id, valor_entrada FROM auditoria_ordens WHERE trader_id = ? AND status_ordem = 'PENDENTE' LIMIT 1`, [trader.id]);
+                                const [pendentes] = await dbPool.query(`SELECT id, valor_entrada, valor_empate FROM auditoria_ordens WHERE trader_id = ? AND status_ordem = 'PENDENTE' LIMIT 1`, [trader.id]);
                                 if (pendentes.length > 0) {
                                     let vEntrada = parseFloat(pendentes[0].valor_entrada);
-                                    let vLucro = isTie ? (vEntrada * parseInt(mult.replace('x', ''))) - vEntrada : vEntrada;
+                                    let vEmpate = Math.max(0, Number(pendentes[0].valor_empate) || 0);
+                                    let vLucro = calcularPnLEtapa({
+                                        resultado: vencedor,
+                                        alvoPrincipal: est.entrada,
+                                        valorPrincipal: vEntrada,
+                                        valorEmpate: vEmpate,
+                                        multiplicadorEmpate: mult
+                                    });
                                     try {
                                         await dbPool.query(`UPDATE auditoria_ordens SET status_ordem = ?, lucro_prejuizo = ?, saldo_pos = ?, placar_mesa = ? WHERE id = ?`, [isTie ? 'TIE' : 'WIN', vLucro, trader.saldo_atual, `[P:${p1+p2} B:${b1+b2}]`, pendentes[0].id]);
                                         await processarResultadoStopRedsAutoTrader(
@@ -3198,12 +3227,24 @@ app.post("/receber-sinal", async (req, res) => {
                             for (let trader of AUTO_TRADERS_MEMORIA) {
                                 let cf = trader.config;
                                 if (trader.ativo && trader.status_operacao === 'OPERANDO' && cf.fontes_sinal && cf.fontes_sinal.includes(est.origem)) {
-                                    const [pendentes] = await dbPool.query(`SELECT id, risco_total FROM auditoria_ordens WHERE trader_id = ? AND status_ordem = 'PENDENTE' LIMIT 1`, [trader.id]);
+                                    const [pendentes] = await dbPool.query(`SELECT id, risco_total, valor_entrada, valor_empate FROM auditoria_ordens WHERE trader_id = ? AND status_ordem = 'PENDENTE' LIMIT 1`, [trader.id]);
                                     if (pendentes.length > 0) {
                                         let riscoAntigo = parseFloat(pendentes[0].risco_total);
-                                        let multGale = st.galeAtual === 1 ? (cf.gale_1_mult || 2.0) : (cf.gale_2_mult || 4.0);
-                                        let valorGale = calcularFichaSegura((cf.stake_inicial || 10.00) * multGale);
-                                        let alvoPython = est.entrada === 'Player' ? 'PlayerWon' : (est.entrada === 'Banker' ? 'BankerWon' : 'Tie');
+                                        const pnlEtapaAnterior = calcularPnLEtapa({
+                                            resultado: vencedor,
+                                            alvoPrincipal: est.entrada,
+                                            valorPrincipal: Number(pendentes[0].valor_entrada) || 0,
+                                            valorEmpate: Number(pendentes[0].valor_empate) || 0,
+                                            multiplicadorEmpate: mult
+                                        });
+                                        const planoGale = calcularPlanoAposta(cf, est, st.galeAtual);
+                                        if (!planoGale.ok) {
+                                            console.error(`❌ GALE ${st.galeAtual} do trader ${trader.id} bloqueado: ${planoGale.motivo}`);
+                                            continue;
+                                        }
+                                        let valorGale = planoGale.valor_principal;
+                                        let valorEmpateGale = planoGale.valor_empate;
+                                        let alvoPython = planoGale.apostas[0].alvo;
 
                                         const ordemExecutorIdGale = crypto.randomUUID();
                                         let intencaoGale = null;
@@ -3215,7 +3256,7 @@ app.post("/receber-sinal", async (req, res) => {
                                                 `UPDATE auditoria_ordens
                                                  SET status_ordem='LOSS', lucro_prejuizo=?, saldo_pos=?, placar_mesa=?
                                                  WHERE id=?`,
-                                                [-riscoAntigo, trader.saldo_atual, `[P:${p1+p2} B:${b1+b2}]`, pendentes[0].id]
+                                                [pnlEtapaAnterior, trader.saldo_atual, `[P:${p1+p2} B:${b1+b2}]`, pendentes[0].id]
                                             );
                                             intencaoGale = await criarIntencaoOrdem(conexaoGale, {
                                                 trader_id: trader.id,
@@ -3223,8 +3264,9 @@ app.post("/receber-sinal", async (req, res) => {
                                                 fonte_sinal: est.origem,
                                                 alvo: alvoPython,
                                                 nivel: `GALE ${st.galeAtual}`,
-                                                risco_total: riscoAntigo + valorGale,
+                                                risco_total: riscoAntigo + planoGale.exposicao_etapa,
                                                 valor_entrada: valorGale,
+                                                valor_empate: valorEmpateGale,
                                                 order_id: ordemExecutorIdGale
                                             });
                                             await conexaoGale.commit();
@@ -3246,7 +3288,7 @@ app.post("/receber-sinal", async (req, res) => {
 
                                         let executorConfirmouGale = false;
                                         try {
-                                            await enviarOrdemAoExecutor(alvoPython, valorGale, ordemExecutorIdGale);
+                                            await enviarOrdemAoExecutor(alvoPython, valorGale, ordemExecutorIdGale, planoGale.apostas);
                                             executorConfirmouGale = true;
                                             const [auditoriaAtualizada] = await dbPool.query(
                                                 `UPDATE auditoria_ordens
@@ -3318,9 +3360,15 @@ app.post("/receber-sinal", async (req, res) => {
                             for (let trader of AUTO_TRADERS_MEMORIA) {
                                 let cf = trader.config;
                                 if (trader.ativo && (trader.status_operacao === 'OPERANDO' || trader.status_operacao === 'STANDBY') && cf.fontes_sinal && cf.fontes_sinal.includes(est.origem)) {
-                                    const [pendentes] = await dbPool.query(`SELECT id, risco_total FROM auditoria_ordens WHERE trader_id = ? AND status_ordem = 'PENDENTE' LIMIT 1`, [trader.id]);
+                                    const [pendentes] = await dbPool.query(`SELECT id, valor_entrada, valor_empate FROM auditoria_ordens WHERE trader_id = ? AND status_ordem = 'PENDENTE' LIMIT 1`, [trader.id]);
                                     if (pendentes.length > 0) {
-                                        let prejuizo = -Math.abs(parseFloat(pendentes[0].risco_total));
+                                        let prejuizo = calcularPnLEtapa({
+                                            resultado: vencedor,
+                                            alvoPrincipal: est.entrada,
+                                            valorPrincipal: Number(pendentes[0].valor_entrada) || 0,
+                                            valorEmpate: Number(pendentes[0].valor_empate) || 0,
+                                            multiplicadorEmpate: mult
+                                        });
                                         try {
                                             await dbPool.query(`UPDATE auditoria_ordens SET status_ordem = 'LOSS', lucro_prejuizo = ?, saldo_pos = ?, placar_mesa = ? WHERE id = ?`, [prejuizo, trader.saldo_atual, `[P:${p1+p2} B:${b1+b2}]`, pendentes[0].id]);
                                             await processarResultadoStopRedsAutoTrader(
@@ -3414,8 +3462,14 @@ app.post("/receber-sinal", async (req, res) => {
                                         }
                                     }
 
-                                    let valorArredondado = calcularFichaSegura(cf.stake_inicial || 10.00);
-                                    let alvoPython = est.entrada === 'Player' ? 'PlayerWon' : (est.entrada === 'Banker' ? 'BankerWon' : 'Tie');
+                                    const planoDireto = calcularPlanoAposta(cf, est, 0);
+                                    if (!planoDireto.ok) {
+                                        console.error(`❌ Entrada do trader ${trader.id} bloqueada: ${planoDireto.motivo}`);
+                                        continue;
+                                    }
+                                    let valorArredondado = planoDireto.valor_principal;
+                                    let valorEmpateDireto = planoDireto.valor_empate;
+                                    let alvoPython = planoDireto.apostas[0].alvo;
 
                                     const ordemExecutorIdDireto = crypto.randomUUID();
                                     let intencaoDireto = null;
@@ -3426,8 +3480,9 @@ app.post("/receber-sinal", async (req, res) => {
                                             fonte_sinal: est.origem,
                                             alvo: alvoPython,
                                             nivel: 'DIRETO',
-                                            risco_total: valorArredondado,
+                                            risco_total: planoDireto.exposicao_etapa,
                                             valor_entrada: valorArredondado,
+                                            valor_empate: valorEmpateDireto,
                                             order_id: ordemExecutorIdDireto
                                         });
                                     } catch(e) {
@@ -3441,7 +3496,7 @@ app.post("/receber-sinal", async (req, res) => {
 
                                     let executorConfirmouDireto = false;
                                     try {
-                                        await enviarOrdemAoExecutor(alvoPython, valorArredondado, ordemExecutorIdDireto);
+                                        await enviarOrdemAoExecutor(alvoPython, valorArredondado, ordemExecutorIdDireto, planoDireto.apostas);
                                         executorConfirmouDireto = true;
 
                                         const conexao = await dbPool.getConnection();

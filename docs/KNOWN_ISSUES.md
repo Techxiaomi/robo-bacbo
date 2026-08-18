@@ -91,6 +91,13 @@ Risco residual externo:
 
 ## Itens mitigados
 
+### BUG-019 — Proteção no empate existia no sinal, mas não na execução financeira
+
+Status: **mitigado**.
+
+O Auto-Trader segue `proteger_empate` da estratégia: sinal sem proteção envia apenas a cor; sinal protegido exige política financeira válida (`PERCENTUAL` ou `VALOR`) e envia uma única ordem lógica composta com principal + Tie. O valor base do Tie recebe os mesmos multiplicadores configurados para G1/G2 e é arredondado para fichas de R$5. O executor pré-valida todas as pernas com `trial=True` antes do primeiro clique; falha posterior a qualquer clique permanece `AMBIGUA`. A auditoria armazena `valor_empate` separadamente e calcula P&L usando a semântica exibida pela mesa (`4:1`, `6:1`, `10:1`, `25:1`, `88:1`), em que X representa lucro líquido por unidade apostada. Em Tie sem proteção, Player/Banker registra perda de 10% da stake da etapa e o sinal segue para o Gale quando aplicável.
+
+
 ### BUG-018 — Resultado resolvido antecede a janela real de apostas
 
 Status: **mitigado**.

@@ -292,6 +292,61 @@ def main():
         assert opcoes["dashboardBacktestSelecionado"] == "MAX", opcoes
         assert opcoes["socketRegistrado"] is True, opcoes
 
+        # BUG-019: o formulário do Auto-Trader expõe política de Tie por percentual
+        # ou valor e mostra os valores efetivos após arredondamento e Gales.
+        tie_ui = page.evaluate(
+            """
+            () => {
+                const modo = document.getElementById('at-tie-modo');
+                const pct = document.getElementById('at-tie-percent');
+                const valor = document.getElementById('at-tie-valor');
+                const stake = document.getElementById('at-stake');
+                const g1 = document.getElementById('at-gale1');
+                const g2 = document.getElementById('at-gale2');
+                if (!modo || !pct || !valor || !stake || !g1 || !g2) return null;
+
+                stake.value = '100';
+                g1.value = '2';
+                g2.value = '4';
+                modo.value = 'PERCENTUAL';
+                pct.value = '5';
+                window.toggleProtecaoEmpateAutoTrader();
+                const percentual = document.getElementById('at-tie-preview').innerText;
+
+                modo.value = 'VALOR';
+                valor.value = '10';
+                window.toggleProtecaoEmpateAutoTrader();
+                const fixo = document.getElementById('at-tie-preview').innerText;
+
+                modo.value = 'PERCENTUAL';
+                pct.value = '5';
+                window.toggleProtecaoEmpateAutoTrader();
+                window.addFicha(5);
+                const aposFicha = document.getElementById('at-tie-preview').innerText;
+
+                return {
+                    modos: Array.from(modo.options).map(o => o.value),
+                    percentual,
+                    fixo,
+                    aposFicha,
+                    boxPercentDisplay: document.getElementById('box-at-tie-percent').style.display,
+                    boxValorDisplay: document.getElementById('box-at-tie-valor').style.display
+                };
+            }
+            """
+        )
+        assert tie_ui is not None, tie_ui
+        assert tie_ui["modos"] == ["PERCENTUAL", "VALOR"], tie_ui
+        assert "Cor R$ 100 + Tie R$ 5" in tie_ui["percentual"], tie_ui
+        assert "Cor R$ 200 + Tie R$ 10" in tie_ui["percentual"], tie_ui
+        assert "Cor R$ 400 + Tie R$ 20" in tie_ui["percentual"], tie_ui
+        assert "Cor R$ 100 + Tie R$ 10" in tie_ui["fixo"], tie_ui
+        assert "Cor R$ 200 + Tie R$ 20" in tie_ui["fixo"], tie_ui
+        assert "Cor R$ 400 + Tie R$ 40" in tie_ui["fixo"], tie_ui
+        assert "Cor R$ 105 + Tie R$ 5" in tie_ui["aposFicha"], tie_ui
+        assert tie_ui["boxPercentDisplay"] == "flex", tie_ui
+        assert tie_ui["boxValorDisplay"] == "none", tie_ui
+
         # Isola a prova de ordenação dos cards da regra dos seletores globais.
         page.evaluate(
             """robos => {

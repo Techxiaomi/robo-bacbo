@@ -1600,7 +1600,7 @@
                         <div style="display:flex; gap:15px; align-items:center; flex-wrap:wrap;">
                             <div class="form-group" style="width:150px;">
                                 <label>Valor da Entrada (R$):</label>
-                                <input type="number" id="at-stake" value="10.00" step="5.00" min="5.00" style="font-size:16px; font-weight:bold; color:#007bff;">
+                                <input type="number" id="at-stake" value="10.00" step="5.00" min="5.00" oninput="atualizarPreviewProtecaoEmpateAutoTrader()" style="font-size:16px; font-weight:bold; color:#007bff;">
                             </div>
                             <div style="flex:1;">
                                 <label style="font-size:10px; color:#aaa; font-weight:bold;">Adicionar Fichas (Múltiplos de 5):</label>
@@ -1615,12 +1615,35 @@
                             </div>
                         </div>
                     </div>
+                    <div style="background:#1a1a1a; padding:15px; border-radius:8px; border:1px solid #66551a; margin-bottom:15px;">
+                        <h4 style="margin:0 0 8px 0; font-size:12px; color:#ffc107; text-transform:uppercase;">Proteção no Empate indicada pelo sinal</h4>
+                        <p style="font-size:11px; color:#aaa; margin:0 0 10px 0;">O robô decide se o sinal usa proteção. Aqui você define somente o valor financeiro da perna Tie. O mesmo multiplicador do Gale é aplicado à proteção.</p>
+                        <div style="display:flex; gap:15px; flex-wrap:wrap; align-items:end;">
+                            <div class="form-group" style="flex:1; min-width:160px;">
+                                <label>Calcular proteção por:</label>
+                                <select id="at-tie-modo" onchange="toggleProtecaoEmpateAutoTrader()">
+                                    <option value="PERCENTUAL">Percentual da entrada</option>
+                                    <option value="VALOR">Valor informado</option>
+                                </select>
+                            </div>
+                            <div class="form-group" id="box-at-tie-percent" style="flex:1; min-width:150px;">
+                                <label>Percentual do empate (%):</label>
+                                <input type="number" id="at-tie-percent" value="" step="0.1" min="0.1" max="100" placeholder="Ex: 5" oninput="atualizarPreviewProtecaoEmpateAutoTrader()">
+                            </div>
+                            <div class="form-group" id="box-at-tie-valor" style="flex:1; min-width:150px; display:none;">
+                                <label>Valor do empate no Direto (R$):</label>
+                                <input type="number" id="at-tie-valor" value="" step="5" min="5" placeholder="Ex: 5" oninput="atualizarPreviewProtecaoEmpateAutoTrader()">
+                            </div>
+                        </div>
+                        <div id="at-tie-preview" style="margin-top:10px; padding:8px 10px; background:#111; border-radius:6px; font-size:11px; color:#aaa;">Informe a política para visualizar os valores efetivos.</div>
+                    </div>
+
                     <div style="background:#1a1a1a; padding:15px; border-radius:8px; border:1px solid #333; margin-bottom:15px;">
                         <h4 style="margin:0 0 10px 0; font-size:12px; color:#ffc107; text-transform:uppercase;">Matriz de Multiplicadores (Smart Gale)</h4>
                         <p style="font-size:11px; color:#888; margin-top:0;">O motor fará o arredondamento automático para a ficha mais próxima caso o cálculo gere valores quebrados.</p>
                         <div style="display:flex; gap:15px; flex-wrap:wrap;">
-                            <div class="form-group" style="flex:1;"><label>Multiplicador Gale 1 (Ex: 2.0x):</label><input type="number" id="at-gale1" value="2.0" step="0.1" min="1.0"></div>
-                            <div class="form-group" style="flex:1;"><label>Multiplicador Gale 2 (Ex: 4.0x):</label><input type="number" id="at-gale2" value="4.0" step="0.1" min="1.0"></div>
+                            <div class="form-group" style="flex:1;"><label>Multiplicador Gale 1 (Ex: 2.0x):</label><input type="number" id="at-gale1" value="2.0" step="0.1" min="1.0" oninput="atualizarPreviewProtecaoEmpateAutoTrader()"></div>
+                            <div class="form-group" style="flex:1;"><label>Multiplicador Gale 2 (Ex: 4.0x):</label><input type="number" id="at-gale2" value="4.0" step="0.1" min="1.0" oninput="atualizarPreviewProtecaoEmpateAutoTrader()"></div>
                         </div>
                     </div>
                 </div>
@@ -2300,8 +2323,33 @@
 
         function mudarAbaAT(aba) { document.querySelectorAll('#modal-autotrader .robo-nav-btn').forEach(btn => btn.classList.remove('ativo')); document.querySelectorAll('#modal-autotrader .robo-tab-content').forEach(content => content.classList.remove('ativo')); document.getElementById('btn-at-tab-' + aba).classList.add('ativo'); document.getElementById('at-tab-' + aba).classList.add('ativo'); }
         
-        function addFicha(valor) { let input = document.getElementById('at-stake'); let atual = parseFloat(input.value) || 0; input.value = (atual + valor).toFixed(2); }
-        function limparFichas() { document.getElementById('at-stake').value = "0.00"; }
+        function addFicha(valor) { let input = document.getElementById('at-stake'); let atual = parseFloat(input.value) || 0; input.value = (atual + valor).toFixed(2); atualizarPreviewProtecaoEmpateAutoTrader(); }
+        function limparFichas() { document.getElementById('at-stake').value = "0.00"; atualizarPreviewProtecaoEmpateAutoTrader(); }
+        function arredondarFichaAutoTrader(valor) { let v = Number(valor); if (!Number.isFinite(v) || v <= 0) return 0; let r = Math.round(v / 5) * 5; return r === 0 ? 5 : r; }
+        function atualizarPreviewProtecaoEmpateAutoTrader() {
+            const modo = document.getElementById('at-tie-modo')?.value || 'PERCENTUAL';
+            const stake = Number(document.getElementById('at-stake')?.value) || 0;
+            const g1 = Number(document.getElementById('at-gale1')?.value) || 2;
+            const g2 = Number(document.getElementById('at-gale2')?.value) || 4;
+            const base = modo === 'PERCENTUAL'
+                ? stake * ((Number(document.getElementById('at-tie-percent')?.value) || 0) / 100)
+                : (Number(document.getElementById('at-tie-valor')?.value) || 0);
+            const box = document.getElementById('at-tie-preview');
+            if (!box) return;
+            if (stake <= 0 || base <= 0) { box.innerText = 'Informe a política para visualizar os valores efetivos.'; return; }
+            const p0 = arredondarFichaAutoTrader(stake), t0 = arredondarFichaAutoTrader(base);
+            const p1 = arredondarFichaAutoTrader(stake * g1), t1 = arredondarFichaAutoTrader(base * g1);
+            const p2 = arredondarFichaAutoTrader(stake * g2), t2 = arredondarFichaAutoTrader(base * g2);
+            box.innerHTML = `Valores efetivos após fichas de R$5 — Direto: <strong>Cor R$ ${p0} + Tie R$ ${t0}</strong> | G1: <strong>Cor R$ ${p1} + Tie R$ ${t1}</strong> | G2: <strong>Cor R$ ${p2} + Tie R$ ${t2}</strong>`;
+        }
+        function toggleProtecaoEmpateAutoTrader() {
+            const modo = document.getElementById('at-tie-modo')?.value || 'PERCENTUAL';
+            const pct = document.getElementById('box-at-tie-percent');
+            const val = document.getElementById('box-at-tie-valor');
+            if (pct) pct.style.display = modo === 'PERCENTUAL' ? 'flex' : 'none';
+            if (val) val.style.display = modo === 'VALOR' ? 'flex' : 'none';
+            atualizarPreviewProtecaoEmpateAutoTrader();
+        }
         function toggleConfigCamuflagem() { let modo = document.getElementById('at-camuflagem').value; let boxPulos = document.getElementById('box-at-pulos'); if (modo === 'PULOS') boxPulos.style.display = 'block'; else boxPulos.style.display = 'none'; }
         function toggleTrailingStopAutoTrader() {
             const ativo = document.getElementById('at-trailing-stop')?.checked === true;
@@ -2350,6 +2398,7 @@
         function abrirFormularioAutoTrader() {
             autoTraderEditandoId = null; document.getElementById('at-titulo').innerText = "💸 Cadastrar Motor de Execução";
             document.getElementById('at-nome').value = ''; document.getElementById('at-ativo').checked = true; document.getElementById('at-saldo-visor').innerText = "R$ 0,00"; document.getElementById('at-saldo-visor').style.color = '#fff'; document.getElementById('at-stake').value = "10.00"; document.getElementById('at-gale1').value = "2.0"; document.getElementById('at-gale2').value = "4.0"; document.getElementById('at-camuflagem').value = "TODAS"; toggleConfigCamuflagem(); document.getElementById('at-pulo-min').value = "1"; document.getElementById('at-pulo-max').value = "3"; document.getElementById('at-max-entradas').value = "15"; document.getElementById('at-stop-win').value = "100.00"; document.getElementById('at-trailing-stop').checked = true; document.getElementById('at-trailing-recuo').value = "0.00"; toggleTrailingStopAutoTrader(); document.getElementById('at-stop-loss').value = "250.00"; document.getElementById('at-hora-inicio').value = "00:00"; document.getElementById('at-hora-fim').value = "23:59";
+            document.getElementById('at-tie-modo').value = 'PERCENTUAL'; document.getElementById('at-tie-percent').value = ''; document.getElementById('at-tie-valor').value = ''; toggleProtecaoEmpateAutoTrader();
             document.getElementById('at-stop-reds').value = "0";
             document.getElementById('at-stop-reds-acao').value = "PAUSAR";
             document.getElementById('at-stop-reds-pausa').value = "60";
@@ -2361,6 +2410,7 @@
             let at = autoTradersGlobais.find(x => x.id === id); if (!at) return;
             autoTraderEditandoId = at.id; let cf = at.config;
             document.getElementById('at-titulo').innerText = "✏️ Editar Motor de Execução"; document.getElementById('at-nome').value = at.nome; document.getElementById('at-ativo').checked = at.ativo; document.getElementById('at-saldo-visor').innerText = `R$ ${parseFloat(at.saldo_atual).toFixed(2).replace('.',',')}`; document.getElementById('at-saldo-visor').style.color = '#28a745'; document.getElementById('at-stake').value = (cf.stake_inicial || 10).toFixed(2); document.getElementById('at-gale1').value = cf.gale_1_mult || 2.0; document.getElementById('at-gale2').value = cf.gale_2_mult || 4.0; document.getElementById('at-camuflagem').value = cf.modo_camuflagem || 'TODAS'; toggleConfigCamuflagem(); document.getElementById('at-pulo-min').value = cf.camuflagem_pulos_min || 1; document.getElementById('at-pulo-max').value = cf.camuflagem_pulos_max || 3; document.getElementById('at-max-entradas').value = cf.limite_entradas || 15; document.getElementById('at-stop-win').value = (cf.stop_win || 100).toFixed(2); document.getElementById('at-trailing-stop').checked = cf.trailing_stop !== false; document.getElementById('at-trailing-recuo').value = Math.max(0, Number(cf.trailing_recuo) || 0).toFixed(2); toggleTrailingStopAutoTrader(); document.getElementById('at-stop-loss').value = (cf.stop_loss || 250).toFixed(2); document.getElementById('at-hora-inicio').value = cf.hora_inicio || "00:00"; document.getElementById('at-hora-fim').value = cf.hora_fim || "23:59";
+            document.getElementById('at-tie-modo').value = String(cf.tie_stake_mode || 'PERCENTUAL').toUpperCase() === 'VALOR' ? 'VALOR' : 'PERCENTUAL'; document.getElementById('at-tie-percent').value = Number(cf.tie_stake_percent) > 0 ? Number(cf.tie_stake_percent) : ''; document.getElementById('at-tie-valor').value = Number(cf.tie_stake_value) > 0 ? Number(cf.tie_stake_value).toFixed(2) : ''; toggleProtecaoEmpateAutoTrader();
             document.getElementById('at-stop-reds').value = Math.max(0, Number(cf.stop_reds_seguidos) || 0);
             document.getElementById('at-stop-reds-acao').value = String(cf.stop_reds_acao || 'PAUSAR').toUpperCase() === 'DESLIGAR' ? 'DESLIGAR' : 'PAUSAR';
             document.getElementById('at-stop-reds-pausa').value = Math.max(1, Number(cf.stop_reds_pausa_min) || 60);
@@ -2380,14 +2430,24 @@
         async function salvarAutoTrader() {
             const nome = document.getElementById('at-nome').value.trim();
             if (!nome) return alert('Preencha o Nome do Motor.');
+            const ativoAT = document.getElementById('at-ativo').checked;
+            const tieModo = document.getElementById('at-tie-modo').value === 'VALOR' ? 'VALOR' : 'PERCENTUAL';
+            const tiePercent = Number(document.getElementById('at-tie-percent').value) || 0;
+            const tieValor = Number(document.getElementById('at-tie-valor').value) || 0;
+            if (ativoAT && ((tieModo === 'PERCENTUAL' && tiePercent <= 0) || (tieModo === 'VALOR' && tieValor <= 0))) {
+                return alert('Defina a política financeira da proteção no empate antes de ativar o Auto-Trader.');
+            }
 
             const payload = {
                 nome,
-                ativo: document.getElementById('at-ativo').checked,
+                ativo: ativoAT,
                 config: {
                     stake_inicial: parseFloat(document.getElementById('at-stake').value) || 10.0,
                     gale_1_mult: parseFloat(document.getElementById('at-gale1').value) || 2.0,
                     gale_2_mult: parseFloat(document.getElementById('at-gale2').value) || 4.0,
+                    tie_stake_mode: tieModo,
+                    tie_stake_percent: tiePercent,
+                    tie_stake_value: tieValor,
                     modo_camuflagem: document.getElementById('at-camuflagem').value,
                     camuflagem_pulos_min: parseInt(document.getElementById('at-pulo-min').value) || 1,
                     camuflagem_pulos_max: parseInt(document.getElementById('at-pulo-max').value) || 3,

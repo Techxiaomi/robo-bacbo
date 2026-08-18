@@ -18,6 +18,7 @@ def carregar_funcoes_reais():
     fonte = ROBO_PATH.read_text(encoding="utf-8")
     arvore = ast.parse(fonte, filename=str(ROBO_PATH))
     nomes = {
+        "normalizar_apostas_recebidas",
         "parsear_valor_monetario",
         "ler_saldo_atual",
         "atualizar_estado_mesa_player",
@@ -347,6 +348,27 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
         finally:
             timer.cancel()
             FUNCOES["executor_pronto"].set()
+            pagina.close()
+
+
+
+    def test_bug019_ordem_composta_prevalida_e_executa_principal_mais_tie(self):
+        pagina = self.nova_pagina("/game.html")
+        try:
+            frame = self.frame_jogo(pagina)
+            resultado = executar_aposta_na_tela(pagina, {"apostas": [
+                {"alvo": "PlayerWon", "valor": 10},
+                {"alvo": "Tie", "valor": 5}
+            ]})
+            self.assertEqual(resultado["status"], "EXECUTADA")
+            self.assertEqual(resultado["cliques_alvo"], 2)
+            chips = frame.evaluate("window.__chipClicks")
+            alvos = frame.evaluate("window.__targetClicks")
+            self.assertEqual(chips["10"], 1)
+            self.assertEqual(chips["5"], 1)
+            self.assertEqual(alvos["playerA"], 1)
+            self.assertEqual(alvos["tie"], 1)
+        finally:
             pagina.close()
 
 
