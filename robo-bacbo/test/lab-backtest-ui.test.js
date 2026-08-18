@@ -23,15 +23,12 @@ function carregarHelpers() {
     return sandbox.window;
 }
 
-test('UX-004: loader carrega Lab após aprimoramentos gerais e antes do DOMContentLoaded sintético', () => {
-    const posUi = loaderHtml.indexOf("enhancements.src = '/ui-enhancements.js?_t='");
-    const posLab = loaderHtml.indexOf("lab.src = '/lab-enhancements.js?_t='");
-    const posEvento = loaderHtml.indexOf("window.dispatchEvent(new Event('DOMContentLoaded'))");
-
-    assert.ok(posUi >= 0, 'ui-enhancements.js ausente do loader');
-    assert.ok(posLab > posUi, 'lab-enhancements.js deve carregar depois dos aprimoramentos gerais');
-    assert.ok(posEvento > posLab, 'DOMContentLoaded sintético deve ocorrer depois do Lab');
-    assert.match(loaderHtml, /window\.configurarLabPadroes\(\)/);
+test('UX-004: loader encadeia UI -> Lab -> DOMContentLoaded na ordem de execução', () => {
+    assert.match(loaderHtml, /enhancements\.src = '\/ui-enhancements\.js\?_t=' \+ Date\.now\(\)/);
+    assert.match(loaderHtml, /lab\.src = '\/lab-enhancements\.js\?_t=' \+ Date\.now\(\)/);
+    assert.match(loaderHtml, /enhancements\.onload = \(\) => \{[\s\S]*?window\.aplicarAprimoramentosUI\(\);[\s\S]*?carregarLab\(\);[\s\S]*?\}/);
+    assert.match(loaderHtml, /lab\.onload = \(\) => \{[\s\S]*?window\.configurarLabPadroes\(\);[\s\S]*?finalizarInicializacao\(\);[\s\S]*?\}/);
+    assert.match(loaderHtml, /const finalizarInicializacao = \(\) => \{[\s\S]*?window\.dispatchEvent\(new Event\('DOMContentLoaded'\)\);[\s\S]*?\}/);
 });
 
 test('UX-004: modalidades agrupam alvo e proteção de empate em um único seletor', () => {
