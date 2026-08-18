@@ -1509,6 +1509,7 @@
                             <div class="form-group" style="flex:1; min-width:120px;"><label>Minerar a cada X giros:</label><input type="number" id="robo-ia-trigger" value="150" min="10"></div>
                             <div class="form-group" style="flex:1; min-width:90px;"><label>Tam. Mínimo:</label><input type="number" id="robo-ia-tam-min" value="3" min="2" max="6"></div>
                             <div class="form-group" style="flex:1; min-width:90px;"><label>Tam. Máximo:</label><input type="number" id="robo-ia-tam-max" value="5" min="2" max="6"></div>
+                            <div class="form-group" style="flex:1; min-width:150px;"><label>Perfil de Seleção:</label><select id="robo-ia-perfil"><option value="CONSERVADOR">Conservador</option><option value="BALANCEADO" selected>Balanceado</option><option value="AGRESSIVO">Agressivo</option></select></div>
                         </div>
 
                         <div style="display:flex; gap:10px; flex-wrap:wrap; background:#111; padding:15px; border-radius:6px; border:1px solid #333; margin-bottom:15px;">
@@ -1520,7 +1521,7 @@
 
                         <div class="form-group" style="margin-bottom:15px; background:#111; padding:15px; border-radius:6px; border:1px solid #333;">
                             <label>🚫 Blacklist (Proibidos):</label>
-                            <input type="text" id="robo-ia-blacklist" placeholder="Ex: P,B,P,B , B,P,B,P">
+                            <input type="text" id="robo-ia-blacklist" placeholder="Ex: P,B,P,B ; B,P,B,P">
                         </div>
 
                         <h4 style="margin:0 0 10px 0; font-size:12px; color:#17a2b8; text-transform:uppercase;">🛡️ Quarentena & Anti-Spam</h4>
@@ -1959,6 +1960,7 @@
             preencherCampoRobo('robo-ia-trigger', 150);
             preencherCampoRobo('robo-ia-tam-min', 3);
             preencherCampoRobo('robo-ia-tam-max', 5);
+            preencherCampoRobo('robo-ia-perfil', 'BALANCEADO');
             preencherCampoRobo('robo-ia-assert', 95);
             preencherCampoRobo('robo-ia-ocorr', 10);
             preencherCampoRobo('robo-ia-gales', 2);
@@ -1966,7 +1968,7 @@
             preencherCampoRobo('robo-ia-blacklist', '');
             preencherCampoRobo('robo-ia-shadow', 0);
             preencherCampoRobo('robo-ia-max', 4);
-            preencherCampoRobo('robo-ia-drop-reds', 1);
+            preencherCampoRobo('robo-ia-drop-reds', 2);
             preencherCampoRobo('robo-ia-drop-assert', 85);
             preencherCampoRobo('robo-ia-ttl', 4);
             preencherCheckRobo('robo-ia-aviso-tel', true);
@@ -2030,6 +2032,7 @@
             preencherCampoRobo('robo-ia-trigger', ia.trigger ?? 150);
             preencherCampoRobo('robo-ia-tam-min', ia.tam_min ?? 3);
             preencherCampoRobo('robo-ia-tam-max', ia.tam_max ?? 5);
+            preencherCampoRobo('robo-ia-perfil', ia.perfil_selecao || 'BALANCEADO');
             preencherCampoRobo('robo-ia-assert', ia.assert_min ?? 95);
             preencherCampoRobo('robo-ia-ocorr', ia.ocorr_min ?? 10);
             preencherCampoRobo('robo-ia-gales', ia.gales ?? 2);
@@ -2037,7 +2040,7 @@
             preencherCampoRobo('robo-ia-blacklist', ia.blacklist || '');
             preencherCampoRobo('robo-ia-shadow', ia.shadow_giros ?? 0);
             preencherCampoRobo('robo-ia-max', ia.max_padroes ?? 4);
-            preencherCampoRobo('robo-ia-drop-reds', ia.drop_reds ?? 1);
+            preencherCampoRobo('robo-ia-drop-reds', ia.drop_reds ?? 2);
             preencherCampoRobo('robo-ia-drop-assert', ia.drop_assert ?? 85);
             preencherCampoRobo('robo-ia-ttl', ia.ttl_horas ?? 4);
             preencherCheckRobo('robo-ia-aviso-tel', ia.aviso_telegram !== false);
@@ -2081,6 +2084,7 @@
                     trigger: parseInt(document.getElementById('robo-ia-trigger').value) || 150,
                     tam_min: parseInt(document.getElementById('robo-ia-tam-min').value) || 3,
                     tam_max: parseInt(document.getElementById('robo-ia-tam-max').value) || 5,
+                    perfil_selecao: document.getElementById('robo-ia-perfil').value || 'BALANCEADO',
                     assert_min: parseFloat(document.getElementById('robo-ia-assert').value) || 95,
                     ocorr_min: parseInt(document.getElementById('robo-ia-ocorr').value) || 10,
                     gales: parseInt(document.getElementById('robo-ia-gales').value) || 0,
@@ -2262,7 +2266,7 @@
                             <span style="background:#111; padding:4px 7px; border-radius:4px;">💻 Web: <strong>${web ? 'ON' : 'OFF'}</strong></span>
                             <span style="background:#111; padding:4px 7px; border-radius:4px;">📱 Telegram: <strong>${tel ? 'ON' : 'OFF'}</strong></span>
                             <span style="background:#111; padding:4px 7px; border-radius:4px;">👥 Destinatários: <strong>${qtdDest}</strong></span>
-                            <span style="background:#111; padding:4px 7px; border-radius:4px;">⚡ IA: <strong>${Number(robo.qtd_padroes_ia || 0)}</strong></span>
+                            <span style="background:#111; padding:4px 7px; border-radius:4px;">⚡ IA: <strong>${Number(robo.qtd_padroes_ia_ativos ?? robo.qtd_padroes_ia ?? 0)}</strong> <small style="color:#888;">(+${Number(robo.qtd_padroes_ia_reserva || 0)} reserva / ${Number(robo.qtd_padroes_ia_sombra || 0)} sombra)</small></span>
                             ${stopRedsLimite > 0 ? `<span style="background:#111; padding:4px 7px; border-radius:4px;">🛑 Stop Reds: <strong>${stopRedsAtual}/${stopRedsLimite}</strong></span>` : ''}
                         </div>
 

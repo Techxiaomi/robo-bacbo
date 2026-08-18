@@ -8,6 +8,7 @@ const {
     calcularPnLEtapa
 } = require("./tie_protection");
 const { Server } = require("socket.io");
+const { criarAutoPilotService } = require("./auto_pilot_ia");
 require("./env_loader").loadEnvFile(path.join(__dirname, "..", ".env"));
 
 // Erros globais realmente não tratados são fatais: continuar pode deixar estado financeiro incoerente.
@@ -866,6 +867,21 @@ const ioServer = new Server(server, {
     }
 });
 
+const autoPilotIA = criarAutoPilotService({
+    dbPool,
+    estaOcupado: () => Object.values(estadoApostas).some(estado => estado && estado.aguardandoResultado),
+    recarregarMemoria: carregarSistemasParaMemoria,
+    notificar: (roboId, resumo) => {
+        ioServer.emit('atualizar_robos');
+        ioServer.emit('atualizar_interface');
+        console.log(
+            `🧠 Auto Pilot IA ${roboId}: ${resumo.ativos.length} ativo(s), `
+            + `${resumo.reservas} reserva(s), ${resumo.sombra} sombra.`
+        );
+    },
+    log: console
+});
+
 // ==========================================
 // 4. FUNÇÕES DE ARREDONDAMENTO (SMART ROUNDING)
 // ==========================================
@@ -1283,7 +1299,7 @@ app.get("/api/robos", async (req, res) => {
     try {
         const [linhas] = await dbPool.query('SELECT * FROM robos_canais ORDER BY id DESC');
         const [destinatarios] = await dbPool.query('SELECT * FROM destinatarios_robo');
-        const [countDinamicos] = await dbPool.query('SELECT robo_dono_id, COUNT(id) as qtd FROM estrategias WHERE is_dinamico = true GROUP BY robo_dono_id');
+        const [countDinamicos] = await dbPool.query(`SELECT robo_dono_id, COUNT(id) AS qtd_total, SUM(ativo = true) AS qtd_ativos, SUM(ativo = false AND quarentena_restante = 0) AS qtd_reserva, SUM(ativo = false AND quarentena_restante > 0) AS qtd_sombra FROM estrategias WHERE is_dinamico = true GROUP BY robo_dono_id`);
 
         // UX-002/003: estatísticas cronológicas dos robôs para os cards e máximas de sequência.
         const [historicoRobos] = await dbPool.query(`
@@ -1384,7 +1400,11 @@ app.get("/api/robos", async (req, res) => {
                 telegram_configurado: Boolean(String(telegramTokenPrivado || '').trim()),
                 config: confObj,
                 destinatarios: meusDestinatarios,
-                qtd_padroes_ia: contagemIA ? contagemIA.qtd : 0,
+                qtd_padroes_ia: contagemIA ? Number(contagemIA.qtd_ativos || 0) : 0,
+                qtd_padroes_ia_ativos: contagemIA ? Number(contagemIA.qtd_ativos || 0) : 0,
+                qtd_padroes_ia_reserva: contagemIA ? Number(contagemIA.qtd_reserva || 0) : 0,
+                qtd_padroes_ia_sombra: contagemIA ? Number(contagemIA.qtd_sombra || 0) : 0,
+                qtd_padroes_ia_total: contagemIA ? Number(contagemIA.qtd_total || 0) : 0,
                 detalhes: mapRobos[r.id],
                 em_standby_ate: cState ? cState.em_standby_ate : 0
             };
@@ -1401,7 +1421,15 @@ app.post("/api/robo", async (req, res) => {
         const [result] = await dbPool.query(`INSERT INTO robos_canais (nome, tag_visual, cor_hex, telegram_token, telegram_chat_id, enviar_telegram, enviar_web, min_assertividade, stop_reds_seguidos, greens_consecutivos, ativo, config_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`, [nome, tag, cor, telegram_token, telegram_chat_id || '', enviar_telegram ? 1 : 0, enviar_web ? 1 : 0, min_assert, stop_reds, ativo ? 1 : 0, configJson]);
         let roboId = result.insertId;
         if (destinatarios && Array.isArray(destinatarios)) { for (let d of destinatarios) { if (d.chat_id && d.chat_id.trim() !== '') await dbPool.query('INSERT INTO destinatarios_robo (robo_id, nome_cliente, chat_id) VALUES (?, ?, ?)', [roboId, d.nome_cliente || 'Cliente', d.chat_id.trim()]); } }
-        await carregarSistemasParaMemoria(); ioServer.emit('atualizar_robos'); res.json({ sucesso: true });
+        await carregarSistemasParaMemoria();
+        autoPilotIA.resetarContador(roboId);
+        try {
+            await autoPilotIA.executarRobo(roboId, { forcar: true, motivo: 'config_criacao' });
+        } catch (e) {
+            console.error(`⚠️ Robô ${roboId}: mineração IA inicial falhou, configuração foi preservada:`, e.message);
+        }
+        ioServer.emit('atualizar_robos');
+        res.json({ sucesso: true });
     } catch(e) { console.error('❌ POST /api/robo falhou:', e.message); res.status(500).json({ sucesso: false }); }
 });
 
@@ -1483,6 +1511,12 @@ app.put("/api/robo/:id", async (req, res) => {
         }
 
         await carregarSistemasParaMemoria();
+        autoPilotIA.resetarContador(id);
+        try {
+            await autoPilotIA.executarRobo(id, { forcar: true, motivo: 'config_edicao' });
+        } catch (e) {
+            console.error(`⚠️ Robô ${id}: remineração IA após edição falhou, configuração foi preservada:`, e.message);
+        }
         ioServer.emit('atualizar_robos');
         res.json({
             sucesso: true,
@@ -1538,6 +1572,14 @@ app.delete("/api/robo/:id", async (req, res) => {
             );
             padroesIaExcluidos = Math.max(0, Number(resultadoPadroes.affectedRows) || 0);
         }
+
+        // O histórico live de padrões expirados é preservado enquanto o robô existir.
+        // Na exclusão definitiva do proprietário, remove também IDs IA já arquivados pelo TTL.
+        const prefixoHistoricoIa = `ia_${roboId}_`;
+        await conexao.query(
+            'DELETE FROM historico_resultados WHERE LEFT(estrategia_id, ?) = ?',
+            [prefixoHistoricoIa.length, prefixoHistoricoIa]
+        );
 
         // Ao excluir o Robô/Canal, seu histórico de distribuição também deixa de ter proprietário.
         await conexao.query('DELETE FROM historico_disparos_robos WHERE robo_id=?', [roboId]);
@@ -1934,6 +1976,31 @@ function contarTiesLegados(tiesJson) {
 }
 
 async function calcularAssertividadePersistidaEstrategia(est) {
+    // Estratégias IA são avaliadas pela mesma janela bruta usada pelo robô proprietário.
+    // Isso evita iniciar em 0% e também evita duplicar a amostra minerada nos contadores live.
+    if (est && est.is_dinamico) {
+        const roboDono = ROBOS_MEMORIA.find(
+            robo => Number(robo.id) === Number(est.robo_dono_id)
+        );
+        const rangeConfig = Number(roboDono?.config?.auto_tuning?.range);
+        const rangeDinamico = Number.isFinite(rangeConfig)
+            ? Math.max(100, Math.min(10000, Math.trunc(rangeConfig)))
+            : 1000;
+        const dadosDinamicos = historicoGirosAnalitico.slice(-rangeDinamico);
+        const detalhes = calcularDetalhesPadraoNoHistorico(
+            est,
+            dadosDinamicos,
+            Date.now()
+        ).geral;
+        const greens = (Number(detalhes.green_direto) || 0)
+            + (Number(detalhes.gale1) || 0)
+            + (Number(detalhes.gale2) || 0)
+            + contarTiesLegados(detalhes.ties);
+        const reds = Number(detalhes.red) || 0;
+        const total = greens + reds;
+        return total > 0 ? (greens / total) * 100 : 0;
+    }
+
     const [baselineRows] = await dbPool.query(
         'SELECT green_direto, gale1, gale2, red, ties_json FROM estrategias WHERE id=? LIMIT 1',
         [est.id]
@@ -3121,6 +3188,7 @@ app.post("/receber-sinal", async (req, res) => {
         let totalP = (p1 + p2).toString().padStart(2, '0'); let totalB = (b1 + b2).toString().padStart(2, '0');
         console.log(`\n====================================\n🔥 Vencedor: ${logNomeVencedor}\n🔵 Jogador : ${totalP} | 🔴 Banca: ${totalB}\n====================================\n`);
 
+        let giroPersistidoParaIA = false;
         try {
             const timestampColetaNumero = Number(dados.timestamp_coleta);
             const timestampGiroAnalitico = Number.isFinite(timestampColetaNumero) && timestampColetaNumero > 0
@@ -3134,12 +3202,22 @@ app.post("/receber-sinal", async (req, res) => {
                 id_sessao: idSessaoContinua,
                 timestamp_ms: timestampGiroAnalitico
             });
+            giroPersistidoParaIA = true;
         } catch(e) {
             console.error('❌ Falha ao persistir giro recente:', e.message);
         }
 
         historicoRecente.push({ resultado: vencedor, placarStr: `[P:${p1+p2} B:${b1+b2}]`, id_sessao: idSessaoContinua });
         if (historicoRecente.length > 30) historicoRecente.shift();
+
+        if (giroPersistidoParaIA) {
+            try {
+                await autoPilotIA.registrarNovoGiro();
+            } catch (e) {
+                console.error('⚠️ Auto Pilot IA: mineração periódica falhou sem interromper a rodada:', e.message);
+            }
+        }
+
         let sinalFinalizadoAgora = false;
 
         for (let est of ESTRATEGIAS_MEMORIA) {
@@ -3386,7 +3464,21 @@ app.post("/receber-sinal", async (req, res) => {
                         finalizar = true;
                     }
                 }
-                if (finalizar) { st.aguardandoResultado = false; st.galeAtual = 0; sinalFinalizadoAgora = true; ioServer.emit('atualizar_interface'); }
+                if (finalizar) {
+                    st.aguardandoResultado = false;
+                    st.galeAtual = 0;
+                    sinalFinalizadoAgora = true;
+
+                    if (est.is_dinamico) {
+                        try {
+                            await autoPilotIA.reavaliarDescarteEstrategia(est.id);
+                        } catch (e) {
+                            console.error(`⚠️ Auto Pilot IA: falha ao reavaliar descarte live de ${est.id}:`, e.message);
+                        }
+                    }
+
+                    ioServer.emit('atualizar_interface');
+                }
             }
         }
 
@@ -3563,6 +3655,11 @@ async function iniciarApp() {
     await prepararBancoDeDados();
     await carregarHistoricoGirosAnalitico();
     await carregarSistemasParaMemoria();
+    try {
+        await autoPilotIA.executarTodos({ forcar: true, motivo: 'startup' });
+    } catch (e) {
+        console.error('⚠️ Auto Pilot IA não conseguiu revalidar no startup; backend continuará com o estado persistido:', e.message);
+    }
     backendPronto = true;
     console.log("✅ Backend inicializado e pronto para atender APIs.");
 }
