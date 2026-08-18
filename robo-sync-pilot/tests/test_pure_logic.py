@@ -105,6 +105,7 @@ class TestParsearValorMonetario(unittest.TestCase):
 
 class TestRegistrarOrdemIdempotente(unittest.TestCase):
     FUNCOES = [
+        "normalizar_apostas_recebidas",
         "persistir_ordens_executor",
         "carregar_ordens_executor_persistidas",
         "registrar_ordem_idempotente",
@@ -378,6 +379,34 @@ class TestProcessarResultado(unittest.TestCase):
         self.assertEqual(segundo["coletor_sessao"], "sessao-teste")
         self.assertEqual(segundo["coletor_seq"], 2)
         self.assertEqual(self.ns["coletor_seq"], 2)
+
+
+
+
+class Bug019CompositePayloadTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        ns = {}
+        carregar_funcoes(["normalizar_apostas_recebidas"], ns)
+        cls.normalizar = staticmethod(ns["normalizar_apostas_recebidas"])
+
+    def test_normaliza_ordem_composta_principal_mais_tie(self):
+        apostas = self.normalizar({"apostas": [
+            {"alvo": "PlayerWon", "valor": 20},
+            {"alvo": "Tie", "valor": 5}
+        ]})
+        self.assertEqual(apostas, [
+            {"alvo": "PlayerWon", "valor": 20.0},
+            {"alvo": "Tie", "valor": 5.0}
+        ])
+
+    def test_rejeita_valor_nao_representavel_e_alvo_duplicado(self):
+        with self.assertRaises(ValueError):
+            self.normalizar({"apostas": [{"alvo": "PlayerWon", "valor": 7}]})
+        with self.assertRaises(ValueError):
+            self.normalizar({"apostas": [
+                {"alvo": "Tie", "valor": 5}, {"alvo": "Tie", "valor": 10}
+            ]})
 
 
 if __name__ == "__main__":

@@ -117,6 +117,39 @@ def persistir_ordens_executor(estado=None):
             except OSError:
                 pass
 
+def normalizar_apostas_recebidas(dados):
+    if not isinstance(dados, dict):
+        raise ValueError("Payload da ordem invalido")
+
+    bruto = dados.get("apostas")
+    if bruto is None:
+        bruto = [{"alvo": dados.get("alvo"), "valor": dados.get("valor")}]
+
+    if not isinstance(bruto, list) or not 1 <= len(bruto) <= 2:
+        raise ValueError("Plano de aposta deve conter uma ou duas pernas")
+
+    normalizadas = []
+    alvos = set()
+    for perna in bruto:
+        if not isinstance(perna, dict):
+            raise ValueError("Perna de aposta invalida")
+        alvo = perna.get("alvo")
+        valor_bruto = perna.get("valor")
+        if alvo not in {"PlayerWon", "BankerWon", "Tie"}:
+            raise ValueError("Alvo invalido")
+        if alvo in alvos:
+            raise ValueError("Plano de aposta contem alvo duplicado")
+        if not isinstance(valor_bruto, (int, float)) or isinstance(valor_bruto, bool):
+            raise ValueError("Valor de aposta invalido")
+        valor = float(valor_bruto)
+        if valor <= 0 or not valor.is_integer() or int(valor) % 5 != 0:
+            raise ValueError("Valor de aposta deve ser multiplo inteiro de R$5")
+        alvos.add(alvo)
+        normalizadas.append({"alvo": alvo, "valor": valor})
+
+    return normalizadas
+
+
 def carregar_ordens_executor_persistidas():
     caminho = os.path.abspath(EXECUTOR_ORDER_JOURNAL_FILE)
     if not os.path.exists(caminho):
@@ -137,25 +170,21 @@ def carregar_ordens_executor_persistidas():
             raise RuntimeError("Journal de idempotencia do executor contem ordem invalida")
 
         order_id = str(item.get("order_id") or "").strip().lower()
-        alvo = item.get("alvo")
-        valor_bruto = item.get("valor")
-        try:
-            valor = float(valor_bruto)
-        except (TypeError, ValueError):
-            raise RuntimeError("Journal de idempotencia do executor contem valor invalido")
-
         if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", order_id):
             raise RuntimeError("Journal de idempotencia do executor contem order_id invalido")
-        if alvo not in {"PlayerWon", "BankerWon", "Tie"}:
-            raise RuntimeError("Journal de idempotencia do executor contem alvo invalido")
-        if isinstance(valor_bruto, bool) or valor <= 0:
-            raise RuntimeError("Journal de idempotencia do executor contem valor invalido")
+        try:
+            apostas = normalizar_apostas_recebidas(item)
+        except ValueError as e:
+            raise RuntimeError(f"Journal de idempotencia do executor contem ordem invalida: {e}") from e
 
-        ordem = {"order_id": order_id, "alvo": alvo, "valor": valor}
+        ordem = {
+            "order_id": order_id,
+            "alvo": apostas[0]["alvo"],
+            "valor": apostas[0]["valor"],
+            "apostas": apostas
+        }
         existente = carregadas.get(order_id)
-        if existente is not None and (
-            existente["alvo"] != alvo or float(existente["valor"]) != valor
-        ):
+        if existente is not None and existente.get("apostas") != apostas:
             raise RuntimeError("Journal de idempotencia do executor contem conflito de order_id")
         carregadas[order_id] = ordem
 
@@ -167,8 +196,7 @@ def carregar_ordens_executor_persistidas():
 
 def registrar_ordem_idempotente(dados, aceitar_nova=True):
     order_id = dados["order_id"]
-    alvo = dados["alvo"]
-    valor = float(dados["valor"])
+    apostas = normalizar_apostas_recebidas(dados)
 
     # BUG-018: a ordem é vinculada ao último resultado resolvido observado pelo
     # mesmo coletor. Isso permite esperar a abertura da rodada seguinte sem risco
@@ -184,8 +212,9 @@ def registrar_ordem_idempotente(dados, aceitar_nova=True):
 
     ordem_normalizada = {
         "order_id": order_id,
-        "alvo": alvo,
-        "valor": valor,
+        "alvo": apostas[0]["alvo"],
+        "valor": apostas[0]["valor"],
+        "apostas": apostas,
         "sincronizar_janela": True,
         "coletor_seq_aceite": seq_contexto,
         "stage_aceite": stage_contexto
@@ -194,10 +223,13 @@ def registrar_ordem_idempotente(dados, aceitar_nova=True):
     with ordens_executor_lock:
         existente = ordens_executor_recebidas.get(order_id)
         if existente is not None:
-            mesmo_payload = (
-                existente["alvo"] == alvo
-                and float(existente["valor"]) == valor
-            )
+            mesmo_payload = existente.get("apostas") == apostas
+            if existente.get("apostas") is None:
+                mesmo_payload = (
+                    existente.get("alvo") == apostas[0]["alvo"]
+                    and float(existente.get("valor")) == apostas[0]["valor"]
+                    and len(apostas) == 1
+                )
             return ("duplicada" if mesmo_payload else "conflito"), existente
 
         if not aceitar_nova:
@@ -210,7 +242,6 @@ def registrar_ordem_idempotente(dados, aceitar_nova=True):
             primeiro_id = next(iter(novo_estado))
             del novo_estado[primeiro_id]
 
-        # Persiste antes do ACK/fila: se o disco falhar, a ordem nao e aceita.
         persistir_ordens_executor(novo_estado)
         ordens_executor_recebidas.clear()
         ordens_executor_recebidas.update(novo_estado)
@@ -224,7 +255,7 @@ if ordens_persistidas:
 
 @app.route('/apostar', methods=['POST'])
 def receber_aposta():
-    """Recebe ordem autenticada; nova exposição só entra na fila quando o Playwright está pronto."""
+    """Recebe uma ordem lógica; ela pode conter principal + proteção Tie."""
     if not requisicao_interna_autorizada():
         return jsonify({"erro": "Nao autorizado"}), 401
 
@@ -233,59 +264,37 @@ def receber_aposta():
         return jsonify({"erro": "Payload JSON invalido"}), 400
 
     order_id = str(dados.get("order_id") or "").strip().lower()
-    alvo = dados.get("alvo")
-    valor = dados.get("valor")
-
     if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", order_id):
         return jsonify({"erro": "order_id invalido"}), 400
-    if alvo not in {"PlayerWon", "BankerWon", "Tie"}:
-        return jsonify({"erro": "Alvo invalido"}), 400
-    if not isinstance(valor, (int, float)) or isinstance(valor, bool) or valor <= 0:
-        return jsonify({"erro": "Valor de aposta invalido"}), 400
+
+    try:
+        apostas = normalizar_apostas_recebidas(dados)
+    except ValueError as e:
+        return jsonify({"erro": str(e)}), 400
 
     try:
         resultado_idempotencia, ordem = registrar_ordem_idempotente({
             "order_id": order_id,
-            "alvo": alvo,
-            "valor": valor
+            "apostas": apostas
         }, aceitar_nova=executor_pronto.is_set())
     except Exception as e:
         print(f"❌ Falha ao persistir idempotencia da ordem {order_id}: {type(e).__name__}: {e}")
         return jsonify({"erro": "Falha ao persistir idempotencia da ordem", "aceita": False}), 503
 
     if resultado_idempotencia == "conflito":
-        return jsonify({
-            "erro": "order_id reutilizado com payload diferente",
-            "aceita": False,
-            "dados": ordem
-        }), 409
+        return jsonify({"erro": "order_id reutilizado com payload diferente", "aceita": False, "dados": ordem}), 409
 
-    # Duplicata já persistida continua idempotente mesmo se o Playwright caiu depois do aceite original.
     if resultado_idempotencia == "duplicada":
         print(f"\n♻️ ORDEM JA RECEBIDA: {order_id} - fila preservada sem duplicar aposta")
-        return jsonify({
-            "status": "Ordem ja recebida; fila preservada",
-            "aceita": True,
-            "duplicada": True,
-            "dados": ordem
-        }), 200
+        return jsonify({"status": "Ordem ja recebida; fila preservada", "aceita": True, "duplicada": True, "dados": ordem}), 200
 
     if resultado_idempotencia == "indisponivel":
         print(f"⚠️ ORDEM RECUSADA SEM ACEITE: {order_id} - Playwright ainda não está pronto")
-        return jsonify({
-            "erro": "Executor Playwright nao esta pronto",
-            "aceita": False,
-            "duplicada": False,
-            "dados": ordem
-        }), 503
+        return jsonify({"erro": "Executor Playwright nao esta pronto", "aceita": False, "duplicada": False, "dados": ordem}), 503
 
-    print(f"\n📥 ORDEM AUTENTICADA DO NODE.JS: {order_id} - Apostar R$ {valor} no alvo {alvo}")
-    return jsonify({
-        "status": "Aposta aceita na fila; aguardando resultado da interacao DOM",
-        "aceita": True,
-        "duplicada": False,
-        "dados": ordem
-    }), 200
+    resumo = " + ".join(f"R$ {int(p['valor'])} em {p['alvo']}" for p in apostas)
+    print(f"\n📥 ORDEM AUTENTICADA DO NODE.JS: {order_id} - Plano: {resumo}")
+    return jsonify({"status": "Aposta aceita na fila; aguardando resultado da interacao DOM", "aceita": True, "duplicada": False, "dados": ordem}), 200
 
 def iniciar_servidor_flask():
     app.run(host=EXECUTOR_HOST, port=EXECUTOR_PORT, debug=False, use_reloader=False)
@@ -554,23 +563,28 @@ def elemento_apostavel(locator):
         return False
 
 
-def localizar_frame_apostavel(page, cliques_necessarios, seletor_alvo):
-    seletores_fichas = [f"div[data-role='chip'][data-value='{ficha}']" for ficha, _ in cliques_necessarios]
-    seletor_alvo_css = f"[data-role='{seletor_alvo}']"
+def localizar_frame_apostavel(page, planos):
+    seletores_fichas = []
+    seletores_alvos = []
+    for plano in planos:
+        seletores_fichas.extend(
+            f"div[data-role='chip'][data-value='{ficha}']" for ficha, _ in plano["cliques_necessarios"]
+        )
+        seletores_alvos.append(f"[data-role='{plano['seletor_alvo']}']")
 
     for frame in page.frames:
         url = str(frame.url or "").lower()
         if not ("evolution" in url or "evocdn" in url or "game" in url):
             continue
-        if not all(elemento_apostavel(frame.locator(seletor)) for seletor in seletores_fichas):
+        if not all(elemento_apostavel(frame.locator(seletor)) for seletor in set(seletores_fichas)):
             continue
-        if not elemento_apostavel(frame.locator(seletor_alvo_css)):
+        if not all(elemento_apostavel(frame.locator(seletor)) for seletor in set(seletores_alvos)):
             continue
         return frame
     return None
 
 
-def aguardar_janela_aposta(page, aposta, cliques_necessarios, seletor_alvo):
+def aguardar_janela_aposta(page, aposta, planos):
     sincronizar = aposta.get("sincronizar_janela") is True
     prazo = time.monotonic() + EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS
 
@@ -609,7 +623,7 @@ def aguardar_janela_aposta(page, aposta, cliques_necessarios, seletor_alvo):
             }
 
         if contexto["estado"] == "ABERTA":
-            frame_jogo = localizar_frame_apostavel(page, cliques_necessarios, seletor_alvo)
+            frame_jogo = localizar_frame_apostavel(page, planos)
             if frame_jogo is not None:
                 return frame_jogo, None
 
@@ -624,86 +638,93 @@ def aguardar_janela_aposta(page, aposta, cliques_necessarios, seletor_alvo):
 
 
 def executar_aposta_na_tela(page, aposta):
-    """Espera a janela correta, valida actionability sem clique e só então executa o plano DOM."""
+    """Pré-valida todas as pernas e só então executa a ordem lógica composta."""
     cliques_alvo = 0
     try:
-        alvo_bruto = aposta.get("alvo")
-        valor_bruto = float(aposta.get("valor", 0))
-        valor_total = int(valor_bruto)
-
-        if valor_bruto <= 0 or valor_bruto != valor_total:
-            return {"status": "FALHOU", "motivo": "Valor incompatível com fichas inteiras", "cliques_alvo": 0}
-
         mapa_alvos = {
             "PlayerWon": "bacbo-bet-spot-Player",
             "BankerWon": "bacbo-bet-spot-Banker",
             "Tie": "bacbo-bet-spot-Tie"
         }
-        seletor_alvo = mapa_alvos.get(alvo_bruto)
-        if not seletor_alvo:
-            print(f"❌ Erro: Alvo '{alvo_bruto}' não mapeado.")
-            return {"status": "FALHOU", "motivo": "Alvo não mapeado", "cliques_alvo": 0}
-
         fichas_disponiveis = [5000, 2500, 500, 125, 25, 10, 5]
-        valor_restante = valor_total
-        cliques_necessarios = []
+        apostas = normalizar_apostas_recebidas(aposta)
+        planos = []
 
-        for ficha in fichas_disponiveis:
-            qtd = valor_restante // ficha
-            if qtd > 0:
-                cliques_necessarios.append((ficha, qtd))
-                valor_restante %= ficha
+        for perna in apostas:
+            alvo_bruto = perna["alvo"]
+            valor_total = int(perna["valor"])
+            seletor_alvo = mapa_alvos.get(alvo_bruto)
+            if not seletor_alvo:
+                return {"status": "FALHOU", "motivo": "Alvo não mapeado", "cliques_alvo": 0}
 
-        if valor_restante > 0 or not cliques_necessarios:
-            print(f"⚠️ Aposta ignorada: R$ {valor_total} não pode ser representado exatamente pelas fichas disponíveis.")
-            return {"status": "FALHOU", "motivo": "Valor não representável pelas fichas", "cliques_alvo": 0}
+            valor_restante = valor_total
+            cliques_necessarios = []
+            for ficha in fichas_disponiveis:
+                qtd = valor_restante // ficha
+                if qtd > 0:
+                    cliques_necessarios.append((ficha, qtd))
+                    valor_restante %= ficha
 
-        frame_jogo, bloqueio = aguardar_janela_aposta(page, aposta, cliques_necessarios, seletor_alvo)
+            if valor_restante != 0 or not cliques_necessarios:
+                print(f"⚠️ Aposta ignorada: R$ {valor_total} não pode ser representado exatamente pelas fichas disponíveis.")
+                return {"status": "FALHOU", "motivo": "Valor não representável pelas fichas", "cliques_alvo": 0}
+
+            planos.append({
+                "alvo": alvo_bruto,
+                "valor": valor_total,
+                "seletor_alvo": seletor_alvo,
+                "cliques_necessarios": cliques_necessarios
+            })
+
+        # BUG-019: principal e proteção Tie precisam estar acionáveis antes do primeiro clique real.
+        frame_jogo, bloqueio = aguardar_janela_aposta(page, aposta, planos)
         if bloqueio is not None:
             print(f"⚠️ Ordem não executada: {bloqueio['motivo']}")
             return bloqueio
 
-        for ficha, qtd in cliques_necessarios:
-            seletor_ficha = f"div[data-role='chip'][data-value='{ficha}']"
-            try:
-                ficha_elemento = frame_jogo.locator(seletor_ficha).first
-                ficha_elemento.click(timeout=2000)
-                page.wait_for_timeout(200)
-
-                alvo_elemento = frame_jogo.locator(f"[data-role='{seletor_alvo}']").first
-                for _ in range(qtd):
-                    alvo_elemento.click(timeout=2000)
-                    cliques_alvo += 1
+        for plano in planos:
+            alvo_elemento = frame_jogo.locator(f"[data-role='{plano['seletor_alvo']}']").first
+            for ficha, qtd in plano["cliques_necessarios"]:
+                seletor_ficha = f"div[data-role='chip'][data-value='{ficha}']"
+                try:
+                    ficha_elemento = frame_jogo.locator(seletor_ficha).first
+                    ficha_elemento.click(timeout=2000)
                     page.wait_for_timeout(150)
-            except PlaywrightTimeoutError as e:
-                status = "AMBIGUA" if cliques_alvo > 0 else "FALHOU"
-                print(f"⚠️ Timeout durante tentativa DOM da ficha {ficha}: {e}")
-                return {
-                    "status": status,
-                    "motivo": f"Timeout DOM após {cliques_alvo} clique(s) de alvo",
-                    "cliques_alvo": cliques_alvo
-                }
-            except Exception as e:
-                status = "AMBIGUA" if cliques_alvo > 0 else "FALHOU"
-                print(f"⚠️ Falha durante tentativa DOM da ficha {ficha}: {e}")
-                return {
-                    "status": status,
-                    "motivo": f"Falha DOM após {cliques_alvo} clique(s) de alvo",
-                    "cliques_alvo": cliques_alvo
-                }
 
-        print(
-            f"🎯 INTERAÇÃO DOM CONCLUÍDA: R$ {valor_total} no {alvo_bruto}; "
-            f"{cliques_alvo} clique(s) de alvo executado(s)."
-        )
+                    for _ in range(int(qtd)):
+                        alvo_elemento.click(timeout=2000)
+                        cliques_alvo += 1
+                        page.wait_for_timeout(120)
+                except PlaywrightTimeoutError as e:
+                    status = "AMBIGUA" if cliques_alvo > 0 else "FALHOU"
+                    print(f"⚠️ Timeout durante tentativa DOM da ficha {ficha}: {e}")
+                    return {
+                        "status": status,
+                        "motivo": f"Timeout DOM após {cliques_alvo} clique(s) de alvo",
+                        "cliques_alvo": cliques_alvo
+                    }
+                except Exception as e:
+                    status = "AMBIGUA" if cliques_alvo > 0 else "FALHOU"
+                    print(f"⚠️ Falha durante tentativa DOM da ficha {ficha}: {type(e).__name__}: {e}")
+                    return {
+                        "status": status,
+                        "motivo": f"Falha DOM após {cliques_alvo} clique(s) de alvo",
+                        "cliques_alvo": cliques_alvo
+                    }
+
+        total = sum(p["valor"] for p in planos)
+        resumo = " + ".join(f"R$ {p['valor']} {p['alvo']}" for p in planos)
+        print(f"🎯 INTERAÇÃO DOM CONCLUÍDA: {resumo}; exposição total R$ {total}; {cliques_alvo} clique(s) de alvo.")
         return {
             "status": "EXECUTADA",
-            "motivo": "Interação DOM concluída sem erro local após confirmação da janela apostável",
+            "motivo": "Plano DOM composto concluído localmente",
             "cliques_alvo": cliques_alvo
         }
+    except ValueError as e:
+        return {"status": "FALHOU", "motivo": str(e), "cliques_alvo": cliques_alvo}
     except Exception as e:
         status = "AMBIGUA" if cliques_alvo > 0 else "FALHOU"
-        print(f"❌ Erro grave na engine de aposta: {e}")
+        print(f"⚠️ Erro inesperado no executor: {type(e).__name__}: {e}")
         return {
             "status": status,
             "motivo": f"Erro inesperado após {cliques_alvo} clique(s) de alvo",

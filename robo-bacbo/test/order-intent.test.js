@@ -137,7 +137,7 @@ test("callback FALHOU vira FALHA_EXECUCAO e callback EXPIRADA vira ORDEM_EXPIRAD
 test("DIRETO e GALE continuam persistindo PREPARANDO antes do POST ao executor", () => {
     const diretoIntent = source.indexOf("intencaoDireto = await criarIntencaoOrdem(dbPool");
     const diretoSend = source.indexOf(
-        "await enviarOrdemAoExecutor(alvoPython, valorArredondado, ordemExecutorIdDireto)",
+        "await enviarOrdemAoExecutor(alvoPython, valorArredondado, ordemExecutorIdDireto, planoDireto.apostas)",
         diretoIntent
     );
     assert.ok(diretoIntent >= 0 && diretoSend > diretoIntent);
@@ -145,7 +145,7 @@ test("DIRETO e GALE continuam persistindo PREPARANDO antes do POST ao executor",
     const galeIntent = source.indexOf("intencaoGale = await criarIntencaoOrdem(conexaoGale");
     const galeCommit = source.indexOf("await conexaoGale.commit();", galeIntent);
     const galeSend = source.indexOf(
-        "await enviarOrdemAoExecutor(alvoPython, valorGale, ordemExecutorIdGale)",
+        "await enviarOrdemAoExecutor(alvoPython, valorGale, ordemExecutorIdGale, planoGale.apostas)",
         galeIntent
     );
     assert.ok(galeIntent >= 0 && galeCommit > galeIntent && galeSend > galeCommit);
