@@ -1968,6 +1968,31 @@ function contarTiesLegados(tiesJson) {
 }
 
 async function calcularAssertividadePersistidaEstrategia(est) {
+    // Estratégias IA são avaliadas pela mesma janela bruta usada pelo robô proprietário.
+    // Isso evita iniciar em 0% e também evita duplicar a amostra minerada nos contadores live.
+    if (est && est.is_dinamico) {
+        const roboDono = ROBOS_MEMORIA.find(
+            robo => Number(robo.id) === Number(est.robo_dono_id)
+        );
+        const rangeConfig = Number(roboDono?.config?.auto_tuning?.range);
+        const rangeDinamico = Number.isFinite(rangeConfig)
+            ? Math.max(100, Math.min(10000, Math.trunc(rangeConfig)))
+            : 1000;
+        const dadosDinamicos = historicoGirosAnalitico.slice(-rangeDinamico);
+        const detalhes = calcularDetalhesPadraoNoHistorico(
+            est,
+            dadosDinamicos,
+            Date.now()
+        ).geral;
+        const greens = (Number(detalhes.green_direto) || 0)
+            + (Number(detalhes.gale1) || 0)
+            + (Number(detalhes.gale2) || 0)
+            + contarTiesLegados(detalhes.ties);
+        const reds = Number(detalhes.red) || 0;
+        const total = greens + reds;
+        return total > 0 ? (greens / total) * 100 : 0;
+    }
+
     const [baselineRows] = await dbPool.query(
         'SELECT green_direto, gale1, gale2, red, ties_json FROM estrategias WHERE id=? LIMIT 1',
         [est.id]
