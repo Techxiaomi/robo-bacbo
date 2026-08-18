@@ -1,4 +1,42 @@
 from pathlib import Path
+import subprocess
+
+# Mantém calcularFichaSegura autocontida no backend porque a suíte pura extrai
+# essa função isoladamente do arquivo, sem executar os requires do módulo.
+bot_path = Path('robo-bacbo/bot2_coletor.js')
+bot = bot_path.read_text(encoding='utf-8')
+wrapper = '''function calcularFichaSegura(valorDesejado) {
+    return calcularFichaSeguraProtecao(valorDesejado);
+}
+
+'''
+original = '''function calcularFichaSegura(valorDesejado) {
+    let valor = parseFloat(valorDesejado);
+    if (isNaN(valor) || valor <= 0) return 0;
+
+    let valorArredondado = Math.round(valor / 5) * 5;
+    if (valorArredondado === 0 && valor > 0) {
+        valorArredondado = 5;
+    }
+    return valorArredondado;
+}
+
+'''
+if wrapper not in bot:
+    raise RuntimeError('Wrapper calcularFichaSegura gerado nao encontrado')
+bot_path.write_text(bot.replace(wrapper, original, 1), encoding='utf-8')
+
+# O teste de intenção durável precisa reconhecer que o POST agora leva o plano composto.
+order_path = Path('robo-bacbo/test/order-intent.test.js')
+order = order_path.read_text(encoding='utf-8')
+old_direto = 'await enviarOrdemAoExecutor(alvoPython, valorArredondado, ordemExecutorIdDireto)'
+new_direto = 'await enviarOrdemAoExecutor(alvoPython, valorArredondado, ordemExecutorIdDireto, planoDireto.apostas)'
+old_gale = 'await enviarOrdemAoExecutor(alvoPython, valorGale, ordemExecutorIdGale)'
+new_gale = 'await enviarOrdemAoExecutor(alvoPython, valorGale, ordemExecutorIdGale, planoGale.apostas)'
+if old_direto not in order or old_gale not in order:
+    raise RuntimeError('Anchors do teste de intenção durável nao encontrados')
+order = order.replace(old_direto, new_direto, 1).replace(old_gale, new_gale, 1)
+order_path.write_text(order, encoding='utf-8')
 
 pure_path = Path('robo-sync-pilot/tests/test_pure_logic.py')
 pure = pure_path.read_text(encoding='utf-8')
@@ -75,5 +113,9 @@ teste = '''    def test_bug019_ordem_composta_prevalida_e_executa_principal_mais
 '''
 pw = pw[:start] + teste + pw[end:]
 pw_path.write_text(pw, encoding='utf-8')
+
+# O workflow final faz git add explícito dos arquivos principais; este teste adicional
+# precisa entrar no mesmo commit gerado.
+subprocess.run(['git', 'add', str(order_path)], check=True)
 
 print('Testes BUG-019 alinhados ao harness existente')
