@@ -155,6 +155,14 @@ jobs:
         run: python tests/test_playwright_dom.py
         working-directory: robo-sync-pilot
 
+      - name: Check dashboard browser smoke syntax
+        run: python -m py_compile integration/dashboard-browser-smoke.py
+        working-directory: robo-bacbo
+
+      - name: Run dashboard browser smoke
+        run: python integration/dashboard-browser-smoke.py
+        working-directory: robo-bacbo
+
   controlled-e2e:
     name: Controlled collector + Node + executor + MySQL E2E
     runs-on: ubuntu-latest

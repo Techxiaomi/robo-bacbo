@@ -61,10 +61,43 @@ function criarSandboxDashboard(fetchImpl) {
     return { sandbox, elementos, botoes };
 }
 
-test('BUG-016: bootstrap carrega a UI principal e injeta o controlador do dashboard', () => {
-    assert.match(loaderHtml, /fetch\('\/dashboard-app\.html\?_t='/);
-    assert.match(loaderHtml, /dashboard-ui\.js/);
-    assert.match(loaderHtml, /document\.write\(html\)/);
+test('BUG-017: loader elimina document.write e fixa a ordem das dependencias criticas', () => {
+    assert.doesNotMatch(loaderHtml, /document\.open\(\)/);
+    assert.doesNotMatch(loaderHtml, /document\.write\(/);
+    assert.doesNotMatch(loaderHtml, /document\.close\(\)/);
+
+    const posChart = loaderHtml.indexOf('cdn.jsdelivr.net/npm/chart.js');
+    const posPdf = loaderHtml.indexOf('html2pdf.bundle.min.js');
+    const posSocket = loaderHtml.indexOf('/socket.io/socket.io.js');
+    const posDashboard = loaderHtml.indexOf('/dashboard-ui.js');
+    assert.ok(posChart >= 0, 'Chart.js ausente');
+    assert.ok(posPdf > posChart, 'html2pdf deve carregar depois do Chart.js');
+    assert.ok(posSocket > posPdf, 'Socket.IO deve carregar antes da aplicacao');
+    assert.ok(posDashboard > posSocket, 'dashboard-ui deve carregar depois do Socket.IO');
+
+    assert.match(loaderHtml, /new DOMParser\(\)\.parseFromString\(html, 'text\/html'\)/);
+    assert.match(loaderHtml, /querySelectorAll\('script:not\(\[src\]\)'\)/);
+    assert.match(loaderHtml, /codigo\.includes\('const socketWeb = io\(\);'\)/);
+    assert.match(loaderHtml, /parsed\.querySelectorAll\('script'\)\.forEach\(script => script\.remove\(\)\)/);
+    assert.match(loaderHtml, /document\.body\.replaceChildren\(/);
+    assert.match(loaderHtml, /script\.textContent = scriptPrincipal/);
+});
+
+test('BUG-017: seletores e card de sinal continuam ligados ao ciclo principal da aplicacao', () => {
+    assert.match(appHtml, /const socketWeb = io\(\);/);
+    assert.match(appHtml, /socketWeb\.on\('alerta_painel', \(dados\) => \{/);
+
+    assert.match(appHtml, /fetch\('\/api\/estrategias'\+q\)/);
+    assert.match(appHtml, /fetch\('\/api\/origens'\+q\)/);
+    assert.match(appHtml, /fetch\('\/api\/robos\?_t=' \+ Date\.now\(\)\)/);
+    assert.match(appHtml, /document\.getElementById\('select-origem-filtro'\)\.innerHTML = ops/);
+    assert.match(appHtml, /document\.getElementById\('select-origem-dash'\)\.innerHTML = ops/);
+    assert.match(appHtml, /renderizarCardsRobos\(\); atualizarFiltrosRoboUI\(\); await atualizarDashboardValores\(\)/);
+    assert.match(appHtml, /sintonizador\.innerHTML = '<option value="TODOS">Todos os Robôs<\/option>' \+/);
+    assert.match(appHtml, /filtroDash\.innerHTML = '<option value="TODOS">🤖 Todos os Robôs<\/option>' \+/);
+
+    assert.match(appHtml, /document\.getElementById\('conteudo-card-ativo'\)\.innerHTML = gerarHtmlCardEstrategia\(est, 'ativo', dashPeriodoAtual\)/);
+    assert.match(appHtml, /document\.getElementById\('container-card-ativo'\)\.style\.display = 'block'/);
 });
 
 test('BUG-016: filtros do dashboard chamam funções globais implementadas', () => {

@@ -4,31 +4,81 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Inteligência Bac Bo</title>
+
+    <!-- Dependências críticas carregadas de forma determinística antes da aplicação -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="/dashboard-ui.js"></script>
+
     <style>
-        html, body { margin: 0; min-height: 100%; background: #121212; color: #fff; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-        #boot { padding: 24px; text-align: center; color: #888; }
+        html, body {
+            margin: 0;
+            min-height: 100%;
+            background: #121212;
+            color: #fff;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        #boot {
+            padding: 24px;
+            text-align: center;
+            color: #888;
+        }
     </style>
 </head>
 <body>
     <div id="boot">Carregando painel...</div>
+
     <script>
         (async () => {
             try {
+                if (typeof window.io !== 'function') {
+                    throw new Error('Cliente Socket.IO não carregado');
+                }
+                if (typeof window.atualizarDashboardValores !== 'function') {
+                    throw new Error('Controlador do dashboard não carregado');
+                }
+
                 const response = await fetch('/dashboard-app.html?_t=' + Date.now(), {
                     cache: 'no-store',
                     credentials: 'same-origin'
                 });
                 if (!response.ok) throw new Error('HTTP ' + response.status);
 
-                let html = await response.text();
-                const fechamentoHead = '</head>';
-                const scriptDashboard = '<script src="/dashboard-ui.js"></' + 'script>';
-                if (!html.includes(fechamentoHead)) throw new Error('Estrutura HTML do painel inválida');
-                html = html.replace(fechamentoHead, '    ' + scriptDashboard + '\n' + fechamentoHead);
+                const html = await response.text();
+                const parsed = new DOMParser().parseFromString(html, 'text/html');
+                if (!parsed.head || !parsed.body) {
+                    throw new Error('Estrutura HTML do painel inválida');
+                }
 
-                document.open();
-                document.write(html);
-                document.close();
+                const scriptsInline = Array.from(parsed.querySelectorAll('script:not([src])'))
+                    .map(script => script.textContent || '')
+                    .filter(codigo => codigo.trim() !== '');
+
+                const scriptPrincipal = scriptsInline.find(codigo => codigo.includes('const socketWeb = io();'));
+                if (!scriptPrincipal) {
+                    throw new Error('JavaScript principal do painel não encontrado');
+                }
+
+                // As dependências externas já foram carregadas acima em ordem fixa.
+                // Removemos todos os scripts do documento-base para impedir execução duplicada.
+                parsed.querySelectorAll('script').forEach(script => script.remove());
+
+                document.documentElement.lang = parsed.documentElement.lang || 'pt-BR';
+                document.head.replaceChildren(
+                    ...Array.from(parsed.head.childNodes).map(node => document.importNode(node, true))
+                );
+                document.body.replaceChildren(
+                    ...Array.from(parsed.body.childNodes).map(node => document.importNode(node, true))
+                );
+
+                const script = document.createElement('script');
+                script.textContent = scriptPrincipal;
+                document.body.appendChild(script);
+
+                // O HTML-base foi montado depois do DOMContentLoaded original do loader.
+                // Disparamos o evento apenas para inicializadores visuais que aguardam esse ciclo.
+                window.dispatchEvent(new Event('DOMContentLoaded'));
             } catch (error) {
                 console.error('Falha ao carregar painel:', error);
                 const boot = document.getElementById('boot');
