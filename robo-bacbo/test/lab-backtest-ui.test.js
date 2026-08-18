@@ -46,12 +46,36 @@ test('UX-005: Automático é a primeira opção e seleção padrão', () => {
     assert.match(labJs, /const modoSelecionado = document\.getElementById\('bk-entrada'\)\?\.value \|\| 'AUTO'/);
 });
 
-test('UX-004: opções de quantidade são exatamente as solicitadas e MAX usa toda a memória', () => {
+test('UX-004/006A: opções de quantidade são padronizadas e MAX usa toda a memória', () => {
     for (const valor of ['100', '200', '500', '1000', '2000', '5000', 'MAX']) {
         assert.match(labJs, new RegExp(`value: '${valor}'`));
     }
     assert.match(labJs, /Toda a Base \(Max\)/);
-    assert.match(labJs, /if \(valor === 'MAX'\) return girosInMemoria\.slice\(\)/);
+    assert.match(labJs, /preencherRange\(range, 'MAX'\)/);
+    assert.match(labJs, /preencherRange\(document\.getElementById\('mn-range'\), '1000'\)/);
+    assert.match(labJs, /id="bk-dashboard-range"/);
+});
+
+test('UX-006A: corte compartilhado atende 100/200/500/1000/2000/5000/MAX', () => {
+    const ui = carregarHelpers();
+    const dados = Array.from({ length: 6007 }, (_, indice) => indice);
+
+    for (const limite of [100, 200, 500, 1000, 2000, 5000]) {
+        const corte = ui.ux006CortarDadosPorRange(String(limite), dados);
+        assert.equal(corte.length, limite);
+        assert.equal(corte[0], dados.length - limite);
+    }
+
+    const max = ui.ux006CortarDadosPorRange('MAX', dados);
+    assert.equal(max.length, dados.length);
+    assert.notEqual(max, dados);
+});
+
+test('UX-006A: dashboard do Backtest mantém filtro próprio e não herda range do Lab', () => {
+    assert.match(labJs, /const valor = document\.getElementById\('bk-dashboard-range'\)\?\.value \|\| 'MAX'/);
+    assert.match(labJs, /function atualizarDashboardBacktestPorRange\(\)/);
+    assert.match(labJs, /calcularEstatisticasMesaBase\(obterDadosDashboardBacktest\(\)\)/);
+    assert.match(labJs, /atualizarDashboardBacktestPorRange\(\);\s*renderizarFitaTemporal\(dadosCorte/);
 });
 
 test('UX-004: modo Automático executa as quatro modalidades no mesmo motor', () => {
