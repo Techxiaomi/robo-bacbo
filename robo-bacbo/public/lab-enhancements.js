@@ -56,6 +56,20 @@
         };
     }
 
+    function ordenarResultadosAutomaticos(resultados) {
+        return resultados
+            .map((item, indiceOriginal) => ({
+                ...item,
+                indiceOriginal,
+                assertividadeOrdenacao: resumirStats(item?.resultado?.stats).assertividade
+            }))
+            .sort((a, b) => {
+                const diferenca = b.assertividadeOrdenacao - a.assertividadeOrdenacao;
+                return diferenca !== 0 ? diferenca : a.indiceOriginal - b.indiceOriginal;
+            })
+            .map(({ indiceOriginal, assertividadeOrdenacao, ...item }) => item);
+    }
+
     function obterDadosCorte() {
         if (typeof girosInMemoria === 'undefined' || !Array.isArray(girosInMemoria)) return [];
         const valor = document.getElementById('bk-range')?.value || 'MAX';
@@ -90,7 +104,9 @@
                 .bk-auto-card { background:#111; border:1px solid #333; border-radius:8px; padding:12px; min-width:0; }
                 .bk-auto-card h4 { margin:0 0 8px 0; font-size:12px; }
                 .bk-auto-assert { font-size:24px; font-weight:800; line-height:1; margin-bottom:4px; }
-                .bk-auto-sub { color:#888; font-size:10px; margin-bottom:9px; }
+                .bk-auto-ocorrencias { display:flex; justify-content:space-between; align-items:center; background:#181818; border:1px solid #303030; border-radius:6px; padding:7px 9px; margin:8px 0 10px; }
+                .bk-auto-ocorrencias span { color:#888; font-size:9px; text-transform:uppercase; letter-spacing:.3px; }
+                .bk-auto-ocorrencias strong { color:#fff; font-size:16px; line-height:1; }
                 .bk-auto-metricas { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:5px; }
                 .bk-auto-metrica { background:#191919; border:1px solid #292929; border-radius:5px; padding:5px 3px; text-align:center; }
                 .bk-auto-metrica span { display:block; color:#777; font-size:8px; text-transform:uppercase; }
@@ -109,7 +125,7 @@
             <div class="bk-auto-card" data-bk-modo="${modo.value}" style="border-top:3px solid ${modo.cor};">
                 <h4 style="color:${modo.cor};">${modo.label}</h4>
                 <div class="bk-auto-assert" style="color:${corAssert};">${s.assertividade.toFixed(1)}%</div>
-                <div class="bk-auto-sub">${s.vitorias} vitórias em ${s.ocorrencias} ocorrências</div>
+                <div class="bk-auto-ocorrencias"><span>Ocorrências</span><strong>${s.ocorrencias}</strong></div>
                 <div class="bk-auto-metricas">
                     <div class="bk-auto-metrica"><span>Greens</span><strong style="color:#28a745;">${s.greensSemTie}</strong></div>
                     <div class="bk-auto-metrica"><span>Empates</span><strong style="color:#ffc107;">${s.ties}</strong></div>
@@ -131,12 +147,14 @@
         const box = document.getElementById('bk-resultados-box');
         const area = garantirAreaAutomatica();
         const grid = document.getElementById('bk-auto-grid');
-        if (!area || !grid) return;
+        if (!area || !grid) return [];
 
+        const ordenados = ordenarResultadosAutomaticos(resultados);
         if (placeholder) placeholder.style.display = 'none';
         if (box) box.style.display = 'none';
         area.style.display = 'block';
-        grid.innerHTML = resultados.map(item => cardAutomatico(item.modo, item.resultado.stats)).join('');
+        grid.innerHTML = ordenados.map(item => cardAutomatico(item.modo, item.resultado.stats)).join('');
+        return ordenados;
     }
 
     function rodarBacktestManualAprimorado() {
@@ -147,7 +165,7 @@
             return alert('Aguarde o carregamento dos giros.');
         }
 
-        const modoSelecionado = document.getElementById('bk-entrada')?.value || 'PLAYER';
+        const modoSelecionado = document.getElementById('bk-entrada')?.value || 'AUTO';
         const gales = Number.parseInt(document.getElementById('bk-gales')?.value || '0', 10);
         const dadosCorte = obterDadosCorte();
 
@@ -156,10 +174,10 @@
                 modo,
                 resultado: simularBacktestCore(bkPadraoAtual, modo.alvo, gales, modo.protegeEmpate, dadosCorte)
             }));
-            mostrarResultadosAutomaticos(resultados);
+            const ordenados = mostrarResultadosAutomaticos(resultados);
             calcularEstatisticasMesa(dadosCorte);
             renderizarFitaTemporal(dadosCorte, []);
-            return resultados;
+            return ordenados;
         }
 
         const modo = resolverModoAposta(modoSelecionado);
@@ -178,7 +196,7 @@
             return alert('Rode o backtest primeiro.');
         }
 
-        const valor = document.getElementById('bk-entrada')?.value || 'PLAYER';
+        const valor = document.getElementById('bk-entrada')?.value || 'AUTO';
         if (valor === 'AUTO') {
             return alert('Para salvar, escolha Player, Player + Empate, Banker ou Banker + Empate.');
         }
@@ -199,10 +217,10 @@
         if (!entrada || !range) return;
 
         entrada.innerHTML = [
-            ...MODOS_APOSTA.map(modo => `<option value="${modo.value}">${modo.label}</option>`),
-            '<option value="AUTO">⚡ Automático — comparar as 4 opções</option>'
+            '<option value="AUTO">⚡ Automático — comparar as 4 opções</option>',
+            ...MODOS_APOSTA.map(modo => `<option value="${modo.value}">${modo.label}</option>`)
         ].join('');
-        entrada.value = 'PLAYER';
+        entrada.value = 'AUTO';
 
         range.innerHTML = OPCOES_RANGE
             .map(opcao => `<option value="${opcao.value}"${opcao.value === 'MAX' ? ' selected' : ''}>${opcao.label}</option>`)
@@ -223,4 +241,5 @@
     window.bkSalvarComoEstrategiaAprimorado = salvarComoEstrategiaAprimorado;
     window.ux004ResolverModoAposta = resolverModoAposta;
     window.ux004ResumirStats = resumirStats;
+    window.ux005OrdenarResultadosAutomaticos = ordenarResultadosAutomaticos;
 })();
