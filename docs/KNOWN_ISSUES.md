@@ -1,6 +1,6 @@
 # Problemas e Riscos Conhecidos
 
-Atualizado em 2026-08-17. Este arquivo descreve o estado atual do `main` e separa riscos ainda abertos de itens já mitigados.
+Atualizado em 2026-08-18. Este arquivo descreve o estado atual do `main` e separa riscos ainda abertos de itens já mitigados.
 
 ## Pendências reais
 
@@ -90,6 +90,12 @@ Risco residual externo:
 - o DOM/WebSocket do site real, sessão autenticada, disponibilidade e regras da plataforma podem divergir do ambiente controlado do CI; esses fatores devem ser tratados como validação operacional, não como gate determinístico do repositório.
 
 ## Itens mitigados
+
+### BUG-018 — Resultado resolvido antecede a janela real de apostas
+
+Status: **mitigado**.
+
+O sinal pode nascer assim que o coletor recebe `stage=Resolved`, enquanto a mesa só libera fichas/alvos alguns segundos depois. O executor agora vincula cada ordem ao `coletor_seq` vigente no aceite, aguarda a saída de `Resolved` e exige que todas as fichas necessárias e o alvo passem por `click(trial=True)` antes de qualquer clique real. Se outra rodada resolver antes do primeiro clique, se a janela não ficar acionável dentro de `EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS` ou se o executor perder prontidão, a ordem termina sem clique. O TTL de 8 s continua limitando somente o tempo de fila; o timeout Node de callback foi ampliado para 30 s para comportar a espera legítima da janela.
 
 ### SEC-002 — Comunicação interna Node ↔ Python sem autenticação
 

@@ -152,6 +152,8 @@ class TestRegistrarOrdemIdempotente(unittest.TestCase):
         self.assertEqual(self.ns["fila_apostas"].qsize(), 1)
         enfileirada = self.ns["fila_apostas"].queue[0]
         self.assertGreater(enfileirada["aceita_em_ms"], 0)
+        self.assertTrue(enfileirada["sincronizar_janela"])
+        self.assertEqual(enfileirada["coletor_seq_aceite"], 0)
         self.assertTrue(os.path.isfile(self.journal))
 
     def test_repeticao_identica_nao_duplica_fila(self):
