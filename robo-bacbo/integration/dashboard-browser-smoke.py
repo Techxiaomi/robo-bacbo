@@ -206,7 +206,7 @@ def main():
         )
         assert card["display"] == "block", card
         assert "Padrao Teste" in card["conteudo"], card
-        assert "SINAL: Padrao Teste" in card["titulo"], card
+        assert "SINAL: PADRAO TESTE" in card["titulo"], card
         assert "PLAYER" in card["acao"], card
 
         assert not page_errors, f"Erros JavaScript na pagina: {page_errors}"
