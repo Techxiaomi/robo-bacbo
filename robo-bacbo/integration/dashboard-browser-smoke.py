@@ -141,6 +141,16 @@ def main():
             timeout=10000,
         )
 
+        page.wait_for_function(
+            """
+            () => document.getElementById('dash-sinais')?.innerText === '4'
+                && document.getElementById('dash-greens')?.innerText === '3'
+                && document.getElementById('dash-reds')?.innerText === '1'
+                && document.getElementById('dash-assertividade')?.innerText === '75.0%'
+            """,
+            timeout=10000,
+        )
+
         opcoes = page.evaluate(
             """
             () => ({
