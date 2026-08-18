@@ -215,8 +215,10 @@ def main():
                 maxGreen: document.getElementById('dash-max-green').innerText,
                 maxRed: document.getElementById('dash-max-red').innerText,
                 assertividade: document.getElementById('dash-assertividade').innerText,
+                dashboardOrdem: Array.from(document.querySelectorAll('#dashboard-resumo-grid > .dash-box')).map(card => card.querySelector('span')?.textContent.trim()),
                 cardRobo: document.getElementById('lista-robos').innerText,
                 labModos: Array.from(document.querySelectorAll('#bk-entrada option')).map(o => ({ value: o.value, label: o.textContent.trim() })),
+                labSelecionado: document.getElementById('bk-entrada').value,
                 labRanges: Array.from(document.querySelectorAll('#bk-range option')).map(o => ({ value: o.value, label: o.textContent.trim() })),
                 socketRegistrado: typeof window.__socketHandlers.alerta_painel === 'function'
             })
@@ -234,15 +236,19 @@ def main():
         assert "3" in opcoes["maxGreen"], opcoes
         assert "2" in opcoes["maxRed"], opcoes
         assert opcoes["assertividade"] == "66.7%", opcoes
+        assert opcoes["dashboardOrdem"] == [
+            "Sinais Disparados", "Greens", "Empates", "Reds", "Maior Sequência", "Assertividade"
+        ], opcoes
         assert "Entradas: 4" in opcoes["cardRobo"], opcoes
         assert "Empates: 1" in opcoes["cardRobo"], opcoes
         assert "Reds: 1" in opcoes["cardRobo"], opcoes
         assert [item["value"] for item in opcoes["labModos"]] == [
-            "PLAYER", "PLAYER_TIE", "BANKER", "BANKER_TIE", "AUTO"
+            "AUTO", "PLAYER", "PLAYER_TIE", "BANKER", "BANKER_TIE"
         ], opcoes
-        assert "Player +" in opcoes["labModos"][1]["label"], opcoes
-        assert "Banker +" in opcoes["labModos"][3]["label"], opcoes
-        assert "Automático" in opcoes["labModos"][4]["label"], opcoes
+        assert opcoes["labSelecionado"] == "AUTO", opcoes
+        assert "Automático" in opcoes["labModos"][0]["label"], opcoes
+        assert "Player +" in opcoes["labModos"][2]["label"], opcoes
+        assert "Banker +" in opcoes["labModos"][4]["label"], opcoes
         assert [item["value"] for item in opcoes["labRanges"]] == [
             "100", "200", "500", "1000", "2000", "5000", "MAX"
         ], opcoes
@@ -277,7 +283,6 @@ def main():
                 bkAdd('Banker');
                 document.getElementById('bk-gales').value = '0';
                 document.getElementById('bk-range').value = 'MAX';
-                document.getElementById('bk-entrada').value = 'AUTO';
                 window.rodarBacktestManual();
             }
             """
@@ -298,7 +303,9 @@ def main():
                 autoDisplay: document.getElementById('bk-resultados-auto').style.display,
                 cards: Array.from(document.querySelectorAll('#bk-auto-grid .bk-auto-card')).map(card => ({
                     modo: card.dataset.bkModo,
-                    texto: card.innerText
+                    texto: card.innerText,
+                    assertividade: Number.parseFloat(card.querySelector('.bk-auto-assert')?.textContent || '0'),
+                    ocorrencias: card.querySelector('.bk-auto-ocorrencias strong')?.textContent || ''
                 }))
             })
             """
@@ -306,16 +313,18 @@ def main():
         assert auto["singleDisplay"] == "none", auto
         assert auto["autoDisplay"] == "block", auto
         assert [card["modo"] for card in auto["cards"]] == [
-            "PLAYER", "PLAYER_TIE", "BANKER", "BANKER_TIE"
+            "PLAYER_TIE", "BANKER_TIE", "PLAYER", "BANKER"
         ], auto
-        assert "Player" in auto["cards"][0]["texto"], auto
-        assert "Player +" in auto["cards"][1]["texto"], auto
-        assert "Banker" in auto["cards"][2]["texto"], auto
-        assert "Banker +" in auto["cards"][3]["texto"], auto
+        assert [card["assertividade"] for card in auto["cards"]] == sorted(
+            [card["assertividade"] for card in auto["cards"]], reverse=True
+        ), auto
         for card_auto in auto["cards"]:
             assert "Greens" in card_auto["texto"], auto
             assert "Empates" in card_auto["texto"], auto
             assert "Reds" in card_auto["texto"], auto
+            assert "Ocorrências" in card_auto["texto"], auto
+            assert card_auto["ocorrencias"] == "4", auto
+            assert "vitórias em" not in card_auto["texto"], auto
 
         page.evaluate(
             """
@@ -368,7 +377,7 @@ def main():
         assert not page_errors, f"Erros JavaScript na pagina: {page_errors}"
         browser.close()
 
-    print("UX-002/003 + UX-004 dashboard, robot cards and Lab browser smoke: PASS")
+    print("UX-005 dashboard order and Lab automatic ranking browser smoke: PASS")
 
 
 if __name__ == "__main__":
