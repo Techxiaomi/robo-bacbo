@@ -11,10 +11,12 @@ PUBLIC = ROOT / "public"
 def detalhes_periodo():
     return {
         "green_direto": 1,
-        "gale1": 0,
+        "gale1": 1,
         "gale2": 0,
-        "red": 0,
-        "ties": {"direto": {}, "gale1": {}, "gale2": {}},
+        "red": 1,
+        "ties": {"direto": {"4x": 1}, "gale1": {}, "gale2": {}},
+        "max_green_seq": 3,
+        "max_red_seq": 1,
     }
 
 
@@ -30,6 +32,7 @@ def main():
     loader_html = (PUBLIC / "index.html").read_text(encoding="utf-8")
     app_html = (PUBLIC / "dashboard-app.html").read_text(encoding="utf-8")
     dashboard_js = (PUBLIC / "dashboard-ui.js").read_text(encoding="utf-8")
+    enhancements_js = (PUBLIC / "ui-enhancements.js").read_text(encoding="utf-8")
 
     estrategia = {
         "id": "est-1",
@@ -60,10 +63,16 @@ def main():
         "greens_consecutivos": 4,
         "reds_consecutivos": 0,
         "stop_reds_seguidos": 0,
-        "config": {},
+        "config": {"origens": ["Origem A"], "avulsos": [], "excecoes": []},
         "destinatarios": [],
         "qtd_padroes_ia": 0,
-        "detalhes": {},
+        "detalhes": {
+            "24h": detalhes_periodo(),
+            "hoje": detalhes_periodo(),
+            "semana": detalhes_periodo(),
+            "mes": detalhes_periodo(),
+            "geral": detalhes_periodo(),
+        },
     }
 
     socket_stub = """
@@ -96,6 +105,9 @@ def main():
             if path == "http://bacbo.test/dashboard-ui.js":
                 route.fulfill(status=200, content_type="application/javascript", body=dashboard_js)
                 return
+            if path == "http://bacbo.test/ui-enhancements.js":
+                route.fulfill(status=200, content_type="application/javascript", body=enhancements_js)
+                return
             if path == "http://bacbo.test/socket.io/socket.io.js":
                 route.fulfill(status=200, content_type="application/javascript", body=socket_stub)
                 return
@@ -119,10 +131,13 @@ def main():
                 return
             if path == "http://bacbo.test/api/dashboard-stats":
                 responder_json(route, {
-                    "sinais": 4,
-                    "greens": 3,
-                    "reds": 1,
-                    "assertividade": "75.0%",
+                    "sinais": 6,
+                    "greens": 4,
+                    "reds": 2,
+                    "ties": 1,
+                    "max_green_seq": 3,
+                    "max_red_seq": 2,
+                    "assertividade": "66.7%",
                 })
                 return
 
@@ -143,10 +158,31 @@ def main():
 
         page.wait_for_function(
             """
-            () => document.getElementById('dash-sinais')?.innerText === '4'
-                && document.getElementById('dash-greens')?.innerText === '3'
-                && document.getElementById('dash-reds')?.innerText === '1'
-                && document.getElementById('dash-assertividade')?.innerText === '75.0%'
+            () => document.getElementById('dash-sinais')?.innerText === '6'
+                && document.getElementById('dash-greens')?.innerText === '4'
+                && document.getElementById('dash-reds')?.innerText === '2'
+                && document.getElementById('dash-ties')?.innerText === '1'
+                && document.getElementById('dash-max-green')?.innerText.includes('3')
+                && document.getElementById('dash-max-red')?.innerText.includes('2')
+                && document.getElementById('dash-assertividade')?.innerText === '66.7%'
+            """,
+            timeout=10000,
+        )
+
+        page.wait_for_function(
+            """
+            () => {
+                const texto = document.getElementById('lista-robos')?.innerText || '';
+                return texto.includes('Robo Teste')
+                    && texto.includes('24H')
+                    && texto.includes('Hoje')
+                    && texto.includes('Semana')
+                    && texto.includes('Mês')
+                    && texto.includes('Geral')
+                    && texto.includes('Maior sequência Green')
+                    && texto.includes('Maior sequência Red')
+                    && texto.includes('🔥 3');
+            }
             """,
             timeout=10000,
         )
@@ -161,7 +197,11 @@ def main():
                 sinais: document.getElementById('dash-sinais').innerText,
                 greens: document.getElementById('dash-greens').innerText,
                 reds: document.getElementById('dash-reds').innerText,
+                ties: document.getElementById('dash-ties').innerText,
+                maxGreen: document.getElementById('dash-max-green').innerText,
+                maxRed: document.getElementById('dash-max-red').innerText,
                 assertividade: document.getElementById('dash-assertividade').innerText,
+                cardRobo: document.getElementById('lista-robos').innerText,
                 socketRegistrado: typeof window.__socketHandlers.alerta_painel === 'function'
             })
             """
@@ -171,11 +211,23 @@ def main():
         assert "Origem A" in opcoes["origemDash"], opcoes
         assert "Robo Teste" in opcoes["roboDash"], opcoes
         assert "Origem A" in opcoes["origemPadroes"], opcoes
-        assert opcoes["sinais"] == "4", opcoes
-        assert opcoes["greens"] == "3", opcoes
-        assert opcoes["reds"] == "1", opcoes
-        assert opcoes["assertividade"] == "75.0%", opcoes
+        assert opcoes["sinais"] == "6", opcoes
+        assert opcoes["greens"] == "4", opcoes
+        assert opcoes["reds"] == "2", opcoes
+        assert opcoes["ties"] == "1", opcoes
+        assert "3" in opcoes["maxGreen"], opcoes
+        assert "2" in opcoes["maxRed"], opcoes
+        assert opcoes["assertividade"] == "66.7%", opcoes
+        assert "Entradas: 4" in opcoes["cardRobo"], opcoes
+        assert "Empates: 1" in opcoes["cardRobo"], opcoes
+        assert "Reds: 1" in opcoes["cardRobo"], opcoes
         assert opcoes["socketRegistrado"] is True, opcoes
+
+        page.evaluate("() => window.mudarPeriodoCardRobo('geral')")
+        page.wait_for_function(
+            "() => Array.from(document.querySelectorAll('#lista-robos .box-tempo')).some(el => el.classList.contains('ativo') && el.innerText.includes('Geral'))",
+            timeout=5000,
+        )
 
         page.evaluate(
             """
@@ -212,7 +264,7 @@ def main():
         assert not page_errors, f"Erros JavaScript na pagina: {page_errors}"
         browser.close()
 
-    print("BUG-017 dashboard browser smoke: PASS")
+    print("UX-002/003 dashboard + robot cards browser smoke: PASS")
 
 
 if __name__ == "__main__":
