@@ -33,6 +33,7 @@ def main():
     app_html = (PUBLIC / "dashboard-app.html").read_text(encoding="utf-8")
     dashboard_js = (PUBLIC / "dashboard-ui.js").read_text(encoding="utf-8")
     enhancements_js = (PUBLIC / "ui-enhancements.js").read_text(encoding="utf-8")
+    lab_js = (PUBLIC / "lab-enhancements.js").read_text(encoding="utf-8")
 
     estrategia = {
         "id": "est-1",
@@ -107,6 +108,9 @@ def main():
                 return
             if path == "http://bacbo.test/ui-enhancements.js":
                 route.fulfill(status=200, content_type="application/javascript", body=enhancements_js)
+                return
+            if path == "http://bacbo.test/lab-enhancements.js":
+                route.fulfill(status=200, content_type="application/javascript", body=lab_js)
                 return
             if path == "http://bacbo.test/socket.io/socket.io.js":
                 route.fulfill(status=200, content_type="application/javascript", body=socket_stub)
@@ -187,6 +191,16 @@ def main():
             timeout=10000,
         )
 
+        page.wait_for_function(
+            """
+            () => document.querySelectorAll('#bk-entrada option').length === 5
+                && document.querySelectorAll('#bk-range option').length === 7
+                && !document.getElementById('bk-prot')
+                && typeof window.rodarBacktestManualAprimorado === 'function'
+            """,
+            timeout=10000,
+        )
+
         opcoes = page.evaluate(
             """
             () => ({
@@ -202,6 +216,8 @@ def main():
                 maxRed: document.getElementById('dash-max-red').innerText,
                 assertividade: document.getElementById('dash-assertividade').innerText,
                 cardRobo: document.getElementById('lista-robos').innerText,
+                labModos: Array.from(document.querySelectorAll('#bk-entrada option')).map(o => ({ value: o.value, label: o.textContent.trim() })),
+                labRanges: Array.from(document.querySelectorAll('#bk-range option')).map(o => ({ value: o.value, label: o.textContent.trim() })),
                 socketRegistrado: typeof window.__socketHandlers.alerta_painel === 'function'
             })
             """
@@ -221,11 +237,99 @@ def main():
         assert "Entradas: 4" in opcoes["cardRobo"], opcoes
         assert "Empates: 1" in opcoes["cardRobo"], opcoes
         assert "Reds: 1" in opcoes["cardRobo"], opcoes
+        assert [item["value"] for item in opcoes["labModos"]] == [
+            "PLAYER", "PLAYER_TIE", "BANKER", "BANKER_TIE", "AUTO"
+        ], opcoes
+        assert "Player +" in opcoes["labModos"][1]["label"], opcoes
+        assert "Banker +" in opcoes["labModos"][3]["label"], opcoes
+        assert "Automático" in opcoes["labModos"][4]["label"], opcoes
+        assert [item["value"] for item in opcoes["labRanges"]] == [
+            "100", "200", "500", "1000", "2000", "5000", "MAX"
+        ], opcoes
+        assert "Toda a Base (Max)" in opcoes["labRanges"][-1]["label"], opcoes
         assert opcoes["socketRegistrado"] is True, opcoes
 
         page.evaluate("() => window.mudarPeriodoCardRobo('geral')")
         page.wait_for_function(
             "() => Array.from(document.querySelectorAll('#lista-robos .box-tempo')).some(el => el.classList.contains('ativo') && el.innerText.includes('Geral'))",
+            timeout=5000,
+        )
+
+        page.evaluate(
+            """
+            () => {
+                girosInMemoria = [
+                    {resultado:'Player', id_sessao:1, multiplicador:'4x'},
+                    {resultado:'Banker', id_sessao:1, multiplicador:'4x'},
+                    {resultado:'Player', id_sessao:1, multiplicador:'4x'},
+                    {resultado:'Player', id_sessao:1, multiplicador:'4x'},
+                    {resultado:'Banker', id_sessao:1, multiplicador:'4x'},
+                    {resultado:'Tie', id_sessao:1, multiplicador:'4x'},
+                    {resultado:'Player', id_sessao:1, multiplicador:'4x'},
+                    {resultado:'Banker', id_sessao:1, multiplicador:'4x'},
+                    {resultado:'Banker', id_sessao:1, multiplicador:'4x'},
+                    {resultado:'Player', id_sessao:1, multiplicador:'4x'},
+                    {resultado:'Banker', id_sessao:1, multiplicador:'4x'},
+                    {resultado:'Tie', id_sessao:1, multiplicador:'4x'}
+                ];
+                bkPadraoAtual = [];
+                bkAdd('Player');
+                bkAdd('Banker');
+                document.getElementById('bk-gales').value = '0';
+                document.getElementById('bk-range').value = 'MAX';
+                document.getElementById('bk-entrada').value = 'AUTO';
+                window.rodarBacktestManual();
+            }
+            """
+        )
+
+        page.wait_for_function(
+            """
+            () => document.getElementById('bk-resultados-auto')?.style.display === 'block'
+                && document.querySelectorAll('#bk-auto-grid .bk-auto-card').length === 4
+            """,
+            timeout=5000,
+        )
+
+        auto = page.evaluate(
+            """
+            () => ({
+                singleDisplay: document.getElementById('bk-resultados-box').style.display,
+                autoDisplay: document.getElementById('bk-resultados-auto').style.display,
+                cards: Array.from(document.querySelectorAll('#bk-auto-grid .bk-auto-card')).map(card => ({
+                    modo: card.dataset.bkModo,
+                    texto: card.innerText
+                }))
+            })
+            """
+        )
+        assert auto["singleDisplay"] == "none", auto
+        assert auto["autoDisplay"] == "block", auto
+        assert [card["modo"] for card in auto["cards"]] == [
+            "PLAYER", "PLAYER_TIE", "BANKER", "BANKER_TIE"
+        ], auto
+        assert "Player" in auto["cards"][0]["texto"], auto
+        assert "Player +" in auto["cards"][1]["texto"], auto
+        assert "Banker" in auto["cards"][2]["texto"], auto
+        assert "Banker +" in auto["cards"][3]["texto"], auto
+        for card_auto in auto["cards"]:
+            assert "Greens" in card_auto["texto"], auto
+            assert "Empates" in card_auto["texto"], auto
+            assert "Reds" in card_auto["texto"], auto
+
+        page.evaluate(
+            """
+            () => {
+                document.getElementById('bk-entrada').value = 'PLAYER_TIE';
+                window.rodarBacktestManual();
+            }
+            """
+        )
+        page.wait_for_function(
+            """
+            () => document.getElementById('bk-resultados-box')?.style.display === 'block'
+                && document.getElementById('bk-resultados-auto')?.style.display === 'none'
+            """,
             timeout=5000,
         )
 
@@ -264,7 +368,7 @@ def main():
         assert not page_errors, f"Erros JavaScript na pagina: {page_errors}"
         browser.close()
 
-    print("UX-002/003 dashboard + robot cards browser smoke: PASS")
+    print("UX-002/003 + UX-004 dashboard, robot cards and Lab browser smoke: PASS")
 
 
 if __name__ == "__main__":

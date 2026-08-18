@@ -76,19 +76,39 @@
                 script.textContent = scriptPrincipal;
                 document.body.appendChild(script);
 
+                const finalizarInicializacao = () => {
+                    // O HTML-base foi montado depois do DOMContentLoaded original do loader.
+                    // Disparamos o evento somente depois de todos os controladores complementares.
+                    window.dispatchEvent(new Event('DOMContentLoaded'));
+                };
+
+                const carregarLab = () => {
+                    const lab = document.createElement('script');
+                    lab.src = '/lab-enhancements.js?_t=' + Date.now();
+                    lab.onload = () => {
+                        if (typeof window.configurarLabPadroes === 'function') {
+                            window.configurarLabPadroes();
+                        }
+                        finalizarInicializacao();
+                    };
+                    lab.onerror = () => {
+                        console.error('Falha ao carregar aprimoramentos do Lab Padrões.');
+                        finalizarInicializacao();
+                    };
+                    document.body.appendChild(lab);
+                };
+
                 const enhancements = document.createElement('script');
                 enhancements.src = '/ui-enhancements.js?_t=' + Date.now();
                 enhancements.onload = () => {
                     if (typeof window.aplicarAprimoramentosUI === 'function') {
                         window.aplicarAprimoramentosUI();
                     }
-                    // O HTML-base foi montado depois do DOMContentLoaded original do loader.
-                    // Disparamos o evento depois dos aprimoramentos para manter a inicialização determinística.
-                    window.dispatchEvent(new Event('DOMContentLoaded'));
+                    carregarLab();
                 };
                 enhancements.onerror = () => {
                     console.error('Falha ao carregar aprimoramentos da interface.');
-                    window.dispatchEvent(new Event('DOMContentLoaded'));
+                    carregarLab();
                 };
                 document.body.appendChild(enhancements);
             } catch (error) {
