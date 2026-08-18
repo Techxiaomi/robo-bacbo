@@ -38,7 +38,7 @@ function normalizarConfigAutoTuning(config = {}) {
         blacklist: String(config.blacklist || '').trim(),
         shadow_giros: inteiroLimitado(config.shadow_giros, 0, 0, 5000),
         max_padroes: inteiroLimitado(config.max_padroes, 4, 1, 100),
-        drop_reds: inteiroLimitado(config.drop_reds, 1, 0, 100),
+        drop_reds: inteiroLimitado(config.drop_reds, 2, 0, 100),
         drop_assert: numeroLimitado(config.drop_assert, 85, 0, 100),
         ttl_horas: numeroLimitado(config.ttl_horas, 4, 0.25, 720),
         max_reservas: inteiroLimitado(
