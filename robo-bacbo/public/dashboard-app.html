@@ -2323,8 +2323,8 @@
 
         function mudarAbaAT(aba) { document.querySelectorAll('#modal-autotrader .robo-nav-btn').forEach(btn => btn.classList.remove('ativo')); document.querySelectorAll('#modal-autotrader .robo-tab-content').forEach(content => content.classList.remove('ativo')); document.getElementById('btn-at-tab-' + aba).classList.add('ativo'); document.getElementById('at-tab-' + aba).classList.add('ativo'); }
         
-        function addFicha(valor) { let input = document.getElementById('at-stake'); let atual = parseFloat(input.value) || 0; input.value = (atual + valor).toFixed(2); }
-        function limparFichas() { document.getElementById('at-stake').value = "0.00"; }
+        function addFicha(valor) { let input = document.getElementById('at-stake'); let atual = parseFloat(input.value) || 0; input.value = (atual + valor).toFixed(2); atualizarPreviewProtecaoEmpateAutoTrader(); }
+        function limparFichas() { document.getElementById('at-stake').value = "0.00"; atualizarPreviewProtecaoEmpateAutoTrader(); }
         function arredondarFichaAutoTrader(valor) { let v = Number(valor); if (!Number.isFinite(v) || v <= 0) return 0; let r = Math.round(v / 5) * 5; return r === 0 ? 5 : r; }
         function atualizarPreviewProtecaoEmpateAutoTrader() {
             const modo = document.getElementById('at-tie-modo')?.value || 'PERCENTUAL';

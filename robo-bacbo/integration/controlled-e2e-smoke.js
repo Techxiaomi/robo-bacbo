@@ -65,13 +65,25 @@ function startFakeExecutor(getDb) {
                     String(payload.order_id || ""),
                     /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
                 );
-                assert.ok(["PlayerWon", "BankerWon", "Tie"].includes(payload.alvo));
-                assert.ok(Number(payload.valor) > 0);
+                const apostas = Array.isArray(payload.apostas)
+                    ? payload.apostas
+                    : [{ alvo: payload.alvo, valor: payload.valor }];
+                assert.ok(apostas.length >= 1 && apostas.length <= 2);
+                const alvos = new Set();
+                for (const perna of apostas) {
+                    assert.ok(["PlayerWon", "BankerWon", "Tie"].includes(perna.alvo));
+                    assert.ok(Number(perna.valor) > 0);
+                    assert.equal(alvos.has(perna.alvo), false, "Plano nao pode repetir alvo");
+                    alvos.add(perna.alvo);
+                }
+                const principal = apostas[0];
+                const empate = apostas.find(perna => perna.alvo === "Tie") || null;
 
                 const db = getDb();
                 assert.ok(db, "Conexão MySQL do teste deve existir antes da primeira ordem");
                 const [[intent]] = await db.query(
-                    `SELECT id, trader_id, alvo, nivel, valor_entrada, executor_order_id, status_ordem
+                    `SELECT id, trader_id, alvo, nivel, valor_entrada, valor_empate,
+                            executor_order_id, status_ordem
                      FROM auditoria_ordens
                      WHERE executor_order_id=?
                      ORDER BY id DESC LIMIT 1`,
@@ -79,8 +91,9 @@ function startFakeExecutor(getDb) {
                 );
                 assert.ok(intent, "Intenção durável deve existir antes do ACK do executor");
                 assert.equal(intent.status_ordem, "PREPARANDO");
-                assert.equal(intent.alvo, payload.alvo);
-                assert.equal(Number(intent.valor_entrada), Number(payload.valor));
+                assert.equal(intent.alvo, principal.alvo);
+                assert.equal(Number(intent.valor_entrada), Number(principal.valor));
+                assert.equal(Number(intent.valor_empate), empate ? Number(empate.valor) : 0);
 
                 // Mantém a primeira rodada deliberadamente presa no executor.
                 // A segunda rodada será recebida pelo Node durante este intervalo.
@@ -105,6 +118,7 @@ function startFakeExecutor(getDb) {
 
                 orders.push({
                     payload,
+                    apostas,
                     token: req.headers["x-internal-token"],
                     intentStatusBeforeAck: intent.status_ordem,
                     intentIdBeforeAck: Number(intent.id),
@@ -267,20 +281,21 @@ async function main() {
                 padrao: "Player",
                 entrada: "Banker",
                 gales: 0,
-                protegerEmpate: false,
+                protegerEmpate: true,
                 ativo: true
             }),
             { sucesso: true }
         );
 
         const [[strategy]] = await db.query(
-            "SELECT id, origem, padrao, entrada, gales, ativo FROM estrategias WHERE nome=? LIMIT 1",
+            "SELECT id, origem, padrao, entrada, gales, proteger_empate, ativo FROM estrategias WHERE nome=? LIMIT 1",
             ["OBS-003H E2E Pattern"]
         );
         assert.ok(strategy);
         assert.equal(strategy.origem, "OBS003H");
         assert.equal(strategy.entrada, "Banker");
         assert.equal(Number(strategy.gales), 0);
+        assert.equal(Number(strategy.proteger_empate), 1);
         assert.equal(Number(strategy.ativo), 1);
         assert.deepEqual(JSON.parse(strategy.padrao), ["Player"]);
 
@@ -292,6 +307,9 @@ async function main() {
                     stake_inicial: 10,
                     gale_1_mult: 2,
                     gale_2_mult: 4,
+                    tie_stake_mode: "VALOR",
+                    tie_stake_value: 5,
+                    tie_stake_percent: 0,
                     modo_camuflagem: "TODAS",
                     limite_entradas: 5,
                     stop_win: 500,
@@ -335,8 +353,13 @@ async function main() {
 
         const order = fakeExecutor.orders[0];
         assert.equal(order.token, TOKEN);
-        assert.equal(order.payload.alvo, "BankerWon");
-        assert.equal(Number(order.payload.valor), 10);
+        assert.equal(order.apostas.length, 2);
+        assert.deepEqual(order.apostas, [
+            { alvo: "BankerWon", valor: 10 },
+            { alvo: "Tie", valor: 5 }
+        ]);
+        assert.equal(order.payload.alvo, undefined);
+        assert.equal(order.payload.valor, undefined);
         assert.equal(order.intentStatusBeforeAck, "PREPARANDO");
         assert.ok(order.intentIdBeforeAck > 0);
         assert.equal(order.callbackBeforeAck, true);
@@ -345,7 +368,7 @@ async function main() {
         const finalized = await waitUntil("auditoria WIN apos rodadas sobrepostas", async () => {
             const [[row]] = await db.query(
                 `SELECT id, estrategia_nome, fonte_sinal, alvo, nivel, risco_total,
-                        valor_entrada, executor_order_id, status_ordem, lucro_prejuizo, placar_mesa
+                        valor_entrada, valor_empate, executor_order_id, status_ordem, lucro_prejuizo, placar_mesa
                  FROM auditoria_ordens
                  WHERE trader_id=?
                  ORDER BY id DESC LIMIT 1`,
@@ -358,10 +381,11 @@ async function main() {
         assert.equal(finalized.fonte_sinal, "OBS003H");
         assert.equal(finalized.alvo, "BankerWon");
         assert.equal(finalized.nivel, "DIRETO");
-        assert.equal(Number(finalized.risco_total), 10);
+        assert.equal(Number(finalized.risco_total), 15);
         assert.equal(Number(finalized.valor_entrada), 10);
+        assert.equal(Number(finalized.valor_empate), 5);
         assert.equal(finalized.executor_order_id, order.payload.order_id);
-        assert.equal(Number(finalized.lucro_prejuizo), 10);
+        assert.equal(Number(finalized.lucro_prejuizo), 5);
         assert.equal(finalized.placar_mesa, "[P:3 B:7]");
 
         const [[traderOperating]] = await db.query(

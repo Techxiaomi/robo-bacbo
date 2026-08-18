@@ -85,12 +85,20 @@ test("5xx sem aceita=false continua ambiguo, repete o mesmo ID e aceita callback
     });
     registrar = logic.registrarResultadoExecucaoExecutor;
 
+    const plano = [
+        { alvo: "PlayerWon", valor: 15 },
+        { alvo: "Tie", valor: 5 }
+    ];
     await assert.rejects(
-        () => logic.enviarOrdemAoExecutor("PlayerWon", 15, orderId),
+        () => logic.enviarOrdemAoExecutor("PlayerWon", 15, orderId, plano),
         erro => erro && erro.envio_ambiguo === true && erro.status_executor === "AMBIGUA"
     );
     assert.equal(chamadas, 2);
     assert.equal(corpos[0].order_id, corpos[1].order_id);
+    assert.deepEqual(corpos[0].apostas, plano);
+    assert.deepEqual(corpos[1], corpos[0]);
+    assert.equal(corpos[0].alvo, undefined);
+    assert.equal(corpos[0].valor, undefined);
 });
 
 test("callback EXECUTADA pode chegar antes do ACK HTTP", async () => {
