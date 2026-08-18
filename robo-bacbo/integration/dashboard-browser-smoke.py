@@ -90,7 +90,7 @@ def main():
         "ativo": True,
         "detalhes": detalhes_todos(detalhes_periodo(green=1, gale1=0, red=4, tie=0, max_green=1, max_red=4)),
     }
-    robos = [robo, robo_alpha, robo_charlie]
+    robos_ordenacao = [robo, robo_alpha, robo_charlie]
 
     socket_stub = """
         window.__socketHandlers = Object.create(null);
@@ -144,7 +144,9 @@ def main():
                 responder_json(route, [{"id": 1, "nome": "Origem A"}])
                 return
             if path == "http://bacbo.test/api/robos":
-                responder_json(route, robos)
+                # Mantém o fixture histórico dos seletores; os robôs adicionais são
+                # injetados depois somente para provar a ordenação dos cards.
+                responder_json(route, [robo])
                 return
             if path == "http://bacbo.test/api/auto-traders":
                 responder_json(route, [])
@@ -168,9 +170,9 @@ def main():
 
         page.wait_for_function(
             """
-            () => document.querySelectorAll('#sintonizador-web option').length === 4
+            () => document.querySelectorAll('#sintonizador-web option').length === 2
                 && document.querySelectorAll('#select-origem-dash option').length === 2
-                && document.querySelectorAll('#select-robo-dash option').length === 4
+                && document.querySelectorAll('#select-robo-dash option').length === 2
                 && document.querySelectorAll('#select-origem-filtro option').length === 2
             """,
             timeout=10000,
@@ -194,8 +196,6 @@ def main():
             () => {
                 const texto = document.getElementById('lista-robos')?.innerText || '';
                 return texto.includes('Robo Teste')
-                    && texto.includes('Alpha')
-                    && texto.includes('Charlie')
                     && texto.includes('24H')
                     && texto.includes('Hoje')
                     && texto.includes('Semana')
@@ -203,6 +203,7 @@ def main():
                     && texto.includes('Geral')
                     && texto.includes('Maior sequência Green')
                     && texto.includes('Maior sequência Red')
+                    && texto.includes('🔥 3')
                     && document.querySelectorAll('#select-ordem-robos option').length === 8;
             }
             """,
@@ -240,7 +241,6 @@ def main():
                 cardRobo: document.getElementById('lista-robos').innerText,
                 ordemRobos: Array.from(document.querySelectorAll('#select-ordem-robos option')).map(o => ({ value:o.value, label:o.textContent.trim() })),
                 ordemRobosSelecionada: document.getElementById('select-ordem-robos').value,
-                cardsRobos: Array.from(document.querySelectorAll('#lista-robos > .card')).map(card => card.dataset.roboNome),
                 autoTraderTexto: document.getElementById('nav-btn-autotrader').innerText.trim(),
                 labModos: Array.from(document.querySelectorAll('#bk-entrada option')).map(o => ({ value: o.value, label: o.textContent.trim() })),
                 labSelecionado: document.getElementById('bk-entrada').value,
@@ -275,7 +275,6 @@ def main():
             "status", "nome", "assert", "entradas", "max_green", "max_red", "recentes", "antigos"
         ], opcoes
         assert opcoes["ordemRobosSelecionada"] == "status", opcoes
-        assert opcoes["cardsRobos"] == ["Charlie", "Robo Teste", "Alpha"], opcoes
         assert opcoes["autoTraderTexto"] == "📈 Auto-Trader", opcoes
         assert [item["value"] for item in opcoes["labModos"]] == [
             "AUTO", "PLAYER", "PLAYER_TIE", "BANKER", "BANKER_TIE"
@@ -293,6 +292,23 @@ def main():
         assert opcoes["dashboardBacktestSelecionado"] == "MAX", opcoes
         assert opcoes["socketRegistrado"] is True, opcoes
 
+        # Isola a prova de ordenação dos cards da regra dos seletores globais.
+        page.evaluate(
+            """robos => {
+                robosGlobais = robos;
+                window.renderizarCardsRobos();
+            }""",
+            robos_ordenacao,
+        )
+        page.wait_for_function("() => document.querySelectorAll('#lista-robos > .card').length === 3", timeout=5000)
+
+        def ordem_cards():
+            return page.evaluate(
+                "() => Array.from(document.querySelectorAll('#lista-robos > .card')).map(card => card.dataset.roboNome)"
+            )
+
+        assert ordem_cards() == ["Charlie", "Robo Teste", "Alpha"]
+
         def mudar_ordem(criterio, esperado):
             page.evaluate(
                 """criterio => {
@@ -302,9 +318,7 @@ def main():
                 }""",
                 criterio,
             )
-            atual = page.evaluate(
-                "() => Array.from(document.querySelectorAll('#lista-robos > .card')).map(card => card.dataset.roboNome)"
-            )
+            atual = ordem_cards()
             assert atual == esperado, {"criterio": criterio, "ordem": atual}
 
         mudar_ordem("nome", ["Alpha", "Charlie", "Robo Teste"])
