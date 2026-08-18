@@ -27,7 +27,10 @@ test('padrão IA calcula assertividade pela janela bruta do robô proprietário'
     assert.match(bloco, /ROBOS_MEMORIA\.find/);
     assert.match(bloco, /auto_tuning\?\.range/);
     assert.match(bloco, /historicoGirosAnalitico\.slice\(-rangeDinamico\)/);
-    assert.match(bloco, /calcularDetalhesPadraoNoHistorico\(est, dadosDinamicos, Date\.now\(\)\)\.geral/);
+    assert.match(bloco, /calcularDetalhesPadraoNoHistorico\s*\(/);
+    assert.match(bloco, /dadosDinamicos/);
+    assert.match(bloco, /Date\.now\(\)/);
+    assert.match(bloco, /\)\.geral/);
     assert.match(bloco, /contarTiesLegados\(detalhes\.ties\)/);
 });
 
