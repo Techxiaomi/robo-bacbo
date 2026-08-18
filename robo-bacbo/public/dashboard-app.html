@@ -1,0 +1,2711 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Painel Bac Bo Analítico Pro - Execution Engine</title>
+    
+    <!-- Bibliotecas Externas -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    <script src="/socket.io/socket.io.js"></script>
+    
+    <style>
+        * { 
+            box-sizing: border-box; 
+        }
+        
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            background-color: #121212; 
+            color: #ffffff; 
+            margin: 0; 
+            padding: 20px 0; 
+        }
+        
+        .container { 
+            max-width: 1200px; 
+            margin: 0 auto; 
+            padding: 0 20px; 
+        }
+        
+        /* HEADER PRINCIPAL */
+        .topo-header { 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center; 
+            border-bottom: 1px solid #333; 
+            padding-bottom: 15px; 
+            margin-bottom: 20px; 
+            flex-wrap: wrap; 
+            gap: 15px; 
+        }
+        
+        .topo-header h1 { 
+            font-size: 22px; 
+            margin: 0; 
+            display: flex; 
+            align-items: center;
+        }
+        
+        .link-home { 
+            color: #ffffff; 
+            text-decoration: none; 
+            cursor: pointer; 
+            display: flex; 
+            align-items: center; 
+        }
+        
+        .link-home:hover { 
+            color: #007bff; 
+        }
+        
+        .versao-tag { 
+            font-size: 10px; 
+            background-color: #28a745; 
+            color: white; 
+            padding: 2px 8px; 
+            border-radius: 4px; 
+            margin-left: 10px; 
+            font-weight: bold; 
+            text-transform: uppercase; 
+            letter-spacing: 1px; 
+        }
+
+        .gear-icon { 
+            cursor: pointer; 
+            font-size: 20px; 
+            color: #aaa; 
+            transition: 0.3s; 
+            margin-left: 12px; 
+            display: inline-flex; 
+            align-items: center; 
+            justify-content: center;
+        }
+        
+        .gear-icon:hover { 
+            color: #007bff; 
+            transform: scale(1.1); 
+        }
+        
+        .gear-icon.spin:hover { 
+            transform: rotate(90deg); 
+        } 
+
+        .box-sintonizador { 
+            display: flex; 
+            align-items: center; 
+            background: #1a1a1a; 
+            border: 1px solid #444; 
+            border-radius: 8px; 
+            padding: 0 12px; 
+            height: 36px; 
+            white-space: nowrap; 
+            transition: 0.3s; 
+        }
+        
+        .box-sintonizador:hover { 
+            border-color: #007bff; 
+        }
+        
+        .box-sintonizador select { 
+            margin: 0; 
+            border: none; 
+            background: transparent; 
+            font-size: 13px; 
+            font-weight: bold; 
+            color: #ffc107; 
+            cursor: pointer; 
+            outline: none; 
+            padding-right: 5px; 
+        }
+
+        /* ANIMAÇÕES E BANNERS */
+        @keyframes animar-piscar { 
+            0% { opacity: 1; transform: scale(1); } 
+            50% { opacity: 0.4; transform: scale(1.3); } 
+            100% { opacity: 1; transform: scale(1); } 
+        }
+        .piscar { 
+            animation: animar-piscar 1.2s infinite; 
+        }
+
+        #banner-sinal { 
+            background: #111; 
+            border: 1px solid #333; 
+            padding: 15px 20px; 
+            border-radius: 8px; 
+            margin-bottom: 20px; 
+            display: flex; 
+            align-items: center; 
+            justify-content: space-between; 
+            transition: 0.3s; 
+            box-shadow: 0 4px 10px rgba(0,0,0,0.3); 
+        }
+        
+        .banner-info { 
+            display: flex; 
+            align-items: center; 
+            gap: 15px; 
+        }
+        
+        #banner-icon { 
+            font-size: 26px; 
+            filter: grayscale(100%); 
+            transition: 0.3s; 
+        }
+        
+        #banner-titulo { 
+            display: block; 
+            font-size: 11px; 
+            color: #888; 
+            text-transform: uppercase; 
+            font-weight: bold; 
+            letter-spacing: 1px; 
+            margin-bottom: 2px; 
+        }
+        
+        #banner-acao { 
+            display: block; 
+            font-size: 18px; 
+            color: #fff; 
+            margin-top: 2px; 
+        }
+        
+        #banner-pulse { 
+            width: 14px; 
+            height: 14px; 
+            background: #555; 
+            border-radius: 50%; 
+            box-shadow: 0 0 5px #555; 
+            transition: 0.3s; 
+            flex-shrink: 0; 
+        }
+        
+        .assertividade-badge { 
+            font-size: 11px; 
+            background: #222; 
+            border: 1px solid #444; 
+            padding: 2px 6px; 
+            border-radius: 4px; 
+            margin-left: 8px; 
+            font-weight: normal; 
+            color: #eee; 
+        }
+        
+        .robo-tag-badge { 
+            font-size: 10px; 
+            padding: 2px 5px; 
+            border-radius: 4px; 
+            margin-right: 4px; 
+            color: #000; 
+            font-weight: bold; 
+        }
+
+        /* GRIDS DE CONTEÚDO */
+        #lista-padroes, #lista-robos { 
+            display: grid; 
+            grid-template-columns: repeat(2, 1fr); 
+            gap: 15px; 
+        }
+
+        #lista-autotraders {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 15px;
+        }
+        
+        .card { 
+            background-color: #1e1e1e; 
+            border: 1px solid #333; 
+            padding: 15px; 
+            border-radius: 8px; 
+            display: flex; 
+            flex-direction: column; 
+            justify-content: space-between; 
+            transition: 0.3s; 
+        }
+        
+        /* BOTÕES E FORMULÁRIOS */
+        .btn { 
+            padding: 0 16px; 
+            height: 36px; 
+            background: #007bff; 
+            color: white; 
+            border: none; 
+            cursor: pointer; 
+            border-radius: 6px; 
+            font-weight: bold; 
+            font-size: 13px; 
+            transition: 0.2s; 
+            display: inline-flex; 
+            align-items: center; 
+            justify-content: center; 
+            gap: 5px; 
+            white-space: nowrap; 
+        }
+        
+        .btn:hover { 
+            filter: brightness(1.1); 
+        }
+        
+        .badge { 
+            background: #333; 
+            padding: 3px 8px; 
+            border-radius: 10px; 
+            font-size: 11px; 
+            color: #ffeb3b; 
+        }
+        
+        input[type="text"], input[type="number"], input[type="time"], select, textarea { 
+            padding: 8px 10px; 
+            border-radius: 6px; 
+            border: 1px solid #444; 
+            background: #222; 
+            color: white; 
+            width: 100%; 
+            font-size: 13px; 
+            outline: none; 
+            transition: 0.2s; 
+            font-family: inherit; 
+        }
+        
+        input[type="text"]:focus, input[type="number"]:focus, input[type="time"]:focus, select:focus { 
+            border-color: #007bff; 
+            background: #1a1a1a; 
+        }
+        
+        .form-group { 
+            display: flex; 
+            flex-direction: column; 
+            gap: 4px; 
+            margin-bottom: 5px; 
+        }
+        
+        .form-group label { 
+            font-size: 10px; 
+            color: #aaa; 
+            text-transform: uppercase; 
+            font-weight: bold; 
+            letter-spacing: 0.5px; 
+        }
+        
+        /* FILTROS E DASHBOARD */
+        .filtro-box { 
+            background: #1a1a1a; 
+            padding: 15px; 
+            border-radius: 8px; 
+            border: 1px solid #333; 
+            margin-bottom: 20px; 
+            display: flex; 
+            flex-wrap: wrap; 
+            align-items: center; 
+            gap: 15px; 
+            justify-content: space-between; 
+        }
+        
+        .dashboard-global { 
+            background: #1a1a1a; 
+            padding: 15px; 
+            border-radius: 10px; 
+            border: 1px solid #333; 
+            margin-bottom: 20px; 
+        }
+        
+        .grid-dash { 
+            display: grid; 
+            grid-template-columns: repeat(4, 1fr); 
+            gap: 10px; 
+            margin-top: 10px; 
+        }
+        
+        .dash-box { 
+            background: #111; 
+            border: 1px solid #222; 
+            padding: 10px; 
+            border-radius: 6px; 
+            text-align: center; 
+        }
+        
+        .dash-box span { 
+            display: block; 
+            font-size: 10px; 
+            color: #888; 
+            text-transform: uppercase; 
+        }
+        
+        .dash-box strong { 
+            display: block; 
+            font-size: 20px; 
+        }
+
+        /* MODAIS */
+        .modal { 
+            display: none; 
+            position: fixed; 
+            top: 0; 
+            left: 0; 
+            width: 100%; 
+            height: 100%; 
+            background: rgba(0,0,0,0.85); 
+            z-index: 3000; 
+            justify-content: center; 
+            align-items: center; 
+        }
+        
+        .modal-content { 
+            background: #1a1a1a; 
+            padding: 25px; 
+            border-radius: 10px; 
+            border: 1px solid #333; 
+            width: 300px; 
+        }
+        
+        .modal-form-overlay { 
+            display: none; 
+            position: fixed; 
+            top: 0; 
+            left: 0; 
+            width: 100%; 
+            height: 100%; 
+            background: rgba(0,0,0,0.85); 
+            z-index: 2000; 
+            justify-content: center; 
+            align-items: center; 
+            padding: 20px; 
+        }
+        
+        .modal-form-content { 
+            background: #1a1a1a; 
+            padding: 25px; 
+            border-radius: 10px; 
+            border: 1px solid #333; 
+            border-top: 4px solid #007bff; 
+            width: 100%; 
+            max-width: 750px; 
+            max-height: 90vh; 
+            overflow-y: auto; 
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5); 
+        }
+        
+        .modal-form-content::-webkit-scrollbar { 
+            width: 8px; 
+        }
+        
+        .modal-form-content::-webkit-scrollbar-thumb { 
+            background-color: #555; 
+            border-radius: 4px; 
+        }
+
+        /* INTERRUPTORES (SWITCHES) */
+        .switch { 
+            position: relative; 
+            display: inline-block; 
+            width: 36px; 
+            height: 20px; 
+        }
+        
+        .switch input { 
+            opacity: 0; 
+            width: 0; 
+            height: 0; 
+        }
+        
+        .slider { 
+            position: absolute; 
+            cursor: pointer; 
+            top: 0; 
+            left: 0; 
+            right: 0; 
+            bottom: 0; 
+            background-color: #555; 
+            transition: .4s; 
+            border-radius: 20px; 
+        }
+        
+        .slider:before { 
+            position: absolute; 
+            content: ""; 
+            height: 14px; 
+            width: 14px; 
+            left: 3px; 
+            bottom: 3px; 
+            background-color: white; 
+            transition: .4s; 
+            border-radius: 50%; 
+        }
+        
+        input:checked + .slider { 
+            background-color: #28a745; 
+        }
+        
+        input:checked + .slider:before { 
+            transform: translateX(16px); 
+        }
+
+        /* TABS INTERNAS (CARTÕES DE DESEMPENHO) */
+        .grid-performance { 
+            display: grid; 
+            grid-template-columns: repeat(5, 1fr); 
+            gap: 4px; 
+            margin: 10px 0; 
+        }
+        
+        .box-tempo { 
+            background: #111; 
+            border: 1px solid #333; 
+            border-radius: 5px; 
+            padding: 4px 2px; 
+            text-align: center; 
+            cursor: pointer; 
+            display: flex; 
+            flex-direction: column; 
+            align-items: center; 
+            transition: 0.2s; 
+        }
+        
+        .box-tempo:hover { 
+            background: #151515; 
+        }
+        
+        .box-tempo.ativo { 
+            background: #1a2a3a; 
+            border-color: #007bff; 
+        }
+        
+        .box-tempo span { 
+            font-size: 9px; 
+            color: #aaa; 
+            text-transform: uppercase; 
+            margin-bottom: 2px; 
+        }
+        
+        .box-tempo strong { 
+            font-size: 11px; 
+            font-weight: bold; 
+        }
+
+        .detalhes-tecnicos { 
+            background: #111; 
+            border: 1px solid #333; 
+            padding: 10px; 
+            border-radius: 6px; 
+            font-size: 12px; 
+            color: #eee; 
+        }
+        
+        .linha-detalhe { 
+            display: flex; 
+            justify-content: space-between; 
+            padding: 5px 0; 
+            border-bottom: 1px dashed #444; 
+        }
+        
+        .tie-box { 
+            background: rgba(255, 193, 7, 0.05); 
+            border-left: 3px solid #ffc107; 
+            padding: 5px; 
+            margin-top: 5px; 
+            border-radius: 0 4px 4px 0; 
+        }
+
+        /* GESTÃO DE ABAS GERAIS */
+        .aba-conteudo { 
+            display: none; 
+        }
+        
+        .aba-conteudo.visivel { 
+            display: block; 
+            animation: fadeIn 0.4s ease-in-out; 
+        }
+        
+        @keyframes fadeIn { 
+            from { opacity: 0; } 
+            to { opacity: 1; } 
+        }
+
+        /* TABS INTERNAS MODAIS (ROBÔ E AUTO-TRADER) */
+        .robo-nav-tabs {
+            display: flex;
+            border-bottom: 1px solid #444;
+            margin-bottom: 15px;
+            gap: 10px;
+            overflow-x: auto;
+        }
+
+        .robo-nav-tabs::-webkit-scrollbar { height: 4px; }
+        .robo-nav-tabs::-webkit-scrollbar-thumb { background: #555; border-radius: 4px; }
+
+        .robo-nav-btn {
+            background: transparent;
+            border: none;
+            color: #888;
+            font-size: 13px;
+            font-weight: bold;
+            padding: 8px 12px;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            transition: 0.3s;
+            white-space: nowrap;
+        }
+
+        .robo-nav-btn.ativo {
+            color: #17a2b8;
+            border-color: #17a2b8;
+        }
+
+        .robo-tab-content {
+            display: none;
+        }
+
+        .robo-tab-content.ativo {
+            display: block;
+            animation: fadeIn 0.3s ease;
+        }
+
+        /* CHECKBOX LISTS */
+        .check-list-box { 
+            background: #111; 
+            border: 1px solid #333; 
+            border-radius: 6px; 
+            padding: 10px; 
+            max-height: 150px; 
+            overflow-y: auto; 
+            font-size: 12px; 
+        }
+        
+        .check-list-box::-webkit-scrollbar { 
+            width: 6px; 
+        }
+        
+        .check-list-box::-webkit-scrollbar-thumb { 
+            background-color: #444; 
+            border-radius: 3px; 
+        }
+        
+        .check-item { 
+            display: flex; 
+            align-items: center; 
+            gap: 8px; 
+            margin-bottom: 6px; 
+            border-bottom: 1px dashed #222; 
+            padding-bottom: 4px; 
+            cursor: pointer; 
+        }
+        
+        .check-item:last-child { 
+            border-bottom: none; 
+            margin-bottom: 0; 
+            padding-bottom: 0; 
+        }
+        
+        .check-item input[type="checkbox"] { 
+            width: 14px; 
+            height: 14px; 
+            margin: 0; 
+            cursor: pointer; 
+        }
+
+        /* TABELA DE DESTINATÁRIOS */
+        .destinatarios-table { 
+            width: 100%; 
+            border-collapse: collapse; 
+            margin-top: 5px; 
+            font-size: 12px; 
+        }
+        
+        .destinatarios-table th, .destinatarios-table td { 
+            padding: 6px 8px; 
+            border: 1px solid #333; 
+            text-align: left; 
+            background: #111; 
+        }
+        
+        .destinatarios-table th { 
+            background: #222; 
+            color: #aaa; 
+            text-transform: uppercase; 
+            font-size: 10px; 
+        }
+
+        /* ESTILOS DO BACKTEST & MINERADOR & SIMULADOR */
+        .bk-grid { 
+            display: grid; 
+            grid-template-columns: 350px 1fr; 
+            gap: 20px; 
+            align-items: start; 
+        }
+        
+        .bk-panel { 
+            background: #1a1a1a; 
+            border: 1px solid #333; 
+            border-radius: 10px; 
+            padding: 20px; 
+        }
+        
+        .bk-fita { 
+            display: flex; 
+            gap: 4px; 
+            overflow-x: auto; 
+            padding: 10px; 
+            background: #111; 
+            border-radius: 6px; 
+            border: 1px solid #222; 
+        }
+        
+        .bk-fita::-webkit-scrollbar { 
+            height: 6px; 
+        }
+        
+        .bk-fita::-webkit-scrollbar-thumb { 
+            background-color: #444; 
+            border-radius: 3px; 
+        }
+        
+        .bk-bola { 
+            width: 22px; 
+            height: 22px; 
+            border-radius: 50%; 
+            display: flex; 
+            align-items: center; 
+            justify-content: center; 
+            font-size: 10px; 
+            font-weight: bold; 
+            color: white; 
+            flex-shrink: 0; 
+            position: relative; 
+        }
+        
+        .bk-bola.player { background: #007bff; } 
+        .bk-bola.banker { background: #ff7777; } 
+        .bk-bola.tie { background: #ffc107; color: black; }
+        
+        .bk-bola.found::after { 
+            content: ''; 
+            position: absolute; 
+            bottom: -6px; 
+            width: 6px; 
+            height: 6px; 
+            background: #28a745; 
+            border-radius: 50%; 
+            box-shadow: 0 0 4px #28a745; 
+        }
+        
+        .bk-bola.loss::after { 
+            content: ''; 
+            position: absolute; 
+            bottom: -6px; 
+            width: 6px; 
+            height: 6px; 
+            background: #ff4444; 
+            border-radius: 50%; 
+            box-shadow: 0 0 4px #ff4444; 
+        }
+        
+        .bk-nav-tabs { 
+            display: flex; 
+            gap: 10px; 
+            margin-bottom: 20px; 
+            border-bottom: 1px solid #333; 
+            padding-bottom: 10px; 
+            flex-wrap: wrap; 
+        }
+        
+        .bk-nav-btn { 
+            background: transparent; 
+            border: none; 
+            color: #888; 
+            font-size: 14px; 
+            font-weight: bold; 
+            cursor: pointer; 
+            padding: 5px 10px; 
+            border-bottom: 2px solid transparent; 
+            transition: 0.3s; 
+        }
+        
+        .bk-nav-btn.ativo { 
+            color: #007bff; 
+            border-color: #007bff; 
+        }
+        
+        .bk-tab-content { 
+            display: none; 
+        }
+        
+        .bk-tab-content.ativo { 
+            display: block; 
+            animation: fadeIn 0.4s ease-in-out; 
+        }
+
+        .miner-card { 
+            background: #111; 
+            border: 1px solid #333; 
+            border-left: 4px solid #007bff; 
+            padding: 15px; 
+            border-radius: 6px; 
+            margin-bottom: 10px; 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center; 
+        }
+
+        /* 💸 FICHAS DE CASSINO (AUTO-TRADER) */
+        .fichas-container {
+            display: flex;
+            gap: 8px;
+            margin-top: 8px;
+            flex-wrap: wrap;
+        }
+        
+        .ficha-btn {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: radial-gradient(circle, #333 40%, #111 90%);
+            border: 2px dashed #666;
+            color: white;
+            font-weight: bold;
+            font-size: 12px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.5);
+            transition: 0.2s;
+        }
+        
+        .ficha-btn:hover {
+            transform: translateY(-2px);
+            border-color: #007bff;
+            box-shadow: 0 6px 10px rgba(0,123,255,0.4);
+        }
+        
+        .ficha-btn.f5 { border-color: #dc3545; }
+        .ficha-btn.f10 { border-color: #007bff; }
+        .ficha-btn.f25 { border-color: #28a745; }
+        .ficha-btn.f125 { border-color: #ffc107; color: black; }
+        .ficha-btn.f500 { border-color: #6f42c1; }
+
+        .progress-bar-bg {
+            width: 100%;
+            height: 8px;
+            background: #222;
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 4px;
+            border: 1px solid #333;
+        }
+
+        .progress-bar-fill {
+            height: 100%;
+            transition: width 0.4s ease;
+        }
+
+        /* ESTILOS DO RELATÓRIO PDF (INVISÍVEL NA TELA) */
+        #pdf-template {
+            display: none;
+            background: white;
+            color: black;
+            padding: 40px;
+            font-family: Arial, sans-serif;
+            width: 800px;
+        }
+        
+        .pdf-header {
+            text-align: center;
+            border-bottom: 2px solid #000;
+            padding-bottom: 10px;
+            margin-bottom: 20px;
+        }
+        
+        .pdf-resumo {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+            margin-bottom: 20px;
+            background: #f8f9fa;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        
+        .pdf-box {
+            flex: 1;
+            min-width: 150px;
+        }
+        
+        .pdf-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 11px;
+        }
+        
+        .pdf-table th, .pdf-table td {
+            border: 1px solid #ccc;
+            padding: 8px;
+            text-align: left;
+        }
+        
+        .pdf-table th {
+            background: #e9ecef;
+            font-weight: bold;
+        }
+
+        /* RESPONSIVIDADE */
+        @media (max-width: 768px) { 
+            .bk-grid { grid-template-columns: 1fr; } 
+            #lista-padroes { grid-template-columns: 1fr; } 
+            .grid-dash { grid-template-columns: repeat(2, 1fr); } 
+            .filtro-box { flex-direction: column; align-items: stretch; } 
+            .topo-header { flex-direction: column; align-items: flex-start; } 
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        
+        <!-- ========================================== -->
+        <!-- NAVEGAÇÃO SUPERIOR -->
+        <!-- ========================================== -->
+        <div class="topo-header">
+            <h1>
+                <a class="link-home" onclick="voltarParaHome()">Inteligência Bac Bo</a> 
+                <span class="versao-tag">V12.0 Pro Engine</span>
+                <span id="btn-som" class="gear-icon" onclick="toggleSom()" title="Ativar/Desativar Sons">🔊</span>
+                <span class="gear-icon spin" onclick="toggleModalConfig(true)" title="Configurações">⚙️</span>
+            </h1>
+            <div style="display: flex; gap: 10px; align-items:center; flex-wrap: wrap;">
+                
+                <div class="box-sintonizador">
+                    <span style="font-size:12px; color:#888; margin-right:8px; font-weight:bold; text-transform:uppercase;">📡 Sintonizar:</span>
+                    <select id="sintonizador-web" onchange="filtrarSintonizador()">
+                        <option value="TODOS">Todos os Robôs</option>
+                    </select>
+                    <!-- 🌟 BADGE DE GREENS -->
+                    <span id="badge-streak-robo" style="display:none; background:#28a745; color:#fff; padding:3px 8px; border-radius:4px; font-size:11px; font-weight:bold; margin-left:10px;">🔥 0 Greens Seguidos</span>
+                </div>
+                
+                <button id="nav-btn-dashboard" class="btn" style="background: #007bff;" onclick="mudarAbaPrincipal('dashboard')">📊 Dashboard</button>
+                <button id="nav-btn-padroes" class="btn" style="background: #222; color: #aaa;" onclick="mudarAbaPrincipal('padroes')">⚙️ Padrões</button>
+                <button id="nav-btn-robos" class="btn" style="background: #222; color: #aaa;" onclick="mudarAbaPrincipal('robos')">🤖 Robôs</button>
+                
+                <!-- 🌟 BOTÃO AUTO-TRADER -->
+                <button id="nav-btn-autotrader" class="btn" style="background: #28a745; color: white; box-shadow: 0 0 8px rgba(40,167,69,0.5);" onclick="mudarAbaPrincipal('autotrader')">💸 Auto-Trader</button>
+                
+                <button id="nav-btn-backtest" class="btn" style="background: #ffc107; color: black;" onclick="abrirAbaBacktest()">🔬 Backtest & Mineração</button>
+            </div>
+        </div>
+
+        <!-- ========================================== -->
+        <!-- ABA 1: DASHBOARD DE ALARMES -->
+        <!-- ========================================== -->
+        <div id="aba-dashboard" class="aba-conteudo visivel">
+            <div id="banner-sinal">
+                <div class="banner-info">
+                    <div id="banner-icon">🔔</div>
+                    <div style="display: flex; flex-direction: column; justify-content: center;">
+                        <div style="display: flex; align-items: center;">
+                            <span id="banner-titulo">Sem Sinal Ativo</span>
+                            <span id="banner-assertividade" class="assertividade-badge" style="display:none;"></span>
+                        </div>
+                        <strong id="banner-acao">AGUARDANDO...</strong>
+                        <div id="banner-padrao" style="display:none; gap: 4px; margin-top: 6px; align-items:center;"></div>
+                        <div id="banner-tags" style="display:flex; gap: 4px; margin-top: 6px;"></div> 
+                    </div>
+                </div>
+                <div id="banner-pulse"></div>
+            </div>
+
+            <div id="container-card-ativo" style="display: none; margin-bottom: 20px;">
+                <h3 style="color: #ffc107; text-align: center; margin-bottom: 10px;" class="piscar">🚨 PADRÃO ATIVADO</h3>
+                <div id="conteudo-card-ativo"></div>
+            </div>
+
+            <div class="dashboard-global">
+                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                    <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+                        <h2 style="margin: 0; font-size: 13px; color: #aaa; text-transform: uppercase;">📊 Resumo Executivo (Disparos Reais)</h2>
+                        <select id="select-origem-dash" style="padding: 4px 8px; font-size: 11px; margin: 0; background: #222; border: 1px solid #444; color: white; border-radius: 4px; cursor: pointer; width: auto;" onchange="mudarFiltrosDash()">
+                            <option value="TODAS">🌐 Todas as Origens</option>
+                        </select>
+                        <select id="select-robo-dash" style="padding: 4px 8px; font-size: 11px; margin: 0; background: #222; border: 1px solid #444; color: #ffc107; font-weight: bold; border-radius: 4px; cursor: pointer; width: auto;" onchange="mudarFiltrosDash()">
+                            <option value="TODOS">🤖 Todos os Robôs</option>
+                        </select>
+                    </div>
+
+                    <div style="display: flex; gap: 4px; background: #111; padding: 2px; border-radius: 5px; border: 1px solid #333;">
+                        <button id="btn-dash-24h" class="btn-dash" style="background: #007bff; color: white; border: none; padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: bold;" onclick="mudarDashGeral('24h')">24H</button>
+                        <button id="btn-dash-hoje" class="btn-dash" style="background: transparent; color: #888; border: none; padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: bold;" onclick="mudarDashGeral('hoje')">Hoje</button>
+                        <button id="btn-dash-semana" class="btn-dash" style="background: transparent; color: #888; border: none; padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: bold;" onclick="mudarDashGeral('semana')">Semana</button>
+                        <button id="btn-dash-mes" class="btn-dash" style="background: transparent; color: #888; border: none; padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: bold;" onclick="mudarDashGeral('mes')">Mês</button>
+                        <button id="btn-dash-geral" class="btn-dash" style="background: transparent; color: #888; border: none; padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: bold;" onclick="mudarDashGeral('geral')">Geral</button>
+                    </div>
+                </div>
+                <div class="grid-dash">
+                    <div class="dash-box"><span>Sinais Disparados</span><strong id="dash-sinais">0</strong></div>
+                    <div class="dash-box"><span>Greens</span><strong id="dash-greens" style="color: #28a745;">0</strong></div>
+                    <div class="dash-box"><span>Reds</span><strong id="dash-reds" style="color: #ff7777;">0</strong></div>
+                    <div class="dash-box" id="box-assertividade" style="border-color: #007bff;"><span id="label-assertividade" style="color: #007bff;">Assertividade</span><strong id="dash-assertividade" style="color: #007bff;">0%</strong></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ========================================== -->
+        <!-- ABA 2: PADRÕES (ESTRATÉGIAS) -->
+        <!-- ========================================== -->
+        <div id="aba-padroes" class="aba-conteudo">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                <h2 style="margin: 0; font-size: 16px; color: #aaa; text-transform: uppercase;">Gestão de Padrões</h2>
+                <button class="btn" style="background: #28a745; font-size: 14px; box-shadow: 0 4px 10px rgba(40, 167, 69, 0.3);" onclick="abrirFormularioNova()">+ Nova Estratégia</button>
+            </div>
+            
+            <div class="filtro-box">
+                <div class="form-group" style="flex:1; min-width:180px;">
+                    <label>📌 Origem</label>
+                    <select id="select-origem-filtro" onchange="aplicarFiltrosEOrdenar()">
+                        <option value="TODAS">🌐 Geral (Todas)</option>
+                    </select>
+                </div>
+                <div class="form-group" style="flex:1; min-width:180px;">
+                    <label>🤖 Tipo de Padrão</label>
+                    <select id="select-tipo-filtro" onchange="aplicarFiltrosEOrdenar()" style="color:#17a2b8; font-weight:bold;">
+                        <option value="TODOS" style="color:white;">⚪ Todos os Padrões</option>
+                        <option value="MANUAIS" style="color:white;">👤 Apenas Manuais</option>
+                        <option value="DINAMICOS" style="color:#17a2b8;">⚡ Apenas Dinâmicos (IA)</option>
+                    </select>
+                </div>
+                <div class="form-group" style="flex:1; min-width:180px;">
+                    <label>🔽 Ordem</label>
+                    <select id="select-ordem-filtro" onchange="aplicarFiltrosEOrdenar()">
+                        <option value="status">Status (Ativos Primeiro)</option>
+                        <option value="assert">Assertividade</option>
+                        <option value="ocorr">Ocorrências</option>
+                        <option value="nome">Nome</option>
+                    </select>
+                </div>
+            </div>
+            
+            <div id="lista-padroes"></div>
+        </div>
+
+        <!-- ========================================== -->
+        <!-- ABA 3: GESTÃO DE ROBÔS -->
+        <!-- ========================================== -->
+        <div id="aba-robos" class="aba-conteudo">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                <h2 style="margin: 0; font-size: 16px; color: #aaa; text-transform: uppercase;">Robôs & Canais de Sinais</h2>
+                <button class="btn" style="background: #17a2b8; font-size: 14px; box-shadow: 0 4px 10px rgba(23, 162, 184, 0.3);" onclick="abrirFormularioRobo()">+ Criar Novo Robô</button>
+            </div>
+            
+            <div id="lista-robos"></div>
+        </div>
+
+        <!-- ========================================== -->
+        <!-- 🌟 ABA 4: AUTO-TRADER (MOTO DE EXECUÇÃO) -->
+        <!-- ========================================== -->
+        <div id="aba-autotrader" class="aba-conteudo">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                <h2 style="margin: 0; font-size: 16px; color: #aaa; text-transform: uppercase;">Motores de Execução (Auto-Traders)</h2>
+                <button class="btn" style="background: #28a745; font-size: 14px; box-shadow: 0 4px 10px rgba(40, 167, 69, 0.3);" onclick="abrirFormularioAutoTrader()">+ Novo Motor de Execução</button>
+            </div>
+            
+            <div id="lista-autotraders">
+                <!-- Cards renderizados via JS -->
+            </div>
+        </div>
+
+        <!-- ========================================== -->
+        <!-- ABA 5: BACKTEST E MINERAÇÃO -->
+        <!-- ========================================== -->
+        <div id="aba-backtest" class="aba-conteudo">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                <h2 style="margin: 0; font-size: 16px; color: #aaa; text-transform: uppercase;">Laboratório In-Memory (Tempo Real)</h2>
+                <div style="font-size: 12px; color: #888;">Giros carregados: <strong id="bk-qtd-giros" style="color:#007bff;">0</strong></div>
+            </div>
+
+            <div class="grid-dash" style="margin-bottom: 20px;">
+                <div class="dash-box" style="background:#007bff20; border-color:#007bff;">
+                    <span style="color:#007bff;">Max Sequência 🔵</span>
+                    <strong id="bk-max-p" style="color:#007bff;">0</strong>
+                </div>
+                <div class="dash-box" style="background:#ff777720; border-color:#ff7777;">
+                    <span style="color:#ff7777;">Max Sequência 🔴</span>
+                    <strong id="bk-max-b" style="color:#ff7777;">0</strong>
+                </div>
+                <div class="dash-box" style="background:#ffc10720; border-color:#ffc107;">
+                    <span style="color:#ffc107;">Max Sequência 🟡</span>
+                    <strong id="bk-max-t" style="color:#ffc107;">0</strong>
+                </div>
+                <div class="dash-box" style="border-color:#555;">
+                    <span>Max Sem Empate</span>
+                    <strong id="bk-max-sem-t">0</strong>
+                </div>
+            </div>
+
+            <div class="bk-fita" id="bk-fita-historico">
+                <!-- Bolinhas injetadas via JS -->
+            </div>
+
+            <div class="bk-nav-tabs" style="margin-top: 20px;">
+                <button class="bk-nav-btn ativo" id="btn-tab-manual" onclick="trocarTabBacktest('manual')">🧪 Lab Padrões</button>
+                <button class="bk-nav-btn" id="btn-tab-minerador" onclick="trocarTabBacktest('minerador')">⛏️ Minerador Manual</button>
+                <button class="bk-nav-btn" id="btn-tab-fin" onclick="trocarTabBacktest('fin')">📊 Simulação de Banca</button>
+            </div>
+
+            <!-- LAB MANUAL -->
+            <div id="bk-tab-manual" class="bk-tab-content ativo">
+                <div class="bk-grid">
+                    <div class="bk-panel">
+                        <h4 style="margin:0 0 15px 0; color:#007bff;">Montar Estratégia</h4>
+                        
+                        <div class="form-group" style="margin-bottom:15px;">
+                            <label>Construir Padrão:</label>
+                            <div style="display:flex; gap:5px;">
+                                <button class="btn" style="flex:1; padding:0;" onclick="bkAdd('Player')">🔵</button>
+                                <button class="btn" style="flex:1; background:#ffc107; color:black; padding:0;" onclick="bkAdd('Tie')">🟡</button>
+                                <button class="btn" style="flex:1; background:#ff7777; padding:0;" onclick="bkAdd('Banker')">🔴</button>
+                                <button class="btn" style="flex:1; background:#444;" onclick="bkLimpar()">🧹</button>
+                            </div>
+                            <div id="bk-visor-padrao" style="margin-top:10px; padding:10px; background:#111; border:1px dashed #555; border-radius:6px; min-height:38px; display:flex; gap:6px; flex-wrap:wrap; align-items:center;"></div>
+                        </div>
+
+                        <div style="display:flex; gap:10px; margin-bottom:15px;">
+                            <div class="form-group" style="flex:1;">
+                                <label>Apostar em:</label>
+                                <select id="bk-entrada">
+                                    <option value="Player">🔵 Player</option>
+                                    <option value="Banker">🔴 Banker</option>
+                                </select>
+                            </div>
+                            <div class="form-group" style="flex:1;">
+                                <label>Gales:</label>
+                                <select id="bk-gales">
+                                    <option value="0">0</option>
+                                    <option value="1">G1</option>
+                                    <option value="2">G2</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <label style="cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom:15px; font-size:12px;">
+                            <input type="checkbox" id="bk-prot" style="width: 14px; height: 14px; margin: 0;"> 
+                            <strong>Proteção de Empate 🟡</strong>
+                        </label>
+
+                        <div class="form-group" style="margin-bottom:15px;">
+                            <label>Analisar nas últimas X rodadas:</label>
+                            <select id="bk-range">
+                                <option value="100">100 Rodadas</option>
+                                <option value="500">500 Rodadas</option>
+                                <option value="1000">1.000 Rodadas</option>
+                                <option value="3000">3.000 Rodadas</option>
+                                <option value="10000" selected>Toda a Base (Max)</option>
+                            </select>
+                        </div>
+
+                        <button class="btn" style="width:100%; background:#28a745; margin-bottom:10px;" onclick="rodarBacktestManual()">▶️ Rodar Simulação</button>
+                        <button class="btn" style="width:100%; background:#17a2b8;" onclick="bkSalvarComoEstrategia()">💾 Salvar como Estratégia</button>
+                    </div>
+
+                    <div class="bk-panel" style="display:flex; flex-direction:column; justify-content:center;">
+                        <div id="bk-resultados-placeholder" style="color:#666; text-align:center;">Configure a estratégia e rode a simulação.</div>
+                        <div id="bk-resultados-box" style="display:none;">
+                            <h2 style="margin:0 0 5px 0; text-align:center; color:#007bff;" id="bk-res-assert">0%</h2>
+                            <p style="text-align:center; font-size:12px; color:#aaa; margin:0 0 20px 0;" id="bk-res-sub">0 vitórias em 0 ocorrências</p>
+                            
+                            <div class="linha-detalhe" style="align-items:center; background:#111; padding:10px; border-radius:6px; margin-bottom:10px;">
+                                <span>✅ Greens: <strong style="color:#28a745;" id="bk-res-greens">0</strong></span>
+                                <div style="display:flex; gap:10px; font-size:11px; color:#ccc;">
+                                    <span>Dir: <strong id="bk-res-dir">0</strong></span>
+                                    <span>G1: <strong id="bk-res-g1">0</strong></span>
+                                    <span>G2: <strong id="bk-res-g2">0</strong></span>
+                                </div>
+                            </div>
+                            
+                            <div class="linha-detalhe" style="flex-direction:column; background:#111; padding:10px; border-radius:6px; margin-bottom:10px;">
+                                <span>🟡 Empates Pegos: <strong style="color:#ffc107;" id="bk-res-ties">0</strong></span>
+                                <div class="tie-box" id="bk-res-ties-box" style="font-size:11px; color:#aaa; margin-top:5px;"></div>
+                            </div>
+                            
+                            <div class="linha-detalhe" style="background:#111; padding:10px; border-radius:6px; border-bottom:none;">
+                                <span>❌ Derrotas (Reds): <strong style="color:#ff7777;" id="bk-res-reds">0</strong></span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- MINERADOR MANUAL -->
+            <div id="bk-tab-minerador" class="bk-tab-content">
+                <div class="bk-grid">
+                    <div class="bk-panel">
+                        <h4 style="margin:0 0 15px 0; color:#ffc107;">Configurar Varredura Manual</h4>
+                        <div style="display:flex; gap:10px; margin-bottom:10px;">
+                            <div class="form-group" style="flex:1;">
+                                <label>Tamanho do Padrão:</label>
+                                <input type="number" id="mn-tamanho" value="3" min="2" max="6">
+                            </div>
+                            <div class="form-group" style="flex:1;">
+                                <label>Gales Permitidos:</label>
+                                <select id="mn-gales">
+                                    <option value="0">0</option>
+                                    <option value="1">G1</option>
+                                    <option value="2" selected>G2</option>
+                                </select>
+                            </div>
+                        </div>
+                        
+                        <div style="display:flex; gap:10px; margin-bottom:10px;">
+                            <div class="form-group" style="flex:1;">
+                                <label>Assertividade Mín (%):</label>
+                                <input type="number" id="mn-assert" value="95" min="50" max="100">
+                            </div>
+                            <div class="form-group" style="flex:1;">
+                                <label>Ocorrências Mínimas:</label>
+                                <input type="number" id="mn-ocorr" value="10" min="1">
+                            </div>
+                        </div>
+                        
+                        <label style="cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom:15px; font-size:12px;">
+                            <input type="checkbox" id="mn-prot" checked style="width: 14px; height: 14px; margin: 0;"> 
+                            <strong>Considerar Proteção no Empate 🟡</strong>
+                        </label>
+                        
+                        <div class="form-group" style="margin-bottom:15px;">
+                            <label>Base de Dados (Rodadas):</label>
+                            <select id="mn-range">
+                                <option value="500">Últimas 500</option>
+                                <option value="1000" selected>Últimas 1.000</option>
+                                <option value="3000">Últimas 3.000</option>
+                                <option value="10000">Toda a Base (Max)</option>
+                            </select>
+                        </div>
+                        
+                        <button class="btn" style="width:100%; background:#ffc107; color:black;" onclick="rodarMinerador()">⛏️ Iniciar Mineração Bruta</button>
+                    </div>
+                    
+                    <div class="bk-panel" style="max-height: 500px; overflow-y: auto;">
+                        <h4 style="margin:0 0 15px 0;">Resultados Encontrados (<span id="mn-qtd-resultados">0</span>)</h4>
+                        <div id="mn-lista-resultados">
+                            <p style="color:#666; text-align:center; margin-top:50px;">Ajuste os filtros e clique em iniciar.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- SIMULAÇÃO FINANCEIRA DE BANCA -->
+            <div id="bk-tab-fin" class="bk-tab-content">
+                <div class="bk-grid">
+                    <div class="bk-panel">
+                        <h4 style="margin:0 0 15px 0; color:#28a745;">Configurar Backtest Financeiro</h4>
+                        
+                        <div style="display:flex; gap:10px; margin-bottom:15px;">
+                            <div class="form-group" style="flex:1;">
+                                <label>Tipo de Alvo:</label>
+                                <select id="sim-tipo-alvo" onchange="atualizarAlvosSimulacao()">
+                                    <option value="ESTRATEGIA">Estratégia Única</option>
+                                    <option value="ORIGEM">Origem (Grupo)</option>
+                                    <option value="ROBO">Robô Completo</option>
+                                </select>
+                            </div>
+                            <div class="form-group" style="flex:1;">
+                                <label>Selecionar Alvo:</label>
+                                <select id="sim-alvo-id"></select>
+                            </div>
+                        </div>
+
+                        <div style="display:flex; gap:10px; margin-bottom:15px;">
+                            <div class="form-group" style="flex:1;">
+                                <label>Banca Inicial (R$):</label>
+                                <input type="number" id="sim-banca" value="1000.00" step="10.00">
+                            </div>
+                            <div class="form-group" style="flex:1;">
+                                <label>Stake Base (R$):</label>
+                                <input type="number" id="sim-stake" value="10.00" step="1.00">
+                            </div>
+                        </div>
+
+                        <div style="display:flex; gap:10px; margin-bottom:15px; align-items:center; background:#111; padding:10px; border-radius:6px; border:1px solid #333;">
+                            <label style="cursor: pointer; display: flex; align-items: center; gap: 8px; font-size:12px; flex:1;">
+                                <input type="checkbox" id="sim-prot" style="width: 14px; height: 14px; margin: 0;" onchange="toggleSimEmpate(this)"> 
+                                <strong>Cobrir Empate</strong>
+                            </label>
+                            <div class="form-group" style="flex:1; margin:0;" id="sim-pct-box">
+                                <label style="font-size:9px;">% da Stake no Empate:</label>
+                                <input type="number" id="sim-pct-empate" value="10" min="1" max="100" style="padding:4px 8px; height:28px;" disabled>
+                            </div>
+                        </div>
+
+                        <div style="display:flex; gap:10px; margin-bottom:15px;">
+                            <div class="form-group" style="flex:1;">
+                                <label>Multiplicador Gale:</label>
+                                <input type="number" id="sim-mult-gale" value="2.0" step="0.1" min="1.0">
+                            </div>
+                            <div class="form-group" style="flex:1;">
+                                <label>Período de Análise:</label>
+                                <select id="sim-periodo">
+                                    <option value="24h">Últimas 24h</option>
+                                    <option value="hoje">Hoje</option>
+                                    <option value="semana" selected>Esta Semana</option>
+                                    <option value="mes">Este Mês</option>
+                                    <option value="geral">Geral (Tudo)</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div style="background:#111; padding:10px; border-radius:6px; border:1px solid #333; margin-bottom:15px;">
+                            <label style="cursor: pointer; display: flex; align-items: center; gap: 8px; font-size:12px; margin-bottom:8px;">
+                                <input type="checkbox" id="sim-filtro-hora" style="width: 14px; height: 14px; margin: 0;" onchange="toggleSimHora(this)"> 
+                                <strong>Limitar Horário de Operação</strong>
+                            </label>
+                            <div style="display:flex; gap:10px;">
+                                <div class="form-group" style="flex:1; margin:0;">
+                                    <label style="font-size:9px;">Início:</label>
+                                    <input type="time" id="sim-hora-inicio" value="08:00" disabled>
+                                </div>
+                                <div class="form-group" style="flex:1; margin:0;">
+                                    <label style="font-size:9px;">Fim:</label>
+                                    <input type="time" id="sim-hora-fim" value="18:00" disabled>
+                                </div>
+                            </div>
+                        </div>
+
+                        <button class="btn" style="width:100%; background:#28a745; margin-bottom:10px; box-shadow: 0 4px 10px rgba(40,167,69,0.3);" onclick="rodarSimulacaoBanca()">▶️ Iniciar Simulação Monte Carlo</button>
+                    </div>
+
+                    <div class="bk-panel" style="display:flex; flex-direction:column;">
+                        <div id="sim-resultados-placeholder" style="color:#666; text-align:center; margin:auto 0;">
+                            Defina o capital e os parâmetros da estratégia para gerar a Equity Curve.
+                        </div>
+                        
+                        <div id="sim-resultados-box" style="display:none; width:100%;">
+                            <div style="display:flex; justify-content:space-between; align-items:end; margin-bottom:15px;">
+                                <div>
+                                    <h4 style="margin:0; font-size:11px; color:#aaa; text-transform:uppercase;">Saldo Final Projetado</h4>
+                                    <h2 style="margin:0; font-size:28px;" id="sim-res-saldo">R$ 0,00</h2>
+                                </div>
+                                <div style="text-align:right;">
+                                    <h4 style="margin:0; font-size:11px; color:#aaa; text-transform:uppercase;">Lucro Líquido</h4>
+                                    <h3 style="margin:0; font-size:20px;" id="sim-res-lucro">R$ 0,00</h3>
+                                    <span style="font-size:12px; font-weight:bold;" id="sim-res-perc">0.00%</span>
+                                </div>
+                            </div>
+
+                            <div class="grid-dash" style="margin-bottom:15px; grid-template-columns: repeat(3, 1fr);">
+                                <div class="dash-box" style="background:#ff777720; border-color:#ff7777;">
+                                    <span style="color:#ff7777;">Max Drawdown (Risco)</span>
+                                    <strong id="sim-res-dd" style="color:#ff7777; font-size:14px;">R$ 0,00</strong>
+                                </div>
+                                <div class="dash-box">
+                                    <span>Total Sinais</span>
+                                    <strong id="sim-res-sinais" style="font-size:14px;">0</strong>
+                                </div>
+                                <div class="dash-box" style="border-color:#007bff;">
+                                    <span style="color:#007bff;">Win Rate Global</span>
+                                    <strong id="sim-res-winrate" style="color:#007bff; font-size:14px;">0%</strong>
+                                </div>
+                            </div>
+
+                            <div style="background:#111; padding:15px; border-radius:8px; border:1px solid #333;">
+                                <h4 style="margin:0 0 10px 0; font-size:11px; color:#888; text-transform:uppercase; text-align:center;">Curva de Crescimento (Equity Curve)</h4>
+                                <canvas id="chart-simulacao" height="120"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- ========================================== -->
+        <!-- MODAIS FLUTUANTES (Estratégias e Robôs) -->
+        <!-- ========================================== -->
+        
+        <!-- MODAL ESTRATÉGIA -->
+        <div id="modal-cadastro" class="modal-form-overlay">
+            <div class="modal-form-content">
+                <h3 id="titulo-formulario" style="margin-top:0; color:#fff;">Cadastrar Nova Estratégia</h3>
+                
+                <div style="display:flex; gap:15px; flex-wrap:wrap;">
+                    <div class="form-group" style="flex:1; min-width:200px;">
+                        <label>Nome:</label>
+                        <input type="text" id="nome">
+                    </div>
+                    <div class="form-group" style="flex:1; min-width:200px;">
+                        <label>Origem:</label>
+                        <div style="display:flex; gap:5px;">
+                            <select id="origem"></select>
+                            <button class="btn" style="background:#6c757d; padding:0 12px;" onclick="cadastrarOrigem()">+</button>
+                            <button class="btn" style="background:#17a2b8; padding:0 12px;" onclick="abrirGerenciadorOrigens()">⚙️</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div style="margin: 20px 0; background: #222; padding: 15px; border-radius: 8px; border: 1px solid #333;">
+                    <label style="display:block; margin-bottom:10px; font-weight:bold; color:#aaa; font-size:11px; text-transform:uppercase;">Construa o Padrão Sequencial:</label>
+                    <div style="display:flex; gap:8px;">
+                        <button class="btn" style="flex:1;" onclick="adicionarNoPadraoModal('Player')">🔵 Player</button>
+                        <button class="btn" style="flex:1; background:#ffc107; color:black;" onclick="adicionarNoPadraoModal('Tie')">🟡 Tie</button>
+                        <button class="btn" style="flex:1; background:#ff7777;" onclick="adicionarNoPadraoModal('Banker')">🔴 Banker</button>
+                        <button class="btn" style="flex:1; background:#6c757d;" onclick="limparPadraoModal()">🧹 Desfazer</button>
+                    </div>
+                    <div id="visor-padrao" style="margin-top:10px; padding:10px; background:#111; border:1px dashed #555; border-radius:6px; min-height:38px; display:flex; gap:6px; flex-wrap:wrap; align-items:center;"></div>
+                </div>
+                <input type="hidden" id="padrao">
+
+                <div style="display:flex; gap:15px; flex-wrap:wrap;">
+                    <div class="form-group" style="flex:1; min-width:200px;">
+                        <label>Entrada (Sinal):</label>
+                        <select id="entrada">
+                            <option value="Player">Player</option>
+                            <option value="Banker">Banker</option>
+                        </select>
+                    </div>
+                    <div class="form-group" style="flex:1; min-width:200px;">
+                        <label>Gales:</label>
+                        <select id="gales">
+                            <option value="0">Sem Gale</option>
+                            <option value="1">Até Gale 1</option>
+                            <option value="2">Até Gale 2</option>
+                        </select>
+                    </div>
+                </div>
+                
+                <div style="margin: 20px 0; background: #222; padding: 12px; border-radius: 6px; display: flex; gap: 20px; flex-wrap: wrap; font-size: 13px;">
+                    <label style="cursor: pointer; display: flex; align-items: center; gap: 8px;">
+                        <input type="checkbox" id="ativo" checked style="width: 16px; height: 16px; margin: 0;"> 
+                        <strong style="color: #28a745;">▶️ Ativa</strong>
+                    </label>
+                    <label style="cursor: pointer; display: flex; align-items: center; gap: 8px;">
+                        <input type="checkbox" id="proteger_empate" style="width: 16px; height: 16px; margin: 0;"> 
+                        <strong>Proteção de Empate 🟡</strong>
+                    </label>
+                </div>
+                
+                <div style="display:flex; gap:10px; margin-top:15px;">
+                    <button class="btn" id="btn-salvar-form" style="background:#28a745; flex:1;" onclick="salvarPadrao()">💾 Salvar</button>
+                    <button class="btn" style="background:#444; border:1px solid #555; flex:1;" onclick="fecharFormulario()">Cancelar</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- MODAL ROBÔ -->
+        <div id="modal-robo" class="modal-form-overlay" style="z-index: 2100;">
+            <div class="modal-form-content" style="border-top-color:#17a2b8; max-width:800px; padding-top: 15px;">
+                
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+                    <h3 id="titulo-robo" style="margin:0; color:#17a2b8;">🤖 Cadastrar Hub de Sinais</h3>
+                    <button class="btn" style="background:transparent; color:#888; font-size:18px; padding:0;" onclick="fecharFormularioRobo()">✖</button>
+                </div>
+
+                <div class="robo-nav-tabs">
+                    <button class="robo-nav-btn ativo" id="btn-robo-tab-geral" onclick="mudarAbaRobo('geral')">⚙️ Geral & Telegram</button>
+                    <button class="robo-nav-btn" id="btn-robo-tab-sint" onclick="mudarAbaRobo('sint')">🎛️ Sintonizador Manual</button>
+                    <button class="robo-nav-btn" id="btn-robo-tab-ia" onclick="mudarAbaRobo('ia')" style="color:#ffc107;">⚡ Piloto Automático (IA)</button>
+                    <button class="robo-nav-btn" id="btn-robo-tab-risco" onclick="mudarAbaRobo('risco')" style="color:#17a2b8;">🛡️ Gestão de Risco</button>
+                </div>
+
+                <!-- Aba Geral do Robô -->
+                <div id="robo-tab-geral" class="robo-tab-content ativo">
+                    <div style="display:flex; gap:15px; flex-wrap:wrap; margin-bottom:15px;">
+                        <div class="form-group" style="flex:2; min-width:200px;">
+                            <label>Nome do Robô / Sala</label>
+                            <input type="text" id="robo-nome" placeholder="Ex: Sala VIP Premium">
+                        </div>
+                        <div class="form-group" style="flex:1; min-width:100px;">
+                            <label>TAG (Sufixo)</label>
+                            <input type="text" id="robo-tag" placeholder="Ex: [VIP]">
+                        </div>
+                        <div class="form-group" style="flex:1; min-width:80px;">
+                            <label>Cor Hex</label>
+                            <input type="color" id="robo-cor" value="#007bff" style="padding:0; height:36px; border:none; cursor:pointer; background:transparent; width:100%; border-radius:6px;">
+                        </div>
+                    </div>
+
+                    <div style="background: #222; padding: 15px; border-radius: 8px; border: 1px solid #333; margin-bottom:15px;">
+                        <h4 style="margin:0 0 10px 0; font-size:12px; color:#aaa; text-transform:uppercase;">📱 Configuração Telegram Bot</h4>
+                        <div class="form-group">
+                            <label>Token do Bot API</label>
+                            <input type="text" id="robo-token" placeholder="000000:AAHHh...">
+                        </div>
+                    </div>
+
+                    <div style="background: #1a1a1a; padding: 15px; border-radius: 8px; border: 1px solid #333; margin-bottom:15px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                            <h4 style="margin:0; font-size:12px; color:#17a2b8; text-transform:uppercase;">👥 Destinatários / Assinantes</h4>
+                            <button class="btn" style="background:#28a745; font-size:11px; height:28px; padding:0 10px;" onclick="adicionarLinhaDestinatario('', '')">+ Adicionar</button>
+                        </div>
+                        <table class="destinatarios-table">
+                            <thead>
+                                <tr>
+                                    <th style="width: 45%;">Nome Cliente</th>
+                                    <th style="width: 45%;">Chat ID</th>
+                                    <th style="width: 10%; text-align: center;">Ação</th>
+                                </tr>
+                            </thead>
+                            <tbody id="corpo-tabela-destinatarios"></tbody>
+                        </table>
+                    </div>
+
+                    <div style="display:flex; gap:15px; flex-wrap:wrap; margin-bottom:15px;">
+                        <div class="form-group" style="flex:1; background:#222; padding:12px; border-radius:6px; border:1px solid #333;">
+                            <label>Min. Assertividade (%)</label>
+                            <input type="number" id="robo-min-assert" value="0" min="0" max="100">
+                        </div>
+                        <div class="form-group" style="flex:1; background:#222; padding:12px; border-radius:6px; border:1px solid #333;">
+                            <label>Stop Reds (Seguidos)</label>
+                            <input type="number" id="robo-stop-red" value="0" min="0">
+                        </div>
+                    </div>
+
+                    <div style="margin: 15px 0; background: #222; padding: 12px; border-radius: 6px; display: flex; gap: 20px; flex-wrap: wrap; font-size: 13px;">
+                        <label style="cursor: pointer; display: flex; align-items: center; gap: 8px;"><input type="checkbox" id="robo-ativo" checked style="width:16px; height:16px; margin:0;"> <strong style="color: #28a745;">▶️ Robô Ativo</strong></label>
+                        <label style="cursor: pointer; display: flex; align-items: center; gap: 8px;"><input type="checkbox" id="robo-envia-tel" checked style="width:16px; height:16px; margin:0;"> <strong>📱 Enviar para Telegram</strong></label>
+                        <label style="cursor: pointer; display: flex; align-items: center; gap: 8px;"><input type="checkbox" id="robo-envia-web" checked style="width:16px; height:16px; margin:0;"> <strong>💻 Mostrar no Painel Web</strong></label>
+                    </div>
+
+                    <div style="background: #1a1a1a; padding: 15px; border-radius: 8px; border: 1px solid #333; margin-bottom:15px;">
+                        <h4 style="margin:0 0 10px 0; font-size:12px; color:#17a2b8; text-transform:uppercase;">🎛️ Interruptores Rápidos de Exibição</h4>
+                        <div style="display: flex; gap: 20px; flex-wrap: wrap; font-size: 13px;">
+                            <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;"><input type="checkbox" id="robo-mostrar-nome" checked style="width:14px; height:14px;"> Mostrar Nome</label>
+                            <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;"><input type="checkbox" id="robo-mostrar-padrao" checked style="width:14px; height:14px;"> Mostrar Padrão</label>
+                            <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;"><input type="checkbox" id="robo-mostrar-assertividade" checked style="width:14px; height:14px;"> Mostrar Assertividade</label>
+                            <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;"><input type="checkbox" id="robo-detalhar-empates" checked style="width:14px; height:14px;"> Detalhar Empates</label>
+                        </div>
+                    </div>
+
+                    <div style="background: #1a1a1a; padding: 15px; border-radius: 8px; border: 1px solid #333; margin-bottom:15px;">
+                        <h4 style="margin:0 0 8px 0; font-size:12px; color:#17a2b8; text-transform:uppercase;">✍️ Textos Opcionais de Marca</h4>
+                        <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                            <div class="form-group" style="flex:1; min-width:250px;">
+                                <label>Cabeçalho Personalizado (Opcional):</label>
+                                <input type="text" id="robo-cabecalho" placeholder="Ex: ⚡ SALA VIP ELITE">
+                            </div>
+                            <div class="form-group" style="flex:1; min-width:250px;">
+                                <label>Rodapé Personalizado (Opcional):</label>
+                                <input type="text" id="robo-rodape" placeholder="Ex: ⚠️ Gerencie sua banca.">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="robo-tab-sint" class="robo-tab-content">
+                    <p style="font-size:12px; color:#aaa;">Selecione abaixo quais padrões manuais ou grupos de origens este robô deve operar.</p>
+                    <div style="display:flex; gap:10px; flex-wrap:wrap;">
+                        <div class="form-group" style="flex:1; min-width:200px;"><label style="color:#007bff;">1. Incluir Origens</label><div class="check-list-box" id="robo-lista-origens"></div></div>
+                        <div class="form-group" style="flex:1; min-width:200px;"><label style="color:#ff7777;">2. Exceções</label><div class="check-list-box" id="robo-lista-excecoes"></div></div>
+                        <div class="form-group" style="flex:1; min-width:200px;"><label style="color:#28a745;">3. Avulsos</label><div class="check-list-box" id="robo-lista-avulsos"></div></div>
+                    </div>
+                </div>
+
+                <div id="robo-tab-ia" class="robo-tab-content">
+                    <div style="background: rgba(255, 193, 7, 0.1); border: 1px solid #ffc107; padding: 15px; border-radius: 8px; margin-bottom:15px;">
+                        <label style="cursor: pointer; display: flex; align-items: center; gap: 10px; font-size:16px;"><input type="checkbox" id="robo-ia-ativo" style="width: 20px; height: 20px; margin: 0;" onchange="toggleFormIA(this)"> <strong style="color: #ffc107;">⚡ ATIVAR PILOTO AUTOMÁTICO (Auto-Miner)</strong></label>
+                    </div>
+                    <div id="form-ia-campos" style="opacity:0.5; pointer-events:none;">
+                        <h4 style="margin:0 0 10px 0; font-size:12px; color:#17a2b8; text-transform:uppercase;">⚙️ Motor de Busca</h4>
+                        <div style="display:flex; gap:10px; flex-wrap:wrap; background:#111; padding:15px; border-radius:6px; border:1px solid #333; margin-bottom:15px;">
+                            <div class="form-group" style="flex:1; min-width:120px;"><label>Giros para Analisar:</label><input type="number" id="robo-ia-range" value="1000" min="100" max="10000"></div>
+                            <div class="form-group" style="flex:1; min-width:120px;"><label>Minerar a cada X giros:</label><input type="number" id="robo-ia-trigger" value="150" min="10"></div>
+                            <div class="form-group" style="flex:1; min-width:90px;"><label>Tam. Mínimo:</label><input type="number" id="robo-ia-tam-min" value="3" min="2" max="6"></div>
+                            <div class="form-group" style="flex:1; min-width:90px;"><label>Tam. Máximo:</label><input type="number" id="robo-ia-tam-max" value="5" min="2" max="6"></div>
+                        </div>
+
+                        <div style="display:flex; gap:10px; flex-wrap:wrap; background:#111; padding:15px; border-radius:6px; border:1px solid #333; margin-bottom:15px;">
+                            <div class="form-group" style="flex:1; min-width:120px;"><label>Assertividade Mín. (%):</label><input type="number" id="robo-ia-assert" value="95" min="50" max="100"></div>
+                            <div class="form-group" style="flex:1; min-width:120px;"><label>Ocorrências Mínimas:</label><input type="number" id="robo-ia-ocorr" value="10" min="1"></div>
+                            <div class="form-group" style="flex:1; min-width:100px;"><label>Gales na Simulação:</label><select id="robo-ia-gales"><option value="0">0</option><option value="1">G1</option><option value="2" selected>G2</option></select></div>
+                            <label style="cursor: pointer; display: flex; align-items: center; gap: 8px; font-size:12px; margin-top:15px;"><input type="checkbox" id="robo-ia-prot" checked style="width: 14px; height: 14px; margin: 0;"> <strong>Cobrir Empate</strong></label>
+                        </div>
+
+                        <div class="form-group" style="margin-bottom:15px; background:#111; padding:15px; border-radius:6px; border:1px solid #333;">
+                            <label>🚫 Blacklist (Proibidos):</label>
+                            <input type="text" id="robo-ia-blacklist" placeholder="Ex: P,B,P,B , B,P,B,P">
+                        </div>
+
+                        <h4 style="margin:0 0 10px 0; font-size:12px; color:#17a2b8; text-transform:uppercase;">🛡️ Quarentena & Anti-Spam</h4>
+                        <div style="display:flex; gap:10px; flex-wrap:wrap; background:#111; padding:15px; border-radius:6px; border:1px solid #333; margin-bottom:15px;">
+                            <div class="form-group" style="flex:1; min-width:200px;"><label>Modo Sombra (Testar X giros):</label><input type="number" id="robo-ia-shadow" value="0" min="0"></div>
+                            <div class="form-group" style="flex:1; min-width:200px;"><label>Máximo de Padrões Ativos:</label><input type="number" id="robo-ia-max" value="4" min="1"></div>
+                        </div>
+
+                        <h4 style="margin:0 0 10px 0; font-size:12px; color:#ff7777; text-transform:uppercase;">🗑️ Gatilhos de Descarte</h4>
+                        <div style="display:flex; gap:10px; flex-wrap:wrap; background:#111; padding:15px; border-radius:6px; border:1px solid #333; margin-bottom:15px;">
+                            <div class="form-group" style="flex:1; min-width:150px;"><label>Auto-excluir se tomar REDs:</label><input type="number" id="robo-ia-drop-reds" value="1" min="1"></div>
+                            <div class="form-group" style="flex:1; min-width:150px;"><label>Excluir se Assert. < (%):</label><input type="number" id="robo-ia-drop-assert" value="85" min="0" max="100"></div>
+                            <div class="form-group" style="flex:1; min-width:150px;"><label>Tempo de Vida (Horas):</label><input type="number" id="robo-ia-ttl" value="4" min="1"></div>
+                        </div>
+                        
+                        <div style="background:#111; padding:15px; border-radius:6px; border:1px solid #333; margin-bottom:15px;">
+                            <label style="cursor: pointer; display: flex; align-items: center; gap: 8px; font-size:12px; margin-bottom:10px;"><input type="checkbox" id="robo-ia-aviso-tel" checked style="width: 14px; height: 14px; margin: 0;"> <strong>Aviso Telegram de IA Ativa</strong></label>
+                            <div class="form-group"><label>Texto do Aviso:</label><input type="text" id="robo-ia-aviso-texto" value="🤖 Novo Padrão Detectado!"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="robo-tab-risco" class="robo-tab-content">
+                    <div style="background: rgba(23, 162, 184, 0.1); border: 1px solid #17a2b8; padding: 15px; border-radius: 8px; margin-bottom:15px;"><label style="cursor: pointer; display: flex; align-items: center; gap: 10px; font-size:16px;"><input type="checkbox" id="robo-cd-ativo" style="width: 20px; height: 20px; margin: 0;" onchange="toggleFormCooldown(this)"> <strong style="color: #17a2b8;">🛡️ ATIVAR DRAWDOWN CONTROL</strong></label></div>
+                    <div id="form-cd-campos" style="opacity:0.5; pointer-events:none;">
+                        <h4 style="margin:0 0 10px 0; font-size:12px; color:#17a2b8; text-transform:uppercase;">⚙️ Tipo de Gatilho</h4>
+                        <div class="form-group" style="margin-bottom:15px;"><select id="robo-cd-tipo" onchange="toggleTipoCooldown()"><option value="CONSERVADOR">Conservador (Pausar no 1º RED)</option><option value="DINAMICO">Dinâmico (Acúmulo de REDs no tempo)</option></select></div>
+                        <div style="display:flex; gap:10px; flex-wrap:wrap; background:#111; padding:15px; border-radius:6px; border:1px solid #333; margin-bottom:15px;"><div class="form-group" style="flex:1; min-width:120px;" id="box-cd-reds"><label>Tomar (X) REDs:</label><input type="number" id="robo-cd-reds" value="2" min="2"></div><div class="form-group" style="flex:1; min-width:120px;" id="box-cd-intervalo"><label>No Intervalo (Min):</label><input type="number" id="robo-cd-intervalo" value="30" min="1"></div><div class="form-group" style="flex:1; min-width:120px;"><label>Pausar Robô Por (Min):</label><input type="number" id="robo-cd-pausa" value="15" min="1"></div></div>
+                        <div style="background:#111; padding:15px; border-radius:6px; border:1px solid #333; margin-bottom:15px;">
+                            <label style="cursor: pointer; display: flex; align-items: center; gap: 8px; font-size:12px; margin-bottom:10px;"><input type="checkbox" id="robo-cd-aviso-tel" checked style="width: 14px; height: 14px; margin: 0;"> <strong>Avisar Telegram</strong></label>
+                            <div class="form-group"><label>Texto do Aviso ({minutos}):</label><textarea id="robo-cd-aviso-texto" rows="3" style="resize:none; font-family:inherit;">⚠️ EM PROTEÇÃO ⚠️ Retorna em {minutos} minutos.</textarea></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div style="display:flex; gap:10px; margin-top:20px; border-top:1px solid #333; padding-top:15px;">
+                    <button class="btn" id="btn-salvar-robo" style="background:#17a2b8; flex:1;" onclick="salvarRobo()">💾 Salvar Robô</button>
+                    <button class="btn" style="background:#444; border:1px solid #555; flex:1;" onclick="fecharFormularioRobo()">Cancelar</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 🌟 MODAL AUTO-TRADER (CÉREBRO DE EXECUÇÃO REAL) -->
+        <div id="modal-autotrader" class="modal-form-overlay" style="z-index: 2200;">
+            <div class="modal-form-content" style="border-top-color:#28a745; max-width:900px; padding-top: 15px;">
+                
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+                    <h3 id="at-titulo" style="margin:0; color:#28a745; font-size:20px;">💸 Cadastrar Motor de Execução (Auto-Trader)</h3>
+                    <button class="btn" style="background:transparent; color:#888; font-size:18px; padding:0;" onclick="fecharFormularioAutoTrader()">✖</button>
+                </div>
+                
+                <div style="display:flex; gap:15px; flex-wrap:wrap; margin-bottom:20px; align-items:flex-end;">
+                    <div class="form-group" style="flex:2; min-width:250px;">
+                        <label>Nome do Motor de Execução:</label>
+                        <input type="text" id="at-nome" placeholder="Ex: Operacional Conta Real">
+                    </div>
+                    <div style="flex:1; min-width:200px; background:#111; padding:10px; border-radius:6px; border:1px solid #28a745; display:flex; justify-content:space-between; align-items:center;">
+                        <div>
+                            <span style="display:block; font-size:10px; color:#28a745; font-weight:bold; text-transform:uppercase;">Saldo Real Sincronizado</span>
+                            <strong id="at-saldo-visor" style="font-size:18px;">R$ 0,00</strong>
+                        </div>
+                        <button class="btn" style="background:#28a745; padding:0 10px; height:32px; font-size:11px;" onclick="sincronizarSaldoPython()" title="Puxar saldo">🔄 Sincronizar</button>
+                    </div>
+                </div>
+                
+                <div class="robo-nav-tabs" style="border-bottom-color:#28a745;">
+                    <button class="robo-nav-btn ativo" style="color:#28a745; border-color:#28a745;" id="btn-at-tab-gestao" onclick="mudarAbaAT('gestao')">💰 Gestão de Fichas</button>
+                    <button class="robo-nav-btn" id="btn-at-tab-camuflagem" onclick="mudarAbaAT('camuflagem')">👻 Camuflagem</button>
+                    <button class="robo-nav-btn" id="btn-at-tab-risco" onclick="mudarAbaAT('risco')">🛡️ Limites de Risco</button>
+                    <button class="robo-nav-btn" id="btn-at-tab-fontes" onclick="mudarAbaAT('fontes')">📡 Fontes de Sinal</button>
+                </div>
+                
+                <!-- GESTÃO DE FICHAS -->
+                <div id="at-tab-gestao" class="robo-tab-content ativo">
+                    <div style="background:#1a1a1a; padding:15px; border-radius:8px; border:1px solid #333; margin-bottom:15px;">
+                        <h4 style="margin:0 0 10px 0; font-size:12px; color:#aaa; text-transform:uppercase;">Entrada Principal (Stake Base)</h4>
+                        <div style="display:flex; gap:15px; align-items:center; flex-wrap:wrap;">
+                            <div class="form-group" style="width:150px;">
+                                <label>Valor da Entrada (R$):</label>
+                                <input type="number" id="at-stake" value="10.00" step="5.00" min="5.00" style="font-size:16px; font-weight:bold; color:#007bff;">
+                            </div>
+                            <div style="flex:1;">
+                                <label style="font-size:10px; color:#aaa; font-weight:bold;">Adicionar Fichas (Múltiplos de 5):</label>
+                                <div class="fichas-container">
+                                    <button type="button" class="ficha-btn f5" onclick="addFicha(5)">5</button>
+                                    <button type="button" class="ficha-btn f10" onclick="addFicha(10)">10</button>
+                                    <button type="button" class="ficha-btn f25" onclick="addFicha(25)">25</button>
+                                    <button type="button" class="ficha-btn f125" onclick="addFicha(125)">125</button>
+                                    <button type="button" class="ficha-btn f500" onclick="addFicha(500)">500</button>
+                                    <button type="button" class="btn" style="background:#444; height:40px; border-radius:20px; font-size:11px;" onclick="limparFichas()">🧹 Limpar</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div style="background:#1a1a1a; padding:15px; border-radius:8px; border:1px solid #333; margin-bottom:15px;">
+                        <h4 style="margin:0 0 10px 0; font-size:12px; color:#ffc107; text-transform:uppercase;">Matriz de Multiplicadores (Smart Gale)</h4>
+                        <p style="font-size:11px; color:#888; margin-top:0;">O motor fará o arredondamento automático para a ficha mais próxima caso o cálculo gere valores quebrados.</p>
+                        <div style="display:flex; gap:15px; flex-wrap:wrap;">
+                            <div class="form-group" style="flex:1;"><label>Multiplicador Gale 1 (Ex: 2.0x):</label><input type="number" id="at-gale1" value="2.0" step="0.1" min="1.0"></div>
+                            <div class="form-group" style="flex:1;"><label>Multiplicador Gale 2 (Ex: 4.0x):</label><input type="number" id="at-gale2" value="4.0" step="0.1" min="1.0"></div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- CAMUFLAGEM -->
+                <div id="at-tab-camuflagem" class="robo-tab-content">
+                    <div style="background:#1a1a1a; padding:15px; border-radius:8px; border:1px solid #333; margin-bottom:15px;">
+                        <h4 style="margin:0 0 10px 0; font-size:12px; color:#17a2b8; text-transform:uppercase;">Evasão de Algoritmo</h4>
+                        <div class="form-group" style="margin-bottom:15px;">
+                            <select id="at-camuflagem" onchange="toggleConfigCamuflagem()">
+                                <option value="TODAS">Entrar em Todos os Sinais (Sem Camuflagem)</option>
+                                <option value="PULOS">Pulos Randômicos (Modo Humano)</option>
+                            </select>
+                        </div>
+                        <div id="box-at-pulos" style="display:none; padding:10px; background:#111; border-radius:6px; border:1px dashed #17a2b8;">
+                            <p style="font-size:11px; color:#ccc; margin-top:0;">O robô vai sortear um número e pular essa quantidade exata de sinais válidos antes de fazer a próxima execução.</p>
+                            <div style="display:flex; gap:15px;">
+                                <div class="form-group" style="flex:1;"><label>Pular no Mínimo:</label><input type="number" id="at-pulo-min" value="1" min="1"></div>
+                                <div class="form-group" style="flex:1;"><label>Pular no Máximo:</label><input type="number" id="at-pulo-max" value="3" min="1"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div style="background:#1a1a1a; padding:15px; border-radius:8px; border:1px solid #333; margin-bottom:15px;">
+                        <h4 style="margin:0 0 10px 0; font-size:12px; color:#aaa; text-transform:uppercase;">Limitação de Volume Diário</h4>
+                        <div class="form-group"><label>Pausar motor automaticamente após X execuções concluídas:</label><input type="number" id="at-max-entradas" value="15" min="1"></div>
+                    </div>
+                </div>
+                
+                <!-- GESTÃO DE RISCO -->
+                <div id="at-tab-risco" class="robo-tab-content">
+                    <div style="display:flex; gap:15px; flex-wrap:wrap; margin-bottom:15px;">
+                        <div style="flex:1; background:#1a1a1a; padding:15px; border-radius:8px; border:1px solid #28a745;">
+                            <h4 style="margin:0 0 10px 0; font-size:12px; color:#28a745; text-transform:uppercase;">🏆 Meta de Lucro (Stop Win)</h4>
+                            <div class="form-group"><label>Lucro Alvo (R$):</label><input type="number" id="at-stop-win" value="100.00" step="10.00"></div>
+                            <label style="cursor: pointer; display: flex; align-items: center; gap: 8px; margin-top:10px; font-size:11px; color:#aaa;"><input type="checkbox" id="at-trailing-stop" checked onchange="toggleTrailingStopAutoTrader()" style="width: 14px; height: 14px; margin: 0;"> <strong>Ativar Trailing Stop (Proteger lucro)</strong></label>
+                            <div class="form-group" id="box-at-trailing-recuo" style="margin-top:10px;">
+                                <label>Recuo permitido a partir do pico (R$):</label>
+                                <input type="number" id="at-trailing-recuo" value="0.00" step="5.00" min="0">
+                                <span style="font-size:9px; color:#666;">0 = não armado. O pico começa a ser registrado após configurar um recuo maior que zero.</span>
+                            </div>
+                        </div>
+                        <div style="flex:1; background:#1a1a1a; padding:15px; border-radius:8px; border:1px solid #ff7777;">
+                            <h4 style="margin:0 0 10px 0; font-size:12px; color:#ff7777; text-transform:uppercase;">🛑 Limite de Perda (Stop Loss)</h4>
+                            <div class="form-group"><label>Risco Máximo Aceitável (R$):</label><input type="number" id="at-stop-loss" value="250.00" step="10.00"></div>
+                            <p style="font-size:10px; color:#888; margin-bottom:0;">O motor desliga se o saldo cair para o saldo inicial menos esse risco.</p>
+                        </div>
+                    </div>
+                    <div style="background:#1a1a1a; padding:15px; border-radius:8px; border:1px solid #fd7e14; margin-bottom:15px;">
+                        <h4 style="margin:0 0 8px 0; font-size:12px; color:#fd7e14; text-transform:uppercase;">Stop Reds do Auto-Trader</h4>
+                        <p style="font-size:10px; color:#888; margin:0 0 10px 0;">Conta somente sequencias realmente executadas por este motor. DIRETO + Gales finalizados em RED contam como 1 RED.</p>
+                        <div style="display:flex; gap:15px; flex-wrap:wrap;">
+                            <div class="form-group" style="flex:1; min-width:160px;"><label>REDs seguidos para acionar:</label><input type="number" id="at-stop-reds" value="0" min="0" oninput="toggleStopRedsAutoTrader()"><span style="font-size:9px; color:#666;">0 = desativado</span></div>
+                            <div class="form-group" style="flex:1; min-width:180px;"><label>Ao atingir o limite:</label><select id="at-stop-reds-acao" onchange="toggleStopRedsAutoTrader()"><option value="PAUSAR">Pausar por intervalo</option><option value="DESLIGAR">Desligar Auto-Trader</option></select></div>
+                            <div class="form-group" id="box-at-stop-reds-pausa" style="flex:1; min-width:160px;"><label>Tempo de pausa (min):</label><input type="number" id="at-stop-reds-pausa" value="60" min="1"></div>
+                        </div>
+                    </div>
+                    <div style="background:#1a1a1a; padding:15px; border-radius:8px; border:1px solid #333; margin-bottom:15px;">
+                        <h4 style="margin:0 0 10px 0; font-size:12px; color:#aaa; text-transform:uppercase;">Horário de Execução</h4>
+                        <div style="display:flex; gap:15px;"><div class="form-group" style="flex:1;"><label>Ligar motor às:</label><input type="time" id="at-hora-inicio" value="00:00"></div><div class="form-group" style="flex:1;"><label>Desligar motor às:</label><input type="time" id="at-hora-fim" value="23:59"></div></div>
+                    </div>
+                </div>
+                
+                <div id="at-tab-fontes" class="robo-tab-content">
+                    <p style="font-size:12px; color:#aaa;">Selecione quais origens/robôs terão autorização para atirar ordens reais através deste Motor.</p>
+                    <div class="check-list-box" id="at-lista-fontes" style="max-height: 250px;"></div>
+                </div>
+                
+                <div style="margin: 15px 0; display: flex; align-items: center; gap: 8px;">
+                    <input type="checkbox" id="at-ativo" checked style="width: 20px; height: 20px; margin: 0;"> 
+                    <strong style="color: #28a745; font-size:16px;">▶️ MOTOR ATIVADO</strong>
+                </div>
+                
+                <div style="display:flex; gap:10px; margin-top:20px; border-top:1px solid #333; padding-top:15px;">
+                    <button class="btn" style="background:#28a745; flex:1; font-size:16px;" onclick="salvarAutoTrader()">💾 Salvar Motor e Sincronizar</button>
+                    <button class="btn" style="background:#444; flex:1;" onclick="fecharFormularioAutoTrader()">Cancelar</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="modal-gerenciar-origens" class="modal-form-overlay" style="z-index: 2500;"><div class="modal-form-content" style="border-top-color:#17a2b8; max-width:400px;"><h3 style="margin-top:0; color:#17a2b8; font-size:18px;">⚙️ Gerenciar Origens</h3><div id="lista-gerenciar-origens" style="margin-top: 15px;"></div><button class="btn" style="background:#ff7777; margin-top:15px; width:100%;" onclick="fecharGerenciadorOrigens()">Fechar</button></div></div>
+        <div id="config-modal" class="modal"><div class="modal-content"><h3 style="margin-top:0;">Configurar Cores</h3><div class="form-group"><label>Verde a partir de (%):</label><input type="number" id="cfg-green" value="80"></div><div class="form-group" style="margin-top:10px;"><label>Amarelo a partir de (%):</label><input type="number" id="cfg-yellow" value="50"></div><div style="display:flex; gap:10px; margin-top:20px;"><button class="btn" style="flex:1;" onclick="salvarConfig()">Salvar</button><button class="btn" style="flex:1; background:#6c757d;" onclick="toggleModalConfig(false)">Fechar</button></div></div></div>
+
+        <!-- TEMPLATE PDF INVISÍVEL (AUDITORIA) -->
+        <div id="pdf-container" style="display:none; position:absolute; top:-9999px; left:-9999px; z-index:-1;">
+            <div id="pdf-template">
+                <div class="pdf-header"><h2>RELATÓRIO DE AUDITORIA DE ORDENS - SNIPER AUTO-TRADER</h2><p style="margin:0; font-size:12px; color:#555;">Documento gerado automaticamente pelo Sistema de Inteligência Bac Bo Pro</p></div>
+                <div class="pdf-resumo">
+                    <div class="pdf-box"><strong>Auto-Trader (Motor):</strong><br><span id="pdf-nome-trader">-</span></div>
+                    <div class="pdf-box"><strong>Período Auditado:</strong><br><span id="pdf-periodo">-</span></div>
+                    <div class="pdf-box"><strong>Lucro Líquido Real:</strong><br><span id="pdf-lucro-liquido" style="font-weight:bold; font-size:16px;">-</span></div>
+                    <div class="pdf-box"><strong>Turnover (Vol. Executado):</strong><br><span id="pdf-turnover">-</span></div>
+                    <div class="pdf-box"><strong>Banca Inicial:</strong><br><span id="pdf-banca-inicial">-</span></div>
+                    <div class="pdf-box"><strong>Saldo Final Auditado:</strong><br><span id="pdf-saldo-final" style="font-weight:bold;">-</span></div>
+                </div>
+                <h3 style="font-size:14px; border-bottom:1px solid #ccc; padding-bottom:5px;">Registro Granular de Ordens</h3>
+                <table class="pdf-table"><thead><tr><th width="5%">ID</th><th width="15%">Data e Hora</th><th width="15%">Origem (Robô)</th><th width="20%">Estrutura (Alvo / Valor)</th><th width="10%">Nível</th><th width="15%">Placar da Mesa</th><th width="10%">Retorno Líquido</th><th width="10%">Saldo Após</th></tr></thead><tbody id="pdf-table-body"></tbody></table>
+                <div style="margin-top:30px; font-size:10px; color:#888; text-align:center;">Hash de Autenticidade: <span id="pdf-hash"></span></div>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- ========================================== -->
+    <!-- JAVASCRIPT FRONTEND V12.0 PRO -->
+    <!-- ========================================== -->
+    <script>
+        const socketWeb = io();
+        let estrategiasGlobais = []; let origensGlobais = []; let robosGlobais = []; let autoTradersGlobais = [];
+        let girosInMemoria = []; let bkPadraoAtual = []; let modalPadraoAtual = [];
+        let estrategiaEditandoId = null; let roboEditandoId = null; let autoTraderEditandoId = null;
+        let dashPeriodoAtual = '24h'; let padroesPeriodoAtual = '24h'; let alertaTimeout; let estrategiaAtivaAtualId = null;
+
+        function mudarAbaPrincipal(aba) {
+            document.querySelectorAll('.aba-conteudo').forEach(el => el.classList.remove('visivel'));
+            ['dashboard', 'padroes', 'robos', 'backtest', 'autotrader'].forEach(id => {
+                let btn = document.getElementById('nav-btn-' + id);
+                if(btn) { btn.style.background = '#222'; btn.style.color = '#aaa'; }
+            });
+            document.getElementById('aba-' + aba).classList.add('visivel');
+            if (aba === 'backtest') { document.getElementById('nav-btn-backtest').style.background = '#ffc107'; document.getElementById('nav-btn-backtest').style.color = 'black'; }
+            else if (aba === 'autotrader') { document.getElementById('nav-btn-autotrader').style.background = '#28a745'; document.getElementById('nav-btn-autotrader').style.color = 'white'; }
+            else { document.getElementById('nav-btn-' + aba).style.background = '#007bff'; document.getElementById('nav-btn-' + aba).style.color = '#fff'; }
+        }
+
+        function voltarParaHome() { document.getElementById('select-origem-filtro').value = 'TODAS'; document.getElementById('select-tipo-filtro').value = 'TODOS'; aplicarFiltrosEOrdenar(); fecharFormulario(); fecharFormularioRobo(); fecharFormularioAutoTrader(); mudarAbaPrincipal('dashboard'); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+
+        let somAtivo = localStorage.getItem('somAtivo') !== 'false';
+        window.addEventListener('DOMContentLoaded', () => { document.getElementById('btn-som').innerText = somAtivo ? '🔊' : '🔇'; });
+        function toggleSom() { somAtivo = !somAtivo; localStorage.setItem('somAtivo', somAtivo); document.getElementById('btn-som').innerText = somAtivo ? '🔊' : '🔇'; if (somAtivo) tocarSom(); }
+        function tocarSom() { if (!somAtivo) return; try { const ctx = new (window.AudioContext || window.webkitAudioContext)(); if (!ctx) return; const osc = ctx.createOscillator(); const gain = ctx.createGain(); osc.type = 'triangle'; osc.frequency.setValueAtTime(600, ctx.currentTime); osc.frequency.exponentialRampToValueAtTime(1200, ctx.currentTime + 0.1); gain.gain.setValueAtTime(0.4, ctx.currentTime); gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.2); osc.connect(gain); gain.connect(ctx.destination); osc.start(); osc.stop(ctx.currentTime + 0.2); } catch(e) {} }
+
+        function verificarSintonizador(robosNotificados) {
+            if (!robosNotificados || !Array.isArray(robosNotificados) || robosNotificados.length === 0) return false; 
+            let filtro = document.getElementById('sintonizador-web').value;
+            if (filtro === 'TODOS') return true; 
+            return robosNotificados.some(r => r.id.toString() === filtro);
+        }
+
+        socketWeb.on('alerta_painel', (dados) => {
+            if (!verificarSintonizador(dados.robosNotificados)) return; 
+            clearTimeout(alertaTimeout); tocarSom();
+            const banner = document.getElementById('banner-sinal'); const titulo = document.getElementById('banner-titulo'); const acao = document.getElementById('banner-acao'); const pulse = document.getElementById('banner-pulse'); const icon = document.getElementById('banner-icon'); const badgeAssert = document.getElementById('banner-assertividade'); const divPadrao = document.getElementById('banner-padrao'); const divTags = document.getElementById('banner-tags');
+            pulse.classList.add('piscar'); divTags.innerHTML = '';
+            dados.robosNotificados.forEach(r => { if (r.tag_visual) divTags.innerHTML += `<span class="robo-tag-badge" style="background-color: ${r.cor_hex};">${r.tag_visual}</span>`; });
+
+            if (dados.tipo === 'ENTRADA') {
+                let cor = dados.entrada === 'Player' ? '#007bff' : '#ff7777'; let txt = dados.entrada === 'Player' ? '🔵 PLAYER' : '🔴 BANKER';
+                banner.style.borderColor = cor; titulo.innerText = `🚨 SINAL: ${dados.nome}`; acao.innerText = `ENTRADA NO ${txt}`; acao.style.color = cor; pulse.style.background = cor; pulse.style.boxShadow = `0 0 10px ${cor}`; icon.style.filter = 'none';
+                if (dados.assertividade) { badgeAssert.innerText = `🎯 Confiança: ${dados.assertividade}%`; badgeAssert.style.display = 'inline-block'; }
+                if (dados.padrao && dados.padrao.length > 0) { divPadrao.innerHTML = dados.padrao.map(j => { let bk = j === 'Player' ? '#007bff' : (j === 'Banker' ? '#ff7777' : '#ffc107'); let cr = j === 'Tie' ? '#000' : '#fff'; return `<span style="background:${bk}; padding:2px 6px; font-size:10px; border-radius:4px; font-weight:bold; color:${cr};">${j.charAt(0)}</span>`; }).join('<span style="color:#666; font-size:10px; margin:0 2px;">➡️</span>'); divPadrao.style.display = 'flex'; }
+                let est = estrategiasGlobais.find(e => e.nome === dados.nome); if (est) { estrategiaAtivaAtualId = est.id; document.getElementById('conteudo-card-ativo').innerHTML = gerarHtmlCardEstrategia(est, 'ativo', dashPeriodoAtual); document.getElementById('container-card-ativo').style.display = 'block'; }
+            } else {
+                badgeAssert.style.display = 'none'; divPadrao.style.display = 'none';
+                if (dados.tipo === 'GALE') { let cor = dados.entrada === 'Player' ? '#007bff' : '#ff7777'; banner.style.borderColor = cor; acao.innerText = `GALE ${dados.nivel}: ${dados.entrada === 'Player' ? '🔵 PLAYER' : '🔴 BANKER'}`; acao.style.color = cor; pulse.style.background = cor; pulse.style.boxShadow = `0 0 10px ${cor}`; icon.style.filter = 'none'; }
+                else if (dados.tipo === 'GREEN') { banner.style.borderColor = '#28a745'; titulo.innerText = `✅ BATEU: ${dados.nome}`; acao.innerText = 'GREEN (WIN)!'; acao.style.color = '#28a745'; pulse.style.background = '#28a745'; pulse.style.boxShadow = '0 0 10px #28a745'; icon.style.filter = 'none'; alertaTimeout = setTimeout(resetarBanner, 10000); }
+                else if (dados.tipo === 'RED') { banner.style.borderColor = '#ff7777'; titulo.innerText = `❌ STOP: ${dados.nome}`; acao.innerText = 'RED (LOSS)'; acao.style.color = '#ff7777'; pulse.style.background = '#ff7777'; pulse.style.boxShadow = '0 0 10px #ff7777'; icon.style.filter = 'none'; alertaTimeout = setTimeout(resetarBanner, 10000); }
+            }
+        });
+
+        function resetarBanner() { document.getElementById('banner-sinal').style.borderColor = '#333'; document.getElementById('banner-titulo').innerText = 'Sem Sinal Ativo'; document.getElementById('banner-acao').innerText = 'AGUARDANDO...'; document.getElementById('banner-acao').style.color = '#fff'; document.getElementById('banner-pulse').style.background = '#555'; document.getElementById('banner-pulse').style.boxShadow = 'none'; document.getElementById('banner-pulse').classList.remove('piscar'); document.getElementById('banner-icon').style.filter = 'grayscale(100%)'; document.getElementById('banner-assertividade').style.display = 'none'; document.getElementById('banner-padrao').style.display = 'none'; document.getElementById('banner-tags').innerHTML = ''; document.getElementById('container-card-ativo').style.display = 'none'; estrategiaAtivaAtualId = null; }
+
+        socketWeb.on('atualizar_interface', () => { if (document.getElementById('modal-cadastro').style.display !== 'flex') { inicializarSistema(); if (document.getElementById('aba-backtest').classList.contains('visivel')) carregarHistoricoMemoria(false); } });
+        socketWeb.on('atualizar_robos', () => { if (document.getElementById('modal-robo').style.display !== 'flex') carregarRobos(); });
+
+        // 🌟 AUTO TRADER FUNÇÕES (FRONTEND)
+        // ==========================================
+        // ROBÔS / CANAIS — CRUD E SINTONIZAÇÃO
+        // ==========================================
+        function escaparHtmlRobo(valor) {
+            return String(valor ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        }
+
+        function boolRobo(valor) {
+            return valor === true || valor === 1 || valor === '1';
+        }
+
+        function mudarAbaRobo(aba) {
+            document.querySelectorAll('#modal-robo .robo-nav-btn').forEach(btn => btn.classList.remove('ativo'));
+            document.querySelectorAll('#modal-robo .robo-tab-content').forEach(content => content.classList.remove('ativo'));
+
+            const btn = document.getElementById('btn-robo-tab-' + aba);
+            const content = document.getElementById('robo-tab-' + aba);
+            if (btn) btn.classList.add('ativo');
+            if (content) content.classList.add('ativo');
+        }
+
+        function toggleFormIA(check) {
+            const box = document.getElementById('form-ia-campos');
+            if (!box) return;
+            const ativo = !!check.checked;
+            box.style.opacity = ativo ? '1' : '0.5';
+            box.style.pointerEvents = ativo ? 'auto' : 'none';
+        }
+
+        function toggleFormCooldown(check) {
+            const box = document.getElementById('form-cd-campos');
+            if (!box) return;
+            const ativo = !!check.checked;
+            box.style.opacity = ativo ? '1' : '0.5';
+            box.style.pointerEvents = ativo ? 'auto' : 'none';
+            toggleTipoCooldown();
+        }
+
+        function toggleTipoCooldown() {
+            const tipo = document.getElementById('robo-cd-tipo')?.value || 'CONSERVADOR';
+            const boxReds = document.getElementById('box-cd-reds');
+            const boxIntervalo = document.getElementById('box-cd-intervalo');
+            const mostrarAcumulo = tipo === 'DINAMICO';
+            if (boxReds) boxReds.style.display = mostrarAcumulo ? 'flex' : 'none';
+            if (boxIntervalo) boxIntervalo.style.display = mostrarAcumulo ? 'flex' : 'none';
+        }
+
+        function adicionarLinhaDestinatario(nome = '', chatId = '') {
+            const tbody = document.getElementById('corpo-tabela-destinatarios');
+            if (!tbody) return;
+
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td><input type="text" class="dest-robo-nome" value="${escaparHtmlRobo(nome)}" placeholder="Cliente"></td>
+                <td><input type="text" class="dest-robo-chat" value="${escaparHtmlRobo(chatId)}" placeholder="Chat ID"></td>
+                <td style="text-align:center;">
+                    <button type="button" class="btn" style="background:#ff7777; padding:2px 7px; height:28px;" onclick="this.closest('tr').remove()">🗑️</button>
+                </td>
+            `;
+            tbody.appendChild(tr);
+        }
+
+        function coletarDestinatariosRobo() {
+            return Array.from(document.querySelectorAll('#corpo-tabela-destinatarios tr'))
+                .map(tr => ({
+                    nome_cliente: tr.querySelector('.dest-robo-nome')?.value.trim() || 'Cliente',
+                    chat_id: tr.querySelector('.dest-robo-chat')?.value.trim() || ''
+                }))
+                .filter(d => d.chat_id !== '');
+        }
+
+        function idsSelecionadosRobo(classe) {
+            return Array.from(document.querySelectorAll(`.${classe}:checked`)).map(el => el.value);
+        }
+
+        function renderizarSintonizadorRobo(config = {}) {
+            const origensAtivas = Array.isArray(config.origens) ? config.origens.map(String) : [];
+            const excecoesAtivas = Array.isArray(config.excecoes) ? config.excecoes.map(String) : [];
+            const avulsosAtivos = Array.isArray(config.avulsos) ? config.avulsos.map(String) : [];
+
+            const boxOrigens = document.getElementById('robo-lista-origens');
+            const boxExcecoes = document.getElementById('robo-lista-excecoes');
+            const boxAvulsos = document.getElementById('robo-lista-avulsos');
+
+            if (boxOrigens) {
+                boxOrigens.innerHTML = origensGlobais.length
+                    ? origensGlobais.map(o => {
+                        const nome = String(o.nome || '');
+                        return `<label class="check-item"><input type="checkbox" class="chk-robo-origem" value="${escaparHtmlRobo(nome)}" ${origensAtivas.includes(nome) ? 'checked' : ''}> <span>${escaparHtmlRobo(nome)}</span></label>`;
+                    }).join('')
+                    : '<span style="color:#666;">Nenhuma origem cadastrada.</span>';
+            }
+
+            const manuais = estrategiasGlobais.filter(e => !(e.is_dinamico === true || e.is_dinamico === 1));
+            const gerarPadroes = (classe, ativos) => manuais.length
+                ? manuais.map(e => {
+                    const id = String(e.id);
+                    const nome = `${e.nome || id} — ${e.origem || ''}`;
+                    return `<label class="check-item"><input type="checkbox" class="${classe}" value="${escaparHtmlRobo(id)}" ${ativos.includes(id) ? 'checked' : ''}> <span>${escaparHtmlRobo(nome)}</span></label>`;
+                }).join('')
+                : '<span style="color:#666;">Nenhum padrão manual cadastrado.</span>';
+
+            if (boxExcecoes) boxExcecoes.innerHTML = gerarPadroes('chk-robo-excecao', excecoesAtivas);
+            if (boxAvulsos) boxAvulsos.innerHTML = gerarPadroes('chk-robo-avulso', avulsosAtivos);
+        }
+
+        function preencherCampoRobo(id, valor) {
+            const el = document.getElementById(id);
+            if (el) el.value = valor ?? '';
+        }
+
+        function preencherCheckRobo(id, valor) {
+            const el = document.getElementById(id);
+            if (el) el.checked = !!valor;
+        }
+
+        function abrirFormularioRobo() {
+            roboEditandoId = null;
+            document.getElementById('titulo-robo').innerText = '🤖 Cadastrar Hub de Sinais';
+
+            preencherCampoRobo('robo-nome', '');
+            preencherCampoRobo('robo-tag', '');
+            preencherCampoRobo('robo-cor', '#007bff');
+            preencherCampoRobo('robo-token', '');
+            document.getElementById('robo-token').placeholder = '123456:ABC...';
+            preencherCampoRobo('robo-min-assert', 0);
+            preencherCampoRobo('robo-stop-red', 0);
+            preencherCheckRobo('robo-ativo', true);
+            preencherCheckRobo('robo-envia-tel', true);
+            preencherCheckRobo('robo-envia-web', true);
+            preencherCheckRobo('robo-mostrar-nome', true);
+            preencherCheckRobo('robo-mostrar-padrao', true);
+            preencherCheckRobo('robo-mostrar-assertividade', true);
+            preencherCheckRobo('robo-detalhar-empates', true);
+            preencherCampoRobo('robo-cabecalho', '');
+            preencherCampoRobo('robo-rodape', '');
+
+            document.getElementById('corpo-tabela-destinatarios').innerHTML = '';
+            adicionarLinhaDestinatario('', '');
+
+            preencherCheckRobo('robo-ia-ativo', false);
+            preencherCampoRobo('robo-ia-range', 1000);
+            preencherCampoRobo('robo-ia-trigger', 150);
+            preencherCampoRobo('robo-ia-tam-min', 3);
+            preencherCampoRobo('robo-ia-tam-max', 5);
+            preencherCampoRobo('robo-ia-assert', 95);
+            preencherCampoRobo('robo-ia-ocorr', 10);
+            preencherCampoRobo('robo-ia-gales', 2);
+            preencherCheckRobo('robo-ia-prot', true);
+            preencherCampoRobo('robo-ia-blacklist', '');
+            preencherCampoRobo('robo-ia-shadow', 0);
+            preencherCampoRobo('robo-ia-max', 4);
+            preencherCampoRobo('robo-ia-drop-reds', 1);
+            preencherCampoRobo('robo-ia-drop-assert', 85);
+            preencherCampoRobo('robo-ia-ttl', 4);
+            preencherCheckRobo('robo-ia-aviso-tel', true);
+            preencherCampoRobo('robo-ia-aviso-texto', '🤖 Novo Padrão Detectado!');
+
+            preencherCheckRobo('robo-cd-ativo', false);
+            preencherCampoRobo('robo-cd-tipo', 'CONSERVADOR');
+            preencherCampoRobo('robo-cd-reds', 2);
+            preencherCampoRobo('robo-cd-intervalo', 30);
+            preencherCampoRobo('robo-cd-pausa', 15);
+            preencherCheckRobo('robo-cd-aviso-tel', true);
+            preencherCampoRobo('robo-cd-aviso-texto', '⚠️ EM PROTEÇÃO ⚠️ Retorna em {minutos} minutos.');
+
+            renderizarSintonizadorRobo({});
+            toggleFormIA(document.getElementById('robo-ia-ativo'));
+            toggleFormCooldown(document.getElementById('robo-cd-ativo'));
+            mudarAbaRobo('geral');
+            document.getElementById('modal-robo').style.display = 'flex';
+        }
+
+        function fecharFormularioRobo() {
+            document.getElementById('modal-robo').style.display = 'none';
+        }
+
+        function prepararEdicaoRobo(id) {
+            const robo = robosGlobais.find(r => Number(r.id) === Number(id));
+            if (!robo) return;
+
+            roboEditandoId = robo.id;
+            const cf = robo.config || {};
+            const ia = cf.auto_tuning || {};
+            const cd = cf.cooldown || {};
+
+            document.getElementById('titulo-robo').innerText = '✏️ Editar Hub de Sinais';
+            preencherCampoRobo('robo-nome', robo.nome || '');
+            preencherCampoRobo('robo-tag', robo.tag_visual || '');
+            preencherCampoRobo('robo-cor', robo.cor_hex || '#007bff');
+            preencherCampoRobo('robo-token', '');
+            document.getElementById('robo-token').placeholder = robo.telegram_configurado
+                ? 'Token já configurado — deixe em branco para manter'
+                : 'Informe o Token do Bot';
+            preencherCampoRobo('robo-min-assert', robo.min_assertividade ?? 0);
+            preencherCampoRobo('robo-stop-red', robo.stop_reds_seguidos ?? 0);
+            preencherCheckRobo('robo-ativo', boolRobo(robo.ativo));
+            preencherCheckRobo('robo-envia-tel', boolRobo(robo.enviar_telegram));
+            preencherCheckRobo('robo-envia-web', boolRobo(robo.enviar_web));
+            preencherCheckRobo('robo-mostrar-nome', cf.mostrar_nome !== false);
+            preencherCheckRobo('robo-mostrar-padrao', cf.mostrar_padrao !== false);
+            preencherCheckRobo('robo-mostrar-assertividade', cf.mostrar_assertividade !== false);
+            preencherCheckRobo('robo-detalhar-empates', cf.detalhar_empates !== false);
+            preencherCampoRobo('robo-cabecalho', cf.cabecalho || '');
+            preencherCampoRobo('robo-rodape', cf.rodape || '');
+
+            const tbody = document.getElementById('corpo-tabela-destinatarios');
+            tbody.innerHTML = '';
+            (robo.destinatarios || []).forEach(d => adicionarLinhaDestinatario(d.nome_cliente || '', d.chat_id || ''));
+            if ((robo.destinatarios || []).length === 0) adicionarLinhaDestinatario('', '');
+
+            preencherCheckRobo('robo-ia-ativo', !!ia.ativo);
+            preencherCampoRobo('robo-ia-range', ia.range ?? 1000);
+            preencherCampoRobo('robo-ia-trigger', ia.trigger ?? 150);
+            preencherCampoRobo('robo-ia-tam-min', ia.tam_min ?? 3);
+            preencherCampoRobo('robo-ia-tam-max', ia.tam_max ?? 5);
+            preencherCampoRobo('robo-ia-assert', ia.assert_min ?? 95);
+            preencherCampoRobo('robo-ia-ocorr', ia.ocorr_min ?? 10);
+            preencherCampoRobo('robo-ia-gales', ia.gales ?? 2);
+            preencherCheckRobo('robo-ia-prot', ia.proteger_empate !== false);
+            preencherCampoRobo('robo-ia-blacklist', ia.blacklist || '');
+            preencherCampoRobo('robo-ia-shadow', ia.shadow_giros ?? 0);
+            preencherCampoRobo('robo-ia-max', ia.max_padroes ?? 4);
+            preencherCampoRobo('robo-ia-drop-reds', ia.drop_reds ?? 1);
+            preencherCampoRobo('robo-ia-drop-assert', ia.drop_assert ?? 85);
+            preencherCampoRobo('robo-ia-ttl', ia.ttl_horas ?? 4);
+            preencherCheckRobo('robo-ia-aviso-tel', ia.aviso_telegram !== false);
+            preencherCampoRobo('robo-ia-aviso-texto', ia.aviso_texto || '🤖 Novo Padrão Detectado!');
+
+            preencherCheckRobo('robo-cd-ativo', !!cd.ativo);
+            preencherCampoRobo('robo-cd-tipo', cd.tipo || 'CONSERVADOR');
+            preencherCampoRobo('robo-cd-reds', cd.reds ?? 2);
+            preencherCampoRobo('robo-cd-intervalo', cd.intervalo_min ?? 30);
+            preencherCampoRobo('robo-cd-pausa', cd.pausa_min ?? 15);
+            preencherCheckRobo('robo-cd-aviso-tel', cd.aviso_telegram !== false);
+            preencherCampoRobo('robo-cd-aviso-texto', cd.aviso_texto || '⚠️ EM PROTEÇÃO ⚠️ Retorna em {minutos} minutos.');
+
+            renderizarSintonizadorRobo(cf);
+            toggleFormIA(document.getElementById('robo-ia-ativo'));
+            toggleFormCooldown(document.getElementById('robo-cd-ativo'));
+            mudarAbaRobo('geral');
+            document.getElementById('modal-robo').style.display = 'flex';
+        }
+
+        function construirPayloadRobo(roboBase = null, ativoOverride = null) {
+            const cfBase = roboBase?.config || {};
+            const iaBase = cfBase.auto_tuning || {};
+            const cdBase = cfBase.cooldown || {};
+
+            const config = {
+                ...cfBase,
+                origens: idsSelecionadosRobo('chk-robo-origem'),
+                excecoes: idsSelecionadosRobo('chk-robo-excecao'),
+                avulsos: idsSelecionadosRobo('chk-robo-avulso'),
+                mostrar_nome: document.getElementById('robo-mostrar-nome').checked,
+                mostrar_padrao: document.getElementById('robo-mostrar-padrao').checked,
+                mostrar_assertividade: document.getElementById('robo-mostrar-assertividade').checked,
+                detalhar_empates: document.getElementById('robo-detalhar-empates').checked,
+                cabecalho: document.getElementById('robo-cabecalho').value.trim(),
+                rodape: document.getElementById('robo-rodape').value.trim(),
+                auto_tuning: {
+                    ...iaBase,
+                    ativo: document.getElementById('robo-ia-ativo').checked,
+                    range: parseInt(document.getElementById('robo-ia-range').value) || 1000,
+                    trigger: parseInt(document.getElementById('robo-ia-trigger').value) || 150,
+                    tam_min: parseInt(document.getElementById('robo-ia-tam-min').value) || 3,
+                    tam_max: parseInt(document.getElementById('robo-ia-tam-max').value) || 5,
+                    assert_min: parseFloat(document.getElementById('robo-ia-assert').value) || 95,
+                    ocorr_min: parseInt(document.getElementById('robo-ia-ocorr').value) || 10,
+                    gales: parseInt(document.getElementById('robo-ia-gales').value) || 0,
+                    proteger_empate: document.getElementById('robo-ia-prot').checked,
+                    blacklist: document.getElementById('robo-ia-blacklist').value.trim(),
+                    shadow_giros: parseInt(document.getElementById('robo-ia-shadow').value) || 0,
+                    max_padroes: parseInt(document.getElementById('robo-ia-max').value) || 4,
+                    drop_reds: parseInt(document.getElementById('robo-ia-drop-reds').value) || 1,
+                    drop_assert: parseFloat(document.getElementById('robo-ia-drop-assert').value) || 85,
+                    ttl_horas: parseFloat(document.getElementById('robo-ia-ttl').value) || 4,
+                    aviso_telegram: document.getElementById('robo-ia-aviso-tel').checked,
+                    aviso_texto: document.getElementById('robo-ia-aviso-texto').value
+                },
+                cooldown: {
+                    ...cdBase,
+                    ativo: document.getElementById('robo-cd-ativo').checked,
+                    tipo: document.getElementById('robo-cd-tipo').value,
+                    reds: parseInt(document.getElementById('robo-cd-reds').value) || 2,
+                    intervalo_min: parseInt(document.getElementById('robo-cd-intervalo').value) || 30,
+                    pausa_min: parseInt(document.getElementById('robo-cd-pausa').value) || 15,
+                    aviso_telegram: document.getElementById('robo-cd-aviso-tel').checked,
+                    aviso_texto: document.getElementById('robo-cd-aviso-texto').value
+                }
+            };
+
+            return {
+                nome: document.getElementById('robo-nome').value.trim(),
+                tag: document.getElementById('robo-tag').value.trim(),
+                cor: document.getElementById('robo-cor').value || '#007bff',
+                telegram_token: document.getElementById('robo-token').value.trim(),
+                telegram_chat_id: roboBase?.telegram_chat_id || '',
+                enviar_telegram: document.getElementById('robo-envia-tel').checked,
+                enviar_web: document.getElementById('robo-envia-web').checked,
+                min_assert: Math.min(100, Math.max(0, parseFloat(document.getElementById('robo-min-assert').value) || 0)),
+                stop_reds: Math.max(0, parseInt(document.getElementById('robo-stop-red').value) || 0),
+                ativo: ativoOverride === null ? document.getElementById('robo-ativo').checked : !!ativoOverride,
+                config,
+                destinatarios: coletarDestinatariosRobo()
+            };
+        }
+
+        async function salvarRobo() {
+            const roboBase = roboEditandoId === null ? null : robosGlobais.find(r => Number(r.id) === Number(roboEditandoId));
+            const payload = construirPayloadRobo(roboBase);
+
+            if (!payload.nome) return alert('Preencha o Nome do Robô / Sala.');
+            const tokenJaConfigurado = !!roboBase?.telegram_configurado;
+            if (payload.enviar_telegram && !payload.telegram_token && !tokenJaConfigurado) {
+                return alert('Informe o Token do Bot ou desative "Enviar para Telegram".');
+            }
+
+            try {
+                const url = roboEditandoId === null ? '/api/robo' : `/api/robo/${roboEditandoId}`;
+                const method = roboEditandoId === null ? 'POST' : 'PUT';
+                const res = await fetch(url, {
+                    method,
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(payload)
+                });
+
+                if (!res.ok) return alert('Erro ao salvar o robô.');
+                fecharFormularioRobo();
+                await carregarRobos();
+            } catch (e) {
+                alert('Erro de conexão ao salvar o robô.');
+            }
+        }
+
+        async function excluirRobo(id) {
+            if (!confirm('Excluir permanentemente este Robô / Canal?')) return;
+            try {
+                const res = await fetch(`/api/robo/${id}`, { method: 'DELETE' });
+                if (!res.ok) return alert('Erro ao excluir o robô.');
+                await carregarRobos();
+            } catch (e) {
+                alert('Erro de conexão ao excluir o robô.');
+            }
+        }
+
+        async function toggleRoboRapido(id, check) {
+            const robo = robosGlobais.find(r => Number(r.id) === Number(id));
+            if (!robo) return;
+
+            const novoAtivo = !!check.checked;
+            const payload = {
+                nome: robo.nome || '',
+                tag: robo.tag_visual || '',
+                cor: robo.cor_hex || '#007bff',
+                telegram_token: '',
+                telegram_chat_id: robo.telegram_chat_id || '',
+                enviar_telegram: boolRobo(robo.enviar_telegram),
+                enviar_web: boolRobo(robo.enviar_web),
+                min_assert: Number(robo.min_assertividade) || 0,
+                stop_reds: Number(robo.stop_reds_seguidos) || 0,
+                ativo: novoAtivo,
+                config: robo.config || {},
+                destinatarios: robo.destinatarios || []
+            };
+
+            try {
+                const res = await fetch(`/api/robo/${id}`, {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(payload)
+                });
+                if (!res.ok) throw new Error('Falha ao atualizar');
+                await carregarRobos();
+            } catch (e) {
+                check.checked = !novoAtivo;
+            }
+        }
+
+        function resumoRobo24h(robo) {
+            const s = robo?.detalhes?.['24h'];
+            if (!s) return { total: 0, greens: 0, reds: 0, assert: '0.0' };
+
+            let ties = 0;
+            ['direto', 'gale1', 'gale2'].forEach(nivel => {
+                Object.values(s.ties?.[nivel] || {}).forEach(q => ties += Number(q) || 0);
+            });
+            const greens = (Number(s.green_direto) || 0) + (Number(s.gale1) || 0) + (Number(s.gale2) || 0) + ties;
+            const reds = Number(s.red) || 0;
+            const total = greens + reds;
+            return { total, greens, reds, assert: total ? ((greens / total) * 100).toFixed(1) : '0.0' };
+        }
+
+        function renderizarCardsRobos() {
+            const div = document.getElementById('lista-robos');
+            if (!div) return;
+            div.innerHTML = '';
+
+            if (!Array.isArray(robosGlobais) || robosGlobais.length === 0) {
+                div.innerHTML = '<p style="color:#666; text-align:center; padding:20px; grid-column:span 2; background:#1a1a1a; border:1px dashed #333; border-radius:8px;">Nenhum Robô / Canal cadastrado.</p>';
+                return;
+            }
+
+            robosGlobais.forEach(robo => {
+                const cf = robo.config || {};
+                const stats = resumoRobo24h(robo);
+                const ativo = boolRobo(robo.ativo);
+                const web = boolRobo(robo.enviar_web);
+                const tel = boolRobo(robo.enviar_telegram);
+                const emStandby = Number(robo.em_standby_ate || 0) > Date.now();
+                const stopRedsLimite = Math.max(0, Number(robo.stop_reds_seguidos) || 0);
+                const stopRedsAtual = Math.max(0, Number(robo.reds_consecutivos) || 0);
+                const emStopReds = !ativo && stopRedsLimite > 0 && stopRedsAtual >= stopRedsLimite;
+                const qtdDest = Array.isArray(robo.destinatarios) ? robo.destinatarios.length : 0;
+                const origens = Array.isArray(cf.origens) ? cf.origens : [];
+                const avulsos = Array.isArray(cf.avulsos) ? cf.avulsos : [];
+                const excecoes = Array.isArray(cf.excecoes) ? cf.excecoes : [];
+
+                const tagsOrigem = origens.length
+                    ? origens.map(o => `<span class="badge" style="margin-right:4px;">${escaparHtmlRobo(o)}</span>`).join('')
+                    : '<span style="color:#666; font-size:11px;">Nenhuma origem incluída</span>';
+
+                const status = emStopReds
+                    ? '<span style="color:#ff7777; font-size:11px; font-weight:bold;">🛑 STOP REDS — DESLIGADO</span>'
+                    : !ativo
+                        ? '<span style="color:#ff7777; font-size:11px; font-weight:bold;">🔴 DESLIGADO</span>'
+                        : emStandby
+                            ? '<span style="color:#ffc107; font-size:11px; font-weight:bold;">🛡️ EM PROTEÇÃO</span>'
+                            : '<span style="color:#28a745; font-size:11px; font-weight:bold;">🟢 ATIVO</span>';
+
+                div.innerHTML += `
+                    <div class="card" style="border-left:4px solid ${escaparHtmlRobo(robo.cor_hex || '#007bff')}; ${ativo ? '' : 'opacity:0.6;'}">
+                        <div style="display:flex; justify-content:space-between; gap:10px; align-items:flex-start;">
+                            <div>
+                                <h3 style="margin:0 0 5px 0; font-size:16px;">🤖 ${escaparHtmlRobo(robo.nome || 'Robô')} ${robo.tag_visual ? `<span class="robo-tag-badge" style="background:${escaparHtmlRobo(robo.cor_hex || '#007bff')};">${escaparHtmlRobo(robo.tag_visual)}</span>` : ''}</h3>
+                                ${status}
+                            </div>
+                            <div style="display:flex; align-items:center; gap:8px;">
+                                <label class="switch" title="Ativar/Desativar"><input type="checkbox" ${ativo ? 'checked' : ''} onchange="toggleRoboRapido(${Number(robo.id)}, this)"><span class="slider"></span></label>
+                                <button class="btn" style="background:transparent; color:#ffc107; padding:2px; height:auto;" onclick="prepararEdicaoRobo(${Number(robo.id)})">✏️</button>
+                                <button class="btn" style="background:transparent; color:#ff7777; padding:2px; height:auto;" onclick="excluirRobo(${Number(robo.id)})">🗑️</button>
+                            </div>
+                        </div>
+
+                        <div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap; font-size:11px;">
+                            <span style="background:#111; padding:4px 7px; border-radius:4px;">💻 Web: <strong>${web ? 'ON' : 'OFF'}</strong></span>
+                            <span style="background:#111; padding:4px 7px; border-radius:4px;">📱 Telegram: <strong>${tel ? 'ON' : 'OFF'}</strong></span>
+                            <span style="background:#111; padding:4px 7px; border-radius:4px;">👥 Destinatários: <strong>${qtdDest}</strong></span>
+                            <span style="background:#111; padding:4px 7px; border-radius:4px;">⚡ IA: <strong>${Number(robo.qtd_padroes_ia || 0)}</strong></span>
+                            ${stopRedsLimite > 0 ? `<span style="background:#111; padding:4px 7px; border-radius:4px;">🛑 Stop Reds: <strong>${stopRedsAtual}/${stopRedsLimite}</strong></span>` : ''}
+                        </div>
+
+                        <div style="margin-top:12px;">
+                            <div style="font-size:10px; color:#888; text-transform:uppercase; margin-bottom:5px;">Sintonização</div>
+                            <div>${tagsOrigem}</div>
+                            <div style="font-size:10px; color:#888; margin-top:6px;">Avulsos: ${avulsos.length} • Exceções: ${excecoes.length}</div>
+                        </div>
+
+                        <div style="margin-top:12px; padding-top:10px; border-top:1px dashed #333; display:flex; justify-content:space-between; font-size:11px;">
+                            <span>24h: <strong>${stats.total}</strong> sinais</span>
+                            <span style="color:#28a745;">✅ ${stats.greens}</span>
+                            <span style="color:#ff7777;">❌ ${stats.reds}</span>
+                            <span>🎯 ${stats.assert}%</span>
+                        </div>
+                    </div>
+                `;
+            });
+        }
+
+        function atualizarFiltrosRoboUI() {
+            const sintonizador = document.getElementById('sintonizador-web');
+            const filtroDash = document.getElementById('select-robo-dash');
+            const valorSint = sintonizador?.value || 'TODOS';
+            const valorDash = filtroDash?.value || 'TODOS';
+
+            if (sintonizador) {
+                const disponiveisWeb = robosGlobais.filter(r => boolRobo(r.ativo) && boolRobo(r.enviar_web));
+                sintonizador.innerHTML = '<option value="TODOS">Todos os Robôs</option>' +
+                    disponiveisWeb.map(r => `<option value="${Number(r.id)}">${escaparHtmlRobo(r.nome || ('Robô ' + r.id))}</option>`).join('');
+                sintonizador.value = Array.from(sintonizador.options).some(o => o.value === valorSint) ? valorSint : 'TODOS';
+            }
+
+            if (filtroDash) {
+                filtroDash.innerHTML = '<option value="TODOS">🤖 Todos os Robôs</option>' +
+                    robosGlobais.map(r => `<option value="${Number(r.id)}">${escaparHtmlRobo(r.nome || ('Robô ' + r.id))}</option>`).join('');
+                filtroDash.value = Array.from(filtroDash.options).some(o => o.value === valorDash) ? valorDash : 'TODOS';
+            }
+
+            filtrarSintonizador();
+        }
+
+        function filtrarSintonizador() {
+            const filtro = document.getElementById('sintonizador-web')?.value || 'TODOS';
+            const badge = document.getElementById('badge-streak-robo');
+            if (!badge) return;
+
+            if (filtro === 'TODOS') {
+                badge.style.display = 'none';
+                return;
+            }
+
+            const robo = robosGlobais.find(r => String(r.id) === String(filtro));
+            const streak = Number(robo?.greens_consecutivos || 0);
+            badge.innerText = `🔥 ${streak} Green${streak === 1 ? '' : 's'} Seguido${streak === 1 ? '' : 's'}`;
+            badge.style.display = 'inline-block';
+        }
+
+        function mudarAbaAT(aba) { document.querySelectorAll('#modal-autotrader .robo-nav-btn').forEach(btn => btn.classList.remove('ativo')); document.querySelectorAll('#modal-autotrader .robo-tab-content').forEach(content => content.classList.remove('ativo')); document.getElementById('btn-at-tab-' + aba).classList.add('ativo'); document.getElementById('at-tab-' + aba).classList.add('ativo'); }
+        
+        function addFicha(valor) { let input = document.getElementById('at-stake'); let atual = parseFloat(input.value) || 0; input.value = (atual + valor).toFixed(2); }
+        function limparFichas() { document.getElementById('at-stake').value = "0.00"; }
+        function toggleConfigCamuflagem() { let modo = document.getElementById('at-camuflagem').value; let boxPulos = document.getElementById('box-at-pulos'); if (modo === 'PULOS') boxPulos.style.display = 'block'; else boxPulos.style.display = 'none'; }
+        function toggleTrailingStopAutoTrader() {
+            const ativo = document.getElementById('at-trailing-stop')?.checked === true;
+            const input = document.getElementById('at-trailing-recuo');
+            const box = document.getElementById('box-at-trailing-recuo');
+            if (input) input.disabled = !ativo;
+            if (box) {
+                box.style.opacity = ativo ? '1' : '0.45';
+                box.style.pointerEvents = ativo ? 'auto' : 'none';
+            }
+        }
+
+        function toggleStopRedsAutoTrader() {
+            const limite = Math.max(0, parseInt(document.getElementById('at-stop-reds')?.value) || 0);
+            const acao = document.getElementById('at-stop-reds-acao')?.value || 'PAUSAR';
+            const inputPausa = document.getElementById('at-stop-reds-pausa');
+            const boxPausa = document.getElementById('box-at-stop-reds-pausa');
+            const habilitarPausa = limite > 0 && acao === 'PAUSAR';
+            if (inputPausa) inputPausa.disabled = !habilitarPausa;
+            if (boxPausa) {
+                boxPausa.style.opacity = habilitarPausa ? '1' : '0.45';
+                boxPausa.style.pointerEvents = habilitarPausa ? 'auto' : 'none';
+            }
+        }
+
+        // Prévia visual; o baseline real é capturado exclusivamente pelo backend.
+        async function sincronizarSaldoPython() {
+            try {
+                const res = await fetch('/api/saldo-global?_t=' + Date.now());
+                const data = await res.json();
+                const saldo = Number(data.saldo_atual);
+
+                if (res.ok && data.fresco === true && Number.isFinite(saldo) && saldo >= 0) {
+                    document.getElementById('at-saldo-visor').innerText = `R$ ${saldo.toFixed(2).replace('.', ',')}`;
+                    document.getElementById('at-saldo-visor').style.color = '#28a745';
+                    return;
+                }
+
+                document.getElementById('at-saldo-visor').style.color = '#ffc107';
+                alert('Saldo real ainda não está recente o suficiente para iniciar um novo ciclo. Aguarde a sincronização do executor.');
+            } catch(e) {
+                alert('Erro de conexão com o servidor local.');
+            }
+        }
+
+        function abrirFormularioAutoTrader() {
+            autoTraderEditandoId = null; document.getElementById('at-titulo').innerText = "💸 Cadastrar Motor de Execução";
+            document.getElementById('at-nome').value = ''; document.getElementById('at-ativo').checked = true; document.getElementById('at-saldo-visor').innerText = "R$ 0,00"; document.getElementById('at-saldo-visor').style.color = '#fff'; document.getElementById('at-stake').value = "10.00"; document.getElementById('at-gale1').value = "2.0"; document.getElementById('at-gale2').value = "4.0"; document.getElementById('at-camuflagem').value = "TODAS"; toggleConfigCamuflagem(); document.getElementById('at-pulo-min').value = "1"; document.getElementById('at-pulo-max').value = "3"; document.getElementById('at-max-entradas').value = "15"; document.getElementById('at-stop-win').value = "100.00"; document.getElementById('at-trailing-stop').checked = true; document.getElementById('at-trailing-recuo').value = "0.00"; toggleTrailingStopAutoTrader(); document.getElementById('at-stop-loss').value = "250.00"; document.getElementById('at-hora-inicio').value = "00:00"; document.getElementById('at-hora-fim').value = "23:59";
+            document.getElementById('at-stop-reds').value = "0";
+            document.getElementById('at-stop-reds-acao').value = "PAUSAR";
+            document.getElementById('at-stop-reds-pausa').value = "60";
+            toggleStopRedsAutoTrader();
+            mudarAbaAT('gestao'); renderizarCheckboxFontesAT([]); document.getElementById('modal-autotrader').style.display = 'flex';
+        }
+
+        function prepararEdicaoAutoTrader(id) {
+            let at = autoTradersGlobais.find(x => x.id === id); if (!at) return;
+            autoTraderEditandoId = at.id; let cf = at.config;
+            document.getElementById('at-titulo').innerText = "✏️ Editar Motor de Execução"; document.getElementById('at-nome').value = at.nome; document.getElementById('at-ativo').checked = at.ativo; document.getElementById('at-saldo-visor').innerText = `R$ ${parseFloat(at.saldo_atual).toFixed(2).replace('.',',')}`; document.getElementById('at-saldo-visor').style.color = '#28a745'; document.getElementById('at-stake').value = (cf.stake_inicial || 10).toFixed(2); document.getElementById('at-gale1').value = cf.gale_1_mult || 2.0; document.getElementById('at-gale2').value = cf.gale_2_mult || 4.0; document.getElementById('at-camuflagem').value = cf.modo_camuflagem || 'TODAS'; toggleConfigCamuflagem(); document.getElementById('at-pulo-min').value = cf.camuflagem_pulos_min || 1; document.getElementById('at-pulo-max').value = cf.camuflagem_pulos_max || 3; document.getElementById('at-max-entradas').value = cf.limite_entradas || 15; document.getElementById('at-stop-win').value = (cf.stop_win || 100).toFixed(2); document.getElementById('at-trailing-stop').checked = cf.trailing_stop !== false; document.getElementById('at-trailing-recuo').value = Math.max(0, Number(cf.trailing_recuo) || 0).toFixed(2); toggleTrailingStopAutoTrader(); document.getElementById('at-stop-loss').value = (cf.stop_loss || 250).toFixed(2); document.getElementById('at-hora-inicio').value = cf.hora_inicio || "00:00"; document.getElementById('at-hora-fim').value = cf.hora_fim || "23:59";
+            document.getElementById('at-stop-reds').value = Math.max(0, Number(cf.stop_reds_seguidos) || 0);
+            document.getElementById('at-stop-reds-acao').value = String(cf.stop_reds_acao || 'PAUSAR').toUpperCase() === 'DESLIGAR' ? 'DESLIGAR' : 'PAUSAR';
+            document.getElementById('at-stop-reds-pausa').value = Math.max(1, Number(cf.stop_reds_pausa_min) || 60);
+            toggleStopRedsAutoTrader();
+            mudarAbaAT('gestao'); renderizarCheckboxFontesAT(cf.fontes_sinal || []); document.getElementById('modal-autotrader').style.display = 'flex';
+        }
+
+        function fecharFormularioAutoTrader() { document.getElementById('modal-autotrader').style.display = 'none'; }
+
+        function renderizarCheckboxFontesAT(fontesAtivas) {
+            let box = document.getElementById('at-lista-fontes'); let html = '';
+            robosGlobais.forEach(r => { let nomeFonte = `[AUTO] ${r.nome}`; let checked = fontesAtivas.includes(nomeFonte) ? 'checked' : ''; html += `<label class="check-item"><input type="checkbox" class="chk-at-fonte" value="${nomeFonte}" ${checked}> <span style="color:#17a2b8;">⚡ ${nomeFonte} (IA Dinâmica)</span></label>`; });
+            origensGlobais.forEach(o => { if (!o.nome.startsWith('[AUTO]')) { let checked = fontesAtivas.includes(o.nome) ? 'checked' : ''; html += `<label class="check-item"><input type="checkbox" class="chk-at-fonte" value="${o.nome}" ${checked}> <span>👤 ${o.nome} (Manuais)</span></label>`; } });
+            box.innerHTML = html || '<span style="color:#666;">Nenhuma fonte de sinal disponível.</span>';
+        }
+
+        async function salvarAutoTrader() {
+            const nome = document.getElementById('at-nome').value.trim();
+            if (!nome) return alert('Preencha o Nome do Motor.');
+
+            const payload = {
+                nome,
+                ativo: document.getElementById('at-ativo').checked,
+                config: {
+                    stake_inicial: parseFloat(document.getElementById('at-stake').value) || 10.0,
+                    gale_1_mult: parseFloat(document.getElementById('at-gale1').value) || 2.0,
+                    gale_2_mult: parseFloat(document.getElementById('at-gale2').value) || 4.0,
+                    modo_camuflagem: document.getElementById('at-camuflagem').value,
+                    camuflagem_pulos_min: parseInt(document.getElementById('at-pulo-min').value) || 1,
+                    camuflagem_pulos_max: parseInt(document.getElementById('at-pulo-max').value) || 3,
+                    limite_entradas: parseInt(document.getElementById('at-max-entradas').value) || 15,
+                    stop_win: parseFloat(document.getElementById('at-stop-win').value) || 100.0,
+                    trailing_stop: document.getElementById('at-trailing-stop').checked,
+                    trailing_recuo: Math.max(0, parseFloat(document.getElementById('at-trailing-recuo').value) || 0),
+                    stop_loss: parseFloat(document.getElementById('at-stop-loss').value) || 250.0,
+                    stop_reds_seguidos: Math.max(0, parseInt(document.getElementById('at-stop-reds').value) || 0),
+                    stop_reds_acao: document.getElementById('at-stop-reds-acao').value === 'DESLIGAR' ? 'DESLIGAR' : 'PAUSAR',
+                    stop_reds_pausa_min: Math.max(1, parseInt(document.getElementById('at-stop-reds-pausa').value) || 60),
+                    hora_inicio: document.getElementById('at-hora-inicio').value,
+                    hora_fim: document.getElementById('at-hora-fim').value,
+                    fontes_sinal: Array.from(document.querySelectorAll('.chk-at-fonte:checked')).map(i => i.value)
+                }
+            };
+
+            try {
+                const res = await fetch(
+                    autoTraderEditandoId ? `/api/auto-trader/${autoTraderEditandoId}` : '/api/auto-trader',
+                    {
+                        method: autoTraderEditandoId ? 'PUT' : 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(payload)
+                    }
+                );
+
+                let resposta = {};
+                try { resposta = await res.json(); } catch (e) {}
+
+                if (!res.ok) {
+                    return alert(resposta.mensagem || 'Erro ao salvar o Auto-Trader.');
+                }
+
+                fecharFormularioAutoTrader();
+                await carregarAutoTraders();
+            } catch(e) {
+                alert('Erro de conexão.');
+            }
+        }
+
+        async function excluirAutoTrader(id) { if (confirm("Apagar permanentemente este Motor?")) { await fetch(`/api/auto-trader/${id}`, { method: 'DELETE' }); await carregarAutoTraders(); } }
+        async function carregarAutoTraders() { try { const res = await fetch('/api/auto-traders?_t=' + Date.now()); autoTradersGlobais = await res.json(); renderizarCardsAutoTraders(); } catch(e){} }
+
+        async function toggleAutoTraderRapido(id, check) {
+            const at = autoTradersGlobais.find(x => x.id === id);
+            if (!at) return;
+
+            const novoAtivo = !!check.checked;
+            try {
+                const res = await fetch(`/api/auto-trader/${id}`, {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ ...at, ativo: novoAtivo })
+                });
+
+                let resposta = {};
+                try { resposta = await res.json(); } catch (e) {}
+                if (!res.ok) {
+                    throw new Error(resposta.mensagem || 'Falha ao atualizar o Auto-Trader.');
+                }
+
+                await carregarAutoTraders();
+            } catch(e) {
+                check.checked = !novoAtivo;
+                alert(e.message || 'Erro ao atualizar o Auto-Trader.');
+            }
+        }
+
+        function renderizarCardsAutoTraders() {
+            const div = document.getElementById('lista-autotraders'); div.innerHTML = '';
+            if (autoTradersGlobais.length === 0) { div.innerHTML = '<p style="color:#666; text-align:center; padding:20px; background:#1a1a1a; border-radius:8px; border:1px dashed #333;">Nenhum Motor de Execução criado.</p>'; return; }
+            
+            autoTradersGlobais.forEach(at => {
+                let cf = at.config || {}; let lucroLiquido = at.saldo_atual - at.saldo_inicial; let percLucro = at.saldo_inicial > 0 ? (lucroLiquido / at.saldo_inicial) * 100 : 0; let corLucro = lucroLiquido >= 0 ? '#28a745' : '#ff7777'; let sinalLucro = lucroLiquido >= 0 ? '+' : '';
+                let pctWin = 0; let pctLoss = 0; let stopWinAlvo = cf.stop_win || 100; let stopLossAlvo = cf.stop_loss || 250;
+                if (lucroLiquido >= 0) pctWin = Math.min(100, (lucroLiquido / stopWinAlvo) * 100); else pctLoss = Math.min(100, (Math.abs(lucroLiquido) / stopLossAlvo) * 100);
+                
+                const stopRedsLimite = Math.max(0, Number(cf.stop_reds_seguidos) || 0);
+                const redsConsecutivos = Math.max(0, Number(at.reds_consecutivos) || 0);
+                const stopRedsAcao = String(cf.stop_reds_acao || 'PAUSAR').toUpperCase() === 'DESLIGAR' ? 'DESLIGAR' : 'PAUSAR';
+                const pausaStopRedsAte = Math.max(0, Number(at.stop_reds_pausado_ate) || 0);
+                const pausaStopRedsMin = Math.max(0, Math.ceil((pausaStopRedsAte - Date.now()) / 60000));
+                const stopRedsHTML = stopRedsLimite > 0
+                    ? `<div style="margin-top:10px; font-size:11px; color:#fd7e14;">Stop Reds Auto-Trader: <strong>${redsConsecutivos}/${stopRedsLimite}</strong> | ${stopRedsAcao === 'DESLIGAR' ? 'Desligar ao atingir' : 'Pausa de ' + Math.max(1, Number(cf.stop_reds_pausa_min) || 60) + ' min'}</div>`
+                    : `<div style="margin-top:10px; font-size:11px; color:#666;">Stop Reds Auto-Trader: desativado</div>`;
+
+                let tagStatus = '';
+                if (at.status_operacao === 'STOP_WIN') tagStatus = `<span style="background:#198754; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">🏁 STOP WIN ATINGIDO</span>`;
+                else if (at.status_operacao === 'STOP_LOSS') tagStatus = `<span style="background:#dc3545; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">🛑 STOP LOSS ATINGIDO</span>`;
+                else if (at.status_operacao === 'TRAILING_STOP') tagStatus = `<span style="background:#6f42c1; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">🛡️ TRAILING STOP ATINGIDO</span>`;
+                else if (at.status_operacao === 'STOP_REDS') tagStatus = `<span style="background:#dc3545; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">STOP REDS - DESLIGADO</span>`;
+                else if (at.status_operacao === 'STOP_REDS_PAUSA' && at.ativo) tagStatus = `<span style="background:#fd7e14; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">STOP REDS - ${pausaStopRedsMin > 0 ? `PAUSADO (${pausaStopRedsMin} min)` : 'REARMANDO'}</span>`;
+                else if (at.status_operacao === 'DADOS_INCOMPLETOS') tagStatus = `<span style="background:#b02a37; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">⚠️ DADOS INCOMPLETOS</span>`;
+                else if (!at.ativo) tagStatus = `<span style="background:#555; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">🔴 DESLIGADO</span>`;
+                else if (at.status_operacao === 'STANDBY') tagStatus = `<span style="background:#ffc107; color:black; padding:2px 8px; border-radius:4px; font-size:10px;">🟡 AGUARDANDO MESA</span>`;
+                else if (at.status_operacao === 'META_ATINGIDA') tagStatus = `<span style="background:#17a2b8; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">💤 META DO DIA BATIDA</span>`;
+                else tagStatus = `<span style="background:#28a745; color:white; padding:2px 8px; border-radius:4px; font-size:10px; animation: animar-piscar 1.5s infinite;">🟢 OPERANDO</span>`;
+
+                const trailingRecuo = Math.max(0, Number(cf.trailing_recuo) || 0);
+                const trailingPico = Math.max(0, Number(at.trailing_pico_lucro) || 0);
+                let trailingHTML = '';
+                if (cf.trailing_stop && trailingRecuo > 0) {
+                    trailingHTML = `<div style="font-size:10px; color:#aaa; margin-top:2px;">↳ Trailing: recuo R$ ${trailingRecuo.toFixed(2).replace('.',',')} | pico registrado +R$ ${trailingPico.toFixed(2).replace('.',',')}</div>`;
+                } else if (cf.trailing_stop) {
+                    trailingHTML = `<div style="font-size:10px; color:#ffc107; margin-top:2px;">↳ Trailing habilitado, mas ainda sem recuo configurado.</div>`;
+                }
+                let camuflagemHTML = (cf.modo_camuflagem === 'PULOS') ? `<span style="display:inline-block; margin-top:5px; background:#111; padding:4px 8px; border-radius:4px; border:1px solid #333; font-size:11px;">🕵️ Camuflagem: Pulará <strong>${at.pulos_restantes}</strong> ordens.</span>` : '';
+                let strFontes = (cf.fontes_sinal || []).map(f => `<span style="font-size:10px; padding:2px 6px; border-radius:4px; background:${f.includes('[AUTO]')?'#17a2b8':'#444'}; color:white; margin-right:4px;">${f}</span>`).join('');
+
+                div.innerHTML += `
+                    <div class="card" style="border-left: 4px solid #28a745; ${at.ativo?'':'opacity:0.6; filter:grayscale(50%);'}">
+                        <div style="display:flex; justify-content:space-between; align-items:start;">
+                            <div><h3 style="margin:0 0 5px 0; font-size:18px; color:#fff;">🎯 ${at.nome}</h3>${tagStatus}</div>
+                            <div style="display:flex; gap:10px; align-items:center;">
+                                <label class="switch" title="On/Off Motor"><input type="checkbox" ${at.ativo?'checked':''} onchange="toggleAutoTraderRapido(${at.id}, this)"><span class="slider"></span></label>
+                                <button class="btn" style="background:transparent; color:#ffc107; padding:2px; font-size:14px; height:auto;" onclick="prepararEdicaoAutoTrader(${at.id})" title="Configurar Cérebro">⚙️</button>
+                                <button class="btn" style="background:transparent; color:#ff7777; padding:2px; font-size:14px; height:auto;" onclick="excluirAutoTrader(${at.id})" title="Excluir Motor">🗑️</button>
+                            </div>
+                        </div>
+                        <div style="margin-top:20px; display:flex; gap:20px; flex-wrap:wrap;">
+                            <div style="flex:1; min-width:200px;">
+                                <h4 style="margin:0 0 10px 0; font-size:11px; color:#888; text-transform:uppercase;">🏦 Status Financeiro da Conta</h4>
+                                <div style="font-size:13px; margin-bottom:5px;">Banca Inicial Lida: <strong style="color:#aaa;">R$ ${at.saldo_inicial.toFixed(2).replace('.',',')}</strong></div>
+                                <div style="font-size:13px; margin-bottom:10px;">Saldo Atual da Corretora: <strong style="color:#fff; font-size:16px;">R$ ${at.saldo_atual.toFixed(2).replace('.',',')}</strong></div>
+                                <div style="background:#111; border:1px solid #333; padding:10px; border-radius:6px;">
+                                    <span style="display:block; font-size:10px; color:#888; text-transform:uppercase;">Lucro Líquido Real</span>
+                                    <strong style="font-size:22px; color:${corLucro};">${sinalLucro} R$ ${Math.abs(lucroLiquido).toFixed(2).replace('.',',')}</strong>
+                                    <span style="font-size:12px; color:${corLucro}; margin-left:10px;">(${sinalLucro}${percLucro.toFixed(2)}%)</span>
+                                </div>
+                            </div>
+                            <div style="flex:1; min-width:200px;">
+                                <h4 style="margin:0 0 10px 0; font-size:11px; color:#888; text-transform:uppercase;">🛡️ Limites de Risco e Metas</h4>
+                                <div style="margin-bottom:15px;"><div style="display:flex; justify-content:space-between; font-size:11px; margin-bottom:2px;"><span style="color:#28a745;">🏆 Stop Win: R$ ${stopWinAlvo.toFixed(2).replace('.',',')}</span><span>${pctWin.toFixed(1)}% Completo</span></div><div class="progress-bar-bg"><div class="progress-bar-fill" style="width:${pctWin}%; background:#28a745;"></div></div>${trailingHTML}</div>
+                                <div style="margin-bottom:10px;"><div style="display:flex; justify-content:space-between; font-size:11px; margin-bottom:2px;"><span style="color:#ff7777;">🛑 Stop Loss: R$ ${stopLossAlvo.toFixed(2).replace('.',',')}</span><span>${pctLoss.toFixed(1)}% Consumido</span></div><div class="progress-bar-bg"><div class="progress-bar-fill" style="width:${pctLoss}%; background:#ff7777;"></div></div></div>
+                                ${stopRedsHTML}
+                            </div>
+                        </div>
+                        <div style="margin-top:20px; border-top:1px dashed #333; padding-top:15px; display:flex; justify-content:space-between; align-items:flex-end; flex-wrap:wrap; gap:10px;">
+                            <div><div style="font-size:12px; margin-bottom:5px;">📊 Volume: <strong>${at.entradas_feitas} / ${cf.limite_entradas||'∞'} Execuções</strong></div><div style="margin-bottom:5px;">📡 Escutando: ${strFontes || '<span style="color:#666; font-size:11px;">Sem robôs vinculados</span>'}</div>${camuflagemHTML}</div>
+                            <button class="btn" style="background:#fff; color:#000; box-shadow: 0 4px 10px rgba(255,255,255,0.2);" onclick="gerarRelatorioPDF(${at.id})">📄 Gerar Auditoria PDF</button>
+                        </div>
+                    </div>
+                `;
+            });
+        }
+
+        async function gerarRelatorioPDF(traderId) {
+            let at = autoTradersGlobais.find(x => x.id === traderId);
+            if (!at) return alert("Motor não encontrado.");
+            let ordens = [];
+            try { let res = await fetch(`/api/auditoria-ordens/${traderId}?_t=${Date.now()}`); ordens = await res.json(); } catch(e) { return alert("Falha ao puxar os logs do banco."); }
+            if (ordens.length === 0) return alert("Nenhuma ordem executada ainda para gerar relatório.");
+
+            let dataAtual = new Date(); let dataFmt = `${dataAtual.getDate().toString().padStart(2,'0')}/${(dataAtual.getMonth()+1).toString().padStart(2,'0')}/${dataAtual.getFullYear()} às ${dataAtual.getHours().toString().padStart(2,'0')}:${dataAtual.getMinutes().toString().padStart(2,'0')}`;
+            let hashValidador = Array.from(crypto.getRandomValues(new Uint8Array(16))).map(b => b.toString(16).padStart(2, '0')).join('');
+            let lucroLiquido = at.saldo_atual - at.saldo_inicial; let corLucro = lucroLiquido >= 0 ? '#28a745' : '#dc3545';
+            let turnover = 0; let wins = 0; let totalValidos = 0;
+
+            document.getElementById('pdf-nome-trader').innerText = at.nome; document.getElementById('pdf-periodo').innerText = `Até ${dataFmt}`; document.getElementById('pdf-lucro-liquido').innerText = `R$ ${lucroLiquido.toFixed(2).replace('.',',')}`; document.getElementById('pdf-lucro-liquido').style.color = corLucro; document.getElementById('pdf-banca-inicial').innerText = `R$ ${at.saldo_inicial.toFixed(2).replace('.',',')}`; document.getElementById('pdf-saldo-final').innerText = `R$ ${at.saldo_atual.toFixed(2).replace('.',',')}`; document.getElementById('pdf-hash').innerText = hashValidador;
+            let tbody = document.getElementById('pdf-table-body'); tbody.innerHTML = '';
+
+            ordens.forEach(o => {
+                let dOb = new Date(o.data_hora); let dObFmt = `${dOb.getDate().toString().padStart(2,'0')}/${(dOb.getMonth()+1).toString().padStart(2,'0')} ${dOb.getHours().toString().padStart(2,'0')}:${dOb.getMinutes().toString().padStart(2,'0')}:${dOb.getSeconds().toString().padStart(2,'0')}`;
+                let vRisco = parseFloat(o.risco_total) || 0; let vLucro = parseFloat(o.lucro_prejuizo) || 0; turnover += vRisco;
+                if (o.status_ordem === 'WIN' || o.status_ordem === 'TIE') wins++; if (o.status_ordem !== 'PENDENTE') totalValidos++;
+                let corStatus = o.status_ordem === 'WIN' ? '#28a745' : (o.status_ordem === 'LOSS' ? '#dc3545' : (o.status_ordem === 'TIE' ? '#ffc107' : '#6c757d'));
+                let sinalResult = vLucro > 0 ? '+' : '';
+
+                tbody.innerHTML += `<tr><td style="color:#666;">#${o.id}</td><td>${dObFmt}</td><td><strong>${o.fonte_sinal}</strong><br><span style="font-size:9px; color:#666;">${o.estrategia_nome}</span></td><td>Alvo: ${o.alvo.replace('Won','')}<br>Risco: R$ ${vRisco.toFixed(2).replace('.',',')}</td><td>${o.nivel}</td><td style="font-weight:bold; color:#0056b3;">${o.placar_mesa || 'Aguardando'}</td><td style="color:${corStatus}; font-weight:bold;">${o.status_ordem}<br>${sinalResult}R$ ${vLucro.toFixed(2).replace('.',',')}</td><td>R$ ${parseFloat(o.saldo_pos || 0).toFixed(2).replace('.',',')}</td></tr>`;
+            });
+
+            document.getElementById('pdf-turnover').innerText = `R$ ${turnover.toFixed(2).replace('.',',')}`;
+            const element = document.getElementById('pdf-template'); element.style.display = 'block';
+            const opt = { margin: 10, filename: `Auditoria_${at.nome.replace(/\s+/g, '_')}_${Date.now()}.pdf`, image: { type: 'jpeg', quality: 0.98 }, html2canvas: { scale: 2 }, jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' } };
+            html2pdf().set(opt).from(element).save().then(() => { element.style.display = 'none'; });
+        }
+
+        // ==========================================
+        // INICIALIZAÇÃO DE SISTEMAS GERAIS
+        // ==========================================
+        async function inicializarSistema() {
+            try {
+                const q = '?_t=' + Date.now();
+                const [resEstr, resOrig] = await Promise.all([fetch('/api/estrategias'+q), fetch('/api/origens'+q)]);
+                estrategiasGlobais = await resEstr.json(); origensGlobais = await resOrig.json();
+                let sFiltro = document.getElementById('select-origem-filtro').value; let sDash = document.getElementById('select-origem-dash').value;
+                let ops = '<option value="TODAS">🌐 Todas as Origens</option>'; origensGlobais.forEach(o => { ops += `<option value="${o.nome}">${o.nome}</option>`; });
+                document.getElementById('select-origem-filtro').innerHTML = ops; document.getElementById('select-origem-dash').innerHTML = ops;
+                if (Array.from(document.getElementById('select-origem-filtro').options).some(x=>x.value===sFiltro)) document.getElementById('select-origem-filtro').value = sFiltro;
+                if (Array.from(document.getElementById('select-origem-dash').options).some(x=>x.value===sDash)) document.getElementById('select-origem-dash').value = sDash;
+                aplicarFiltrosEOrdenar(); atualizarCardAtivoDinamicamente(); await carregarRobos(); await carregarAutoTraders(); atualizarAlvosSimulacao(); 
+            } catch(e) {}
+        }
+
+        async function carregarRobos() {
+            try {
+                const res = await fetch('/api/robos?_t=' + Date.now()); robosGlobais = await res.json();
+                renderizarCardsRobos(); atualizarFiltrosRoboUI(); await atualizarDashboardValores(); atualizarAlvosSimulacao(); 
+            } catch(e) {}
+        }
+
+        function atualizarCardAtivoDinamicamente() {
+            if (!estrategiaAtivaAtualId) return;
+            let est = estrategiasGlobais.find(e => e.id === estrategiaAtivaAtualId);
+            if (est) document.getElementById('conteudo-card-ativo').innerHTML = gerarHtmlCardEstrategia(est, 'ativo', dashPeriodoAtual);
+        }
+
+        function gerarHtmlCardEstrategia(est, idPrefixo, periodoGlobal) {
+            const buildTab = (periodo) => {
+                let s = est.detalhes[periodo]; if (!s) return { perc: '-', html: '', totais: 0 };
+                let tiesNum = 0; let htmlTies = ""; 
+                ['direto', 'gale1', 'gale2'].forEach(nivel => { let arr = []; if (s.ties[nivel]) { for (let m in s.ties[nivel]) { let q = s.ties[nivel][m]; if (q > 0) { arr.push(`<strong>${q}</strong> - ${m}`); tiesNum += q; } } } if (arr.length > 0) htmlTies += `<div style="font-size: 10px; margin-bottom:2px;">${nivel.toUpperCase()}: ${arr.join(' | ')}</div>`; });
+                let gT = s.green_direto + s.gale1 + s.gale2 + tiesNum; let tot = gT + s.red;
+                let pctGreen = tot > 0 ? (((s.green_direto + s.gale1 + s.gale2) / tot) * 100).toFixed(1) : 0; let pctTie = tot > 0 ? ((tiesNum / tot) * 100).toFixed(1) : 0; let pctRed = tot > 0 ? ((s.red / tot) * 100).toFixed(1) : 0; let ass = tot > 0 ? ((gT / tot) * 100).toFixed(1) : 0;
+                let isVis = (idPrefixo === 'lista') ? (periodo === periodoGlobal) : (periodo === dashPeriodoAtual);
+                let html = `<div id="detalhe-${idPrefixo}-${est.id}-${periodo}" class="detalhes-tecnicos detalhes-grupo-${idPrefixo}-${est.id}" style="display:${isVis?'block':'none'}; margin-top:auto;"><div style="display:flex; justify-content:space-between; border-bottom:1px solid #444; margin-bottom:5px; padding-bottom:4px;"><span>Entradas: <strong>${tot}</strong></span><span>Assertividade: <strong style="color:${getCor(ass)};">${ass}%</strong></span></div><div class="linha-detalhe" style="align-items:center;"><span>✅ Greens: <strong style="color:#28a745;">${s.green_direto+s.gale1+s.gale2}</strong> <small style="color:#aaa;">(${pctGreen}%)</small></span><div style="display:flex; gap:10px; font-size:11px; color:#ccc;"><span>Dir: <strong>${s.green_direto}</strong></span><span>G1: <strong>${s.gale1}</strong></span><span>G2: <strong>${s.gale2}</strong></span></div></div><div class="linha-detalhe" style="flex-direction:column;"><span>🟡 Empates: <strong style="color:#ffc107;">${tiesNum}</strong> <small style="color:#aaa;">(${pctTie}%)</small></span><div class="tie-box">${htmlTies||'<span style="font-size:10px; color:#666;">Sem empates</span>'}</div></div><div class="linha-detalhe" style="margin-top:5px; border-bottom:none; padding-bottom:0;"><span>❌ Reds: <strong style="color:#ff7777;">${s.red}</strong> <small style="color:#aaa;">(${pctRed}%)</small></span></div></div>`;
+                return { perc: ass > 0 ? ass + '%' : '-', html, totais: tot };
+            };
+            
+            let d24h = buildTab('24h'); let dHoje = buildTab('hoje'); let dSemana = buildTab('semana'); let dMes = buildTab('mes'); let dGeral = buildTab('geral');
+            let isAtivo = (idPrefixo === 'ativo');
+            let switchHtml = '';
+            if (!isAtivo) { if (est.is_dinamico) { switchHtml = `<span style="font-size:11px; color:#17a2b8; font-weight:bold;">⚡ IA Automática</span>`; } else { switchHtml = `<label class="switch" title="Ativar/Pausar"><input type="checkbox" ${est.ativo?'checked':''} onchange="toggleEstrategiaRapido('${est.id}', this)"><span class="slider"></span></label><button class="btn" style="background:transparent; color:#ffc107; padding:2px; font-size:14px; height:auto;" onclick="prepararEdicao('${est.id}')">✏️</button><button class="btn" style="background:transparent; color:#ff7777; padding:2px; font-size:14px; height:auto;" onclick="excluirEstrategia('${est.id}')">🗑️</button>`; } }
+
+            let bolinhasHtml = ''; try { bolinhasHtml = JSON.parse(est.padrao).map(j => { let bk = j === 'Player' ? '#007bff' : (j === 'Banker' ? '#ff7777' : '#ffc107'); let cl = j === 'Tie' ? '#000' : '#fff'; return `<span style="background:${bk}; color:${cl}; padding: 4px 8px; font-size: 11px; border-radius:4px; font-weight:bold;">${j.charAt(0)}</span>`; }).join(' <span style="color:#555; font-size:10px;">➡️</span> '); } catch(e) {}
+            let periodoSelecionado = isAtivo ? dashPeriodoAtual : periodoGlobal;
+            let menusTabs = `<div class="grid-performance"><div class="box-tempo ${periodoSelecionado==='24h'?'ativo':''}" onclick="mudarPeriodoCardEstrategia('${idPrefixo}', '24h')"><span>24H</span><strong style="color:${getCor(d24h.perc)}">${d24h.perc}</strong></div><div class="box-tempo ${periodoSelecionado==='hoje'?'ativo':''}" onclick="mudarPeriodoCardEstrategia('${idPrefixo}', 'hoje')"><span>Hoje</span><strong style="color:${getCor(dHoje.perc)}">${dHoje.perc}</strong></div><div class="box-tempo ${periodoSelecionado==='semana'?'ativo':''}" onclick="mudarPeriodoCardEstrategia('${idPrefixo}', 'semana')"><span>Semana</span><strong style="color:${getCor(dSemana.perc)}">${dSemana.perc}</strong></div><div class="box-tempo ${periodoSelecionado==='mes'?'ativo':''}" onclick="mudarPeriodoCardEstrategia('${idPrefixo}', 'mes')"><span>Mês</span><strong style="color:${getCor(dMes.perc)}">${dMes.perc}</strong></div><div class="box-tempo ${periodoSelecionado==='geral'?'ativo':''}" onclick="mudarPeriodoCardEstrategia('${idPrefixo}', 'geral')"><span>Geral</span><strong style="color:${getCor(dGeral.perc)}">${dGeral.perc}</strong></div></div>`;
+            let detailsToRender = isAtivo ? (d24h.html + dHoje.html + dSemana.html + dMes.html + dGeral.html) : (periodoGlobal === '24h' ? d24h.html : (periodoGlobal === 'hoje' ? dHoje.html : (periodoGlobal === 'semana' ? dSemana.html : (periodoGlobal === 'mes' ? dMes.html : dGeral.html))));
+            let iaBadge = est.is_dinamico ? `<span style="background: #17a2b8; color: white; padding: 2px 5px; font-size: 10px; border-radius: 4px; margin-left: 8px;">🤖 IA Dinâmica</span>` : '';
+            let lockMsg = ''; if (est.is_dinamico && !isAtivo) { if (est.quarentena_restante > 0) lockMsg = `<div style="text-align:center; margin-top:10px; padding:4px; background:#222; border-radius:4px; font-size:10px; color:#ffc107; border:1px dashed #ffc107;">⏱️ EM QUARENTENA: Restam ${est.quarentena_restante} giros.</div>`; else lockMsg = `<div style="text-align:center; margin-top:10px; padding:4px; background:#222; border-radius:4px; font-size:10px; color:#28a745; border:1px dashed #28a745;">✅ Padrão Aprovado e Gerenciado pela IA</div>`; }
+
+            return `<div class="card" style="${est.ativo?'':'opacity: 0.6; filter: grayscale(30%);'} ${isAtivo?'margin-bottom:0;':''}"><div style="display:flex; justify-content:space-between; align-items:start;"><h3 style="margin:0 0 5px 0; font-size: 14px; display:flex; align-items:center; gap:8px;">${est.nome} <span class="badge" style="margin:0;">${est.origem}</span> ${iaBadge}</h3><div style="display:flex; gap:10px; align-items:center;">${switchHtml}</div></div><div style="margin: 12px 0;">${bolinhasHtml}</div><p style="margin: 0 0 10px 0; font-size: 11px; color: #aaa;">Entrada: <strong style="color:${est.entrada==='Player'?'#007bff':'#ff7777'}">${est.entrada==='Player'?'🔵 Player':'🔴 Banker'}</strong> | G${est.gales} ${est.proteger_empate?'| 🟡 Prot. Empate':''}</p>${menusTabs}${detailsToRender}${lockMsg}</div>`;
+        }
+
+        function mudarPeriodoCardEstrategia(tipoCard, periodo) {
+            const periodosValidos = new Set(['24h', 'hoje', 'semana', 'mes', 'geral']);
+            if (!periodosValidos.has(periodo)) return;
+
+            if (tipoCard === 'ativo') {
+                dashPeriodoAtual = periodo;
+                atualizarCardAtivoDinamicamente();
+                return;
+            }
+
+            padroesPeriodoAtual = periodo;
+            aplicarFiltrosEOrdenar();
+        }
+
+        // Funções remanescentes de UI (Backtest, Minerador Simulação) preservadas
+        function aplicarFiltrosEOrdenar() { let oFiltro = document.getElementById('select-origem-filtro').value; let tFiltro = document.getElementById('select-tipo-filtro').value; const div = document.getElementById('lista-padroes'); div.innerHTML = ''; let filtradas = oFiltro === 'TODAS' ? [...estrategiasGlobais] : estrategiasGlobais.filter(e => e.origem === oFiltro); if (tFiltro === 'MANUAIS') filtradas = filtradas.filter(e => !e.is_dinamico); else if (tFiltro === 'DINAMICOS') filtradas = filtradas.filter(e => e.is_dinamico); let ordem = document.getElementById('select-ordem-filtro').value; filtradas.sort((a, b) => { const calcStats = (estObj) => { let s = estObj.detalhes[padroesPeriodoAtual]; if (!s) return { tot: 0, ass: 0, pTie: 0 }; let tiesNum = 0; ['direto', 'gale1', 'gale2'].forEach(n => { if (s.ties[n]) { for (let m in s.ties[n]) tiesNum += s.ties[n][m]; } }); let g = s.green_direto + s.gale1 + s.gale2 + tiesNum; let tot = g + s.red; let ass = tot > 0 ? (g / tot) * 100 : 0; let pTie = tot > 0 ? (tiesNum / tot) * 100 : 0; return { tot, ass, pTie }; }; let sA = calcStats(a); let sB = calcStats(b); if (ordem === 'nome') return a.nome.localeCompare(b.nome); if (ordem === 'ocorr') return sB.tot - sA.tot; if (ordem === 'assert') return sB.ass - sA.ass; if (ordem === 'status') return (b.ativo === 1 || b.ativo === true) - (a.ativo === 1 || a.ativo === true); return 0; }); if (filtradas.length === 0) div.innerHTML = '<p style="color: #666; text-align: center; padding: 20px; grid-column: span 2;">Nenhuma estratégia encontrada.</p>'; else filtradas.forEach(est => div.innerHTML += gerarHtmlCardEstrategia(est, 'lista', padroesPeriodoAtual)); }
+        function mudarAbaRoboStats(idC, p) { document.querySelectorAll(`.tab-robo-${idC}`).forEach(e => e.classList.remove('ativo')); document.getElementById(`tab-robo-${idC}-${p}`).classList.add('ativo'); document.querySelectorAll(`.detalhes-grupo-robo-${idC}`).forEach(e => e.style.display='none'); document.getElementById(`detalhe-robo-${idC}-${p}`).style.display='block'; }
+        function toggleModalConfig(open) { document.getElementById('config-modal').style.display = open ? 'flex' : 'none'; }
+        function salvarConfig() { localStorage.setItem('threshGreen', document.getElementById('cfg-green').value); localStorage.setItem('threshYellow', document.getElementById('cfg-yellow').value); toggleModalConfig(false); aplicarFiltrosEOrdenar(); atualizarDashboardValores(); }
+        function getCor(pctStr) { if (pctStr === '-') return '#aaa'; let pct = parseFloat(pctStr); let gVal = parseFloat(localStorage.getItem('threshGreen') || 80); let yVal = parseFloat(localStorage.getItem('threshYellow') || 50); if (pct >= gVal) return '#28a745'; if (pct >= yVal) return '#ffc107'; return '#ff7777'; }
+
+        async function toggleEstrategiaRapido(id, check) { let e = estrategiasGlobais.find(x => x.id.toString() === id.toString()); if (!e) return; let nA = check.checked; try { await fetch(`/api/estrategia/${id}`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({...e, padrao: e.padrao.join(','), ativo: nA}) }); e.ativo = nA; aplicarFiltrosEOrdenar(); } catch(err) { check.checked = !nA; } }
+        function abrirFormularioNova() { mudarAbaPrincipal('padroes'); estrategiaEditandoId = null; document.getElementById('titulo-formulario').innerText = "Cadastrar Nova Estratégia"; document.getElementById('nome').value = ''; document.getElementById('gales').value = '0'; document.getElementById('entrada').value = 'Player'; document.getElementById('proteger_empate').checked = false; document.getElementById('ativo').checked = true; limparPadraoModal(); document.getElementById('modal-cadastro').style.display = 'flex'; }
+        function fecharFormulario() { document.getElementById('modal-cadastro').style.display = 'none'; }
+        function prepararEdicao(id) { const est = estrategiasGlobais.find(e => e.id === id); if (!est) return; estrategiaEditandoId = est.id; document.getElementById('titulo-formulario').innerText = "✏️ Editar Estratégia"; document.getElementById('nome').value = est.nome; let selO = document.getElementById('origem'); if (Array.from(selO.options).some(o => o.value === est.origem)) { selO.value = est.origem; } document.getElementById('entrada').value = est.entrada; document.getElementById('gales').value = est.gales; document.getElementById('proteger_empate').checked = est.proteger_empate === 1; document.getElementById('ativo').checked = est.ativo === 1 || est.ativo === true; limparPadraoModal(); try { JSON.parse(est.padrao).forEach(j => adicionarNoPadraoModal(j)); } catch(e) {} document.getElementById('modal-cadastro').style.display = 'flex'; }
+        async function salvarPadrao() { let data = { nome: document.getElementById('nome').value, origem: document.getElementById('origem').value, padrao: document.getElementById('padrao').value, entrada: document.getElementById('entrada').value, gales: document.getElementById('gales').value, protegerEmpate: document.getElementById('proteger_empate').checked, ativo: document.getElementById('ativo').checked }; if (!data.nome || !data.padrao) return alert("Preencha Nome e Padrão"); try { let res = await fetch(estrategiaEditandoId ? '/api/estrategia/' + estrategiaEditandoId : '/api/novo-padrao', { method: estrategiaEditandoId ? 'PUT' : 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data) }); let r = await res.json(); if (r.sucesso) { fecharFormulario(); inicializarSistema(); } else alert("Erro ao salvar."); } catch(e) {} }
+        function adicionarNoPadraoModal(j) { modalPadraoAtual.push(j); atualizarVisorPadraoModal(); } 
+        function limparPadraoModal() { modalPadraoAtual = []; atualizarVisorPadraoModal(); }
+        function atualizarVisorPadraoModal() { const vis = document.getElementById('visor-padrao'); if (modalPadraoAtual.length === 0) { vis.innerHTML = '<span style="color:#666; font-style:italic; font-size:12px;">Clique nos botões acima...</span>'; document.getElementById('padrao').value = ''; return; } vis.innerHTML = modalPadraoAtual.map(j => { let cor = j === 'Player' ? '#007bff' : (j === 'Banker' ? '#ff7777' : '#ffc107'); let ic = j === 'Player' ? '🔵' : (j === 'Banker' ? '🔴' : '🟡'); return `<span style="background:${cor}; color:${j==='Tie'?'#000':'#fff'}; padding:4px 8px; border-radius:4px; font-weight:bold; font-size:12px; box-shadow:0 2px 4px rgba(0,0,0,0.3);">${ic} ${j.charAt(0)}</span>`; }).join(''); document.getElementById('padrao').value = modalPadraoAtual.join(', '); }
+        function abrirGerenciadorOrigens() { fecharFormulario(); document.getElementById('modal-gerenciar-origens').style.display = 'flex'; carregarListaOrigens(); }
+        function fecharGerenciadorOrigens() { document.getElementById('modal-gerenciar-origens').style.display = 'none'; document.getElementById('modal-cadastro').style.display = 'flex'; }
+        async function carregarOrigens() { try { const res = await fetch('/api/origens?_t=' + Date.now()); origensGlobais = await res.json(); const select = document.getElementById('origem'); select.innerHTML = ''; origensGlobais.forEach(o => select.innerHTML += `<option value="${o.nome}">${o.nome}</option>`); } catch(e){} }
+        async function cadastrarOrigem() { let n = prompt("Nova Origem:"); if (n && n.trim()) { await fetch('/api/nova-origem', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ nome: n.trim() }) }); carregarOrigens(); carregarListaOrigens(); inicializarSistema(); } }
+        async function carregarListaOrigens() { try { const res = await fetch('/api/origens?_t=' + Date.now()); const origens = await res.json(); const div = document.getElementById('lista-gerenciar-origens'); div.innerHTML = ''; origens.forEach(org => { div.innerHTML += `<div style="display: flex; justify-content: space-between; align-items: center; background: #222; padding: 8px; margin-bottom: 4px; border-radius: 4px; border: 1px solid #333; font-size: 13px;"><span>${org.nome}</span><div><button class="btn" style="background: #ffc107; color: black; padding: 2px 6px; font-size: 11px; height:auto;" onclick="editarOrigem(${org.id}, '${org.nome}')">✏️</button><button class="btn" style="background: #ff7777; padding: 2px 6px; font-size: 11px; height:auto;" onclick="excluirOrigem(${org.id})">🗑️</button></div></div>`; }); } catch (error) {} }
+        async function editarOrigem(id, old) { let n = prompt("Renomear Origem:", old); if (n && n.trim() !== "" && n !== old) { await fetch(`/api/origem/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ novoNome: n.trim(), nomeAntigo: old }) }); carregarOrigens(); carregarListaOrigens(); inicializarSistema(); } }
+        async function excluirOrigem(id) { if (confirm("Excluir esta Origem?")) { await fetch(`/api/origem/${id}`, { method: 'DELETE' }); carregarOrigens(); carregarListaOrigens(); inicializarSistema(); } }
+        
+        function trocarTabBacktest(tab) { document.querySelectorAll('.bk-nav-btn').forEach(b => b.classList.remove('ativo')); document.querySelectorAll('.bk-tab-content').forEach(c => c.classList.remove('ativo')); document.getElementById('btn-tab-' + tab).classList.add('ativo'); document.getElementById('bk-tab-' + tab).classList.add('ativo'); }
+        async function abrirAbaBacktest() { mudarAbaPrincipal('backtest'); await carregarHistoricoMemoria(true); }
+        async function carregarHistoricoMemoria(renderizar = false) { try { let limit = document.getElementById('bk-range') ? document.getElementById('bk-range').value : 10000; const res = await fetch(`/api/historico-giros?limit=10000&_t=${Date.now()}`); girosInMemoria = await res.json(); document.getElementById('bk-qtd-giros').innerText = girosInMemoria.length; if (renderizar) { calcularEstatisticasMesa(girosInMemoria); renderizarFitaTemporal(girosInMemoria, []); } } catch(e) {} }
+        function calcularEstatisticasMesa(dados) {
+            let maxP = 0, maxB = 0, maxT = 0, maxNoT = 0;
+            let curP = 0, curB = 0, curT = 0, curNoT = 0;
+            let sessaoAnterior = null;
+
+            dados.forEach(d => {
+                const sessaoAtual = String(d.id_sessao ?? '');
+                if (sessaoAnterior !== null && sessaoAtual !== sessaoAnterior) {
+                    curP = 0; curB = 0; curT = 0; curNoT = 0;
+                }
+                sessaoAnterior = sessaoAtual;
+
+                if (d.resultado === 'Player') { curP++; curB=0; curT=0; curNoT++; }
+                else if (d.resultado === 'Banker') { curB++; curP=0; curT=0; curNoT++; }
+                else if (d.resultado === 'Tie') { curT++; curP=0; curB=0; curNoT=0; }
+
+                if(curP > maxP) maxP = curP;
+                if(curB > maxB) maxB = curB;
+                if(curT > maxT) maxT = curT;
+                if(curNoT > maxNoT) maxNoT = curNoT;
+            });
+            document.getElementById('bk-max-p').innerText = maxP;
+            document.getElementById('bk-max-b').innerText = maxB;
+            document.getElementById('bk-max-t').innerText = maxT;
+            document.getElementById('bk-max-sem-t').innerText = maxNoT;
+        }
+        function renderizarFitaTemporal(dados, indicesHighlight) { const fita = document.getElementById('bk-fita-historico'); fita.innerHTML = ''; let exibir = dados.slice(-200); let offset = dados.length - 200; exibir.forEach((d, idx) => { let div = document.createElement('div'); div.className = `bk-bola ${d.resultado.toLowerCase()}`; let val = ''; if (d.resultado === 'Tie') val = 'T'; else if (d.resultado === 'Player') val = 'P'; else val = 'B'; div.innerText = val; let realIndex = offset + idx; let highlight = indicesHighlight.find(h => h.index === realIndex); if (highlight) { if (highlight.status === 'win') { div.classList.add('found'); } else if (highlight.status === 'loss') { div.classList.add('loss'); } } fita.appendChild(div); }); fita.scrollLeft = fita.scrollWidth; }
+        function bkAdd(val) { bkPadraoAtual.push(val); renderBkPadrao(); } function bkLimpar() { bkPadraoAtual = []; renderBkPadrao(); } function renderBkPadrao() { const vis = document.getElementById('bk-visor-padrao'); if(bkPadraoAtual.length === 0) { vis.innerHTML = '<span style="color:#666;">Clique nos botões...</span>'; return; } vis.innerHTML = bkPadraoAtual.map(j => { let cor = j === 'Player' ? '#007bff' : (j === 'Banker' ? '#ff7777' : '#ffc107'); let ic = j === 'Player' ? '🔵' : (j === 'Banker' ? '🔴' : '🟡'); return `<span style="background:${cor}; color:${j==='Tie'?'#000':'#fff'}; padding:4px 8px; border-radius:4px; font-weight:bold; font-size:12px;">${ic} ${j.charAt(0)}</span>`; }).join(''); }
+        function simularBacktestCore(padraoArr, alvo, gales, protEmpate, dadosArr) { let stats = { sg: 0, g1: 0, g2: 0, red: 0, ties: { direto: {}, g1: {}, g2: {} }, totalEncontrado: 0 }; let tamanho = padraoArr.length; let highlights = []; for (let i = 0; i <= dadosArr.length - tamanho - 1; i++) { let match = true; let sessaoBase = dadosArr[i].id_sessao; for (let p = 0; p < tamanho; p++) { if (dadosArr[i + p].resultado !== padraoArr[p] || dadosArr[i + p].id_sessao !== sessaoBase) { match = false; break; } } if (match) { let currentIndex = i + tamanho; if (currentIndex >= dadosArr.length || dadosArr[currentIndex].id_sessao !== sessaoBase) { continue; } stats.totalEncontrado++; let step = 0; let win = false; let lastIndexChecked = currentIndex; while (step <= gales && currentIndex < dadosArr.length) { if (dadosArr[currentIndex].id_sessao !== sessaoBase) { break; } let res = dadosArr[currentIndex].resultado; let mult = dadosArr[currentIndex].multiplicador || '4x'; lastIndexChecked = currentIndex; if (res === alvo) { if (step === 0) { stats.sg++; } else if (step === 1) { stats.g1++; } else if (step === 2) { stats.g2++; } win = true; break; } else if (res === 'Tie' && protEmpate) { let level = step === 0 ? 'direto' : (step === 1 ? 'g1' : 'g2'); if (!stats.ties[level][mult]) { stats.ties[level][mult] = 0; } stats.ties[level][mult]++; win = true; break; } else { step++; currentIndex++; } } if (!win && step > gales && lastIndexChecked < dadosArr.length && dadosArr[lastIndexChecked].id_sessao === sessaoBase) { stats.red++; highlights.push({ index: lastIndexChecked, status: 'loss' }); } else if (win) { highlights.push({ index: lastIndexChecked, status: 'win' }); } } } return { stats, highlights }; }
+        function rodarBacktestManual() { if(bkPadraoAtual.length < 2) return alert("Construa um padrão de pelo menos 2 cores."); if(girosInMemoria.length === 0) return alert("Aguarde o carregamento dos giros."); let alvo = document.getElementById('bk-entrada').value; let gales = parseInt(document.getElementById('bk-gales').value); let prot = document.getElementById('bk-prot').checked; let limit = parseInt(document.getElementById('bk-range').value); let dadosCorte = girosInMemoria.slice(-limit); let result = simularBacktestCore(bkPadraoAtual, alvo, gales, prot, dadosCorte); renderizarResultadoManual(result.stats); calcularEstatisticasMesa(dadosCorte); renderizarFitaTemporal(dadosCorte, result.highlights); }
+        function renderizarResultadoManual(stats) { document.getElementById('bk-resultados-placeholder').style.display = 'none'; document.getElementById('bk-resultados-box').style.display = 'block'; let tTies = 0; let htmlTies = ""; ['direto', 'g1', 'g2'].forEach(nivel => { let arr = []; for(let m in stats.ties[nivel]) { let q = stats.ties[nivel][m]; if (q > 0) { arr.push(`<strong>${q}</strong> - ${m}`); tTies += q; } } if (arr.length > 0) htmlTies += `<div style="margin-bottom:2px;">${nivel.toUpperCase()}: ${arr.join(' | ')}</div>`; }); let tGreen = stats.sg + stats.g1 + stats.g2 + tTies; let totalValido = tGreen + stats.red; let assertividade = totalValido > 0 ? ((tGreen / totalValido) * 100).toFixed(1) : 0; document.getElementById('bk-res-assert').innerText = assertividade + '%'; document.getElementById('bk-res-assert').style.color = getCor(assertividade); document.getElementById('bk-res-sub').innerText = `${tGreen} vitórias em ${stats.totalEncontrado} ocorrências`; document.getElementById('bk-res-greens').innerText = (stats.sg + stats.g1 + stats.g2); document.getElementById('bk-res-dir').innerText = stats.sg; document.getElementById('bk-res-g1').innerText = stats.g1; document.getElementById('bk-res-g2').innerText = stats.g2; document.getElementById('bk-res-ties').innerText = tTies; document.getElementById('bk-res-ties-box').innerHTML = htmlTies || 'Nenhum empate capturado.'; document.getElementById('bk-res-reds').innerText = stats.red; }
+        function bkSalvarComoEstrategia() { if(bkPadraoAtual.length < 2) return alert("Rode o backtest primeiro."); abrirFormularioNova(); bkPadraoAtual.forEach(j => adicionarNoPadraoModal(j)); document.getElementById('entrada').value = document.getElementById('bk-entrada').value; document.getElementById('gales').value = document.getElementById('bk-gales').value; document.getElementById('proteger_empate').checked = document.getElementById('bk-prot').checked; }
+        function rodarMinerador() { if (girosInMemoria.length === 0) return alert("Aguarde."); let tamanho = parseInt(document.getElementById('mn-tamanho').value); let gales = parseInt(document.getElementById('mn-gales').value); let prot = document.getElementById('mn-prot').checked; let minAssert = parseInt(document.getElementById('mn-assert').value); let minOcorr = parseInt(document.getElementById('mn-ocorr').value); let limit = parseInt(document.getElementById('mn-range').value); let dadosCorte = girosInMemoria.slice(-limit); document.getElementById('mn-lista-resultados').innerHTML = '<p style="text-align:center; color:#ffc107;">⛏️ Minerando com Força Bruta...</p>'; setTimeout(() => { let sequenciasUnicas = new Map(); for(let i=0; i <= dadosCorte.length - tamanho; i++) { let sessaoBase = dadosCorte[i].id_sessao; let seq = []; let valida = true; for(let p=0; p<tamanho; p++) { if (dadosCorte[i+p].id_sessao !== sessaoBase) { valida = false; break; } seq.push(dadosCorte[i+p].resultado); } if(valida) { let seqStr = seq.join(','); if(!sequenciasUnicas.has(seqStr)) sequenciasUnicas.set(seqStr, seq); } } let resultados = []; sequenciasUnicas.forEach((seqArr, seqStr) => { ['Player', 'Banker'].forEach(alvo => { let result = simularBacktestCore(seqArr, alvo, gales, prot, dadosCorte); let s = result.stats; let tTies = 0; ['direto','g1','g2'].forEach(n => { for(let m in s.ties[n]) tTies += s.ties[n][m]; }); let tG = s.sg + s.g1 + s.g2 + tTies; let tot = tG + s.red; let assert = tot > 0 ? (tG / tot) * 100 : 0; if (s.totalEncontrado >= minOcorr && assert >= minAssert) resultados.push({ padrao: seqArr, alvo: alvo, stats: s, assert: assert, tiesTotal: tTies }); }); }); resultados.sort((a, b) => { if (b.assert !== a.assert) return b.assert - a.assert; if (a.padrao.length !== b.padrao.length) return a.padrao.length - b.padrao.length; return b.stats.totalEncontrado - a.stats.totalEncontrado; }); renderizarMinerador(resultados, gales, prot); }, 100); }
+        function renderizarMinerador(resultados, gales, prot) { document.getElementById('mn-qtd-resultados').innerText = resultados.length; const div = document.getElementById('mn-lista-resultados'); div.innerHTML = ''; if (resultados.length === 0) return div.innerHTML = '<p style="color:#ff7777; text-align:center;">Nenhum padrão superou o filtro.</p>'; resultados.forEach((r, idx) => { let htmlPadrao = r.padrao.map(j => { let cor = j === 'Player' ? '#007bff' : (j === 'Banker' ? '#ff7777' : '#ffc107'); return `<span style="display:inline-block; width:14px; height:14px; background:${cor}; border-radius:50%; margin-right:3px;"></span>`; }).join(''); let corAlvo = r.alvo === 'Player' ? '#007bff' : '#ff7777'; let txtAlvo = r.alvo === 'Player' ? '🔵 Player' : '🔴 Banker'; let pStr = r.padrao.join(','); div.innerHTML += `<div class="miner-card"><div style="flex:1;"><div style="display:flex; align-items:center; margin-bottom:8px;">${htmlPadrao} <span style="font-size:12px; color:#aaa; margin-left:10px;">➔ Pode indicar <strong style="color:${corAlvo};">${txtAlvo}</strong></span><span style="margin-left:auto; font-weight:bold; color:${getCor(r.assert)}">${r.assert.toFixed(1)}%</span></div><div style="font-size:10px; display:flex; gap:10px; color:#aaa;"><span style="background:#222; padding:2px 6px; border-radius:4px; border:1px solid #333;">Apareceu: <strong style="color:#fff;">${r.stats.totalEncontrado}x</strong></span><span style="background:#222; padding:2px 6px; border-radius:4px; border:1px solid #333; color:#28a745;">SG: ${r.stats.sg}</span><span style="background:#222; padding:2px 6px; border-radius:4px; border:1px solid #333;">G1: ${r.stats.g1}</span><span style="background:#222; padding:2px 6px; border-radius:4px; border:1px solid #333;">G2: ${r.stats.g2}</span><span style="background:#222; padding:2px 6px; border-radius:4px; border:1px solid #333; color:#ffc107;">Empates: ${r.tiesTotal}</span><span style="background:#222; padding:2px 6px; border-radius:4px; border:1px solid #333; color:#ff7777;">Reds: ${r.stats.red}</span></div></div><div style="margin-left:15px;"><button class="btn" style="background:#17a2b8; padding:0 10px; font-size:11px; height:28px;" onclick="salvarMinerado('${pStr}', '${r.alvo}', ${gales}, ${prot})">💾 Salvar</button></div></div>`; }); }
+        function salvarMinerado(padraoStr, alvo, gales, prot) { abrirFormularioNova(); let pArr = padraoStr.split(','); pArr.forEach(j => adicionarNoPadraoModal(j)); document.getElementById('entrada').value = alvo; document.getElementById('gales').value = gales; document.getElementById('proteger_empate').checked = prot; }
+        function toggleSimEmpate(cb) { document.getElementById('sim-pct-empate').disabled = !cb.checked; } function toggleSimHora(cb) { document.getElementById('sim-hora-inicio').disabled = !cb.checked; document.getElementById('sim-hora-fim').disabled = !cb.checked; }
+        function atualizarAlvosSimulacao() { let tipo = document.getElementById('sim-tipo-alvo').value; let sel = document.getElementById('sim-alvo-id'); sel.innerHTML = ''; if (tipo === 'ESTRATEGIA') estrategiasGlobais.forEach(e => sel.innerHTML += `<option value="${e.id}">${e.nome} (${e.origem})</option>`); else if (tipo === 'ORIGEM') origensGlobais.forEach(o => sel.innerHTML += `<option value="${o.nome}">${o.nome}</option>`); else if (tipo === 'ROBO') robosGlobais.forEach(r => sel.innerHTML += `<option value="${r.id}">${r.nome}</option>`); }
+        async function rodarSimulacaoBanca() { let tipo_alvo = document.getElementById('sim-tipo-alvo').value; let alvo_id = document.getElementById('sim-alvo-id').value; let banca_inicial = document.getElementById('sim-banca').value; let stake_principal = document.getElementById('sim-stake').value; let cobrir_empate = document.getElementById('sim-prot').checked; let pct_empate = document.getElementById('sim-pct-empate').value; let mult_gale = document.getElementById('sim-mult-gale').value; let periodo = document.getElementById('sim-periodo').value; let filtro_horario = document.getElementById('sim-filtro-hora').checked; let hora_inicio = document.getElementById('sim-hora-inicio').value; let hora_fim = document.getElementById('sim-hora-fim').value; if(!alvo_id) return alert("Selecione um alvo."); const payload = { tipo_alvo, alvo_id, banca_inicial, stake_principal, cobrir_empate, pct_empate, mult_gale, periodo, filtro_horario, hora_inicio, hora_fim }; document.getElementById('sim-resultados-placeholder').innerText = "Processando simulação Monte Carlo..."; document.getElementById('sim-resultados-placeholder').style.display = 'block'; document.getElementById('sim-resultados-box').style.display = 'none'; try { const res = await fetch('/api/simular-banca', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) }); const data = await res.json(); if (data.sucesso) renderizarResultadosFinanceiros(data); else alert("Erro: " + data.erro); } catch (e) { alert("Falha de conexão com o motor financeiro."); } }
+        let chartInstancia = null;
+        function renderizarResultadosFinanceiros(data) { document.getElementById('sim-resultados-placeholder').style.display = 'none'; document.getElementById('sim-resultados-box').style.display = 'block'; document.getElementById('sim-res-saldo').innerText = `R$ ${data.saldo_final.toFixed(2).replace('.',',')}`; document.getElementById('sim-res-saldo').style.color = data.saldo_final >= data.banca_inicial ? '#28a745' : '#ff7777'; document.getElementById('sim-res-lucro').innerText = `R$ ${data.lucro_liquido.toFixed(2).replace('.',',')}`; document.getElementById('sim-res-lucro').style.color = data.lucro_liquido >= 0 ? '#28a745' : '#ff7777'; document.getElementById('sim-res-perc').innerText = `${data.lucro_perc}%`; document.getElementById('sim-res-perc').style.color = data.lucro_liquido >= 0 ? '#28a745' : '#ff7777'; document.getElementById('sim-res-dd').innerText = `R$ ${data.max_drawdown.toFixed(2).replace('.',',')} (${data.max_drawdown_perc}%)`; document.getElementById('sim-res-sinais').innerText = data.total_sinais; document.getElementById('sim-res-winrate').innerText = `${data.win_rate}%`; let ctx = document.getElementById('chart-simulacao').getContext('2d'); if(chartInstancia) chartInstancia.destroy(); let gradient = ctx.createLinearGradient(0, 0, 0, 400); gradient.addColorStop(0, 'rgba(40, 167, 69, 0.4)'); gradient.addColorStop(1, 'rgba(40, 167, 69, 0.0)'); let borderColor = data.saldo_final >= data.banca_inicial ? '#28a745' : '#ff7777'; if (data.saldo_final < data.banca_inicial) { gradient = ctx.createLinearGradient(0, 0, 0, 400); gradient.addColorStop(0, 'rgba(255, 119, 119, 0.4)'); gradient.addColorStop(1, 'rgba(255, 119, 119, 0.0)'); } chartInstancia = new Chart(ctx, { type: 'line', data: { labels: data.dates, datasets: [{ label: 'Evolução', data: data.equity_curve, borderColor: borderColor, backgroundColor: gradient, borderWidth: 2, fill: true, tension: 0.2, pointRadius: 0 }] }, options: { responsive: true, interaction: { mode: 'index', intersect: false }, plugins: { legend: { display: false } }, scales: { x: { display: false }, y: { ticks: { color: '#888' }, grid: { color: '#333' } } } } }); }
+
+        carregarOrigens(); 
+        inicializarSistema();
+    </script>
+</body>
+</html>
