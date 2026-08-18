@@ -1575,9 +1575,10 @@ app.delete("/api/robo/:id", async (req, res) => {
 
         // O histórico live de padrões expirados é preservado enquanto o robô existir.
         // Na exclusão definitiva do proprietário, remove também IDs IA já arquivados pelo TTL.
+        const prefixoHistoricoIa = `ia_${roboId}_`;
         await conexao.query(
-            'DELETE FROM historico_resultados WHERE estrategia_id LIKE ?',
-            [`ia_${roboId}_%`]
+            'DELETE FROM historico_resultados WHERE LEFT(estrategia_id, ?) = ?',
+            [prefixoHistoricoIa.length, prefixoHistoricoIa]
         );
 
         // Ao excluir o Robô/Canal, seu histórico de distribuição também deixa de ter proprietário.

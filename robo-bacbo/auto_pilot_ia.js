@@ -766,7 +766,7 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
             let configRobo = {};
             try { configRobo = JSON.parse(row.config_json || '{}'); } catch (e) {}
             const config = normalizarConfigAutoTuning(configRobo.auto_tuning || {});
-            const [mapaLive] = [await historicoLive([id])];
+            const mapaLive = await historicoLive([id]);
             const avaliacao = avaliarDescarteLive(mapaLive.get(id) || [], config);
             if (!avaliacao.descartar) {
                 return { executado: true, descartado: false, avaliacao };

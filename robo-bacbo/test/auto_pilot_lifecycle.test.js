@@ -75,7 +75,7 @@ test('mudança forçada durante sinal fica pendente e é aplicada no próximo gi
 test('backend reavalia descarte live depois de finalizar padrão dinâmico', () => {
     const backend = fs.readFileSync(path.join(__dirname, '..', 'bot2_coletor.js'), 'utf8');
     assert.match(backend, /est\.is_dinamico[\s\S]{0,400}autoPilotIA\.reavaliarDescarteEstrategia\(est\.id\)/);
-    assert.match(backend, /DELETE FROM historico_resultados WHERE estrategia_id LIKE/);
+    assert.match(backend, /DELETE FROM historico_resultados WHERE LEFT\(estrategia_id, \?\) = \?/);
 });
 
 test('motor preserva reputação live ao expirar definição do padrão', () => {
