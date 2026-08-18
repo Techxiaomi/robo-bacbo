@@ -61,6 +61,10 @@ async function limparPadroesDinamicosOrfaos() {
                 ids
             );
             await conexao.query(
+                `DELETE FROM historico_shadow_ia WHERE estrategia_id IN (${placeholders})`,
+                ids
+            );
+            await conexao.query(
                 `DELETE FROM estrategias WHERE id IN (${placeholders}) AND is_dinamico = true`,
                 ids
             );
@@ -133,6 +137,23 @@ async function prepararBancoDeDados() {
                 nivel VARCHAR(20),
                 multiplicador VARCHAR(10),
                 data_hora DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+
+        await dbPool.query(`
+            CREATE TABLE IF NOT EXISTS historico_shadow_ia (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                estrategia_id VARCHAR(100) NOT NULL,
+                robo_id INT NOT NULL,
+                giro_resultado_id INT NOT NULL,
+                tipo_resultado VARCHAR(20) NOT NULL,
+                nivel VARCHAR(20) DEFAULT 'DIRETO',
+                multiplicador VARCHAR(10) DEFAULT '',
+                data_hora DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_shadow_estrategia_giro (estrategia_id, giro_resultado_id),
+                INDEX idx_shadow_robo (robo_id),
+                INDEX idx_shadow_estrategia (estrategia_id)
             )
         `);
 
@@ -259,6 +280,7 @@ async function prepararBancoDeDados() {
         await adicionarColuna("ALTER TABLE estrategias ADD COLUMN robo_dono_id INT DEFAULT NULL");
         await adicionarColuna("ALTER TABLE estrategias ADD COLUMN criado_em BIGINT DEFAULT 0");
         await adicionarColuna("ALTER TABLE estrategias ADD COLUMN quarentena_restante INT DEFAULT 0");
+        await adicionarColuna("ALTER TABLE estrategias ADD COLUMN ia_status VARCHAR(30) DEFAULT NULL");
         await adicionarColuna("ALTER TABLE historico_disparos_robos ADD COLUMN estrategia_origem VARCHAR(100) DEFAULT ''");
         await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN executor_order_id VARCHAR(64) DEFAULT NULL");
         await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN valor_empate DECIMAL(12,2) DEFAULT 0");
@@ -1299,7 +1321,7 @@ app.get("/api/robos", async (req, res) => {
     try {
         const [linhas] = await dbPool.query('SELECT * FROM robos_canais ORDER BY id DESC');
         const [destinatarios] = await dbPool.query('SELECT * FROM destinatarios_robo');
-        const [countDinamicos] = await dbPool.query(`SELECT robo_dono_id, COUNT(id) AS qtd_total, SUM(ativo = true) AS qtd_ativos, SUM(ativo = false AND quarentena_restante = 0) AS qtd_reserva, SUM(ativo = false AND quarentena_restante > 0) AS qtd_sombra FROM estrategias WHERE is_dinamico = true GROUP BY robo_dono_id`);
+        const [countDinamicos] = await dbPool.query(`SELECT robo_dono_id, COUNT(id) AS qtd_total, SUM(ativo = true) AS qtd_ativos, SUM(ativo = false AND (ia_status='RESERVA' OR (ia_status IS NULL AND quarentena_restante=0))) AS qtd_reserva, SUM(ativo = false AND ia_status='SHADOW_HISTORICO') AS qtd_shadow_historico, SUM(ativo = false AND ia_status='SHADOW_LIVE') AS qtd_shadow_live, SUM(ativo = false AND (ia_status LIKE 'SHADOW_%' OR (ia_status IS NULL AND quarentena_restante>0))) AS qtd_sombra FROM estrategias WHERE is_dinamico = true GROUP BY robo_dono_id`);
 
         // UX-002/003: estatísticas cronológicas dos robôs para os cards e máximas de sequência.
         const [historicoRobos] = await dbPool.query(`
@@ -1404,6 +1426,8 @@ app.get("/api/robos", async (req, res) => {
                 qtd_padroes_ia_ativos: contagemIA ? Number(contagemIA.qtd_ativos || 0) : 0,
                 qtd_padroes_ia_reserva: contagemIA ? Number(contagemIA.qtd_reserva || 0) : 0,
                 qtd_padroes_ia_sombra: contagemIA ? Number(contagemIA.qtd_sombra || 0) : 0,
+                qtd_padroes_ia_shadow_historico: contagemIA ? Number(contagemIA.qtd_shadow_historico || 0) : 0,
+                qtd_padroes_ia_shadow_live: contagemIA ? Number(contagemIA.qtd_shadow_live || 0) : 0,
                 qtd_padroes_ia_total: contagemIA ? Number(contagemIA.qtd_total || 0) : 0,
                 detalhes: mapRobos[r.id],
                 em_standby_ate: cState ? cState.em_standby_ate : 0
@@ -1582,6 +1606,7 @@ app.delete("/api/robo/:id", async (req, res) => {
         );
 
         // Ao excluir o Robô/Canal, seu histórico de distribuição também deixa de ter proprietário.
+        await conexao.query('DELETE FROM historico_shadow_ia WHERE robo_id=?', [roboId]);
         await conexao.query('DELETE FROM historico_disparos_robos WHERE robo_id=?', [roboId]);
         await conexao.query('DELETE FROM destinatarios_robo WHERE robo_id=?', [roboId]);
         await conexao.query('DELETE FROM robos_canais WHERE id=?', [roboId]);
@@ -3212,7 +3237,7 @@ app.post("/receber-sinal", async (req, res) => {
 
         if (giroPersistidoParaIA) {
             try {
-                await autoPilotIA.registrarNovoGiro();
+                await autoPilotIA.registrarNovoGiro({ giro_id: Number(resultadoInsertGiro.insertId) || 0 });
             } catch (e) {
                 console.error('⚠️ Auto Pilot IA: mineração periódica falhou sem interromper a rodada:', e.message);
             }
