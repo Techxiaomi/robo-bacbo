@@ -24,11 +24,17 @@
         });
     }
 
+    function definirTexto(id, valor) {
+        const el = document.getElementById(id);
+        if (el) el.innerText = valor;
+    }
+
     function renderizarDashboardIndisponivel() {
-        ['dash-sinais', 'dash-greens', 'dash-reds', 'dash-assertividade'].forEach(id => {
-            const el = document.getElementById(id);
-            if (el) el.innerText = '—';
+        ['dash-sinais', 'dash-greens', 'dash-reds', 'dash-ties', 'dash-assertividade'].forEach(id => {
+            definirTexto(id, '—');
         });
+        definirTexto('dash-max-green', '✅ —');
+        definirTexto('dash-max-red', '❌ —');
 
         const boxAssert = document.getElementById('box-assertividade');
         const labelAssert = document.getElementById('label-assertividade');
@@ -61,23 +67,32 @@
             const sinais = inteiroDashboardSeguro(data.sinais);
             const greens = inteiroDashboardSeguro(data.greens);
             const reds = inteiroDashboardSeguro(data.reds);
+            const ties = inteiroDashboardSeguro(data.ties);
+            const maxGreen = inteiroDashboardSeguro(data.max_green_seq);
+            const maxRed = inteiroDashboardSeguro(data.max_red_seq);
             const assertNumero = Number.parseFloat(String(data.assertividade ?? '').replace('%', ''));
             const assertividade = Number.isFinite(assertNumero) && assertNumero >= 0
                 ? Math.min(100, assertNumero)
                 : (sinais > 0 ? (greens / sinais) * 100 : 0);
             const assertTexto = `${assertividade.toFixed(1)}%`;
 
-            document.getElementById('dash-sinais').innerText = sinais;
-            document.getElementById('dash-greens').innerText = greens;
-            document.getElementById('dash-reds').innerText = reds;
-            document.getElementById('dash-assertividade').innerText = assertTexto;
+            definirTexto('dash-sinais', sinais);
+            definirTexto('dash-greens', greens);
+            definirTexto('dash-reds', reds);
+            definirTexto('dash-ties', ties);
+            definirTexto('dash-max-green', `✅ ${maxGreen}`);
+            definirTexto('dash-max-red', `❌ ${maxRed}`);
+            definirTexto('dash-assertividade', assertTexto);
 
             const corAssert = typeof window.getCor === 'function'
                 ? window.getCor(assertividade)
                 : '#007bff';
-            document.getElementById('dash-assertividade').style.color = corAssert;
-            document.getElementById('box-assertividade').style.borderColor = corAssert;
-            document.getElementById('label-assertividade').style.color = corAssert;
+            const assertEl = document.getElementById('dash-assertividade');
+            const boxAssert = document.getElementById('box-assertividade');
+            const labelAssert = document.getElementById('label-assertividade');
+            if (assertEl) assertEl.style.color = corAssert;
+            if (boxAssert) boxAssert.style.borderColor = corAssert;
+            if (labelAssert) labelAssert.style.color = corAssert;
         } catch (erro) {
             if (requestSeq !== dashboardAtualizacaoSeq) return;
             console.error('Falha ao atualizar Resumo Executivo:', erro);
