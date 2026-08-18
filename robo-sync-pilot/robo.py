@@ -48,6 +48,11 @@ except ValueError:
     EXECUTOR_ORDER_TTL_SECONDS = 8.0
 
 try:
+    EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS = max(3.0, min(30.0, float(os.getenv("EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS", "15"))))
+except ValueError:
+    EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS = 15.0
+
+try:
     RESULT_DEDUP_WINDOW_SECONDS = max(0.5, min(10.0, float(os.getenv("RESULT_DEDUP_WINDOW_SECONDS", "3"))))
 except ValueError:
     RESULT_DEDUP_WINDOW_SECONDS = 3.0
@@ -75,6 +80,8 @@ fila_apostas = queue.Queue()
 ordens_executor_recebidas = {}
 ordens_executor_lock = threading.Lock()
 executor_pronto = threading.Event()
+estado_mesa_lock = threading.Lock()
+estado_mesa = {"stage": "", "atualizado_em_ms": 0}
 ORDEM_ID_LIMITE_MEMORIA = 5000
 app = Flask(__name__)
 log = logging.getLogger('werkzeug')
@@ -162,10 +169,26 @@ def registrar_ordem_idempotente(dados, aceitar_nova=True):
     order_id = dados["order_id"]
     alvo = dados["alvo"]
     valor = float(dados["valor"])
+
+    # BUG-018: a ordem é vinculada ao último resultado resolvido observado pelo
+    # mesmo coletor. Isso permite esperar a abertura da rodada seguinte sem risco
+    # de executar a ordem depois que outra rodada já terminou.
+    seq_contexto = max(0, int(globals().get("coletor_seq", 0) or 0))
+    estado_contexto = globals().get("estado_mesa", {})
+    lock_contexto = globals().get("estado_mesa_lock")
+    if lock_contexto is not None:
+        with lock_contexto:
+            stage_contexto = str(estado_contexto.get("stage") or "")
+    else:
+        stage_contexto = str(estado_contexto.get("stage") or "") if isinstance(estado_contexto, dict) else ""
+
     ordem_normalizada = {
         "order_id": order_id,
         "alvo": alvo,
-        "valor": valor
+        "valor": valor,
+        "sincronizar_janela": True,
+        "coletor_seq_aceite": seq_contexto,
+        "stage_aceite": stage_contexto
     }
 
     with ordens_executor_lock:
@@ -323,7 +346,7 @@ def processar_ordem_executor(page, ordem):
         }
     else:
         resultado = executar_aposta_na_tela(page, ordem)
-        if not isinstance(resultado, dict) or resultado.get("status") not in {"EXECUTADA", "FALHOU", "AMBIGUA"}:
+        if not isinstance(resultado, dict) or resultado.get("status") not in {"EXECUTADA", "FALHOU", "EXPIRADA", "AMBIGUA"}:
             resultado = {
                 "status": "AMBIGUA",
                 "motivo": "Resultado local da tentativa DOM ficou indeterminado",
@@ -485,8 +508,123 @@ def renovar_sessao_automaticamente(page, context):
         )
         return False
 
+def atualizar_estado_mesa_player(dados):
+    game_info = dados.get("args", {}).get("game", {}) if isinstance(dados, dict) else {}
+    stage = str(game_info.get("stage") or "").strip()
+    if not stage:
+        return
+
+    with estado_mesa_lock:
+        estado_mesa["stage"] = stage
+        estado_mesa["atualizado_em_ms"] = int(time.time() * 1000)
+
+
+def avaliar_contexto_janela_aposta(aposta):
+    if not aposta.get("sincronizar_janela"):
+        return {"estado": "ABERTA", "stage": "", "seq_atual": None, "seq_ordem": None}
+
+    seq_ordem = max(0, int(aposta.get("coletor_seq_aceite") or 0))
+    seq_atual = max(0, int(globals().get("coletor_seq", 0) or 0))
+    with estado_mesa_lock:
+        stage = str(estado_mesa.get("stage") or "").strip()
+
+    if seq_ordem <= 0:
+        return {"estado": "SEM_CONTEXTO", "stage": stage, "seq_atual": seq_atual, "seq_ordem": seq_ordem}
+    if seq_atual > seq_ordem:
+        return {"estado": "EXPIRADA", "stage": stage, "seq_atual": seq_atual, "seq_ordem": seq_ordem}
+    if seq_atual < seq_ordem:
+        return {"estado": "INCONSISTENTE", "stage": stage, "seq_atual": seq_atual, "seq_ordem": seq_ordem}
+    if not stage or stage.lower() == "resolved":
+        return {"estado": "AGUARDAR", "stage": stage, "seq_atual": seq_atual, "seq_ordem": seq_ordem}
+    return {"estado": "ABERTA", "stage": stage, "seq_atual": seq_atual, "seq_ordem": seq_ordem}
+
+
+def elemento_apostavel(locator):
+    try:
+        if locator.count() <= 0:
+            return False
+        elemento = locator.first
+        if not elemento.is_visible():
+            return False
+        # trial=True executa as verificações de actionability do Playwright sem
+        # efetuar clique financeiro. É o gate DOM antes de qualquer interação real.
+        elemento.click(trial=True, timeout=250)
+        return True
+    except Exception:
+        return False
+
+
+def localizar_frame_apostavel(page, cliques_necessarios, seletor_alvo):
+    seletores_fichas = [f"div[data-role='chip'][data-value='{ficha}']" for ficha, _ in cliques_necessarios]
+    seletor_alvo_css = f"[data-role='{seletor_alvo}']"
+
+    for frame in page.frames:
+        url = str(frame.url or "").lower()
+        if not ("evolution" in url or "evocdn" in url or "game" in url):
+            continue
+        if not all(elemento_apostavel(frame.locator(seletor)) for seletor in seletores_fichas):
+            continue
+        if not elemento_apostavel(frame.locator(seletor_alvo_css)):
+            continue
+        return frame
+    return None
+
+
+def aguardar_janela_aposta(page, aposta, cliques_necessarios, seletor_alvo):
+    sincronizar = aposta.get("sincronizar_janela") is True
+    prazo = time.monotonic() + EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS
+
+    if sincronizar:
+        print(
+            f"⏳ Ordem {aposta.get('order_id', 'n/a')} aguardando janela apostável "
+            f"da rodada após coletor_seq={aposta.get('coletor_seq_aceite', 0)}..."
+        )
+
+    while True:
+        if sincronizar and not executor_pronto.is_set():
+            return None, {
+                "status": "FALHOU",
+                "motivo": "Executor ficou indisponível enquanto aguardava a janela de apostas",
+                "cliques_alvo": 0
+            }
+
+        contexto = avaliar_contexto_janela_aposta(aposta)
+        if contexto["estado"] == "SEM_CONTEXTO":
+            return None, {
+                "status": "FALHOU",
+                "motivo": "Ordem sem contexto de rodada do coletor; execução bloqueada",
+                "cliques_alvo": 0
+            }
+        if contexto["estado"] == "INCONSISTENTE":
+            return None, {
+                "status": "FALHOU",
+                "motivo": "Contexto de rodada inconsistente; execução bloqueada",
+                "cliques_alvo": 0
+            }
+        if contexto["estado"] == "EXPIRADA":
+            return None, {
+                "status": "EXPIRADA",
+                "motivo": "Nova rodada foi resolvida antes da execução; ordem descartada sem cliques",
+                "cliques_alvo": 0
+            }
+
+        if contexto["estado"] == "ABERTA":
+            frame_jogo = localizar_frame_apostavel(page, cliques_necessarios, seletor_alvo)
+            if frame_jogo is not None:
+                return frame_jogo, None
+
+        if time.monotonic() >= prazo:
+            return None, {
+                "status": "EXPIRADA",
+                "motivo": f"Janela de apostas não ficou acionável em {EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS:g}s",
+                "cliques_alvo": 0
+            }
+
+        page.wait_for_timeout(100)
+
+
 def executar_aposta_na_tela(page, aposta):
-    """Executa a tentativa DOM e retorna um estado local explícito; não prova aceite transacional externo."""
+    """Espera a janela correta, valida actionability sem clique e só então executa o plano DOM."""
     cliques_alvo = 0
     try:
         alvo_bruto = aposta.get("alvo")
@@ -506,17 +644,6 @@ def executar_aposta_na_tela(page, aposta):
             print(f"❌ Erro: Alvo '{alvo_bruto}' não mapeado.")
             return {"status": "FALHOU", "motivo": "Alvo não mapeado", "cliques_alvo": 0}
 
-        frame_jogo = None
-        for frame in page.frames:
-            if "evolution" in frame.url.lower() or "evocdn" in frame.url.lower() or "game" in frame.url.lower():
-                if frame.locator("div[data-role='chip']").count() > 0:
-                    frame_jogo = frame
-                    break
-
-        if not frame_jogo:
-            print("❌ Erro: Iframe da mesa não encontrado! A tela pode estar carregando.")
-            return {"status": "FALHOU", "motivo": "Iframe da mesa não encontrado", "cliques_alvo": 0}
-
         fichas_disponiveis = [5000, 2500, 500, 125, 25, 10, 5]
         valor_restante = valor_total
         cliques_necessarios = []
@@ -531,18 +658,21 @@ def executar_aposta_na_tela(page, aposta):
             print(f"⚠️ Aposta ignorada: R$ {valor_total} não pode ser representado exatamente pelas fichas disponíveis.")
             return {"status": "FALHOU", "motivo": "Valor não representável pelas fichas", "cliques_alvo": 0}
 
+        frame_jogo, bloqueio = aguardar_janela_aposta(page, aposta, cliques_necessarios, seletor_alvo)
+        if bloqueio is not None:
+            print(f"⚠️ Ordem não executada: {bloqueio['motivo']}")
+            return bloqueio
+
         for ficha, qtd in cliques_necessarios:
             seletor_ficha = f"div[data-role='chip'][data-value='{ficha}']"
             try:
                 ficha_elemento = frame_jogo.locator(seletor_ficha).first
-                ficha_elemento.wait_for(state="visible", timeout=3000)
-                ficha_elemento.click(force=True, timeout=3000)
+                ficha_elemento.click(timeout=2000)
                 page.wait_for_timeout(200)
 
                 alvo_elemento = frame_jogo.locator(f"[data-role='{seletor_alvo}']").first
-                alvo_elemento.wait_for(state="visible", timeout=3000)
                 for _ in range(qtd):
-                    alvo_elemento.click(force=True, timeout=3000)
+                    alvo_elemento.click(timeout=2000)
                     cliques_alvo += 1
                     page.wait_for_timeout(150)
             except PlaywrightTimeoutError as e:
@@ -568,7 +698,7 @@ def executar_aposta_na_tela(page, aposta):
         )
         return {
             "status": "EXECUTADA",
-            "motivo": "Interação DOM concluída sem erro local",
+            "motivo": "Interação DOM concluída sem erro local após confirmação da janela apostável",
             "cliques_alvo": cliques_alvo
         }
     except Exception as e:
@@ -813,6 +943,10 @@ def iniciar_robo_blindado():
                 if not texto_limpo: return
                 dados = json.loads(texto_limpo)
                 if dados.get("type") == "bacbo.playerState":
+                    # Atualiza o stage antes de processar Resolved. O POST ao Node pode
+                    # gerar uma ordem imediatamente, e ela precisa nascer vinculada a
+                    # um estado explicitamente Resolved.
+                    atualizar_estado_mesa_player(dados)
                     processar_resultado(dados)
             except json.JSONDecodeError:
                 pass

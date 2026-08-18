@@ -561,13 +561,13 @@ function headersInternos() {
 
 const EXECUTOR_TIMEOUT_MS = 5000;
 const EXECUTOR_MAX_ATTEMPTS = 2;
-const executorExecutionTimeoutConfig = Number(process.env.EXECUTOR_EXECUTION_TIMEOUT_MS || 20000);
+const executorExecutionTimeoutConfig = Number(process.env.EXECUTOR_EXECUTION_TIMEOUT_MS || 30000);
 const EXECUTOR_EXECUTION_TIMEOUT_MS = (
     Number.isFinite(executorExecutionTimeoutConfig)
     && executorExecutionTimeoutConfig >= 3000
     && executorExecutionTimeoutConfig <= 120000
         ? executorExecutionTimeoutConfig
-        : 20000
+        : 30000
 );
 const CONFIRMACOES_EXECUTOR_PENDENTES = new Map();
 const STATUS_EXECUTOR_VALIDOS = new Set(['EXECUTADA', 'FALHOU', 'EXPIRADA', 'AMBIGUA']);
