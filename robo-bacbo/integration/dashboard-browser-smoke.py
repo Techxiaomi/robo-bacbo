@@ -195,8 +195,11 @@ def main():
             """
             () => document.querySelectorAll('#bk-entrada option').length === 5
                 && document.querySelectorAll('#bk-range option').length === 7
+                && document.querySelectorAll('#mn-range option').length === 7
+                && document.querySelectorAll('#bk-dashboard-range option').length === 7
                 && !document.getElementById('bk-prot')
                 && typeof window.rodarBacktestManualAprimorado === 'function'
+                && typeof window.atualizarDashboardBacktestPorRange === 'function'
             """,
             timeout=10000,
         )
@@ -217,9 +220,14 @@ def main():
                 assertividade: document.getElementById('dash-assertividade').innerText,
                 dashboardOrdem: Array.from(document.querySelectorAll('#dashboard-resumo-grid > .dash-box')).map(card => card.querySelector('span')?.textContent.trim()),
                 cardRobo: document.getElementById('lista-robos').innerText,
+                autoTraderTexto: document.getElementById('nav-btn-autotrader').innerText.trim(),
                 labModos: Array.from(document.querySelectorAll('#bk-entrada option')).map(o => ({ value: o.value, label: o.textContent.trim() })),
                 labSelecionado: document.getElementById('bk-entrada').value,
                 labRanges: Array.from(document.querySelectorAll('#bk-range option')).map(o => ({ value: o.value, label: o.textContent.trim() })),
+                minerRanges: Array.from(document.querySelectorAll('#mn-range option')).map(o => ({ value: o.value, label: o.textContent.trim() })),
+                minerSelecionado: document.getElementById('mn-range').value,
+                dashboardBacktestRanges: Array.from(document.querySelectorAll('#bk-dashboard-range option')).map(o => ({ value: o.value, label: o.textContent.trim() })),
+                dashboardBacktestSelecionado: document.getElementById('bk-dashboard-range').value,
                 socketRegistrado: typeof window.__socketHandlers.alerta_painel === 'function'
             })
             """
@@ -242,6 +250,7 @@ def main():
         assert "Entradas: 4" in opcoes["cardRobo"], opcoes
         assert "Empates: 1" in opcoes["cardRobo"], opcoes
         assert "Reds: 1" in opcoes["cardRobo"], opcoes
+        assert opcoes["autoTraderTexto"] == "📈 Auto-Trader", opcoes
         assert [item["value"] for item in opcoes["labModos"]] == [
             "AUTO", "PLAYER", "PLAYER_TIE", "BANKER", "BANKER_TIE"
         ], opcoes
@@ -249,11 +258,42 @@ def main():
         assert "Automático" in opcoes["labModos"][0]["label"], opcoes
         assert "Player +" in opcoes["labModos"][2]["label"], opcoes
         assert "Banker +" in opcoes["labModos"][4]["label"], opcoes
-        assert [item["value"] for item in opcoes["labRanges"]] == [
-            "100", "200", "500", "1000", "2000", "5000", "MAX"
-        ], opcoes
+        ranges_esperados = ["100", "200", "500", "1000", "2000", "5000", "MAX"]
+        assert [item["value"] for item in opcoes["labRanges"]] == ranges_esperados, opcoes
+        assert [item["value"] for item in opcoes["minerRanges"]] == ranges_esperados, opcoes
+        assert [item["value"] for item in opcoes["dashboardBacktestRanges"]] == ranges_esperados, opcoes
         assert "Toda a Base (Max)" in opcoes["labRanges"][-1]["label"], opcoes
+        assert opcoes["minerSelecionado"] == "1000", opcoes
+        assert opcoes["dashboardBacktestSelecionado"] == "MAX", opcoes
         assert opcoes["socketRegistrado"] is True, opcoes
+
+        page.evaluate(
+            """
+            () => {
+                girosInMemoria = [];
+                for (let i = 0; i < 10; i++) {
+                    girosInMemoria.push({ resultado: 'Player', id_sessao: 99, multiplicador: '4x' });
+                }
+                for (let i = 0; i < 100; i++) {
+                    girosInMemoria.push({ resultado: i % 2 === 0 ? 'Banker' : 'Player', id_sessao: 99, multiplicador: '4x' });
+                }
+                document.getElementById('bk-dashboard-range').value = 'MAX';
+                window.atualizarDashboardBacktestPorRange();
+            }
+            """
+        )
+        assert page.locator('#bk-max-p').inner_text() == "10"
+
+        page.evaluate(
+            """
+            () => {
+                const select = document.getElementById('bk-dashboard-range');
+                select.value = '100';
+                select.dispatchEvent(new Event('change'));
+            }
+            """
+        )
+        assert page.locator('#bk-max-p').inner_text() == "1"
 
         page.evaluate("() => window.mudarPeriodoCardRobo('geral')")
         page.wait_for_function(
@@ -377,7 +417,7 @@ def main():
         assert not page_errors, f"Erros JavaScript na pagina: {page_errors}"
         browser.close()
 
-    print("UX-005 dashboard order and Lab automatic ranking browser smoke: PASS")
+    print("UX-006A Backtest ranges, dashboard filter and Auto-Trader icon browser smoke: PASS")
 
 
 if __name__ == "__main__":

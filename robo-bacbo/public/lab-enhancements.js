@@ -18,6 +18,9 @@
         { value: 'MAX', label: 'Toda a Base (Max)' }
     ]);
 
+    let calcularEstatisticasMesaBase = null;
+    let abrirAbaBacktestBase = null;
+
     function resolverModoAposta(valor) {
         return MODOS_APOSTA.find(modo => modo.value === valor) || null;
     }
@@ -70,13 +73,81 @@
             .map(({ indiceOriginal, assertividadeOrdenacao, ...item }) => item);
     }
 
-    function obterDadosCorte() {
-        if (typeof girosInMemoria === 'undefined' || !Array.isArray(girosInMemoria)) return [];
-        const valor = document.getElementById('bk-range')?.value || 'MAX';
-        if (valor === 'MAX') return girosInMemoria.slice();
+    function cortarDadosPorRange(valor, dados = null) {
+        const fonte = Array.isArray(dados)
+            ? dados
+            : (typeof girosInMemoria !== 'undefined' && Array.isArray(girosInMemoria) ? girosInMemoria : []);
+        if (valor === 'MAX') return fonte.slice();
         const limite = Number.parseInt(valor, 10);
-        if (!Number.isFinite(limite) || limite <= 0) return girosInMemoria.slice();
-        return girosInMemoria.slice(-limite);
+        if (!Number.isFinite(limite) || limite <= 0) return fonte.slice();
+        return fonte.slice(-limite);
+    }
+
+    function preencherRange(select, selecionado) {
+        if (!select) return;
+        select.innerHTML = OPCOES_RANGE
+            .map(opcao => `<option value="${opcao.value}">${opcao.label}</option>`)
+            .join('');
+        select.value = OPCOES_RANGE.some(opcao => opcao.value === selecionado) ? selecionado : 'MAX';
+    }
+
+    function obterDadosCorte() {
+        const valor = document.getElementById('bk-range')?.value || 'MAX';
+        return cortarDadosPorRange(valor);
+    }
+
+    function obterDadosDashboardBacktest() {
+        const valor = document.getElementById('bk-dashboard-range')?.value || 'MAX';
+        return cortarDadosPorRange(valor);
+    }
+
+    function atualizarDashboardBacktestPorRange() {
+        if (typeof calcularEstatisticasMesaBase !== 'function') return;
+        return calcularEstatisticasMesaBase(obterDadosDashboardBacktest());
+    }
+
+    function garantirFiltroDashboardBacktest() {
+        const qtd = document.getElementById('bk-qtd-giros');
+        const cabecalho = qtd?.parentElement?.parentElement;
+        if (!cabecalho) return;
+
+        let box = document.getElementById('bk-dashboard-range-box');
+        if (!box) {
+            box = document.createElement('div');
+            box.id = 'bk-dashboard-range-box';
+            box.style.cssText = 'display:flex; align-items:center; gap:7px; background:#181818; border:1px solid #333; border-radius:6px; padding:5px 8px; margin-left:auto;';
+            box.innerHTML = '<label for="bk-dashboard-range" style="font-size:9px; color:#777; text-transform:uppercase; font-weight:bold; white-space:nowrap;">Resumo:</label><select id="bk-dashboard-range" style="width:auto; min-width:145px; padding:4px 7px; height:28px; font-size:10px; margin:0;"></select>';
+            cabecalho.appendChild(box);
+        }
+
+        const select = document.getElementById('bk-dashboard-range');
+        const valorAnterior = select?.value || 'MAX';
+        preencherRange(select, valorAnterior);
+        if (select && !select.dataset.ux006aBound) {
+            select.dataset.ux006aBound = '1';
+            select.addEventListener('change', atualizarDashboardBacktestPorRange);
+        }
+    }
+
+    function instalarFiltroDashboardBacktest() {
+        garantirFiltroDashboardBacktest();
+
+        if (!calcularEstatisticasMesaBase && typeof window.calcularEstatisticasMesa === 'function') {
+            calcularEstatisticasMesaBase = window.calcularEstatisticasMesa;
+        }
+
+        if (calcularEstatisticasMesaBase) {
+            window.calcularEstatisticasMesa = () => atualizarDashboardBacktestPorRange();
+        }
+
+        if (!abrirAbaBacktestBase && typeof window.abrirAbaBacktest === 'function') {
+            abrirAbaBacktestBase = window.abrirAbaBacktest;
+            window.abrirAbaBacktest = async (...args) => {
+                const retorno = await abrirAbaBacktestBase(...args);
+                atualizarDashboardBacktestPorRange();
+                return retorno;
+            };
+        }
     }
 
     function garantirAreaAutomatica() {
@@ -175,7 +246,7 @@
                 resultado: simularBacktestCore(bkPadraoAtual, modo.alvo, gales, modo.protegeEmpate, dadosCorte)
             }));
             const ordenados = mostrarResultadosAutomaticos(resultados);
-            calcularEstatisticasMesa(dadosCorte);
+            atualizarDashboardBacktestPorRange();
             renderizarFitaTemporal(dadosCorte, []);
             return ordenados;
         }
@@ -186,7 +257,7 @@
         const resultado = simularBacktestCore(bkPadraoAtual, modo.alvo, gales, modo.protegeEmpate, dadosCorte);
         mostrarResultadoUnico();
         renderizarResultadoManual(resultado.stats);
-        calcularEstatisticasMesa(dadosCorte);
+        atualizarDashboardBacktestPorRange();
         renderizarFitaTemporal(dadosCorte, resultado.highlights);
         return resultado;
     }
@@ -222,16 +293,15 @@
         ].join('');
         entrada.value = 'AUTO';
 
-        range.innerHTML = OPCOES_RANGE
-            .map(opcao => `<option value="${opcao.value}"${opcao.value === 'MAX' ? ' selected' : ''}>${opcao.label}</option>`)
-            .join('');
-        range.value = 'MAX';
+        preencherRange(range, 'MAX');
+        preencherRange(document.getElementById('mn-range'), '1000');
 
         const prot = document.getElementById('bk-prot');
         const labelProt = prot?.closest('label');
         if (labelProt) labelProt.remove();
 
         garantirAreaAutomatica();
+        instalarFiltroDashboardBacktest();
         window.rodarBacktestManual = rodarBacktestManualAprimorado;
         window.bkSalvarComoEstrategia = salvarComoEstrategiaAprimorado;
     }
@@ -239,7 +309,9 @@
     window.configurarLabPadroes = configurarLabPadroes;
     window.rodarBacktestManualAprimorado = rodarBacktestManualAprimorado;
     window.bkSalvarComoEstrategiaAprimorado = salvarComoEstrategiaAprimorado;
+    window.atualizarDashboardBacktestPorRange = atualizarDashboardBacktestPorRange;
     window.ux004ResolverModoAposta = resolverModoAposta;
     window.ux004ResumirStats = resumirStats;
     window.ux005OrdenarResultadosAutomaticos = ordenarResultadosAutomaticos;
+    window.ux006CortarDadosPorRange = cortarDadosPorRange;
 })();
