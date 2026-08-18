@@ -219,6 +219,16 @@
             grid.appendChild(sequencias);
         }
 
+        const ordem = [
+            document.getElementById('dash-sinais')?.closest('.dash-box'),
+            document.getElementById('dash-greens')?.closest('.dash-box'),
+            document.getElementById('dash-ties')?.closest('.dash-box'),
+            document.getElementById('dash-reds')?.closest('.dash-box'),
+            document.getElementById('dash-max-green')?.closest('.dash-box'),
+            document.getElementById('dash-assertividade')?.closest('.dash-box')
+        ];
+        ordem.filter(Boolean).forEach(card => grid.appendChild(card));
+
         if (!document.getElementById('ux-dashboard-grid-style')) {
             const style = document.createElement('style');
             style.id = 'ux-dashboard-grid-style';
