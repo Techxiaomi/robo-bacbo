@@ -40,6 +40,12 @@ test('UX-004: modalidades agrupam alvo e proteção de empate em um único selet
     assert.match(labJs, /labelProt\.remove\(\)/);
 });
 
+test('UX-005: Automático é a primeira opção e seleção padrão', () => {
+    assert.match(labJs, /entrada\.innerHTML = \[\s*'<option value="AUTO">/);
+    assert.match(labJs, /entrada\.value = 'AUTO'/);
+    assert.match(labJs, /const modoSelecionado = document\.getElementById\('bk-entrada'\)\?\.value \|\| 'AUTO'/);
+});
+
 test('UX-004: opções de quantidade são exatamente as solicitadas e MAX usa toda a memória', () => {
     for (const valor of ['100', '200', '500', '1000', '2000', '5000', 'MAX']) {
         assert.match(labJs, new RegExp(`value: '${valor}'`));
@@ -99,6 +105,38 @@ test('UX-004: resumo automático separa greens, ties, reds e níveis', () => {
     assert.equal(resumo.vitorias, 8);
     assert.equal(resumo.ocorrencias, 10);
     assert.equal(resumo.assertividade, 80);
+});
+
+test('UX-005: resultados automáticos são ordenados por assertividade decrescente com desempate estável', () => {
+    const ui = carregarHelpers();
+    const criar = (value, wins, reds) => ({
+        modo: { value },
+        resultado: {
+            stats: {
+                sg: wins,
+                g1: 0,
+                g2: 0,
+                red: reds,
+                totalEncontrado: wins + reds,
+                ties: { direto: {}, g1: {}, g2: {} }
+            }
+        }
+    });
+
+    const ordenados = ui.ux005OrdenarResultadosAutomaticos([
+        criar('A', 1, 3),
+        criar('B', 3, 1),
+        criar('C', 2, 2),
+        criar('D', 3, 1)
+    ]);
+
+    assert.deepEqual(Array.from(ordenados, item => item.modo.value), ['B', 'D', 'C', 'A']);
+});
+
+test('UX-005: ocorrências têm métrica própria e o texto redundante de vitórias foi removido', () => {
+    assert.match(labJs, /class="bk-auto-ocorrencias"/);
+    assert.match(labJs, /<span>Ocorrências<\/span><strong>\$\{s\.ocorrencias\}<\/strong>/);
+    assert.doesNotMatch(labJs, /\$\{s\.vitorias\} vitórias em \$\{s\.ocorrencias\} ocorrências/);
 });
 
 test('UX-004: salvar no modo automático é explicitamente bloqueado por ambiguidade', () => {
