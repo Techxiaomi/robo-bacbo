@@ -16,8 +16,8 @@ A implementação não assume que sequências históricas de Bac Bo criam vantag
 6. **Shadow / holdout** — quando `shadow_giros > 0`, os últimos X giros ficam fora do treino e funcionam como validação out-of-sample. O candidato não pode ser promovido se não tiver observações suficientes nessa janela ou se degradar abaixo do limiar de validação.
 7. **Diversidade** — o TOP X evita, quando houver alternativa, preencher todas as vagas com variações quase idênticas da mesma sequência/alvo.
 8. **Ativos e reserva** — apenas `max_padroes` ficam ativos. Os próximos melhores ficam persistidos como reserva e podem ser promovidos nas próximas reavaliações.
-9. **Descarte live** — o desempenho real registrado em `historico_resultados` pode desqualificar um padrão por `drop_reds` ou `drop_assert`.
-10. **TTL como revalidação** — `ttl_horas` não mata automaticamente um padrão bom. Ao vencer, ele é reavaliado; se continuar qualificado, recebe novo ciclo. Candidatos fora do pool podem ser removidos após o TTL.
+9. **Descarte live** — após cada fechamento de um padrão IA, `drop_reds` e `drop_assert` são reavaliados. Se houver descarte, o padrão é desativado imediatamente e o portfólio é reminerado para promover a melhor reserva elegível.
+10. **TTL como revalidação** — `ttl_horas` não mata automaticamente um padrão bom. Ao vencer, ele é reavaliado; se continuar qualificado, recebe novo ciclo. Quando uma definição expirada sai do pool, seu histórico live é preservado pelo ID determinístico para impedir que um padrão ruim reapareça com reputação zerada. Esse histórico é removido na exclusão definitiva do robô proprietário.
 
 ## Perfis de seleção
 

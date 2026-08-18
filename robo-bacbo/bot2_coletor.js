@@ -1573,6 +1573,13 @@ app.delete("/api/robo/:id", async (req, res) => {
             padroesIaExcluidos = Math.max(0, Number(resultadoPadroes.affectedRows) || 0);
         }
 
+        // O histórico live de padrões expirados é preservado enquanto o robô existir.
+        // Na exclusão definitiva do proprietário, remove também IDs IA já arquivados pelo TTL.
+        await conexao.query(
+            'DELETE FROM historico_resultados WHERE estrategia_id LIKE ?',
+            [`ia_${roboId}_%`]
+        );
+
         // Ao excluir o Robô/Canal, seu histórico de distribuição também deixa de ter proprietário.
         await conexao.query('DELETE FROM historico_disparos_robos WHERE robo_id=?', [roboId]);
         await conexao.query('DELETE FROM destinatarios_robo WHERE robo_id=?', [roboId]);
@@ -3456,7 +3463,21 @@ app.post("/receber-sinal", async (req, res) => {
                         finalizar = true;
                     }
                 }
-                if (finalizar) { st.aguardandoResultado = false; st.galeAtual = 0; sinalFinalizadoAgora = true; ioServer.emit('atualizar_interface'); }
+                if (finalizar) {
+                    st.aguardandoResultado = false;
+                    st.galeAtual = 0;
+                    sinalFinalizadoAgora = true;
+
+                    if (est.is_dinamico) {
+                        try {
+                            await autoPilotIA.reavaliarDescarteEstrategia(est.id);
+                        } catch (e) {
+                            console.error(`⚠️ Auto Pilot IA: falha ao reavaliar descarte live de ${est.id}:`, e.message);
+                        }
+                    }
+
+                    ioServer.emit('atualizar_interface');
+                }
             }
         }
 

@@ -445,6 +445,7 @@ function avaliarDescarteLive(resultados, config) {
 function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notificar, log = console }) {
     if (!dbPool || typeof dbPool.query !== 'function') throw new Error('dbPool inválido para Auto Pilot IA');
     const contadores = new Map();
+    const pendenciasForcadas = new Map();
     let execucaoEmAndamento = Promise.resolve();
 
     const serializar = (fn) => {
@@ -510,7 +511,8 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
         const incumbentesAtivos = new Set(
             existentes.filter(e => e.ativo === true || e.ativo === 1).map(e => String(e.id))
         );
-        const liveMap = await historicoLive([...existentesMap.keys()]);
+        const idsLive = [...new Set([...existentesMap.keys(), ...candidatos.map(c => String(c.id))])];
+        const liveMap = await historicoLive(idsLive);
 
         const elegiveis = candidatos.filter(c => c.shadow_ok);
         const elegiveisSemDrop = elegiveis.filter(c => {
@@ -590,8 +592,8 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
                 const criadoEm = Math.max(0, Number(existente.criado_em) || 0);
                 const expirado = criadoEm <= 0 || (agora - criadoEm) >= ttlMs;
                 if (expirado) {
-                    await conexao.query('DELETE FROM historico_resultados WHERE estrategia_id=?', [id]);
-                    await conexao.query('DELETE FROM historico_disparos_robos WHERE estrategia_id=?', [id]);
+                    // Remove somente a definição. O histórico live fica preservado pelo ID determinístico
+                    // para que um padrão ruim não possa reaparecer futuramente com reputação zerada.
                     await conexao.query('DELETE FROM estrategias WHERE id=? AND is_dinamico=true AND robo_dono_id=?', [id, robo.id]);
                 } else {
                     await conexao.query('UPDATE estrategias SET ativo=false WHERE id=? AND is_dinamico=true AND robo_dono_id=?', [id, robo.id]);
@@ -616,15 +618,43 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
         };
     }
 
+    async function desativarPadroesRobo(robo, motivo) {
+        const [resultado] = await dbPool.query(
+            `UPDATE estrategias SET ativo=false
+             WHERE is_dinamico=true AND robo_dono_id=? AND ativo=true`,
+            [robo.id]
+        );
+        const desativados = Math.max(0, Number(resultado.affectedRows) || 0);
+        contadores.set(Number(robo.id), 0);
+        const resumo = { ativos: [], reservas: 0, sombra: 0, candidatos: 0, desativados };
+
+        if (desativados > 0 && typeof recarregarMemoria === 'function') {
+            await recarregarMemoria();
+        }
+        if (desativados > 0 && typeof notificar === 'function') {
+            notificar(robo.id, resumo);
+        }
+
+        log.log(`🤖 Auto Pilot IA ${robo.id}: ${motivo}; ${desativados} padrão(ões) ativo(s) desativado(s).`);
+        return { executado: true, desativado: true, motivo, ...resumo };
+    }
+
     async function executarRoboInterno(roboId, { forcar = false, motivo = 'trigger' } = {}) {
+        const idNumerico = Number(roboId);
         if (typeof estaOcupado === 'function' && estaOcupado()) {
+            if (forcar && Number.isFinite(idNumerico)) {
+                pendenciasForcadas.set(idNumerico, String(motivo || 'forcado'));
+            }
             return { executado: false, adiado: true, motivo: 'SINAL_EM_ANDAMENTO' };
         }
 
+        if (Number.isFinite(idNumerico)) pendenciasForcadas.delete(idNumerico);
         const robo = await carregarRobo(roboId);
         if (!robo) return { executado: false, motivo: 'ROBO_INEXISTENTE' };
         const config = normalizarConfigAutoTuning(robo.config?.auto_tuning || {});
-        if (!config.ativo) return { executado: false, motivo: 'IA_DESATIVADA' };
+        const roboAtivo = robo.ativo === true || robo.ativo === 1;
+        if (!roboAtivo) return desativarPadroesRobo(robo, 'ROBO_DESATIVADO');
+        if (!config.ativo) return desativarPadroesRobo(robo, 'IA_DESATIVADA');
 
         const atual = Math.max(0, Number(contadores.get(Number(robo.id))) || 0);
         if (!forcar && atual < config.trigger) {
@@ -658,14 +688,24 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
 
     async function executarTodosInterno(opcoes = {}) {
         if (typeof estaOcupado === 'function' && estaOcupado()) {
+            if (opcoes.forcar) {
+                const [todosRobos] = await dbPool.query('SELECT id FROM robos_canais');
+                for (const row of todosRobos) {
+                    pendenciasForcadas.set(Number(row.id), String(opcoes.motivo || 'forcado'));
+                }
+            }
             return { executado: false, adiado: true, motivo: 'SINAL_EM_ANDAMENTO' };
         }
-        const [robos] = await dbPool.query('SELECT id, config_json FROM robos_canais WHERE ativo=true');
+
+        const sqlRobos = opcoes.forcar
+            ? 'SELECT id, ativo, config_json FROM robos_canais'
+            : 'SELECT id, ativo, config_json FROM robos_canais WHERE ativo=true';
+        const [robos] = await dbPool.query(sqlRobos);
         const saida = [];
         for (const row of robos) {
             let config = {};
             try { config = JSON.parse(row.config_json || '{}'); } catch (e) {}
-            if (!(config.auto_tuning?.ativo === true || config.auto_tuning?.ativo === 1)) continue;
+            if (!opcoes.forcar && !(config.auto_tuning?.ativo === true || config.auto_tuning?.ativo === 1)) continue;
             saida.push(await executarRoboInterno(row.id, opcoes));
         }
         return { executado: true, robos: saida };
@@ -676,6 +716,14 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
     }
 
     async function registrarNovoGiro() {
+        const ocupadoAgora = typeof estaOcupado === 'function' && estaOcupado();
+        if (!ocupadoAgora && pendenciasForcadas.size > 0) {
+            const pendentes = [...pendenciasForcadas.entries()];
+            for (const [roboId, motivo] of pendentes) {
+                await executarRobo(roboId, { forcar: true, motivo: `pendente:${motivo}` });
+            }
+        }
+
         const [robos] = await dbPool.query('SELECT id, config_json FROM robos_canais WHERE ativo=true');
         let haDevido = false;
         for (const row of robos) {
@@ -696,11 +744,64 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
         return executarTodos({ forcar: false, motivo: 'trigger' });
     }
 
+    function reavaliarDescarteEstrategia(estrategiaId) {
+        return serializar(async () => {
+            if (typeof estaOcupado === 'function' && estaOcupado()) {
+                return { executado: false, adiado: true, motivo: 'SINAL_EM_ANDAMENTO' };
+            }
+
+            const id = String(estrategiaId || '').trim();
+            if (!id) return { executado: false, motivo: 'ESTRATEGIA_INVALIDA' };
+            const [linhas] = await dbPool.query(
+                `SELECT e.id, e.robo_dono_id, e.ativo, r.ativo AS robo_ativo, r.config_json
+                 FROM estrategias e
+                 JOIN robos_canais r ON r.id=e.robo_dono_id
+                 WHERE e.id=? AND e.is_dinamico=true
+                 LIMIT 1`,
+                [id]
+            );
+            if (linhas.length === 0) return { executado: false, motivo: 'ESTRATEGIA_DINAMICA_INEXISTENTE' };
+
+            const row = linhas[0];
+            let configRobo = {};
+            try { configRobo = JSON.parse(row.config_json || '{}'); } catch (e) {}
+            const config = normalizarConfigAutoTuning(configRobo.auto_tuning || {});
+            const [mapaLive] = [await historicoLive([id])];
+            const avaliacao = avaliarDescarteLive(mapaLive.get(id) || [], config);
+            if (!avaliacao.descartar) {
+                return { executado: true, descartado: false, avaliacao };
+            }
+
+            await dbPool.query(
+                'UPDATE estrategias SET ativo=false WHERE id=? AND is_dinamico=true',
+                [id]
+            );
+            if (typeof recarregarMemoria === 'function') await recarregarMemoria();
+            log.warn(
+                `🗑️ Auto Pilot IA: padrão ${id} desativado imediatamente por ${avaliacao.motivo} `
+                + `(assertividade live=${avaliacao.assertividade === null ? 'n/a' : avaliacao.assertividade.toFixed(1)}%, `
+                + `streak RED=${avaliacao.streak_red}).`
+            );
+
+            const promocao = await executarRoboInterno(
+                Number(row.robo_dono_id),
+                { forcar: true, motivo: `descarte_live:${avaliacao.motivo}` }
+            );
+            return { executado: true, descartado: true, avaliacao, promocao };
+        });
+    }
+
     function resetarContador(roboId) {
         contadores.set(Number(roboId), 0);
     }
 
-    return { executarRobo, executarTodos, registrarNovoGiro, resetarContador };
+    return {
+        executarRobo,
+        executarTodos,
+        registrarNovoGiro,
+        reavaliarDescarteEstrategia,
+        resetarContador
+    };
 }
 
 module.exports = {
