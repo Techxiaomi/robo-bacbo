@@ -8,6 +8,7 @@ const root = path.join(__dirname, '..');
 const loaderHtml = fs.readFileSync(path.join(root, 'public', 'index.html'), 'utf8');
 const appHtml = fs.readFileSync(path.join(root, 'public', 'dashboard-app.html'), 'utf8');
 const dashboardJs = fs.readFileSync(path.join(root, 'public', 'dashboard-ui.js'), 'utf8');
+const enhancementsJs = fs.readFileSync(path.join(root, 'public', 'ui-enhancements.js'), 'utf8');
 const backend = fs.readFileSync(path.join(root, 'bot2_coletor.js'), 'utf8');
 
 function criarElemento(valor = '') {
@@ -29,6 +30,9 @@ function criarSandboxDashboard(fetchImpl) {
         'dash-sinais': criarElemento(),
         'dash-greens': criarElemento(),
         'dash-reds': criarElemento(),
+        'dash-ties': criarElemento(),
+        'dash-max-green': criarElemento(),
+        'dash-max-red': criarElemento(),
         'dash-assertividade': criarElemento(),
         'box-assertividade': criarElemento(),
         'label-assertividade': criarElemento()
@@ -100,6 +104,19 @@ test('BUG-017: seletores e card de sinal continuam ligados ao ciclo principal da
     assert.match(appHtml, /document\.getElementById\('container-card-ativo'\)\.style\.display = 'block'/);
 });
 
+test('UX-002/003: aprimoramentos carregam depois do JavaScript principal sem alterar o bootstrap', () => {
+    const posPrincipal = loaderHtml.indexOf('script.textContent = scriptPrincipal');
+    const posEnhancements = loaderHtml.indexOf("enhancements.src = '/ui-enhancements.js?_t='");
+    assert.ok(posPrincipal >= 0);
+    assert.ok(posEnhancements > posPrincipal);
+    assert.match(loaderHtml, /window\.aplicarAprimoramentosUI\(\)/);
+    assert.match(enhancementsJs, /window\.renderizarCardsRobos\s*=\s*renderizarCardsRobosAprimorado/);
+    assert.match(enhancementsJs, /window\.mudarPeriodoCardRobo\s*=\s*mudarPeriodoCardRobo/);
+    assert.match(enhancementsJs, /Maior sequência Green/);
+    assert.match(enhancementsJs, /Maior sequência Red/);
+    assert.match(enhancementsJs, /const PERIODOS_ROBO = \['24h', 'hoje', 'semana', 'mes', 'geral'\]/);
+});
+
 test('BUG-016: filtros do dashboard chamam funções globais implementadas', () => {
     assert.match(appHtml, /onchange=["']mudarFiltrosDash\(\)["']/);
     for (const periodo of ['24h', 'hoje', 'semana', 'mes', 'geral']) {
@@ -111,14 +128,22 @@ test('BUG-016: filtros do dashboard chamam funções globais implementadas', () 
     assert.match(dashboardJs, /window\.mudarFiltrosDash\s*=\s*mudarFiltrosDash/);
 });
 
-test('BUG-016: clique em período consulta robô + origem + período e atualiza os quatro cards', async () => {
+test('UX-003: período consulta robô + origem e atualiza sinais, greens, reds, empates e sequências', async () => {
     const urls = [];
     const { sandbox, elementos } = criarSandboxDashboard(async url => {
         urls.push(String(url));
         return {
             ok: true,
             async json() {
-                return { sinais: 7, greens: 5, reds: 2, assertividade: '71.4%' };
+                return {
+                    sinais: 8,
+                    greens: 6,
+                    reds: 2,
+                    ties: 2,
+                    max_green_seq: 4,
+                    max_red_seq: 2,
+                    assertividade: '75.0%'
+                };
             }
         };
     });
@@ -132,10 +157,13 @@ test('BUG-016: clique em período consulta robô + origem + período e atualiza 
     assert.equal(chamada.searchParams.get('origem'), 'Origem VIP');
     assert.equal(chamada.searchParams.get('periodo'), 'mes');
 
-    assert.equal(elementos['dash-sinais'].innerText, 7);
-    assert.equal(elementos['dash-greens'].innerText, 5);
+    assert.equal(elementos['dash-sinais'].innerText, 8);
+    assert.equal(elementos['dash-greens'].innerText, 6);
     assert.equal(elementos['dash-reds'].innerText, 2);
-    assert.equal(elementos['dash-assertividade'].innerText, '71.4%');
+    assert.equal(elementos['dash-ties'].innerText, 2);
+    assert.equal(elementos['dash-max-green'].innerText, '✅ 4');
+    assert.equal(elementos['dash-max-red'].innerText, '❌ 2');
+    assert.equal(elementos['dash-assertividade'].innerText, '75.0%');
     assert.equal(elementos['btn-dash-mes'].style.background, '#007bff');
     assert.equal(elementos['btn-dash-mes'].atributos['aria-pressed'], 'true');
     assert.equal(elementos['btn-dash-24h'].atributos['aria-pressed'], 'false');
@@ -145,7 +173,7 @@ test('BUG-016: troca de robô/origem reaproveita o período selecionado', async 
     const urls = [];
     const { sandbox, elementos } = criarSandboxDashboard(async url => {
         urls.push(String(url));
-        return { ok: true, json: async () => ({ sinais: 1, greens: 1, reds: 0, assertividade: '100.0%' }) };
+        return { ok: true, json: async () => ({ sinais: 1, greens: 1, reds: 0, ties: 0, max_green_seq: 1, max_red_seq: 0, assertividade: '100.0%' }) };
     });
 
     await sandbox.window.mudarDashGeral('semana');
@@ -159,19 +187,25 @@ test('BUG-016: troca de robô/origem reaproveita o período selecionado', async 
     assert.equal(chamada.searchParams.get('periodo'), 'semana');
 });
 
-test('BUG-016: falha de API não é apresentada como falso zero', async () => {
+test('UX-003: falha de API não é apresentada como falso zero também nos novos indicadores', async () => {
     const { sandbox, elementos } = criarSandboxDashboard(async () => ({ ok: false, status: 500 }));
     await sandbox.window.atualizarDashboardValores();
 
     assert.equal(elementos['dash-sinais'].innerText, '—');
     assert.equal(elementos['dash-greens'].innerText, '—');
     assert.equal(elementos['dash-reds'].innerText, '—');
+    assert.equal(elementos['dash-ties'].innerText, '—');
+    assert.equal(elementos['dash-max-green'].innerText, '✅ —');
+    assert.equal(elementos['dash-max-red'].innerText, '❌ —');
     assert.equal(elementos['dash-assertividade'].innerText, '—');
 });
 
-test('BUG-016: dashboard de disparos reais continua ligado ao histórico por robô', () => {
+test('UX-002/003: backend usa histórico real e expõe empates e máximas de sequência', () => {
     assert.match(backend, /app\.get\("\/api\/dashboard-stats"/);
     assert.match(backend, /FROM\s+historico_disparos_robos\s+h/);
     assert.match(backend, /h\.robo_id\s*=\s*\?/);
     assert.match(backend, /h\.estrategia_origem\s*=\s*\?/);
+    assert.match(backend, /max_green_seq/);
+    assert.match(backend, /max_red_seq/);
+    assert.match(backend, /ties/);
 });

@@ -76,9 +76,21 @@
                 script.textContent = scriptPrincipal;
                 document.body.appendChild(script);
 
-                // O HTML-base foi montado depois do DOMContentLoaded original do loader.
-                // Disparamos o evento apenas para inicializadores visuais que aguardam esse ciclo.
-                window.dispatchEvent(new Event('DOMContentLoaded'));
+                const enhancements = document.createElement('script');
+                enhancements.src = '/ui-enhancements.js?_t=' + Date.now();
+                enhancements.onload = () => {
+                    if (typeof window.aplicarAprimoramentosUI === 'function') {
+                        window.aplicarAprimoramentosUI();
+                    }
+                    // O HTML-base foi montado depois do DOMContentLoaded original do loader.
+                    // Disparamos o evento depois dos aprimoramentos para manter a inicialização determinística.
+                    window.dispatchEvent(new Event('DOMContentLoaded'));
+                };
+                enhancements.onerror = () => {
+                    console.error('Falha ao carregar aprimoramentos da interface.');
+                    window.dispatchEvent(new Event('DOMContentLoaded'));
+                };
+                document.body.appendChild(enhancements);
             } catch (error) {
                 console.error('Falha ao carregar painel:', error);
                 const boot = document.getElementById('boot');

@@ -234,6 +234,9 @@ async function main() {
             sinais: 0,
             greens: 0,
             reds: 0,
+            ties: 0,
+            max_green_seq: 0,
+            max_red_seq: 0,
             assertividade: "0%"
         });
 
