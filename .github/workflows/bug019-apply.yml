@@ -1,0 +1,51 @@
+name: BUG-019 temporary applicator
+
+on:
+  push:
+    branches:
+      - agent/bug-019-tie-protection-execution
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.event.head_commit.message != 'BUG-019: aplicar proteção financeira no empate'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/bug-019-tie-protection-execution
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Apply BUG-019
+        run: python scripts/apply_bug019.py
+
+      - name: Syntax checks
+        run: |
+          node --check robo-bacbo/bot2_coletor.js
+          node --check robo-bacbo/tie_protection.js
+          python -m py_compile robo-sync-pilot/robo.py
+          python -m py_compile robo-sync-pilot/tests/test_pure_logic.py
+          python -m py_compile robo-sync-pilot/tests/test_playwright_dom.py
+          git diff --check
+
+      - name: Node regression tests
+        working-directory: robo-bacbo
+        run: npm test
+
+      - name: Commit generated patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add robo-bacbo/bot2_coletor.js robo-bacbo/public/dashboard-app.html robo-sync-pilot/robo.py robo-sync-pilot/tests/test_pure_logic.py robo-sync-pilot/tests/test_playwright_dom.py docs/KNOWN_ISSUES.md
+          git commit -m "BUG-019: aplicar proteção financeira no empate"
+          git push origin HEAD:agent/bug-019-tie-protection-execution
