@@ -313,7 +313,7 @@ def main():
 
         page.evaluate("() => window.mudarAbaPrincipal('padroes')")
         page.wait_for_function(
-            "() => document.getElementById('view-padroes').style.display !== 'none'",
+            "() => document.getElementById('aba-padroes')?.classList.contains('visivel')",
             timeout=5000,
         )
         page.select_option("#select-origem-filtro", "TODAS")
