@@ -9,6 +9,7 @@ const {
     selecionarPortfolio,
     similaridadePadroes,
     avaliarDescarteLive,
+    formatarLogDesativacaoAutoPilot,
     idCandidato
 } = require('../auto_pilot_ia');
 
@@ -128,4 +129,30 @@ test('descarte live considera streak de RED e assertividade mínima', () => {
     ], normalizarConfigAutoTuning({ ocorr_min: 5, drop_reds: 0, drop_assert: 70 }));
     assert.equal(porAssert.descartar, true);
     assert.equal(porAssert.motivo, 'DROP_ASSERT');
+});
+
+
+test('log de startup distingue Robô/Canal de Auto Pilot IA desativado', () => {
+    const iaDesativada = formatarLogDesativacaoAutoPilot(
+        { id: 1, nome: 'Bacbo Club' },
+        'IA_DESATIVADA',
+        0
+    );
+    assert.equal(
+        iaDesativada,
+        '🤖 Robô/Canal 1 — Bacbo Club: Auto Pilot IA desativado na configuração; '
+            + '0 padrão(ões) dinâmico(s) ativo(s) desativado(s).'
+    );
+    assert.doesNotMatch(iaDesativada, /Auto Pilot IA 1:/);
+
+    const roboDesativado = formatarLogDesativacaoAutoPilot(
+        { id: 2, nome: 'Neurobet\nCanal' },
+        'ROBO_DESATIVADO',
+        3
+    );
+    assert.equal(
+        roboDesativado,
+        '🤖 Robô/Canal 2 — Neurobet Canal: Robô/Canal desativado; '
+            + '3 padrão(ões) dinâmico(s) ativo(s) desativado(s).'
+    );
 });
