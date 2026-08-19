@@ -2,6 +2,7 @@
 import argparse
 import ast
 import json as json_module
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -106,6 +107,14 @@ def main():
         "ultimo_resultado_chave": None,
         "ultimo_resultado_chave_em": 0.0,
         "RESULT_DEDUP_WINDOW_SECONDS": 3.0,
+        "executor_pronto": threading.Event(),
+        "continuidade_fluxo_lock": threading.Lock(),
+        "continuidade_fluxo": {
+            "interrompida": False,
+            "motivo": "",
+            "geracao": 0,
+        },
+        "notificar_interrupcao_node": lambda motivo, timestamp_ms=None: True,
         "registrar_erro_limitado": registrar_erro_limitado,
     }
 
@@ -114,7 +123,12 @@ def main():
             robo_path,
             [
                 "chave_resultado_resolvido",
+                "identidade_rodada_evolution",
                 "resultado_resolvido_duplicado",
+                "marcar_interrupcao_fluxo",
+                "snapshot_interrupcao_fluxo",
+                "confirmar_interrupcao_reportada",
+                "validar_resultado_resolvido",
                 "processar_resultado",
             ],
         ),
