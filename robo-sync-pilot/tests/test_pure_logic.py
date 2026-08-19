@@ -218,6 +218,9 @@ class TestProcessarResultado(unittest.TestCase):
             "coletor_seq": 0,
             "ultimo_resultado_chave": None,
             "ultimo_resultado_chave_em": 0.0,
+            "historico_resultados_confirmados_lock": threading.Lock(),
+            "historico_resultados_confirmados": [],
+            "HISTORICO_RESULTADOS_CONFIRMADOS_LIMITE": 12,
             "RESULT_DEDUP_WINDOW_SECONDS": 3.0,
             "continuidade_fluxo_lock": threading.Lock(),
             "continuidade_fluxo": {
@@ -233,6 +236,8 @@ class TestProcessarResultado(unittest.TestCase):
         carregar_funcoes([
             "chave_resultado_resolvido",
             "identidade_rodada_evolution",
+            "marcador_resultado",
+            "registrar_resultado_confirmado",
             "resultado_resolvido_duplicado",
             "marcar_interrupcao_fluxo",
             "snapshot_interrupcao_fluxo",
@@ -296,6 +301,7 @@ class TestProcessarResultado(unittest.TestCase):
         self.assertEqual(payload["motivo_interrupcao"], "")
         self.assertEqual(payload["timestamp_coleta"], 100000)
         self.assertEqual(self.ns["ultimo_tempo_rodada"], 100.0)
+        self.assertEqual(self.ns["historico_resultados_confirmados"], ["P"])
 
     def test_normaliza_tie_e_trata_intervalo_maior_que_60s_apenas_como_aviso(self):
         self.ns["ultimo_tempo_rodada"] = 30.0
@@ -594,7 +600,10 @@ class TestContratoWebSocketFailClosed(unittest.TestCase):
         self.assertNotIn('marcar_interrupcao_fluxo("WEBSOCKET_PLAYER_STATE_FECHADO")', SOURCE)
         self.assertIn('motivo = "WEBSOCKET_RECONEXAO_TIMEOUT"', SOURCE)
         self.assertIn('not player_state_reconexao_elegivel(dados)', SOURCE)
-        self.assertIn('aguardando playerState completo com stage e roundId', SOURCE)
+        self.assertIn('reconciliar_reconexao_por_roadmap(page, dados)', SOURCE)
+        self.assertIn('ROADMAP_DOM_CAUSA_COMPATIVEL', SOURCE)
+        self.assertIn('ROADMAP_RECONCILIATION_MIN_RESULTS', SOURCE)
+        self.assertIn('aguardando playerState completo ou roadmap', SOURCE)
 
     def test_sessao_saudavel_nao_e_recarregada_por_tempo_fixo(self):
         self.assertIn('while status_conexao["ativa"]:', SOURCE)
@@ -606,6 +615,44 @@ class TestContratoWebSocketFailClosed(unittest.TestCase):
         self.assertIn("COLLECTOR_PLAYER_STATE_STALE_SECONDS", SOURCE)
         self.assertIn('marcar_interrupcao_fluxo("PLAYER_STATE_STALE")', SOURCE)
         self.assertIn('notificar_interrupcao_node("PLAYER_STATE_STALE")', SOURCE)
+
+
+class TestReconciliacaoRoadmap(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        ns = {"re": re}
+        carregar_funcoes([
+            "normalizar_marcador_roadmap",
+            "reconciliar_trilhas_roadmap",
+        ], ns)
+        cls.normalizar = staticmethod(ns["normalizar_marcador_roadmap"])
+        cls.reconciliar = staticmethod(ns["reconciliar_trilhas_roadmap"])
+
+    def test_normaliza_semantica_da_roadmap(self):
+        self.assertEqual(self.normalizar("badge PlayerWon blue"), "P")
+        self.assertEqual(self.normalizar("resultado-banca red"), "B")
+        self.assertEqual(self.normalizar("Tie / yellow"), "T")
+        self.assertEqual(self.normalizar("sem resultado"), "")
+
+    def test_preserva_reconexao_apenas_com_cauda_exata(self):
+        historico = ["P", "B", "T", "B", "P", "B"]
+        confirmado = self.reconciliar(
+            historico,
+            [["T", "P", "B", "T", "B", "P", "B"]],
+            6,
+        )
+        self.assertTrue(confirmado["confirmada"])
+        self.assertEqual(confirmado["motivo"], "ROADMAP_DOM_CAUSA_COMPATIVEL")
+        self.assertEqual(confirmado["orientacao"], "DIRETA")
+
+        divergente = self.reconciliar(historico, [["P", "B", "T", "B", "B", "P"]], 6)
+        self.assertFalse(divergente["confirmada"])
+        self.assertEqual(divergente["motivo"], "ROADMAP_DOM_SEM_CAUSA_COMPATIVEL")
+
+    def test_historico_insuficiente_permanece_fechado(self):
+        resultado = self.reconciliar(["P", "B", "T"], [["P", "B", "T", "B"]], 6)
+        self.assertFalse(resultado["confirmada"])
+        self.assertEqual(resultado["motivo"], "HISTORICO_LOCAL_INSUFICIENTE")
 
 
 
