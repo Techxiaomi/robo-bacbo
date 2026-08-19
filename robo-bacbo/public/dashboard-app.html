@@ -2656,6 +2656,55 @@
             return false;
         }
 
+        function origemDashboardEhLegadaAuto(nome) {
+            const normalizada = String(nome || '').trim();
+            return /^\[AUTO\]\s*/i.test(normalizada)
+                || /^AUTO_PILOT_IA:/i.test(normalizada)
+                || /^Auto Pilot\s+\d+$/i.test(normalizada);
+        }
+
+        function listarRobosDonosIa() {
+            const robosPorId = new Map(
+                robosGlobais.map(robo => [String(robo.id), robo])
+            );
+            return [...new Set(
+                estrategiasGlobais
+                    .filter(estrategiaEhDinamica)
+                    .map(est => String(est.robo_dono_id || '').trim())
+                    .filter(id => id && robosPorId.has(id))
+            )]
+                .map(id => robosPorId.get(id))
+                .sort((a, b) => String(a.nome || '').localeCompare(String(b.nome || ''), 'pt-BR'));
+        }
+
+        function atualizarFiltroOrigensDashboard() {
+            const select = document.getElementById('select-origem-dash');
+            if (!select) return;
+
+            const selecionado = select.value || 'TODAS';
+            const origensManuais = [...new Set(
+                origensGlobais
+                    .map(origem => String(origem?.nome || '').trim())
+                    .filter(nome => nome && !origemDashboardEhLegadaAuto(nome))
+            )].sort((a, b) => a.localeCompare(b, 'pt-BR'));
+            const donosIa = listarRobosDonosIa();
+
+            let opcoes = '<option value="TODAS">🌐 Todas as Origens</option>';
+            for (const origem of origensManuais) {
+                opcoes += `<option value="${escaparHtmlRobo(origem)}">${escaparHtmlRobo(origem)}</option>`;
+            }
+            for (const robo of donosIa) {
+                const id = String(robo.id);
+                const nome = String(robo.nome || `Robô ${id}`);
+                opcoes += `<option value="AUTO_PILOT_IA:${escaparHtmlRobo(id)}">🤖 Auto - IA — ${escaparHtmlRobo(nome)}</option>`;
+            }
+
+            select.innerHTML = opcoes;
+            select.value = Array.from(select.options).some(option => option.value === selecionado)
+                ? selecionado
+                : 'TODAS';
+        }
+
         function atualizarFiltroOrigensPadroes() {
             const select = document.getElementById('select-origem-filtro');
             if (!select) return;
@@ -2668,17 +2717,7 @@
                     .filter(Boolean)
             )].sort((a, b) => a.localeCompare(b, 'pt-BR'));
 
-            const robosPorId = new Map(
-                robosGlobais.map(robo => [String(robo.id), robo])
-            );
-            const donosIa = [...new Set(
-                estrategiasGlobais
-                    .filter(estrategiaEhDinamica)
-                    .map(est => String(est.robo_dono_id || '').trim())
-                    .filter(id => id && robosPorId.has(id))
-            )]
-                .map(id => robosPorId.get(id))
-                .sort((a, b) => String(a.nome || '').localeCompare(String(b.nome || ''), 'pt-BR'));
+            const donosIa = listarRobosDonosIa();
 
             let opcoes = '<option value="TODAS">🌐 Geral (Todas)</option>';
             for (const origem of origensManuais) {
@@ -2708,13 +2747,7 @@
                     : [];
                 origensGlobais = await resOrig.json();
 
-                const sDash = document.getElementById('select-origem-dash').value;
-                let opsDash = '<option value="TODAS">🌐 Todas as Origens</option>';
-                origensGlobais.forEach(o => { opsDash += `<option value="${o.nome}">${o.nome}</option>`; });
-                document.getElementById('select-origem-dash').innerHTML = opsDash;
-                if (Array.from(document.getElementById('select-origem-dash').options).some(x => x.value === sDash)) {
-                    document.getElementById('select-origem-dash').value = sDash;
-                }
+                atualizarFiltroOrigensDashboard();
 
                 aplicarFiltrosEOrdenar();
                 atualizarCardAtivoDinamicamente();
@@ -2730,6 +2763,7 @@
                 robosGlobais = await res.json();
                 renderizarCardsRobos();
                 atualizarFiltrosRoboUI();
+                atualizarFiltroOrigensDashboard();
                 atualizarFiltroOrigensPadroes();
                 aplicarFiltrosEOrdenar();
                 await atualizarDashboardValores();
