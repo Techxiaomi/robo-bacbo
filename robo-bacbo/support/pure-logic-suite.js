@@ -89,6 +89,8 @@ function carregarLogicaPura() {
             nivelHistoricoResultado,
             contarTiesLegados,
             roboSintonizaEstrategia,
+            fonteCanonicaAutoTrader,
+            autoTraderAutorizaEstrategia,
             avaliarStopRedsRobo,
             formatarPadraoTelegram,
             montarMensagemTelegram,
@@ -225,6 +227,59 @@ test("robo dinamico pertence exclusivamente ao robo_dono_id", () => {
 
     assert.equal(logic.roboSintonizaEstrategia({ id: 7, config: {} }, est), true);
     assert.equal(logic.roboSintonizaEstrategia({ id: 8, config: {} }, est), false);
+});
+
+test("BUG-027: Auto-Trader autoriza fonte IA por ID estável e isola robôs diferentes", () => {
+    const dinamica = {
+        id: "ia-8-padrao",
+        origem: "AUTO_PILOT_IA:8",
+        is_dinamico: true,
+        robo_dono_id: 8
+    };
+
+    assert.equal(logic.fonteCanonicaAutoTrader(dinamica), "AUTO_PILOT_IA:8");
+    assert.equal(logic.autoTraderAutorizaEstrategia({
+        fontes_sinal: ["AUTO_PILOT_IA:8"]
+    }, dinamica, []), true);
+    assert.equal(logic.autoTraderAutorizaEstrategia({
+        fontes_sinal: ["AUTO_PILOT_IA:7"]
+    }, dinamica, []), false);
+
+    // O nome é apenas visual: renomear o robô não altera a autorização canônica.
+    assert.equal(logic.autoTraderAutorizaEstrategia({
+        fontes_sinal: ["AUTO_PILOT_IA:8"]
+    }, dinamica, [{ id: 8, nome: "Nome alterado" }]), true);
+});
+
+test("BUG-027: formato legado e origens manuais permanecem compatíveis", () => {
+    const dinamica = {
+        origem: "AUTO_PILOT_IA:8",
+        is_dinamico: true,
+        robo_dono_id: 8
+    };
+    const manual = { origem: "Bacbo Club", is_dinamico: false };
+
+    assert.equal(logic.autoTraderAutorizaEstrategia({
+        fontes_sinal: ["[AUTO] Teste IA 2"]
+    }, dinamica, [{ id: 8, nome: "Teste IA 2" }]), true);
+    assert.equal(logic.autoTraderAutorizaEstrategia({
+        fontes_sinal: ["Bacbo Club"]
+    }, manual, []), true);
+    assert.equal(logic.autoTraderAutorizaEstrategia({
+        fontes_sinal: ["Neurobet"]
+    }, manual, []), false);
+});
+
+test("BUG-027: painel persiste fonte IA canônica e backend usa o matcher central", () => {
+    assert.match(frontendSource, /const fonteCanonica = `AUTO_PILOT_IA:\$\{Number\(r\.id\)\}`/);
+    assert.match(frontendSource, /class="chk-at-fonte" value="\$\{fonteCanonica\}"/);
+    assert.match(frontendSource, /function rotuloFonteAutoTrader\(fonte\)/);
+    assert.doesNotMatch(source, /fontes_sinal\.includes\(est\.origem\)/);
+    assert.equal(
+        (source.match(/autoTraderAutorizaEstrategia\(cf, est, ROBOS_MEMORIA\)/g) || []).length,
+        4
+    );
+    assert.match(source, /Auto-Trader \$\{trader\.id\} \(\$\{trader\.nome\}\) autorizado para o sinal/);
 });
 
 test("formatarPadraoTelegram preserva a representacao visual do sinal", () => {
