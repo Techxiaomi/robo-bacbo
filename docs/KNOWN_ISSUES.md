@@ -101,13 +101,23 @@ O intervalo temporal agora é apenas diagnóstico: o Python registra aviso de pa
 
 Risco residual: o watchdog de `playerState` continua deliberadamente fail-closed. Se a Evolution deixar de transmitir estados por tempo superior ao configurado, mesmo durante uma pausa operacional, o evento será tratado como perda de observabilidade e exigirá nova sessão. A validação no site real deve confirmar se a fonte mantém `playerState` durante trocas de crupiê e manutenção da mesa.
 
+### BUG-023 — Handover transitório do WebSocket invalidava continuidade íntegra
+
+Status: **mitigado em código; validação operacional no site real pendente**.
+
+O fechamento do socket que havia entregue `bacbo.playerState` era tratado imediatamente como prova de perda de rodada. A Evolution pode, porém, substituir essa conexão durante uma sequência correta. Isso invalidava sinais em andamento e o mesmo evento ainda reaparecia no primeiro resultado por meio do lacre do Python.
+
+O coletor agora bloqueia o executor e abre uma quarentena curta após o fechamento. A continuidade é preservada somente quando o novo `playerState` comprova a mesma `roundId`, ou uma nova rodada após o estado anterior ter sido observado como `Resolved`, dentro de `WEBSOCKET_RECONNECT_GRACE_SECONDS`. Reconexão tardia, identidade ausente, troca durante rodada não resolvida e demais ambiguidades continuam falhando fechado.
+
+Interrupções confirmadas recebem um `interrupcao_id` derivado da sessão e geração do lacre. `/collector-health` e o resultado de retomada usam esse mesmo identificador, e o Node invalida pendências apenas uma vez. A comprovação determinística está coberta por testes; frequência e formato dos handovers reais da Evolution ainda devem ser acompanhados operacionalmente.
+
 ### BUG-021 — Rodada invisível ao Python podia concluir o sinal no resultado seguinte
 
 Status: **mitigado em modo fail-closed, com dependência externa residual**.
 
 O `coletor_seq` anterior provava somente a ordem dos resultados que o Python havia observado. Se uma rodada desaparecesse antes de `processar_resultado()`, o próximo resultado recebia uma sequência local contígua e podia concluir um sinal pendente. Além disso, interrupções temporais apenas separavam o histórico; a invalidação financeira ocorria somente em salto/restart/metadados ausentes.
 
-O coletor agora elege como oficial apenas o WebSocket que efetivamente entrega `bacbo.playerState`, monitora o tempo desde o último estado e mantém um lacre de interrupção até o Node confirmar um resultado posterior. Fechamento do socket oficial, `playerState` silencioso, payload `Resolved` inválido e falha no POST rompem a continuidade. A rota interna autenticada `/collector-health` antecipa a invalidação sem esperar a próxima rodada; o Node a coloca na mesma FIFO dos resultados e só confirma após limpar sinais pendentes e bloquear Auto-Traders com ordem `PENDENTE` como `DADOS_INCOMPLETOS`.
+O coletor agora elege como oficial apenas o WebSocket que efetivamente entrega `bacbo.playerState`, monitora o tempo desde o último estado e mantém um lacre de interrupção até o Node confirmar um resultado posterior. `playerState` silencioso, payload `Resolved` inválido e falha no POST rompem a continuidade; desde o BUG-023, um fechamento transitório passa primeiro pela quarentena estrutural de reconexão. A rota interna autenticada `/collector-health` antecipa interrupções confirmadas sem esperar a próxima rodada; o Node as coloca na mesma FIFO dos resultados e só confirma após limpar sinais pendentes e bloquear Auto-Traders com ordem `PENDENTE` como `DADOS_INCOMPLETOS`.
 
 Qualquer interrupção estrutural reconhecida ou sinalizada pelo Python invalida pendências antes de processar o giro de retomada. O resultado de retomada abre uma nova `id_sessao`, podendo servir como nova âncora histórica, mas nunca como desfecho do sinal anterior. Desde o BUG-022, o simples intervalo entre resultados não é uma interrupção. `Resolved` também exige vencedor conhecido, quatro dados únicos no intervalo 1..6 e coerência matemática entre os dados e o vencedor. Quando o payload fornece `roundId`/variante, uma troca de rodada antes de observar `Resolved` rompe a continuidade.
 
