@@ -21,6 +21,7 @@ def carregar_funcoes_reais():
         "normalizar_apostas_recebidas",
         "parsear_valor_monetario",
         "ler_saldo_atual",
+        "extrair_trilhas_roadmap_dom",
         "identidade_rodada_evolution",
         "atualizar_estado_mesa_player",
         "avaliar_contexto_janela_aposta",
@@ -66,6 +67,7 @@ FUNCOES = carregar_funcoes_reais()
 parsear_valor_monetario = FUNCOES["parsear_valor_monetario"]
 ler_saldo_atual = FUNCOES["ler_saldo_atual"]
 executar_aposta_na_tela = FUNCOES["executar_aposta_na_tela"]
+extrair_trilhas_roadmap_dom = FUNCOES["extrair_trilhas_roadmap_dom"]
 
 
 HTML = {
@@ -81,6 +83,16 @@ HTML = {
     "/balance-inner.html": """<!doctype html>
 <html><body>
   <span class="saldo-teste">US$ 9,876.54</span>
+</body></html>""",
+    "/roadmap.html": """<!doctype html>
+<html><body><iframe src="/roadmap-frame.html"></iframe></body></html>""",
+    "/roadmap-frame.html": """<!doctype html>
+<html><body>
+  <div class="bead-road" aria-label="Histórico de resultados">
+    <span class="bead player"></span><span class="bead banker"></span>
+    <span class="bead tie"></span><span class="bead banker"></span>
+    <span class="bead player"></span><span class="bead banker"></span>
+  </div>
 </body></html>""",
     "/game.html": """<!doctype html>
 <html><body>
@@ -217,6 +229,16 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
         try:
             pagina.locator("iframe").wait_for(state="attached")
             self.assertEqual(ler_saldo_atual(pagina), 9876.54)
+        finally:
+            pagina.close()
+
+    def test_extrai_trilha_semantica_da_roadmap_no_iframe(self):
+        pagina = self.nova_pagina("/roadmap.html")
+        try:
+            pagina.locator("iframe").wait_for(state="attached")
+            extraido = extrair_trilhas_roadmap_dom(pagina)
+            self.assertGreaterEqual(extraido["diagnostico"]["trilhas"], 1)
+            self.assertIn(["P", "B", "T", "B", "P", "B"], extraido["trilhas"])
         finally:
             pagina.close()
 
