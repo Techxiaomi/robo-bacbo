@@ -45,7 +45,7 @@ def main():
     enhancements_js = (PUBLIC / "ui-enhancements.js").read_text(encoding="utf-8")
     lab_js = (PUBLIC / "lab-enhancements.js").read_text(encoding="utf-8")
 
-    estrategia = {
+    estrategia_manual = {
         "id": "est-1",
         "nome": "Padrao Teste",
         "origem": "Origem A",
@@ -54,7 +54,21 @@ def main():
         "gales": 0,
         "proteger_empate": True,
         "ativo": True,
-        "is_dinamico": False,
+        "is_dinamico": "0",
+        "robo_dono_id": None,
+        "detalhes": detalhes_todos(detalhes_periodo()),
+    }
+    estrategia_dinamica = {
+        "id": "ia-7",
+        "nome": "Padrao Dinamico",
+        "origem": "AUTO_PILOT_IA:7",
+        "padrao": '["Banker","Player"]',
+        "entrada": "Banker",
+        "gales": 0,
+        "proteger_empate": False,
+        "ativo": True,
+        "is_dinamico": "1",
+        "robo_dono_id": 7,
         "detalhes": detalhes_todos(detalhes_periodo()),
     }
 
@@ -138,10 +152,10 @@ def main():
                 route.fulfill(status=200, content_type="application/javascript", body="window.html2pdf = function() {};" )
                 return
             if path == "http://bacbo.test/api/estrategias":
-                responder_json(route, [estrategia])
+                responder_json(route, [estrategia_manual, estrategia_dinamica])
                 return
             if path == "http://bacbo.test/api/origens":
-                responder_json(route, [{"id": 1, "nome": "Origem A"}])
+                responder_json(route, [{"id": 1, "nome": "Origem A"}, {"id": 2, "nome": "[AUTO] Auto Pilot 01"}])
                 return
             if path == "http://bacbo.test/api/robos":
                 # Mantém o fixture histórico dos seletores; os robôs adicionais são
@@ -152,15 +166,26 @@ def main():
                 responder_json(route, [])
                 return
             if path == "http://bacbo.test/api/dashboard-stats":
-                responder_json(route, {
-                    "sinais": 6,
-                    "greens": 4,
-                    "reds": 2,
-                    "ties": 1,
-                    "max_green_seq": 3,
-                    "max_red_seq": 2,
-                    "assertividade": "66.7%",
-                })
+                if "origem=AUTO_PILOT_IA%3A7" in url:
+                    responder_json(route, {
+                        "sinais": 2,
+                        "greens": 2,
+                        "reds": 0,
+                        "ties": 0,
+                        "max_green_seq": 2,
+                        "max_red_seq": 0,
+                        "assertividade": "100.0%",
+                    })
+                else:
+                    responder_json(route, {
+                        "sinais": 6,
+                        "greens": 4,
+                        "reds": 2,
+                        "ties": 1,
+                        "max_green_seq": 3,
+                        "max_red_seq": 2,
+                        "assertividade": "66.7%",
+                    })
                 return
 
             route.fulfill(status=404, content_type="text/plain", body="not found")
@@ -171,9 +196,9 @@ def main():
         page.wait_for_function(
             """
             () => document.querySelectorAll('#sintonizador-web option').length === 2
-                && document.querySelectorAll('#select-origem-dash option').length === 2
+                && document.querySelectorAll('#select-origem-dash option').length === 3
                 && document.querySelectorAll('#select-robo-dash option').length === 2
-                && document.querySelectorAll('#select-origem-filtro option').length === 2
+                && document.querySelectorAll('#select-origem-filtro option').length === 3
             """,
             timeout=10000,
         )
@@ -228,8 +253,10 @@ def main():
             () => ({
                 sintonia: Array.from(document.querySelectorAll('#sintonizador-web option')).map(o => o.textContent.trim()),
                 origemDash: Array.from(document.querySelectorAll('#select-origem-dash option')).map(o => o.textContent.trim()),
+                valoresOrigemDash: Array.from(document.querySelectorAll('#select-origem-dash option')).map(o => o.value),
                 roboDash: Array.from(document.querySelectorAll('#select-robo-dash option')).map(o => o.textContent.trim()),
                 origemPadroes: Array.from(document.querySelectorAll('#select-origem-filtro option')).map(o => o.textContent.trim()),
+                valoresOrigemPadroes: Array.from(document.querySelectorAll('#select-origem-filtro option')).map(o => o.value),
                 sinais: document.getElementById('dash-sinais').innerText,
                 greens: document.getElementById('dash-greens').innerText,
                 reds: document.getElementById('dash-reds').innerText,
@@ -256,8 +283,15 @@ def main():
 
         assert "Robo Teste" in opcoes["sintonia"], opcoes
         assert "Origem A" in opcoes["origemDash"], opcoes
+        assert any("Auto - IA — Robo Teste" in item for item in opcoes["origemDash"]), opcoes
+        assert not any("Auto Pilot 01" in item for item in opcoes["origemDash"]), opcoes
+        assert "AUTO_PILOT_IA:7" in opcoes["valoresOrigemDash"], opcoes
         assert "Robo Teste" in opcoes["roboDash"], opcoes
-        assert "Origem A" in opcoes["origemPadroes"], opcoes
+        assert any("Origem A" in item for item in opcoes["origemPadroes"]), opcoes
+        assert any("Auto - IA — Robo Teste" in item for item in opcoes["origemPadroes"]), opcoes
+        assert not any("Auto Pilot 01" in item for item in opcoes["origemPadroes"]), opcoes
+        assert "MANUAL:Origem%20A" in opcoes["valoresOrigemPadroes"], opcoes
+        assert "IA:7" in opcoes["valoresOrigemPadroes"], opcoes
         assert opcoes["sinais"] == "6", opcoes
         assert opcoes["greens"] == "4", opcoes
         assert opcoes["reds"] == "2", opcoes
@@ -291,6 +325,51 @@ def main():
         assert opcoes["minerSelecionado"] == "1000", opcoes
         assert opcoes["dashboardBacktestSelecionado"] == "MAX", opcoes
         assert opcoes["socketRegistrado"] is True, opcoes
+
+        page.select_option("#select-origem-dash", "AUTO_PILOT_IA:7")
+        page.wait_for_function(
+            """
+            () => document.getElementById('dash-sinais')?.innerText === '2'
+                && document.getElementById('dash-greens')?.innerText === '2'
+                && document.getElementById('dash-assertividade')?.innerText === '100.0%'
+            """,
+            timeout=5000,
+        )
+        page.select_option("#select-origem-dash", "TODAS")
+        page.wait_for_function(
+            "() => document.getElementById('dash-sinais')?.innerText === '6'",
+            timeout=5000,
+        )
+
+        page.evaluate("() => window.mudarAbaPrincipal('padroes')")
+        page.wait_for_function(
+            "() => document.getElementById('aba-padroes')?.classList.contains('visivel')",
+            timeout=5000,
+        )
+        page.select_option("#select-origem-filtro", "TODAS")
+        page.select_option("#select-tipo-filtro", "MANUAIS")
+        manuais = page.locator("#lista-padroes .card")
+        assert manuais.count() == 1, manuais.all_inner_texts()
+        assert "Padrao Teste" in manuais.first.inner_text()
+        assert "Padrao Dinamico" not in manuais.first.inner_text()
+
+        page.select_option("#select-tipo-filtro", "DINAMICOS")
+        dinamicos = page.locator("#lista-padroes .card")
+        assert dinamicos.count() == 1, dinamicos.all_inner_texts()
+        assert "Padrao Dinamico" in dinamicos.first.inner_text()
+        assert "Padrao Teste" not in dinamicos.first.inner_text()
+
+        page.select_option("#select-tipo-filtro", "TODOS")
+        page.select_option("#select-origem-filtro", "IA:7")
+        fonte_ia = page.locator("#lista-padroes .card")
+        assert fonte_ia.count() == 1, fonte_ia.all_inner_texts()
+        assert "Padrao Dinamico" in fonte_ia.first.inner_text()
+
+        page.select_option("#select-origem-filtro", "MANUAL:Origem%20A")
+        fonte_manual = page.locator("#lista-padroes .card")
+        assert fonte_manual.count() == 1, fonte_manual.all_inner_texts()
+        assert "Padrao Teste" in fonte_manual.first.inner_text()
+        page.evaluate("() => window.mudarAbaPrincipal('dashboard')")
 
         # BUG-019: o formulário do Auto-Trader expõe política de Tie por percentual
         # ou valor e mostra os valores efetivos após arredondamento e Gales.

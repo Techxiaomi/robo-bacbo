@@ -2648,24 +2648,126 @@
         // ==========================================
         // INICIALIZAÇÃO DE SISTEMAS GERAIS
         // ==========================================
+        function estrategiaEhDinamica(est) {
+            const valor = est?.is_dinamico;
+            if (valor === true || valor === 1 || valor === '1') return true;
+            if (typeof valor === 'string' && valor.trim().toLowerCase() === 'true') return true;
+            if (valor && Array.isArray(valor.data)) return Number(valor.data[0]) === 1;
+            return false;
+        }
+
+        function origemDashboardEhLegadaAuto(nome) {
+            const normalizada = String(nome || '').trim();
+            return /^\[AUTO\]\s*/i.test(normalizada)
+                || /^AUTO_PILOT_IA:/i.test(normalizada)
+                || /^Auto Pilot\s+\d+$/i.test(normalizada);
+        }
+
+        function listarRobosDonosIa() {
+            const robosPorId = new Map(
+                robosGlobais.map(robo => [String(robo.id), robo])
+            );
+            return [...new Set(
+                estrategiasGlobais
+                    .filter(estrategiaEhDinamica)
+                    .map(est => String(est.robo_dono_id || '').trim())
+                    .filter(id => id && robosPorId.has(id))
+            )]
+                .map(id => robosPorId.get(id))
+                .sort((a, b) => String(a.nome || '').localeCompare(String(b.nome || ''), 'pt-BR'));
+        }
+
+        function atualizarFiltroOrigensDashboard() {
+            const select = document.getElementById('select-origem-dash');
+            if (!select) return;
+
+            const selecionado = select.value || 'TODAS';
+            const origensManuais = [...new Set(
+                origensGlobais
+                    .map(origem => String(origem?.nome || '').trim())
+                    .filter(nome => nome && !origemDashboardEhLegadaAuto(nome))
+            )].sort((a, b) => a.localeCompare(b, 'pt-BR'));
+            const donosIa = listarRobosDonosIa();
+
+            let opcoes = '<option value="TODAS">🌐 Todas as Origens</option>';
+            for (const origem of origensManuais) {
+                opcoes += `<option value="${escaparHtmlRobo(origem)}">${escaparHtmlRobo(origem)}</option>`;
+            }
+            for (const robo of donosIa) {
+                const id = String(robo.id);
+                const nome = String(robo.nome || `Robô ${id}`);
+                opcoes += `<option value="AUTO_PILOT_IA:${escaparHtmlRobo(id)}">🤖 Auto - IA — ${escaparHtmlRobo(nome)}</option>`;
+            }
+
+            select.innerHTML = opcoes;
+            select.value = Array.from(select.options).some(option => option.value === selecionado)
+                ? selecionado
+                : 'TODAS';
+        }
+
+        function atualizarFiltroOrigensPadroes() {
+            const select = document.getElementById('select-origem-filtro');
+            if (!select) return;
+
+            const selecionado = select.value || 'TODAS';
+            const origensManuais = [...new Set(
+                estrategiasGlobais
+                    .filter(est => !estrategiaEhDinamica(est))
+                    .map(est => String(est.origem || '').trim())
+                    .filter(Boolean)
+            )].sort((a, b) => a.localeCompare(b, 'pt-BR'));
+
+            const donosIa = listarRobosDonosIa();
+
+            let opcoes = '<option value="TODAS">🌐 Geral (Todas)</option>';
+            for (const origem of origensManuais) {
+                opcoes += `<option value="MANUAL:${encodeURIComponent(origem)}">📌 ${escaparHtmlRobo(origem)}</option>`;
+            }
+            for (const robo of donosIa) {
+                const id = String(robo.id);
+                const nome = String(robo.nome || `Robô ${id}`);
+                opcoes += `<option value="IA:${encodeURIComponent(id)}">🤖 Auto - IA — ${escaparHtmlRobo(nome)}</option>`;
+            }
+
+            select.innerHTML = opcoes;
+            if (Array.from(select.options).some(option => option.value === selecionado)) {
+                select.value = selecionado;
+            } else {
+                select.value = 'TODAS';
+            }
+        }
+
         async function inicializarSistema() {
             try {
                 const q = '?_t=' + Date.now();
                 const [resEstr, resOrig] = await Promise.all([fetch('/api/estrategias'+q), fetch('/api/origens'+q)]);
-                estrategiasGlobais = await resEstr.json(); origensGlobais = await resOrig.json();
-                let sFiltro = document.getElementById('select-origem-filtro').value; let sDash = document.getElementById('select-origem-dash').value;
-                let ops = '<option value="TODAS">🌐 Todas as Origens</option>'; origensGlobais.forEach(o => { ops += `<option value="${o.nome}">${o.nome}</option>`; });
-                document.getElementById('select-origem-filtro').innerHTML = ops; document.getElementById('select-origem-dash').innerHTML = ops;
-                if (Array.from(document.getElementById('select-origem-filtro').options).some(x=>x.value===sFiltro)) document.getElementById('select-origem-filtro').value = sFiltro;
-                if (Array.from(document.getElementById('select-origem-dash').options).some(x=>x.value===sDash)) document.getElementById('select-origem-dash').value = sDash;
-                aplicarFiltrosEOrdenar(); atualizarCardAtivoDinamicamente(); await carregarRobos(); await carregarAutoTraders(); atualizarAlvosSimulacao(); 
+                const estrategiasRecebidas = await resEstr.json();
+                estrategiasGlobais = Array.isArray(estrategiasRecebidas)
+                    ? estrategiasRecebidas.map(est => ({ ...est, is_dinamico: estrategiaEhDinamica(est) }))
+                    : [];
+                origensGlobais = await resOrig.json();
+
+                atualizarFiltroOrigensDashboard();
+
+                aplicarFiltrosEOrdenar();
+                atualizarCardAtivoDinamicamente();
+                await carregarRobos();
+                await carregarAutoTraders();
+                atualizarAlvosSimulacao(); 
             } catch(e) {}
         }
 
         async function carregarRobos() {
             try {
-                const res = await fetch('/api/robos?_t=' + Date.now()); robosGlobais = await res.json();
-                renderizarCardsRobos(); atualizarFiltrosRoboUI(); await atualizarDashboardValores(); atualizarAlvosSimulacao(); 
+                const res = await fetch('/api/robos?_t=' + Date.now());
+                robosGlobais = await res.json();
+                renderizarCardsRobos();
+                atualizarFiltrosRoboUI();
+                atualizarFiltroOrigensDashboard();
+                atualizarFiltroOrigensPadroes();
+                aplicarFiltrosEOrdenar();
+                await atualizarDashboardValores();
+                atualizarAlvosSimulacao(); 
             } catch(e) {}
         }
 
@@ -2717,7 +2819,67 @@
         }
 
         // Funções remanescentes de UI (Backtest, Minerador Simulação) preservadas
-        function aplicarFiltrosEOrdenar() { let oFiltro = document.getElementById('select-origem-filtro').value; let tFiltro = document.getElementById('select-tipo-filtro').value; const div = document.getElementById('lista-padroes'); div.innerHTML = ''; let filtradas = oFiltro === 'TODAS' ? [...estrategiasGlobais] : estrategiasGlobais.filter(e => e.origem === oFiltro); if (tFiltro === 'MANUAIS') filtradas = filtradas.filter(e => !e.is_dinamico); else if (tFiltro === 'DINAMICOS') filtradas = filtradas.filter(e => e.is_dinamico); let ordem = document.getElementById('select-ordem-filtro').value; filtradas.sort((a, b) => { const calcStats = (estObj) => { let s = estObj.detalhes[padroesPeriodoAtual]; if (!s) return { tot: 0, ass: 0, pTie: 0 }; let tiesNum = 0; ['direto', 'gale1', 'gale2'].forEach(n => { if (s.ties[n]) { for (let m in s.ties[n]) tiesNum += s.ties[n][m]; } }); let g = s.green_direto + s.gale1 + s.gale2 + tiesNum; let tot = g + s.red; let ass = tot > 0 ? (g / tot) * 100 : 0; let pTie = tot > 0 ? (tiesNum / tot) * 100 : 0; return { tot, ass, pTie }; }; let sA = calcStats(a); let sB = calcStats(b); if (ordem === 'nome') return a.nome.localeCompare(b.nome); if (ordem === 'ocorr') return sB.tot - sA.tot; if (ordem === 'assert') return sB.ass - sA.ass; if (ordem === 'status') return (b.ativo === 1 || b.ativo === true) - (a.ativo === 1 || a.ativo === true); return 0; }); if (filtradas.length === 0) div.innerHTML = '<p style="color: #666; text-align: center; padding: 20px; grid-column: span 2;">Nenhuma estratégia encontrada.</p>'; else filtradas.forEach(est => div.innerHTML += gerarHtmlCardEstrategia(est, 'lista', padroesPeriodoAtual)); }
+        function aplicarFiltrosEOrdenar() {
+            const oFiltro = document.getElementById('select-origem-filtro').value;
+            const tFiltro = document.getElementById('select-tipo-filtro').value;
+            const div = document.getElementById('lista-padroes');
+            div.innerHTML = '';
+
+            let filtradas = [...estrategiasGlobais];
+            if (oFiltro.startsWith('MANUAL:')) {
+                const origemManual = decodeURIComponent(oFiltro.slice('MANUAL:'.length));
+                filtradas = filtradas.filter(est =>
+                    !estrategiaEhDinamica(est) && String(est.origem || '') === origemManual
+                );
+            } else if (oFiltro.startsWith('IA:')) {
+                const roboDonoId = decodeURIComponent(oFiltro.slice('IA:'.length));
+                filtradas = filtradas.filter(est =>
+                    estrategiaEhDinamica(est) && String(est.robo_dono_id) === roboDonoId
+                );
+            }
+
+            if (tFiltro === 'MANUAIS') {
+                filtradas = filtradas.filter(est => !estrategiaEhDinamica(est));
+            } else if (tFiltro === 'DINAMICOS') {
+                filtradas = filtradas.filter(estrategiaEhDinamica);
+            }
+
+            const ordem = document.getElementById('select-ordem-filtro').value;
+            filtradas.sort((a, b) => {
+                const calcStats = (estObj) => {
+                    const s = estObj.detalhes[padroesPeriodoAtual];
+                    if (!s) return { tot: 0, ass: 0, pTie: 0 };
+                    let tiesNum = 0;
+                    ['direto', 'gale1', 'gale2'].forEach(n => {
+                        if (s.ties[n]) {
+                            for (const m in s.ties[n]) tiesNum += s.ties[n][m];
+                        }
+                    });
+                    const g = s.green_direto + s.gale1 + s.gale2 + tiesNum;
+                    const tot = g + s.red;
+                    const ass = tot > 0 ? (g / tot) * 100 : 0;
+                    const pTie = tot > 0 ? (tiesNum / tot) * 100 : 0;
+                    return { tot, ass, pTie };
+                };
+                const sA = calcStats(a);
+                const sB = calcStats(b);
+                if (ordem === 'nome') return a.nome.localeCompare(b.nome);
+                if (ordem === 'ocorr') return sB.tot - sA.tot;
+                if (ordem === 'assert') return sB.ass - sA.ass;
+                if (ordem === 'status') {
+                    return (b.ativo === 1 || b.ativo === true) - (a.ativo === 1 || a.ativo === true);
+                }
+                return 0;
+            });
+
+            if (filtradas.length === 0) {
+                div.innerHTML = '<p style="color: #666; text-align: center; padding: 20px; grid-column: span 2;">Nenhuma estratégia encontrada.</p>';
+            } else {
+                filtradas.forEach(est => {
+                    div.innerHTML += gerarHtmlCardEstrategia(est, 'lista', padroesPeriodoAtual);
+                });
+            }
+        }
         function mudarAbaRoboStats(idC, p) { document.querySelectorAll(`.tab-robo-${idC}`).forEach(e => e.classList.remove('ativo')); document.getElementById(`tab-robo-${idC}-${p}`).classList.add('ativo'); document.querySelectorAll(`.detalhes-grupo-robo-${idC}`).forEach(e => e.style.display='none'); document.getElementById(`detalhe-robo-${idC}-${p}`).style.display='block'; }
         function toggleModalConfig(open) { document.getElementById('config-modal').style.display = open ? 'flex' : 'none'; }
         function salvarConfig() { localStorage.setItem('threshGreen', document.getElementById('cfg-green').value); localStorage.setItem('threshYellow', document.getElementById('cfg-yellow').value); toggleModalConfig(false); aplicarFiltrosEOrdenar(); atualizarDashboardValores(); }
