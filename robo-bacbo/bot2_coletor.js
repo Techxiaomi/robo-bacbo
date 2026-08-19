@@ -604,6 +604,8 @@ const EXECUTOR_EXECUTION_TIMEOUT_MS = (
 );
 const CONFIRMACOES_EXECUTOR_PENDENTES = new Map();
 const STATUS_EXECUTOR_VALIDOS = new Set(['EXECUTADA', 'FALHOU', 'EXPIRADA', 'AMBIGUA']);
+const INTERRUPCOES_COLETOR_PROCESSADAS = new Map();
+const LIMITE_INTERRUPCOES_COLETOR_MEMORIA = 1000;
 const TELEGRAM_TIMEOUT_MS = 3000;
 const balanceSyncMaxAgeSecondsConfig = Number(process.env.BALANCE_SYNC_MAX_AGE_SECONDS || 90);
 const BALANCE_SYNC_MAX_AGE_MS = (
@@ -631,6 +633,41 @@ function snapshotSaldoGlobal(agora = Date.now()) {
 function obterSaldoGlobalFresco(agora = Date.now()) {
     const snapshot = snapshotSaldoGlobal(agora);
     return snapshot.fresco ? snapshot.saldo_atual : null;
+}
+
+function normalizarInterrupcaoColetorId(dados) {
+    const id = String(dados?.interrupcao_id || '').trim();
+    if (!id || id.length > 256 || !/^[A-Za-z0-9:_-]+$/.test(id)) return '';
+    return id;
+}
+
+function reservarInterrupcaoColetor(dados, agora = Date.now()) {
+    const id = normalizarInterrupcaoColetorId(dados);
+    if (!id) return { id: '', repetida: false, legado: true };
+    const existente = INTERRUPCOES_COLETOR_PROCESSADAS.get(id);
+    if (existente) return { id, repetida: true, legado: false, estado: existente.estado };
+
+    INTERRUPCOES_COLETOR_PROCESSADAS.set(id, { estado: 'PROCESSANDO', atualizado_em: agora });
+    while (INTERRUPCOES_COLETOR_PROCESSADAS.size > LIMITE_INTERRUPCOES_COLETOR_MEMORIA) {
+        const maisAntigo = INTERRUPCOES_COLETOR_PROCESSADAS.keys().next().value;
+        INTERRUPCOES_COLETOR_PROCESSADAS.delete(maisAntigo);
+    }
+    return { id, repetida: false, legado: false, estado: 'PROCESSANDO' };
+}
+
+function concluirInterrupcaoColetor(id, sucesso, agora = Date.now()) {
+    const normalizado = String(id || '').trim();
+    if (!normalizado) return false;
+    if (!sucesso) return INTERRUPCOES_COLETOR_PROCESSADAS.delete(normalizado);
+    INTERRUPCOES_COLETOR_PROCESSADAS.set(normalizado, { estado: 'APLICADA', atualizado_em: agora });
+    return true;
+}
+
+function interrupcaoColetorJaAplicada(dados) {
+    const id = normalizarInterrupcaoColetorId(dados);
+    if (!id) return false;
+    const registro = INTERRUPCOES_COLETOR_PROCESSADAS.get(id);
+    return registro?.estado === 'APLICADA';
 }
 
 function criarEsperaResultadoExecutor(orderId) {
@@ -3123,9 +3160,40 @@ app.post("/collector-health", async (req, res) => {
         }
 
         const motivo = String(dados.motivo || 'INTERRUPCAO_COLETOR').trim().slice(0, 120) || 'INTERRUPCAO_COLETOR';
+        const reservaInterrupcao = reservarInterrupcaoColetor(dados);
+        if (reservaInterrupcao.repetida) {
+            if (reservaInterrupcao.estado === 'PROCESSANDO') {
+                return res.status(503).json({
+                    recebido: false,
+                    continuidade: 'INVALIDACAO_EM_ANDAMENTO',
+                    idempotente: true,
+                    interrupcao_id: reservaInterrupcao.id
+                });
+            }
+            return res.json({
+                recebido: true,
+                continuidade: 'INVALIDADA_ANTERIORMENTE',
+                idempotente: true,
+                interrupcao_id: reservaInterrupcao.id,
+                sinais_invalidados: 0,
+                traders_bloqueados: 0
+            });
+        }
         liberarTurnoResultado = await aguardarTurnoProcessamentoResultado();
-        const resumo = await invalidarSequenciasAposBuracoDados(motivo);
-        return res.json({ recebido: true, continuidade: 'INVALIDADA', ...resumo });
+        try {
+            const resumo = await invalidarSequenciasAposBuracoDados(motivo);
+            concluirInterrupcaoColetor(reservaInterrupcao.id, true);
+            return res.json({
+                recebido: true,
+                continuidade: 'INVALIDADA',
+                idempotente: false,
+                interrupcao_id: reservaInterrupcao.id || null,
+                ...resumo
+            });
+        } catch (e) {
+            concluirInterrupcaoColetor(reservaInterrupcao.id, false);
+            throw e;
+        }
     } catch (e) {
         console.error("❌ Falha ao tratar interrupção imediata do coletor:", e.message);
         if (!res.headersSent) return res.status(500).json({ erro: "falha ao invalidar continuidade" });
@@ -3193,9 +3261,26 @@ app.post("/receber-sinal", async (req, res) => {
         liberarTurnoResultado = await aguardarTurnoProcessamentoResultado();
 
         if (continuidade.interrupcao) {
-            const dadosInterrupcao = { ...dados, interrupcao_fluxo: true, motivo_interrupcao: continuidade.motivo };
+            const motivoInterrupcao = String(
+                dados.motivo_interrupcao || continuidade.motivo || 'INTERRUPCAO_PYTHON'
+            ).trim().slice(0, 120) || 'INTERRUPCAO_PYTHON';
+            const dadosInterrupcao = { ...dados, interrupcao_fluxo: true, motivo_interrupcao: motivoInterrupcao };
             rotacionarSessaoAposInterrupcao(dadosInterrupcao);
-            await invalidarSequenciasAposBuracoDados(continuidade.motivo);
+            if (interrupcaoColetorJaAplicada(dados)) {
+                console.log(
+                    `♻️ Interrupção ${normalizarInterrupcaoColetorId(dados)} já aplicada via collector-health; `
+                    + 'o primeiro resultado apenas estabelece a nova fronteira estatística.'
+                );
+            } else {
+                const reservaInterrupcao = reservarInterrupcaoColetor(dados);
+                try {
+                    await invalidarSequenciasAposBuracoDados(motivoInterrupcao);
+                    concluirInterrupcaoColetor(reservaInterrupcao.id, true);
+                } catch (e) {
+                    concluirInterrupcaoColetor(reservaInterrupcao.id, false);
+                    throw e;
+                }
+            }
         }
 
         // Só avança a continuidade depois que qualquer interrupção foi tratada em modo fail-closed.
