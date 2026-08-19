@@ -10,6 +10,7 @@ const {
     similaridadePadroes,
     avaliarDescarteLive,
     formatarLogDesativacaoAutoPilot,
+    formatarLinhaAuditoriaCandidato,
     idCandidato
 } = require('../auto_pilot_ia');
 
@@ -86,6 +87,64 @@ test('shadow impede promoção quando a janela recente contradiz o treino', () =
     assert.equal(alvo.shadow_ok, false);
     assert.ok(alvo.shadow.ocorrencias >= 2);
     assert.ok(alvo.shadow.assertividade < 80);
+    assert.equal(alvo.auditoria.status, 'REPROVADO_SHADOW_HISTORICO');
+    assert.deepEqual(alvo.auditoria.motivos, ['ASSERTIVIDADE_SHADOW_INSUFICIENTE']);
+    assert.equal(alvo.auditoria.shadow.minimo_assertividade, 80);
+});
+
+test('diagnóstico registra individualmente reprovação no treino sem promover candidato', () => {
+    const historico = repetir(['Player', 'Banker', 'Player'], 8);
+    const candidatos = minerarCandidatos(historico, {
+        range: 100,
+        tam_min: 2,
+        tam_max: 2,
+        assert_min: 100,
+        ocorr_min: 50,
+        gales: 0,
+        proteger_empate: false,
+        shadow_giros: 0
+    }, { robo_id: 8 });
+    const auditoria = candidatos.diagnostico.candidatos.find(
+        item => item.padrao === 'P-B' && item.entrada === 'P'
+    );
+    assert.ok(auditoria);
+    assert.equal(auditoria.status, 'REPROVADO_TREINO');
+    assert.deepEqual(auditoria.motivos, ['OCORRENCIAS_TREINO_INSUFICIENTES']);
+    assert.equal(auditoria.treino.minimo_ocorrencias, 50);
+});
+
+test('diagnóstico identifica preservação ou mudança do ID de padrão anteriormente ativo', () => {
+    const historico = repetir(['Player', 'Banker', 'Player'], 40);
+    const anterior = normalizarConfigAutoTuning({ gales: 0, proteger_empate: false });
+    const idAnterior = idCandidato(8, ['Player', 'Banker'], 'Player', anterior);
+    const candidatos = minerarCandidatos(historico, {
+        range: 1000,
+        tam_min: 2,
+        tam_max: 2,
+        assert_min: 90,
+        ocorr_min: 10,
+        gales: 1,
+        proteger_empate: false,
+        shadow_giros: 0
+    }, {
+        robo_id: 8,
+        incumbentes: [idAnterior],
+        incumbentes_detalhes: [{
+            id: idAnterior,
+            padrao: JSON.stringify(['Player', 'Banker']),
+            entrada: 'Player',
+            gales: 0,
+            proteger_empate: 0
+        }]
+    });
+    const auditoria = candidatos.diagnostico.candidatos.find(
+        item => item.id_anterior === idAnterior
+    );
+    assert.ok(auditoria);
+    assert.equal(auditoria.id_alterado, true);
+    assert.equal(auditoria.motivo_id_alterado, 'GALES_OU_PROTECAO_EMPATE_ALTERADOS');
+    assert.notEqual(auditoria.id, idAnterior);
+    assert.match(formatarLinhaAuditoriaCandidato(auditoria), /ID ALTERADO/);
 });
 
 test('portfolio respeita máximo e evita família redundante quando há alternativa', () => {
