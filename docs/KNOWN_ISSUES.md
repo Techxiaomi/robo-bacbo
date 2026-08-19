@@ -91,6 +91,14 @@ Risco residual externo:
 
 ## Itens mitigados
 
+### BUG-024 — Reload preventivo criava uma janela periódica sem observabilidade
+
+Status: **mitigado em código; validação operacional prolongada pendente**.
+
+O executor encerrava aproximadamente a cada duas horas o loop de uma sessão saudável e navegava novamente para a mesa. Antes do `page.goto()`, o contexto do WebSocket oficial era apagado, de modo que o fechamento provocado pela própria navegação não passava pela quarentena estrutural do BUG-023. Uma rodada resolvida durante essa troca poderia ficar invisível ao coletor.
+
+O limite temporal foi removido. Enquanto página, WebSocket oficial e `playerState` permanecerem saudáveis, a sessão continua indefinidamente. A navegação e a recuperação permanecem orientadas por falhas observáveis: reconexão não confirmada, silêncio do `playerState`, ausência de WebSocket após navegação, necessidade de Auto-Login, timeout ou exceção do Playwright. O botão `Continuar` continua sendo tratado sem reiniciar a sessão.
+
 ### BUG-022 — Pausa legítima da mesa era tratada como interrupção
 
 Status: **mitigado**.
