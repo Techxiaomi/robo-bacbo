@@ -519,6 +519,23 @@ function combinarScoreShadowLive(scoreAnterior, metricasBrutas, assertividadeTre
     return Math.max(0, Math.min(100, score));
 }
 
+function formatarLogDesativacaoAutoPilot(robo, motivo, quantidade) {
+    const id = Number(robo?.id);
+    const idTexto = Number.isFinite(id) ? String(id) : 'desconhecido';
+    const nome = String(robo?.nome || 'Sem nome')
+        .replace(/[\r\n\t]+/g, ' ')
+        .trim() || 'Sem nome';
+    const total = Math.max(0, Number(quantidade) || 0);
+    const estado = motivo === 'IA_DESATIVADA'
+        ? 'Auto Pilot IA desativado na configuração'
+        : motivo === 'ROBO_DESATIVADO'
+            ? 'Robô/Canal desativado'
+            : `Auto Pilot IA em estado seguro (${String(motivo || 'MOTIVO_DESCONHECIDO')})`;
+
+    return `🤖 Robô/Canal ${idTexto} — ${nome}: ${estado}; `
+        + `${total} padrão(ões) dinâmico(s) ativo(s) desativado(s).`;
+}
+
 function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notificar, log = console }) {
     if (!dbPool || typeof dbPool.query !== 'function') throw new Error('dbPool inválido para Auto Pilot IA');
     const contadores = new Map();
@@ -910,7 +927,7 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
             notificar(robo.id, resumo);
         }
 
-        log.log(`🤖 Auto Pilot IA ${robo.id}: ${motivo}; ${desativados} padrão(ões) ativo(s) desativado(s).`);
+        log.log(formatarLogDesativacaoAutoPilot(robo, motivo, desativados));
         return { executado: true, desativado: true, motivo, ...resumo };
     }
 
@@ -1100,6 +1117,7 @@ module.exports = {
     avaliarDescarteLive,
     avaliarShadowLive,
     combinarScoreShadowLive,
+    formatarLogDesativacaoAutoPilot,
     criarAutoPilotService,
     idCandidato
 };
