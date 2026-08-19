@@ -802,15 +802,18 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
                 const live = item.live?.ocorrencias > 0
                     ? ` | live=${formatarPercentualDiagnostico(item.live.assertividade)} (${item.live.ocorrencias}), streak RED=${item.live.streak_red}`
                     : ' | live=sem amostra';
-                linhas.push(`      #${i + 1} ${formatarLinhaAuditoriaCandidato(item)}${live}`);
+                linhas.push(`      #${i + 1} ${formatarLinhaAuditoriaCandidato(item)}${live} | referência=${item.origem_auditoria}`);
             });
         }
 
         if (Array.isArray(resumo.shadow_historico_auditoria) && resumo.shadow_historico_auditoria.length > 0) {
             linhas.push('   🧪 REPROVADOS NA VALIDAÇÃO HISTÓRICA');
-            resumo.shadow_historico_auditoria.forEach((item, i) => linhas.push(
-                `      #${i + 1} ${formatarLinhaAuditoriaCandidato(item)}`
-            ));
+            resumo.shadow_historico_auditoria.forEach((item, i) => {
+                const live = item.live?.ocorrencias > 0
+                    ? ` | live preservado=${formatarPercentualDiagnostico(item.live.assertividade)} (${item.live.ocorrencias}), streak RED=${item.live.streak_red}`
+                    : ' | live preservado=sem amostra';
+                linhas.push(`      #${i + 1} ${formatarLinhaAuditoriaCandidato(item)}${live}`);
+            });
         }
 
         if (resumo.ativos.length > 0) {
@@ -917,7 +920,7 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
 
     async function reconciliar(robo, config, candidatos) {
         const [existentes] = await dbPool.query(
-            `SELECT id, padrao, entrada, gales, proteger_empate, ativo, criado_em, quarentena_restante
+            `SELECT id, padrao, entrada, gales, proteger_empate, ativo, criado_em, quarentena_restante, ia_status
              FROM estrategias
              WHERE is_dinamico=true AND robo_dono_id=?`,
             [robo.id]
@@ -967,8 +970,23 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
         const auditorias = Array.isArray(candidatos?.diagnostico?.candidatos)
             ? candidatos.diagnostico.candidatos
             : [];
+        const metricasLiveAuditoria = (auditoria, idPreferencial = null) => {
+            const ids = [idPreferencial, auditoria?.id_anterior, auditoria?.id]
+                .filter(Boolean)
+                .map(String);
+            const idComHistorico = ids.find(id => (liveMap.get(id) || []).length > 0);
+            const liveRows = idComHistorico ? (liveMap.get(idComHistorico) || []) : [];
+            const liveValidos = liveRows.filter(r => ['GREEN', 'TIE', 'RED'].includes(String(r.tipo_resultado || '').toUpperCase()));
+            const liveWins = liveValidos.filter(r => ['GREEN', 'TIE'].includes(String(r.tipo_resultado || '').toUpperCase())).length;
+            return {
+                ocorrencias: liveValidos.length,
+                assertividade: liveValidos.length > 0 ? (liveWins / liveValidos.length) * 100 : null,
+                streak_red: calcularStreakRed(liveValidos),
+                estrategia_id: idComHistorico || null
+            };
+        };
         const incumbentesAuditoria = existentes
-            .filter(e => e.ativo === true || e.ativo === 1)
+            .filter(e => e.ativo === true || e.ativo === 1 || String(e.ia_status || '').toUpperCase() === 'ATIVO')
             .map(existente => {
                 const idAnterior = String(existente.id);
                 const auditoria = auditorias.find(a => a.id_anterior === idAnterior || a.id === idAnterior) || {
@@ -991,17 +1009,13 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
                 else if (shadowLiveIds.has(idAtual)) destino = 'MOVIDO_PARA_SHADOW_LIVE';
                 else if (rejeitadosIds.has(idAtual)) destino = 'REJEITADO_SHADOW_LIVE';
 
-                const liveRows = liveMap.get(idAnterior) || [];
-                const liveValidos = liveRows.filter(r => ['GREEN', 'TIE', 'RED'].includes(String(r.tipo_resultado || '').toUpperCase()));
-                const liveWins = liveValidos.filter(r => ['GREEN', 'TIE'].includes(String(r.tipo_resultado || '').toUpperCase())).length;
                 return {
                     ...auditoria,
                     destino,
-                    live: {
-                        ocorrencias: liveValidos.length,
-                        assertividade: liveValidos.length > 0 ? (liveWins / liveValidos.length) * 100 : null,
-                        streak_red: calcularStreakRed(liveValidos)
-                    }
+                    origem_auditoria: existente.ativo === true || existente.ativo === 1
+                        ? 'ATIVO_ANTES_DESTA_REAVALIACAO'
+                        : 'ULTIMO_STATUS_ATIVO_PERSISTIDO',
+                    live: metricasLiveAuditoria(auditoria, idAnterior)
                 };
             });
         const agora = Date.now();
@@ -1112,7 +1126,9 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
             fora_pool: Math.max(0, candidatos.length - reter.length - rejeitadosShadowLive.length),
             candidatos: candidatos.length,
             incumbentes_auditoria: incumbentesAuditoria,
-            shadow_historico_auditoria: auditorias.filter(a => a.shadow && a.status === 'REPROVADO_SHADOW_HISTORICO')
+            shadow_historico_auditoria: auditorias
+                .filter(a => a.shadow && a.status === 'REPROVADO_SHADOW_HISTORICO')
+                .map(a => ({ ...a, live: metricasLiveAuditoria(a) }))
         };
     }
 
@@ -1160,15 +1176,18 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
         }
 
         const [existentes] = await dbPool.query(
-            `SELECT id, padrao, entrada, gales, proteger_empate
+            `SELECT id, padrao, entrada, gales, proteger_empate, ativo, ia_status
              FROM estrategias
-             WHERE is_dinamico=true AND robo_dono_id=? AND ativo=true`,
+             WHERE is_dinamico=true AND robo_dono_id=?
+               AND (ativo=true OR ia_status='ATIVO')`,
             [robo.id]
         );
         const historico = await carregarHistorico(config.range);
         const candidatos = minerarCandidatos(historico, config, {
             robo_id: robo.id,
-            incumbentes: existentes.map(e => String(e.id)),
+            incumbentes: existentes
+                .filter(e => e.ativo === true || e.ativo === 1)
+                .map(e => String(e.id)),
             incumbentes_detalhes: existentes
         });
         await aplicarShadowLiveAosCandidatos(candidatos, config);
