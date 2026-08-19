@@ -718,14 +718,14 @@ test("avaliarContinuidadeResultado detecta salto, restart e duplicatas", () => {
     assert.equal(r.motivo, "COLETOR_REINICIADO");
 });
 
-test("continuidade separa pausa temporal de perda confirmada e invalida pendencias", () => {
+test("intervalo longo preserva continuidade e evidencias estruturais invalidam pendencias", () => {
     let r = logic.avaliarContinuidadeResultado(
         { sessao: "sessao-a", seq: 2, timestamp_coleta: 1000 },
         { coletor_sessao: "sessao-a", coletor_seq: 3, timestamp_coleta: 62001 }
     );
-    assert.equal(r.interrupcao, true);
+    assert.equal(r.interrupcao, false);
     assert.equal(r.buraco_confirmado, false);
-    assert.equal(r.motivo, "INTERVALO_NODE");
+    assert.equal(r.motivo, null);
 
     r = logic.avaliarContinuidadeResultado(
         { sessao: "sessao-a", seq: 2, timestamp_coleta: 1000 },
@@ -743,7 +743,10 @@ test("continuidade separa pausa temporal de perda confirmada e invalida pendenci
     assert.equal(r.buraco_confirmado, true);
     assert.equal(r.motivo, "METADADOS_COLETOR_AUSENTES");
 
-    assert.match(source, /if \(continuidade\.buraco_confirmado\) \{\s*await invalidarSequenciasAposBuracoDados\(continuidade\.motivo\);/);
+    assert.match(source, /if \(continuidade\.interrupcao\) \{[\s\S]*?await invalidarSequenciasAposBuracoDados\(continuidade\.motivo\);/);
+    assert.doesNotMatch(source, /if \(continuidade\.buraco_confirmado\) \{\s*await invalidarSequenciasAposBuracoDados/);
+    assert.doesNotMatch(source, /INTERVALO_NODE/);
+    assert.match(source, /app\.post\("\/collector-health"[\s\S]*?await invalidarSequenciasAposBuracoDados\(motivo\)/);
     assert.match(source, /SET status_ordem='DADOS_INCOMPLETOS'\s*WHERE status_ordem='PENDENTE'/);
     assert.match(source, /SET ativo=false, status_operacao='DADOS_INCOMPLETOS'/);
     assert.match(frontendSource, /⚠️ DADOS INCOMPLETOS/);
@@ -899,6 +902,8 @@ test("cookiesDoHeader extrai cookie administrativo sem depender do frontend", ()
 
 test("SEC-003B preserva webhook interno e exige sessao administrativa no Socket.IO", () => {
     assert.match(source, /req\.path === '\/receber-sinal'/);
+    assert.match(source, /req\.path === '\/collector-health'/);
+    assert.match(source, /app\.post\("\/collector-health"[\s\S]*?requisicaoInternaAutorizada\(req\)/);
     assert.match(source, /autenticacao_administrativa_necessaria/);
     assert.match(source, /authAdminPermitida/);
     assert.match(source, /sessaoAdminValidaCookie\(req\.headers\.cookie\)/);

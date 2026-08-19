@@ -63,10 +63,28 @@ test("receber-sinal reserva sequencia antes de I/O, da ACK antes do turno e semp
     const ack = handler.indexOf("res.json({ recebido: true });");
     const turno = handler.indexOf("await aguardarTurnoProcessamentoResultado();");
     const interrupcao = handler.indexOf("if (continuidade.interrupcao)");
+    const invalidacao = handler.indexOf("await invalidarSequenciasAposBuracoDados(continuidade.motivo);");
     const finallyRelease = handler.indexOf("if (liberarTurnoResultado)");
 
     assert.ok(reserva >= 0 && primeiroAwaitSaldo > reserva, "reserva deve preceder o primeiro I/O possível");
     assert.ok(ack >= 0 && turno > ack, "ACK deve preceder espera FIFO");
     assert.ok(interrupcao > turno, "mutações pós-ACK devem ocorrer dentro do turno");
+    assert.ok(invalidacao > interrupcao, "qualquer interrupção deve invalidar pendências antes do giro");
     assert.ok(finallyRelease > interrupcao, "turno deve ser liberado em finally");
+});
+
+test("collector-health serializa e persiste a invalidação antes do ACK", () => {
+    const inicio = source.indexOf('app.post("/collector-health", async (req, res) => {');
+    const fim = source.indexOf('app.post("/receber-sinal", async (req, res) => {', inicio);
+    assert.ok(inicio >= 0 && fim > inicio, "endpoint interno de saúde deve existir");
+    const handler = source.slice(inicio, fim);
+
+    const turno = handler.indexOf("await aguardarTurnoProcessamentoResultado();");
+    const invalidacao = handler.indexOf("await invalidarSequenciasAposBuracoDados(motivo);");
+    const ack = handler.indexOf("return res.json({ recebido: true, continuidade: 'INVALIDADA'");
+    const release = handler.indexOf("if (liberarTurnoResultado) liberarTurnoResultado();");
+
+    assert.ok(turno >= 0 && invalidacao > turno, "health deve entrar na mesma FIFO dos resultados");
+    assert.ok(ack > invalidacao, "ACK de saúde só pode ocorrer após invalidação persistida");
+    assert.ok(release > ack, "turno de saúde deve ser liberado em finally");
 });

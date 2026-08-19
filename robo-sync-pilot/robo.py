@@ -19,8 +19,8 @@ load_env_file(os.path.join(PROJECT_ROOT, ".env"))
 # ====================================================================
 # CONFIGURAÇÕES GERAIS E CONTROLE DE VERSÃO
 # ====================================================================
-VERSAO_ROBO = "v1.5"
-NOME_ATUALIZACAO = "Motor Completo + Anti-Duplicidade (Strict Mode Bypass)"
+VERSAO_ROBO = "v1.6.1"
+NOME_ATUALIZACAO = "Continuidade Estrutural Fail-Closed"
 
 URL_CASSINO = os.getenv("CASINO_GAME_URL", "")
 ARQUIVO_SESSAO = os.getenv("SESSION_STATE_FILE", os.path.join(BASE_DIR, "sessao_salva.json"))
@@ -28,6 +28,10 @@ ARQUIVO_SESSAO = os.getenv("SESSION_STATE_FILE", os.path.join(BASE_DIR, "sessao_
 USUARIO_CASSINO = os.getenv("CASINO_USER", "")
 SENHA_CASSINO = os.getenv("CASINO_PASSWORD", "")
 WEBHOOK_JS = os.getenv("NODE_WEBHOOK_URL", "http://127.0.0.1:3000/receber-sinal")
+COLLECTOR_HEALTH_URL = (
+    os.getenv("NODE_COLLECTOR_HEALTH_URL", "http://127.0.0.1:3000/collector-health").strip()
+    or "http://127.0.0.1:3000/collector-health"
+)
 EXECUTOR_STATUS_URL = (
     os.getenv("NODE_EXECUTOR_STATUS_URL", "http://127.0.0.1:3000/executor-status").strip()
     or "http://127.0.0.1:3000/executor-status"
@@ -58,6 +62,14 @@ except ValueError:
     RESULT_DEDUP_WINDOW_SECONDS = 3.0
 
 try:
+    COLLECTOR_PLAYER_STATE_STALE_SECONDS = max(
+        10.0,
+        min(60.0, float(os.getenv("COLLECTOR_PLAYER_STATE_STALE_SECONDS", "20")))
+    )
+except ValueError:
+    COLLECTOR_PLAYER_STATE_STALE_SECONDS = 20.0
+
+try:
     BALANCE_SYNC_INTERVAL_SECONDS = max(0.5, float(os.getenv("BALANCE_SYNC_INTERVAL_SECONDS", "2")))
 except ValueError:
     BALANCE_SYNC_INTERVAL_SECONDS = 2.0
@@ -81,7 +93,12 @@ ordens_executor_recebidas = {}
 ordens_executor_lock = threading.Lock()
 executor_pronto = threading.Event()
 estado_mesa_lock = threading.Lock()
-estado_mesa = {"stage": "", "atualizado_em_ms": 0}
+estado_mesa = {
+    "stage": "",
+    "atualizado_em_ms": 0,
+    "round_id": "",
+    "round_resolvido": False,
+}
 ORDEM_ID_LIMITE_MEMORIA = 5000
 app = Flask(__name__)
 log = logging.getLogger('werkzeug')
@@ -372,6 +389,12 @@ coletor_seq = 0
 ultimo_resultado_chave = None
 ultimo_resultado_chave_em = 0.0
 avisos_erro_limitados = {}
+continuidade_fluxo_lock = threading.Lock()
+continuidade_fluxo = {
+    "interrompida": False,
+    "motivo": "",
+    "geracao": 0,
+}
 
 def registrar_erro_limitado(chave, mensagem, intervalo_segundos=30):
     agora = time.time()
@@ -379,6 +402,113 @@ def registrar_erro_limitado(chave, mensagem, intervalo_segundos=30):
     if agora - ultimo >= intervalo_segundos:
         print(mensagem)
         avisos_erro_limitados[chave] = agora
+
+
+def marcar_interrupcao_fluxo(motivo):
+    motivo_normalizado = str(motivo or "CONTINUIDADE_INDETERMINADA").strip()[:120]
+    with continuidade_fluxo_lock:
+        ja_interrompida = continuidade_fluxo["interrompida"]
+        continuidade_fluxo["interrompida"] = True
+        continuidade_fluxo["motivo"] = motivo_normalizado
+        continuidade_fluxo["geracao"] += 1
+        return not ja_interrompida
+
+
+def snapshot_interrupcao_fluxo():
+    with continuidade_fluxo_lock:
+        return {
+            "interrompida": bool(continuidade_fluxo["interrompida"]),
+            "motivo": str(continuidade_fluxo["motivo"] or ""),
+            "geracao": int(continuidade_fluxo["geracao"]),
+        }
+
+
+def confirmar_interrupcao_reportada(geracao):
+    with continuidade_fluxo_lock:
+        if not continuidade_fluxo["interrompida"]:
+            return False
+        if int(geracao) != int(continuidade_fluxo["geracao"]):
+            return False
+        continuidade_fluxo["interrompida"] = False
+        continuidade_fluxo["motivo"] = ""
+        return True
+
+
+def notificar_interrupcao_node(motivo, timestamp_ms=None):
+    payload = {
+        "evento": "INTERRUPCAO",
+        "motivo": str(motivo or "CONTINUIDADE_INDETERMINADA")[:120],
+        "coletor_sessao": COLETOR_SESSAO,
+        "coletor_seq": coletor_seq,
+        "timestamp_coleta": int(timestamp_ms or time.time() * 1000),
+    }
+    try:
+        resposta = requests.post(
+            COLLECTOR_HEALTH_URL,
+            json=payload,
+            headers={"X-Internal-Token": INTERNAL_API_TOKEN},
+            timeout=2,
+        )
+        resposta.raise_for_status()
+        return True
+    except Exception as e:
+        registrar_erro_limitado(
+            "collector_health_node",
+            f"⚠️ Node não confirmou interrupção do coletor; o próximo resultado continuará lacrado: {type(e).__name__}: {e}",
+            30,
+        )
+        return False
+
+
+def validar_resultado_resolvido(game_info):
+    if not isinstance(game_info, dict):
+        raise ValueError("game ausente ou inválido")
+
+    resultado_bruto = str(game_info.get("result") or "").strip()
+    if "Tie" in resultado_bruto:
+        resultado = "Tie"
+    elif resultado_bruto in {"PlayerWon", "BankerWon"}:
+        resultado = resultado_bruto
+    else:
+        raise ValueError(f"vencedor inválido: {resultado_bruto or 'ausente'}")
+
+    dados_recebidos = game_info.get("dice")
+    if not isinstance(dados_recebidos, list) or len(dados_recebidos) != 4:
+        raise ValueError("resultado deve conter exatamente quatro dados")
+
+    valores_dados = {}
+    for dado in dados_recebidos:
+        if not isinstance(dado, dict):
+            raise ValueError("item de dado inválido")
+        identificador = dado.get("id")
+        valor = dado.get("value")
+        if isinstance(identificador, bool) or isinstance(valor, bool):
+            raise ValueError("id/valor booleano não permitido")
+        try:
+            identificador = int(identificador)
+            valor = int(valor)
+        except (TypeError, ValueError) as e:
+            raise ValueError("id/valor de dado não numérico") from e
+        if identificador not in {1, 2, 3, 4} or identificador in valores_dados:
+            raise ValueError("IDs dos dados devem ser únicos entre 1 e 4")
+        if valor < 1 or valor > 6:
+            raise ValueError("valor de dado fora do intervalo 1..6")
+        valores_dados[identificador] = valor
+
+    if set(valores_dados) != {1, 2, 3, 4}:
+        raise ValueError("conjunto de dados incompleto")
+
+    soma_jogador = valores_dados[1] + valores_dados[3]
+    soma_banca = valores_dados[2] + valores_dados[4]
+    resultado_coerente = (
+        (resultado == "PlayerWon" and soma_jogador > soma_banca)
+        or (resultado == "BankerWon" and soma_banca > soma_jogador)
+        or (resultado == "Tie" and soma_jogador == soma_banca)
+    )
+    if not resultado_coerente:
+        raise ValueError("vencedor incompatível com os quatro dados")
+
+    return resultado, resultado_bruto, valores_dados
 
 # ====================================================================
 # FUNÇÕES CORE DO ROBÔ (Navegação, Login e Apostas)
@@ -408,6 +538,15 @@ def chave_resultado_resolvido(game_info):
         str(info.get("result") or ""),
         tuple(dados_normalizados)
     )
+
+
+def identidade_rodada_evolution(game_info):
+    info = game_info if isinstance(game_info, dict) else {}
+    for campo in ("roundId", "round_id", "roundID", "roundUid", "round_uid"):
+        valor = info.get(campo)
+        if valor is not None and str(valor).strip():
+            return str(valor).strip()
+    return ""
 
 
 def resultado_resolvido_duplicado(game_info, agora=None):
@@ -521,11 +660,30 @@ def atualizar_estado_mesa_player(dados):
     game_info = dados.get("args", {}).get("game", {}) if isinstance(dados, dict) else {}
     stage = str(game_info.get("stage") or "").strip()
     if not stage:
-        return
+        return "PLAYER_STATE_SEM_STAGE"
+
+    round_id = identidade_rodada_evolution(game_info)
+    motivo_interrupcao = ""
 
     with estado_mesa_lock:
+        round_anterior = str(estado_mesa.get("round_id") or "")
+        round_anterior_resolvido = bool(estado_mesa.get("round_resolvido"))
+
+        if round_id and round_anterior and round_id != round_anterior:
+            if not round_anterior_resolvido:
+                motivo_interrupcao = "TROCA_RODADA_SEM_RESOLVED"
+            estado_mesa["round_id"] = round_id
+            estado_mesa["round_resolvido"] = False
+        elif round_id and not round_anterior:
+            estado_mesa["round_id"] = round_id
+
+        if stage.lower() == "resolved" and (round_id or round_anterior):
+            estado_mesa["round_resolvido"] = True
+
         estado_mesa["stage"] = stage
         estado_mesa["atualizado_em_ms"] = int(time.time() * 1000)
+
+    return motivo_interrupcao
 
 
 def avaliar_contexto_janela_aposta(aposta):
@@ -838,6 +996,21 @@ def processar_resultado(dados):
 
         if status_atual == "Resolved":
             tempo_atual = time.time()
+            try:
+                resultado, resultado_bruto, valores_dados = validar_resultado_resolvido(game_info)
+            except ValueError as e:
+                motivo = "RESULTADO_RESOLVIDO_INVALIDO"
+                primeira_marcacao = marcar_interrupcao_fluxo(motivo)
+                executor_pronto.clear()
+                registrar_erro_limitado(
+                    "resultado_resolved_invalido",
+                    f"🚨 Resultado Resolved rejeitado; continuidade lacrada: {e}",
+                    10,
+                )
+                if primeira_marcacao:
+                    notificar_interrupcao_node(motivo, int(tempo_atual * 1000))
+                return
+
             if resultado_resolvido_duplicado(game_info, tempo_atual):
                 registrar_erro_limitado(
                     "resultado_resolved_duplicado",
@@ -851,18 +1024,20 @@ def processar_resultado(dados):
             # um salto observável pelo Node.
             coletor_seq += 1
             seq_atual = coletor_seq
-
-            resultado_bruto = game_info.get("result", "")
-            resultado = "Tie" if "Tie" in resultado_bruto else resultado_bruto
-            
-            valores_dados = {1: 0, 2: 0, 3: 0, 4: 0}
-            for d in game_info.get("dice", []):
-                valores_dados[d.get("id")] = d.get("value", 0)
-            
             soma_jogador = valores_dados[1] + valores_dados[3]
             soma_banca = valores_dados[2] + valores_dados[4]
 
-            houve_interrupcao = ultimo_tempo_rodada > 0 and (tempo_atual - ultimo_tempo_rodada) > 60
+            interrupcao_pendente = snapshot_interrupcao_fluxo()
+            intervalo_resultados = tempo_atual - ultimo_tempo_rodada if ultimo_tempo_rodada > 0 else 0
+            if intervalo_resultados > 60:
+                registrar_erro_limitado(
+                    "intervalo_resultados_longo",
+                    "⚠️ Intervalo operacional longo entre resultados "
+                    f"({intervalo_resultados:.1f}s); continuidade preservada sem evidência estrutural de falha.",
+                    30,
+                )
+            houve_interrupcao = interrupcao_pendente["interrompida"]
+            motivo_interrupcao = interrupcao_pendente["motivo"] if houve_interrupcao else ""
             ultimo_tempo_rodada = tempo_atual
 
             payload = {
@@ -874,7 +1049,9 @@ def processar_resultado(dados):
                 "dados_banca": [valores_dados[2], valores_dados[4]],
                 "coletor_sessao": COLETOR_SESSAO,
                 "coletor_seq": seq_atual,
+                "rodada_origem": identidade_rodada_evolution(game_info),
                 "interrupcao_fluxo": houve_interrupcao,
+                "motivo_interrupcao": motivo_interrupcao,
                 "timestamp_coleta": int(tempo_atual * 1000)
             }
 
@@ -886,7 +1063,11 @@ def processar_resultado(dados):
                     timeout=2
                 )
                 resposta.raise_for_status()
+                if interrupcao_pendente["interrompida"]:
+                    confirmar_interrupcao_reportada(interrupcao_pendente["geracao"])
+                executor_pronto.set()
             except Exception as e:
+                marcar_interrupcao_fluxo("FALHA_ENVIO_RESULTADO_NODE")
                 registrar_erro_limitado(
                     "resultado_node",
                     f"❌ Falha ao enviar resultado resolvido ao Node: {type(e).__name__}: {e}",
@@ -894,7 +1075,8 @@ def processar_resultado(dados):
                 )
 
             print("\n====================================")
-            if houve_interrupcao: print("⚠️ [ALERTA] Interrupção de Sequência (> 60s)")
+            if houve_interrupcao:
+                print(f"⚠️ [ALERTA] Continuidade interrompida ({motivo_interrupcao or 'DESCONHECIDA'})")
             traducao = {"PlayerWon": "🔵 JOGADOR", "BankerWon": "🔴 BANCA", "Tie": "🟡 EMPATE"}
             print(f"🔥 Vencedor: {traducao.get(resultado, resultado)}")
             print(f"🔵 Jogador : {soma_jogador:02d} | 🔴 Banca: {soma_banca:02d}")
@@ -933,7 +1115,12 @@ def iniciar_robo_blindado():
         
         page = context.new_page()
         aplicar_stealth(page)
-        status_conexao = {"ativa": True, "ws_conectado": False}
+        status_conexao = {
+            "ativa": True,
+            "ws_conectado": False,
+            "ws_oficial": None,
+            "ultimo_player_state_monotonic": 0.0,
+        }
         estado_saldo = {
             "ultima_tentativa": 0.0,
             "ultimo_saldo": None,
@@ -947,30 +1134,57 @@ def iniciar_robo_blindado():
 
         def on_web_socket(ws):
             if "evolution" in ws.url.lower() or "evocdn" in ws.url.lower() or "game" in ws.url.lower():
-                status_conexao["ativa"] = True
-                status_conexao["ws_conectado"] = True
-                ws.on("framereceived", capturar_frame)
+                ws.on("framereceived", lambda texto: capturar_frame(ws, texto))
 
                 def websocket_fechado(_ws):
+                    if status_conexao.get("ws_oficial") is not ws:
+                        return
                     executor_pronto.clear()
-                    status_conexao.update({"ativa": False, "ws_conectado": False})
+                    status_conexao.update({
+                        "ativa": False,
+                        "ws_conectado": False,
+                        "ws_oficial": None,
+                    })
+                    if marcar_interrupcao_fluxo("WEBSOCKET_PLAYER_STATE_FECHADO"):
+                        print("🚨 WebSocket oficial da mesa foi fechado; sinais pendentes serão invalidados.")
+                        notificar_interrupcao_node("WEBSOCKET_PLAYER_STATE_FECHADO")
 
                 ws.on("close", websocket_fechado)
 
-        def capturar_frame(texto):
+        def capturar_frame(ws, texto):
             try:
-                if not texto or not isinstance(texto, str): return
+                if not texto or not isinstance(texto, str):
+                    return
                 texto_limpo = re.sub(r'^\d+', '', texto)
-                if not texto_limpo: return
+                if not texto_limpo:
+                    return
                 dados = json.loads(texto_limpo)
                 if dados.get("type") == "bacbo.playerState":
+                    ws_oficial = status_conexao.get("ws_oficial")
+                    if ws_oficial is not None and ws_oficial is not ws:
+                        return
+                    status_conexao.update({
+                        "ativa": True,
+                        "ws_conectado": True,
+                        "ws_oficial": ws,
+                        "ultimo_player_state_monotonic": time.monotonic(),
+                    })
                     # Atualiza o stage antes de processar Resolved. O POST ao Node pode
                     # gerar uma ordem imediatamente, e ela precisa nascer vinculada a
                     # um estado explicitamente Resolved.
-                    atualizar_estado_mesa_player(dados)
+                    motivo_estado = atualizar_estado_mesa_player(dados)
+                    if motivo_estado:
+                        executor_pronto.clear()
+                        if marcar_interrupcao_fluxo(motivo_estado):
+                            print(f"🚨 Continuidade da rodada Evolution inválida ({motivo_estado}).")
+                            notificar_interrupcao_node(motivo_estado)
                     processar_resultado(dados)
             except json.JSONDecodeError:
-                pass
+                registrar_erro_limitado(
+                    "frame_websocket_json_invalido",
+                    "⚠️ Frame WebSocket textual inválido ignorado antes da identificação playerState.",
+                    30,
+                )
             except Exception as e:
                 registrar_erro_limitado(
                     "capturar_frame",
@@ -984,6 +1198,8 @@ def iniciar_robo_blindado():
             try:
                 executor_pronto.clear()
                 status_conexao["ws_conectado"] = False
+                status_conexao["ws_oficial"] = None
+                status_conexao["ultimo_player_state_monotonic"] = 0.0
                 page.goto(URL_CASSINO, wait_until="domcontentloaded", timeout=60000)
                 fechar_popups(page)
                 
@@ -1015,6 +1231,21 @@ def iniciar_robo_blindado():
                             ordem = fila_apostas.get()
                             processar_ordem_executor(page, ordem)
                         page.wait_for_timeout(500)
+
+                        ultimo_player_state = float(status_conexao.get("ultimo_player_state_monotonic") or 0.0)
+                        if ultimo_player_state > 0 and time.monotonic() - ultimo_player_state > COLLECTOR_PLAYER_STATE_STALE_SECONDS:
+                            executor_pronto.clear()
+                            status_conexao["ativa"] = False
+                            if marcar_interrupcao_fluxo("PLAYER_STATE_STALE"):
+                                print(
+                                    "🚨 Fluxo playerState ficou silencioso por mais de "
+                                    f"{COLLECTOR_PLAYER_STATE_STALE_SECONDS:g}s; reiniciando sessão em modo seguro."
+                                )
+                                notificar_interrupcao_node("PLAYER_STATE_STALE")
+                            break
+
+                    if not status_conexao["ativa"]:
+                        break
                     
                     # Clica no botão 'Continuar' caso a mesa fique inativa para você
                     for frame in page.frames:
