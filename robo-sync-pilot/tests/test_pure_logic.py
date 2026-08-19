@@ -587,6 +587,12 @@ class TestContratoWebSocketFailClosed(unittest.TestCase):
         self.assertNotIn('marcar_interrupcao_fluxo("WEBSOCKET_PLAYER_STATE_FECHADO")', SOURCE)
         self.assertIn('motivo = "WEBSOCKET_RECONEXAO_TIMEOUT"', SOURCE)
 
+    def test_sessao_saudavel_nao_e_recarregada_por_tempo_fixo(self):
+        self.assertIn('while status_conexao["ativa"]:', SOURCE)
+        self.assertNotIn('(2 * 60 * 60 * 1000)', SOURCE)
+        self.assertNotIn('Reinicia a cada 2 horas', SOURCE)
+        self.assertNotIn('tempo_passado += 10000', SOURCE)
+
     def test_watchdog_reinicia_coletor_e_notifica_node(self):
         self.assertIn("COLLECTOR_PLAYER_STATE_STALE_SECONDS", SOURCE)
         self.assertIn('marcar_interrupcao_fluxo("PLAYER_STATE_STALE")', SOURCE)
