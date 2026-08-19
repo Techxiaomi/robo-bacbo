@@ -1,6 +1,6 @@
 # Problemas e Riscos Conhecidos
 
-Atualizado em 2026-08-18. Este arquivo descreve o estado atual do `main` e separa riscos ainda abertos de itens já mitigados.
+Atualizado em 2026-08-19. Este arquivo descreve o estado atual do `main` e separa riscos ainda abertos de itens já mitigados.
 
 ## Pendências reais
 
@@ -91,6 +91,18 @@ Risco residual externo:
 
 ## Itens mitigados
 
+### BUG-021 — Rodada invisível ao Python podia concluir o sinal no resultado seguinte
+
+Status: **mitigado em modo fail-closed, com dependência externa residual**.
+
+O `coletor_seq` anterior provava somente a ordem dos resultados que o Python havia observado. Se uma rodada desaparecesse antes de `processar_resultado()`, o próximo resultado recebia uma sequência local contígua e podia concluir um sinal pendente. Além disso, interrupções temporais apenas separavam o histórico; a invalidação financeira ocorria somente em salto/restart/metadados ausentes.
+
+O coletor agora elege como oficial apenas o WebSocket que efetivamente entrega `bacbo.playerState`, monitora o tempo desde o último estado e mantém um lacre de interrupção até o Node confirmar um resultado posterior. Fechamento do socket oficial, `playerState` silencioso, payload `Resolved` inválido e falha no POST rompem a continuidade. A rota interna autenticada `/collector-health` antecipa a invalidação sem esperar a próxima rodada; o Node a coloca na mesma FIFO dos resultados e só confirma após limpar sinais pendentes e bloquear Auto-Traders com ordem `PENDENTE` como `DADOS_INCOMPLETOS`.
+
+Qualquer interrupção reconhecida — inclusive apenas temporal ou sinalizada pelo Python — passa a invalidar pendências antes de processar o giro de retomada. O resultado de retomada abre uma nova `id_sessao`, podendo servir como nova âncora histórica, mas nunca como desfecho do sinal anterior. `Resolved` também exige vencedor conhecido, quatro dados únicos no intervalo 1..6 e coerência matemática entre os dados e o vencedor. Quando o payload fornece `roundId`/variante, uma troca de rodada antes de observar `Resolved` rompe a continuidade.
+
+Risco residual externo: o projeto não presume que `roundId` seja numérico/sequencial sem contrato oficial. Se a plataforma omitir uma rodada completa, continuar enviando outros `playerState` válidos e retornar antes do watchdog, uma única fonte não consegue provar matematicamente a ausência. A proteção prioriza falhar fechado em fechamento, silêncio e transições observáveis; reconciliação por uma segunda fonte oficial/roadmap continua sendo a única forma de elevar essa garantia contra omissão totalmente invisível da fonte primária.
+
 ### BUG-019 — Proteção no empate existia no sinal, mas não na execução financeira
 
 Status: **mitigado**.
@@ -108,7 +120,7 @@ O sinal pode nascer assim que o coletor recebe `stage=Resolved`, enquanto a mesa
 
 Status: **mitigado**.
 
-`/apostar` e `/receber-sinal` exigem `INTERNAL_API_TOKEN`; o executor Flask usa loopback por padrão e valida payload mínimo antes de enfileirar ordem.
+`/apostar`, `/receber-sinal`, `/collector-health` e `/executor-status` exigem `INTERNAL_API_TOKEN`; o executor Flask usa loopback por padrão e valida payload mínimo antes de enfileirar ordem.
 
 ### SEC-003 — APIs Node sem autenticação e CORS amplo
 
