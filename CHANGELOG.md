@@ -41,6 +41,9 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - O CI usa permissões `contents: read`, sem secrets, sem instalação de dependências e sem inicializar MySQL, Flask, Playwright ou rede do projeto.
 
 ### Fixed
+- BUG-021: uma rodada ausente antes do contador local do Python não pode mais concluir silenciosamente o sinal anterior. O coletor elege como oficial somente o WebSocket que entrega `bacbo.playerState`, monitora silêncio configurável, lacra a continuidade em fechamento/stall/payload inválido/falha de entrega e notifica imediatamente o endpoint autenticado `/collector-health`.
+- O Node serializa a notificação de saúde na mesma FIFO dos resultados e invalida sinais/ordens pendentes antes do ACK. `INTERVALO_NODE` e `INTERRUPCAO_PYTHON` também passam a invalidar pendências, não apenas saltos de `coletor_seq`; o primeiro giro após a interrupção inicia nova sessão e jamais fecha o sinal anterior.
+- Resultados `Resolved` agora exigem vencedor conhecido, exatamente quatro dados únicos de 1 a 6 e coerência matemática entre dados e vencedor. Quando `roundId`/variante está disponível, mudança de rodada sem `Resolved` também rompe a continuidade; a identidade original segue no payload como `rodada_origem` para diagnóstico.
 - BUG-001: o Node agora aguarda e valida a confirmação HTTP do executor antes de contabilizar uma entrada direta ou criar a nova ordem `PENDENTE` de Gale.
 - Entradas diretas atualizam `entradas_feitas` e auditoria em uma transação local somente após o aceite do executor.
 - Falhas de conexão, timeout, HTTP não-2xx e confirmações divergentes deixam de ser silenciosas e não são contabilizadas como novas ordens enviadas.
