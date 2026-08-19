@@ -522,7 +522,9 @@ app.post('/auth/logout', (req, res) => {
 });
 
 app.use((req, res, next) => {
-    const rotaInterna = req.path === '/receber-sinal' || req.path === '/executor-status';
+    const rotaInterna = req.path === '/receber-sinal'
+        || req.path === '/executor-status'
+        || req.path === '/collector-health';
     if (rotaInterna) return next();
     if (!ADMIN_AUTH_REQUIRED || sessaoAdminValidaCookie(req.get('Cookie'))) return next();
 
@@ -534,6 +536,7 @@ app.use((req, res, next) => {
 app.use((req, res, next) => {
     const rotaDependeDeInicializacao = req.path === '/receber-sinal'
         || req.path === '/executor-status'
+        || req.path === '/collector-health'
         || req.path.startsWith('/api/');
     if (rotaDependeDeInicializacao && !backendPronto) {
         return res.status(503).json({ erro: 'backend_inicializando' });
@@ -1958,7 +1961,7 @@ async function invalidarSequenciasAposBuracoDados(motivo) {
         }
     }
 
-    console.warn(`⚠️ Buraco de dados confirmado (${motivo || 'DESCONHECIDO'}): ${sinaisInvalidados} sinal(is) pendente(s) invalidado(s), ${traderIds.length} Auto-Trader(s) com ordem pendente bloqueado(s).`);
+    console.warn(`⚠️ Continuidade de dados comprometida (${motivo || 'DESCONHECIDO'}): ${sinaisInvalidados} sinal(is) pendente(s) invalidado(s), ${traderIds.length} Auto-Trader(s) com ordem pendente bloqueado(s).`);
     ioServer.emit('atualizar_interface');
     return { sinais_invalidados: sinaisInvalidados, traders_bloqueados: traderIds.length };
 }
@@ -3115,6 +3118,30 @@ app.post("/executor-status", (req, res) => {
     return res.json({ recebido: true, orfa: !entregue });
 });
 
+app.post("/collector-health", async (req, res) => {
+    let liberarTurnoResultado = null;
+    try {
+        if (!requisicaoInternaAutorizada(req)) {
+            return res.status(401).json({ erro: "Nao autorizado" });
+        }
+
+        const dados = req.body || {};
+        if (String(dados.evento || '').trim().toUpperCase() !== 'INTERRUPCAO') {
+            return res.status(400).json({ erro: "evento de saude invalido" });
+        }
+
+        const motivo = String(dados.motivo || 'INTERRUPCAO_COLETOR').trim().slice(0, 120) || 'INTERRUPCAO_COLETOR';
+        liberarTurnoResultado = await aguardarTurnoProcessamentoResultado();
+        const resumo = await invalidarSequenciasAposBuracoDados(motivo);
+        return res.json({ recebido: true, continuidade: 'INVALIDADA', ...resumo });
+    } catch (e) {
+        console.error("❌ Falha ao tratar interrupção imediata do coletor:", e.message);
+        if (!res.headersSent) return res.status(500).json({ erro: "falha ao invalidar continuidade" });
+    } finally {
+        if (liberarTurnoResultado) liberarTurnoResultado();
+    }
+});
+
 app.post("/receber-sinal", async (req, res) => {
     let liberarTurnoResultado = null;
     try {
@@ -3176,13 +3203,10 @@ app.post("/receber-sinal", async (req, res) => {
         if (continuidade.interrupcao) {
             const dadosInterrupcao = { ...dados, interrupcao_fluxo: true, motivo_interrupcao: continuidade.motivo };
             rotacionarSessaoAposInterrupcao(dadosInterrupcao);
-
-            if (continuidade.buraco_confirmado) {
-                await invalidarSequenciasAposBuracoDados(continuidade.motivo);
-            }
+            await invalidarSequenciasAposBuracoDados(continuidade.motivo);
         }
 
-        // Só avança a continuidade depois que o tratamento de um buraco confirmado foi persistido com sucesso.
+        // Só avança a continuidade depois que qualquer interrupção foi tratada em modo fail-closed.
         estadoContinuidadeColetor = continuidade.estado;
 
         try {
