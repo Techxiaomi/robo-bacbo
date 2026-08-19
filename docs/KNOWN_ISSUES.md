@@ -91,6 +91,14 @@ Risco residual externo:
 
 ## Itens mitigados
 
+### BUG-027 — Auto-Trader não reconhecia fontes dinâmicas selecionadas no painel
+
+Status: **mitigado em código; validação operacional com ordem real pendente**.
+
+O formulário persistia a seleção de um Robô IA como `[AUTO] Nome`, mas cada estratégia dinâmica era identificada no backend por `AUTO_PILOT_IA:<robo_dono_id>`. Como entrada, Gale e fechamento usavam igualdade literal entre esses valores, o Auto-Trader era silenciosamente ignorado antes de criar a intenção `PREPARANDO` ou chamar o executor Python. O estado `OPERANDO` comprovava apenas sincronização com a mesa, não a validade da associação da fonte.
+
+O painel agora grava `AUTO_PILOT_IA:<id>` como identidade estável e continua exibindo `[AUTO] Nome` apenas como rótulo. O backend centraliza a autorização: estratégias IA são associadas pelo proprietário real, origens manuais continuam pelo nome e robôs diferentes permanecem isolados. Um fallback nominal preserva configurações legadas, mas novas configurações não dependem de nome nem são quebradas por renomeação do robô. O log registra quando um Auto-Trader é efetivamente autorizado para um sinal antes das demais barreiras operacionais.
+
 ### BUG-026 — Handover legítimo sem `roundId` ainda podia expirar sem evidência alternativa
 
 Status: **mitigado em código; validação operacional da semântica da roadmap pendente**.
