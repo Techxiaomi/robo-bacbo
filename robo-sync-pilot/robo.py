@@ -715,6 +715,13 @@ def snapshot_estado_mesa():
         }
 
 
+def player_state_reconexao_elegivel(dados):
+    """Exige identidade mínima antes de decidir uma reconexão em quarentena."""
+    game_info = dados.get("args", {}).get("game", {}) if isinstance(dados, dict) else {}
+    stage = str(game_info.get("stage") or "").strip()
+    return bool(stage and identidade_rodada_evolution(game_info))
+
+
 def classificar_reconexao_player_state(estado_anterior, dados, decorrido_segundos, limite_segundos):
     anterior = estado_anterior if isinstance(estado_anterior, dict) else {}
     game_info = dados.get("args", {}).get("game", {}) if isinstance(dados, dict) else {}
@@ -1226,6 +1233,16 @@ def iniciar_robo_blindado():
                     reconexao = status_conexao.get("reconexao_pendente")
                     classificacao_reconexao = None
                     if isinstance(reconexao, dict):
+                        # A Evolution pode emitir frames transitórios sem roundId ao
+                        # abrir um novo socket. Eles não provam continuidade nem
+                        # buraco: aguarda o próximo playerState completo até o timeout.
+                        if not player_state_reconexao_elegivel(dados):
+                            registrar_erro_limitado(
+                                "reconexao_player_state_incompleto",
+                                "⏳ WebSocket em reconexão: aguardando playerState completo com stage e roundId.",
+                                5,
+                            )
+                            return
                         decorrido = time.monotonic() - float(reconexao.get("iniciada_monotonic") or 0.0)
                         classificacao_reconexao = classificar_reconexao_player_state(
                             reconexao.get("estado_anterior"),
