@@ -63,7 +63,7 @@ test("receber-sinal reserva sequencia antes de I/O, da ACK antes do turno e semp
     const ack = handler.indexOf("res.json({ recebido: true });");
     const turno = handler.indexOf("await aguardarTurnoProcessamentoResultado();");
     const interrupcao = handler.indexOf("if (continuidade.interrupcao)");
-    const invalidacao = handler.indexOf("await invalidarSequenciasAposBuracoDados(continuidade.motivo);");
+    const invalidacao = handler.indexOf("await invalidarSequenciasAposBuracoDados(motivoInterrupcao);");
     const finallyRelease = handler.indexOf("if (liberarTurnoResultado)");
 
     assert.ok(reserva >= 0 && primeiroAwaitSaldo > reserva, "reserva deve preceder o primeiro I/O possível");
@@ -81,10 +81,12 @@ test("collector-health serializa e persiste a invalidação antes do ACK", () =>
 
     const turno = handler.indexOf("await aguardarTurnoProcessamentoResultado();");
     const invalidacao = handler.indexOf("await invalidarSequenciasAposBuracoDados(motivo);");
-    const ack = handler.indexOf("return res.json({ recebido: true, continuidade: 'INVALIDADA'");
+    const ack = handler.indexOf("continuidade: 'INVALIDADA',", invalidacao);
     const release = handler.indexOf("if (liberarTurnoResultado) liberarTurnoResultado();");
 
     assert.ok(turno >= 0 && invalidacao > turno, "health deve entrar na mesma FIFO dos resultados");
     assert.ok(ack > invalidacao, "ACK de saúde só pode ocorrer após invalidação persistida");
     assert.ok(release > ack, "turno de saúde deve ser liberado em finally");
+    assert.match(handler, /reservaInterrupcao\.estado === 'PROCESSANDO'[\s\S]*?status\(503\)[\s\S]*?INVALIDACAO_EM_ANDAMENTO/);
+    assert.match(handler, /reservaInterrupcao\.repetida[\s\S]*?INVALIDADA_ANTERIORMENTE/);
 });
