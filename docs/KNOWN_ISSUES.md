@@ -91,6 +91,14 @@ Risco residual externo:
 
 ## Itens mitigados
 
+### BUG-025 — Frame parcial na reconexão encerrava a quarentena antes da evidência estrutural
+
+Status: **mitigado em código; validação operacional pendente**.
+
+Alguns handovers da Evolution podem entregar inicialmente um `bacbo.playerState` sem `roundId`. O BUG-023 tratava esse primeiro frame como uma ambiguidade definitiva e criava nova sessão, embora ainda existisse tempo na janela de reconexão para receber o estado completo.
+
+Durante a quarentena, frames sem `stage` ou sem identidade de rodada agora são apenas ignorados, mantendo o executor bloqueado. A decisão é tomada somente ao chegar um `playerState` completo, ou quando expira `WEBSOCKET_RECONNECT_GRACE_SECONDS`. A ausência de identidade até o timeout, uma troca incompatível ou outra evidência estrutural continuam invalidando em modo fail-closed.
+
 ### BUG-024 — Reload preventivo criava uma janela periódica sem observabilidade
 
 Status: **mitigado em código; validação operacional prolongada pendente**.
