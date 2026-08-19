@@ -21,6 +21,7 @@ def carregar_funcoes_reais():
         "normalizar_apostas_recebidas",
         "parsear_valor_monetario",
         "ler_saldo_atual",
+        "identidade_rodada_evolution",
         "atualizar_estado_mesa_player",
         "avaliar_contexto_janela_aposta",
         "elemento_apostavel",
@@ -49,7 +50,12 @@ def carregar_funcoes_reais():
         "EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS": 1.5,
         "executor_pronto": executor_pronto,
         "estado_mesa_lock": threading.Lock(),
-        "estado_mesa": {"stage": "Resolved", "atualizado_em_ms": 0},
+        "estado_mesa": {
+            "stage": "Resolved",
+            "atualizado_em_ms": 0,
+            "round_id": "",
+            "round_resolvido": False,
+        },
         "coletor_seq": 0,
     }
     exec(compile(modulo, str(ROBO_PATH), "exec"), namespace)
