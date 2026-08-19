@@ -311,6 +311,11 @@ def main():
         assert opcoes["dashboardBacktestSelecionado"] == "MAX", opcoes
         assert opcoes["socketRegistrado"] is True, opcoes
 
+        page.evaluate("() => window.mudarAbaPrincipal('padroes')")
+        page.wait_for_function(
+            "() => document.getElementById('view-padroes').style.display !== 'none'",
+            timeout=5000,
+        )
         page.select_option("#select-origem-filtro", "TODAS")
         page.select_option("#select-tipo-filtro", "MANUAIS")
         manuais = page.locator("#lista-padroes .card")
