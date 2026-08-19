@@ -816,6 +816,13 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
             });
         }
 
+        if (Array.isArray(resumo.live_preservado_auditoria) && resumo.live_preservado_auditoria.length > 0) {
+            linhas.push('   📈 ELIMINADOS COM HISTÓRICO LIVE PRESERVADO');
+            resumo.live_preservado_auditoria.forEach((item, i) => linhas.push(
+                `      #${i + 1} ${formatarLinhaAuditoriaCandidato(item)} | live preservado=${formatarPercentualDiagnostico(item.live.assertividade)} (${item.live.ocorrencias}), streak RED=${item.live.streak_red}`
+            ));
+        }
+
         if (resumo.ativos.length > 0) {
             linhas.push('   🏆 ATIVOS');
             resumo.ativos.forEach((c, i) => linhas.push(
@@ -929,7 +936,15 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
         const incumbentesAtivos = new Set(
             existentes.filter(e => e.ativo === true || e.ativo === 1).map(e => String(e.id))
         );
-        const idsLive = [...new Set([...existentesMap.keys(), ...candidatos.map(c => String(c.id))])];
+        const auditoriasIniciais = Array.isArray(candidatos?.diagnostico?.candidatos)
+            ? candidatos.diagnostico.candidatos
+            : [];
+        const idsAuditoria = auditoriasIniciais.flatMap(a => [a.id, a.id_anterior]).filter(Boolean).map(String);
+        const idsLive = [...new Set([
+            ...existentesMap.keys(),
+            ...candidatos.map(c => String(c.id)),
+            ...idsAuditoria
+        ])];
         const liveMap = await historicoLive(idsLive);
 
         const elegiveis = candidatos.filter(c => c.shadow_ok);
@@ -1018,6 +1033,16 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
                     live: metricasLiveAuditoria(auditoria, idAnterior)
                 };
             });
+        const idsJaDetalhados = new Set([
+            ...incumbentesAuditoria.flatMap(a => [a.id, a.id_anterior]),
+            ...auditorias
+                .filter(a => a.shadow && a.status === 'REPROVADO_SHADOW_HISTORICO')
+                .flatMap(a => [a.id, a.id_anterior])
+        ].filter(Boolean).map(String));
+        const livePreservadoAuditoria = auditorias
+            .map(a => ({ ...a, live: metricasLiveAuditoria(a) }))
+            .filter(a => a.live.ocorrencias > 0)
+            .filter(a => ![a.id, a.id_anterior].filter(Boolean).some(id => idsJaDetalhados.has(String(id))));
         const agora = Date.now();
         const ttlMs = config.ttl_horas * 60 * 60 * 1000;
         const tiesZerado = JSON.stringify({ direto:{}, gale1:{}, gale2:{} });
@@ -1128,7 +1153,8 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
             incumbentes_auditoria: incumbentesAuditoria,
             shadow_historico_auditoria: auditorias
                 .filter(a => a.shadow && a.status === 'REPROVADO_SHADOW_HISTORICO')
-                .map(a => ({ ...a, live: metricasLiveAuditoria(a) }))
+                .map(a => ({ ...a, live: metricasLiveAuditoria(a) })),
+            live_preservado_auditoria: livePreservadoAuditoria
         };
     }
 
