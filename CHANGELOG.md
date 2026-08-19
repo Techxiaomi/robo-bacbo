@@ -41,6 +41,7 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - O CI usa permissões `contents: read`, sem secrets, sem instalação de dependências e sem inicializar MySQL, Flask, Playwright ou rede do projeto.
 
 ### Fixed
+- BUG-025: um `playerState` transitório sem `roundId` durante a quarentena de reconexão não invalida mais imediatamente a continuidade. O executor permanece bloqueado e aguarda, dentro da janela do BUG-023, um frame completo com `stage` e identidade de rodada; timeout ou evidência estrutural incompatível continuam fail-closed.
 - BUG-024: removida a navegação preventiva que descartava uma sessão saudável aproximadamente a cada duas horas. O coletor agora permanece conectado indefinidamente e só reinicia a navegação diante de falha observável de WebSocket/playerState, login, página ou Playwright.
 - O reload periódico apagava o contexto do socket antes do `page.goto()` e podia criar uma janela sem observabilidade fora da quarentena do BUG-023. As recuperações fail-closed, o watchdog, o Auto-Login e o tratamento do botão `Continuar` permanecem ativos.
 - BUG-023: fechamento transitório do WebSocket oficial deixa de invalidar imediatamente uma sequência que continua íntegra. O coletor entra em quarentena curta, bloqueia novas execuções e confirma a retomada pela identidade estrutural da rodada antes de preservar a sessão.
