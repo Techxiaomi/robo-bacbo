@@ -36,14 +36,16 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - OBS-003A: `npm test` passa a executar testes reais com `node:test` sobre lógica pura do backend, sem MySQL, rede ou inicialização do servidor.
 - A suíte inicial cobre stake rounding, níveis de Gale, TIEs legados, filtros de robô, mensagens Telegram e janelas de horário inclusive overnight.
 - OBS-003B: adicionada suíte Python `unittest` que extrai funções de `robo.py` via AST sem importar/inicializar Flask ou Playwright.
-- Os testes cobrem parsing de saldo e transformação de rodada resolvida em payload Node, incluindo TIE, interrupção >60s e falha HTTP simulada.
+- Os testes cobrem parsing de saldo e transformação de rodada resolvida em payload Node, incluindo TIE, pausa operacional >60s e falha HTTP simulada.
 - OBS-003C: GitHub Actions passa a executar automaticamente as suítes Node/Python e checagens de sintaxe em PRs e pushes para `main`.
 - O CI usa permissões `contents: read`, sem secrets, sem instalação de dependências e sem inicializar MySQL, Flask, Playwright ou rede do projeto.
 
 ### Fixed
 - BUG-021: uma rodada ausente antes do contador local do Python não pode mais concluir silenciosamente o sinal anterior. O coletor elege como oficial somente o WebSocket que entrega `bacbo.playerState`, monitora silêncio configurável, lacra a continuidade em fechamento/stall/payload inválido/falha de entrega e notifica imediatamente o endpoint autenticado `/collector-health`.
-- O Node serializa a notificação de saúde na mesma FIFO dos resultados e invalida sinais/ordens pendentes antes do ACK. `INTERVALO_NODE` e `INTERRUPCAO_PYTHON` também passam a invalidar pendências, não apenas saltos de `coletor_seq`; o primeiro giro após a interrupção inicia nova sessão e jamais fecha o sinal anterior.
+- O Node serializa a notificação de saúde na mesma FIFO dos resultados e invalida sinais/ordens pendentes antes do ACK. `INTERRUPCAO_PYTHON` e evidências estruturais também invalidam pendências, não apenas saltos de `coletor_seq`; o primeiro giro após a interrupção inicia nova sessão e jamais fecha o sinal anterior.
 - Resultados `Resolved` agora exigem vencedor conhecido, exatamente quatro dados únicos de 1 a 6 e coerência matemática entre dados e vencedor. Quando `roundId`/variante está disponível, mudança de rodada sem `Resolved` também rompe a continuidade; a identidade original segue no payload como `rodada_origem` para diagnóstico.
+- BUG-022: pausas legítimas superiores a 60 segundos entre resultados deixam de ser tratadas como prova de buraco. O Python mantém o intervalo apenas como aviso operacional explícito, sem preencher `interrupcao_fluxo`, e o Node remove `INTERVALO_NODE` como causa de invalidação.
+- A continuidade fail-closed permanece baseada em fechamento/silêncio do WebSocket oficial, troca de rodada sem `Resolved`, resultado inválido, falha de entrega, reinício do coletor, metadados ausentes e salto de `coletor_seq`.
 - BUG-001: o Node agora aguarda e valida a confirmação HTTP do executor antes de contabilizar uma entrada direta ou criar a nova ordem `PENDENTE` de Gale.
 - Entradas diretas atualizam `entradas_feitas` e auditoria em uma transação local somente após o aceite do executor.
 - Falhas de conexão, timeout, HTTP não-2xx e confirmações divergentes deixam de ser silenciosas e não são contabilizadas como novas ordens enviadas.
@@ -59,7 +61,7 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - A transição é persistida no MySQL antes de atualizar o estado em memória; traders desligados ou em outros estados não são alterados.
 - BUG-003: editar configurações ou usar o toggle rápido do Auto-Trader não sobrescreve mais `saldo_inicial` nem `saldo_atual`.
 - Criação de um novo Auto-Trader continua inicializando os dois saldos; recalibração futura deverá ser uma ação explícita.
-- BUG-004: `interrupcao_fluxo` agora inicia uma nova `idSessaoContinua` antes de registrar o primeiro giro após uma pausa superior a 60 segundos.
+- BUG-004: `interrupcao_fluxo` agora inicia uma nova `idSessaoContinua` antes de registrar o primeiro giro após uma interrupção confirmada. A associação histórica original com pausas superiores a 60 segundos foi removida pelo BUG-022.
 - A separação de sessão reaproveita a checagem `mesmaSessao` já existente e não altera ordens pendentes, stake, Gale ou frontend.
 - BUG-005A: resultados finalizados de estratégias agora são persistidos em `historico_resultados` como `GREEN`, `TIE` ou `RED`, incluindo nível, multiplicador de empate e horário da rodada.
 - `historico_disparos_robos` permanece fora deste patch até que o fluxo de robôs consiga identificar de forma confiável quais robôs efetivamente receberam cada sinal.
@@ -89,8 +91,8 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - Reativação inicia novo ciclo em `STANDBY`, zera `entradas_feitas`/`pulos_restantes` e rejeita ativação com HTTP 409 quando o saldo está ausente ou além da janela de freshness configurável. Edição de trader já ativo continua preservando os saldos.
 - BUG-010: o desligamento manual do Auto-Trader passa a persistir `status_operacao='DESLIGADO'`, eliminando combinações incoerentes como `ativo=false` + `OPERANDO`.
 - Traders criados inativos também começam em `DESLIGADO`; no startup, linhas legadas inativas em `OPERANDO`/`STANDBY` são normalizadas sem alterar `STOP_WIN`, `STOP_LOSS`, `STOP_REDS` ou `TRAILING_STOP`. A reativação continua entrando em `STANDBY` com novo baseline.
-- BUG-011: resultados Python→Node passam a carregar `coletor_sessao` e `coletor_seq`; o Node mantém verificação própria de continuidade e detecta salto de sequência, reinício do coletor, desaparecimento de metadados, duplicatas/fora de ordem e intervalo temporal.
-- Saltos/restarts/metadados ausentes são tratados como buraco confirmado: a sessão histórica é rotacionada, sinais analíticos pendentes são invalidados e ordens `PENDENTE` são marcadas `DADOS_INCOMPLETOS`, desligando somente os Auto-Traders afetados até reativação manual. Pausas temporais >60 s continuam somente separando sessões, sem serem confundidas com perda confirmada.
+- BUG-011: resultados Python→Node passam a carregar `coletor_sessao` e `coletor_seq`; o Node mantém verificação própria de continuidade e detecta salto de sequência, reinício do coletor, desaparecimento de metadados e duplicatas/fora de ordem.
+- Saltos/restarts/metadados ausentes são tratados como buraco confirmado: a sessão histórica é rotacionada, sinais analíticos pendentes são invalidados e ordens `PENDENTE` são marcadas `DADOS_INCOMPLETOS`, desligando somente os Auto-Traders afetados até reativação manual. Desde o BUG-022, pausas temporais >60 s não separam sessões nem invalidam pendências sem evidência estrutural.
 - Backtest e minerador continuam exigindo `id_sessao` consistente; a estatística visual de maiores sequências também passa a zerar seus contadores ao mudar de sessão.
 - BUG-012: exclusão de Robô/Canal passa a remover, na mesma transação, todos os padrões IA cuja propriedade é `robo_dono_id`, além dos históricos ligados a esses padrões e ao robô excluído.
 - O startup executa limpeza idempotente de padrões dinâmicos órfãos (`is_dinamico=true` sem proprietário existente), corrigindo automaticamente resíduos deixados por versões anteriores sem tocar em padrões manuais.

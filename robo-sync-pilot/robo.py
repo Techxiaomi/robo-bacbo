@@ -19,8 +19,8 @@ load_env_file(os.path.join(PROJECT_ROOT, ".env"))
 # ====================================================================
 # CONFIGURAÇÕES GERAIS E CONTROLE DE VERSÃO
 # ====================================================================
-VERSAO_ROBO = "v1.6"
-NOME_ATUALIZACAO = "Continuidade Evolution Fail-Closed"
+VERSAO_ROBO = "v1.6.1"
+NOME_ATUALIZACAO = "Continuidade Estrutural Fail-Closed"
 
 URL_CASSINO = os.getenv("CASINO_GAME_URL", "")
 ARQUIVO_SESSAO = os.getenv("SESSION_STATE_FILE", os.path.join(BASE_DIR, "sessao_salva.json"))
@@ -1028,11 +1028,16 @@ def processar_resultado(dados):
             soma_banca = valores_dados[2] + valores_dados[4]
 
             interrupcao_pendente = snapshot_interrupcao_fluxo()
-            intervalo_excedido = ultimo_tempo_rodada > 0 and (tempo_atual - ultimo_tempo_rodada) > 60
-            houve_interrupcao = intervalo_excedido or interrupcao_pendente["interrompida"]
-            motivo_interrupcao = interrupcao_pendente["motivo"] if interrupcao_pendente["interrompida"] else (
-                "INTERVALO_RESULTADOS" if intervalo_excedido else ""
-            )
+            intervalo_resultados = tempo_atual - ultimo_tempo_rodada if ultimo_tempo_rodada > 0 else 0
+            if intervalo_resultados > 60:
+                registrar_erro_limitado(
+                    "intervalo_resultados_longo",
+                    "⚠️ Intervalo operacional longo entre resultados "
+                    f"({intervalo_resultados:.1f}s); continuidade preservada sem evidência estrutural de falha.",
+                    30,
+                )
+            houve_interrupcao = interrupcao_pendente["interrompida"]
+            motivo_interrupcao = interrupcao_pendente["motivo"] if houve_interrupcao else ""
             ultimo_tempo_rodada = tempo_atual
 
             payload = {

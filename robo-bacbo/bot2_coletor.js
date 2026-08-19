@@ -1830,7 +1830,7 @@ async function ativarAutoTradersAguardandoMesa() {
     console.log(`🟢 ${aguardandoMesa.length} Auto-Trader(s) sincronizado(s) com a mesa e liberado(s) para OPERANDO.`);
 }
 
-function avaliarContinuidadeResultado(estadoAnterior, dados, limiteMs = 60000) {
+function avaliarContinuidadeResultado(estadoAnterior, dados) {
     const anterior = estadoAnterior || {};
     const atual = dados || {};
 
@@ -1878,14 +1878,6 @@ function avaliarContinuidadeResultado(estadoAnterior, dados, limiteMs = 60000) {
             buracoConfirmado = true;
             motivo = 'SALTO_SEQUENCIA';
         }
-    }
-
-    const limiteNumero = Number(limiteMs);
-    const limite = Number.isFinite(limiteNumero) && limiteNumero > 0 ? limiteNumero : 60000;
-
-    if (!interrupcao && timestampAnterior !== null && timestampRecebido !== null && timestampRecebido - timestampAnterior > limite) {
-        interrupcao = true;
-        motivo = 'INTERVALO_NODE';
     }
 
     if (!interrupcao && atual.interrupcao_fluxo === true) {

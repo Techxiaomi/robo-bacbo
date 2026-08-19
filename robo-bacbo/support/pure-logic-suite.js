@@ -718,14 +718,14 @@ test("avaliarContinuidadeResultado detecta salto, restart e duplicatas", () => {
     assert.equal(r.motivo, "COLETOR_REINICIADO");
 });
 
-test("qualquer interrupcao de continuidade invalida pendencias em modo fail-closed", () => {
+test("intervalo longo preserva continuidade e evidencias estruturais invalidam pendencias", () => {
     let r = logic.avaliarContinuidadeResultado(
         { sessao: "sessao-a", seq: 2, timestamp_coleta: 1000 },
         { coletor_sessao: "sessao-a", coletor_seq: 3, timestamp_coleta: 62001 }
     );
-    assert.equal(r.interrupcao, true);
+    assert.equal(r.interrupcao, false);
     assert.equal(r.buraco_confirmado, false);
-    assert.equal(r.motivo, "INTERVALO_NODE");
+    assert.equal(r.motivo, null);
 
     r = logic.avaliarContinuidadeResultado(
         { sessao: "sessao-a", seq: 2, timestamp_coleta: 1000 },
@@ -745,6 +745,7 @@ test("qualquer interrupcao de continuidade invalida pendencias em modo fail-clos
 
     assert.match(source, /if \(continuidade\.interrupcao\) \{[\s\S]*?await invalidarSequenciasAposBuracoDados\(continuidade\.motivo\);/);
     assert.doesNotMatch(source, /if \(continuidade\.buraco_confirmado\) \{\s*await invalidarSequenciasAposBuracoDados/);
+    assert.doesNotMatch(source, /INTERVALO_NODE/);
     assert.match(source, /app\.post\("\/collector-health"[\s\S]*?await invalidarSequenciasAposBuracoDados\(motivo\)/);
     assert.match(source, /SET status_ordem='DADOS_INCOMPLETOS'\s*WHERE status_ordem='PENDENTE'/);
     assert.match(source, /SET ativo=false, status_operacao='DADOS_INCOMPLETOS'/);

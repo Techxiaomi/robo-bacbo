@@ -296,7 +296,7 @@ class TestProcessarResultado(unittest.TestCase):
         self.assertEqual(payload["timestamp_coleta"], 100000)
         self.assertEqual(self.ns["ultimo_tempo_rodada"], 100.0)
 
-    def test_normaliza_tie_e_detecta_interrupcao_maior_que_60s(self):
+    def test_normaliza_tie_e_trata_intervalo_maior_que_60s_apenas_como_aviso(self):
         self.ns["ultimo_tempo_rodada"] = 30.0
         FakeTime.atual = 100.5
 
@@ -305,9 +305,13 @@ class TestProcessarResultado(unittest.TestCase):
         payload = FakeRequests.chamadas[0]["kwargs"]["json"]
         self.assertEqual(payload["vencedor"], "Tie")
         self.assertEqual(payload["resultado_bruto"], "TieWon")
-        self.assertTrue(payload["interrupcao_fluxo"])
-        self.assertEqual(payload["motivo_interrupcao"], "INTERVALO_RESULTADOS")
+        self.assertFalse(payload["interrupcao_fluxo"])
+        self.assertEqual(payload["motivo_interrupcao"], "")
         self.assertEqual(payload["timestamp_coleta"], 100500)
+        self.assertTrue(any(
+            chave == "intervalo_resultados_longo" and "continuidade preservada" in mensagem
+            for chave, mensagem, _ in self.logs
+        ))
 
     def test_exatamente_60s_nao_e_interrupcao(self):
         self.ns["ultimo_tempo_rodada"] = 40.0
@@ -318,6 +322,7 @@ class TestProcessarResultado(unittest.TestCase):
         payload = FakeRequests.chamadas[0]["kwargs"]["json"]
         self.assertFalse(payload["interrupcao_fluxo"])
         self.assertEqual(payload["vencedor"], "BankerWon")
+        self.assertFalse(any(chave == "intervalo_resultados_longo" for chave, _, _ in self.logs))
 
     def test_frame_resolved_identico_repetido_nao_consume_nova_seq(self):
         dados = self.dados_resolvidos("PlayerWon")
