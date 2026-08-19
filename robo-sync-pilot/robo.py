@@ -82,6 +82,14 @@ try:
 except ValueError:
     BALANCE_SYNC_HEARTBEAT_SECONDS = 60.0
 
+try:
+    WEBSOCKET_RECONNECT_GRACE_SECONDS = max(
+        2.0,
+        min(30.0, float(os.getenv("WEBSOCKET_RECONNECT_GRACE_SECONDS", "10")))
+    )
+except ValueError:
+    WEBSOCKET_RECONNECT_GRACE_SECONDS = 10.0
+
 if not INTERNAL_API_TOKEN:
     raise RuntimeError("INTERNAL_API_TOKEN nao configurado. Defina o segredo compartilhado no .env antes de iniciar o executor.")
 
@@ -423,6 +431,14 @@ def snapshot_interrupcao_fluxo():
         }
 
 
+def id_interrupcao_fluxo(snapshot=None):
+    estado = snapshot if isinstance(snapshot, dict) else snapshot_interrupcao_fluxo()
+    geracao = max(0, int(estado.get("geracao") or 0))
+    if geracao <= 0:
+        return ""
+    return f"{COLETOR_SESSAO}:{geracao}"
+
+
 def confirmar_interrupcao_reportada(geracao):
     with continuidade_fluxo_lock:
         if not continuidade_fluxo["interrompida"]:
@@ -435,11 +451,14 @@ def confirmar_interrupcao_reportada(geracao):
 
 
 def notificar_interrupcao_node(motivo, timestamp_ms=None):
+    interrupcao = snapshot_interrupcao_fluxo()
     payload = {
         "evento": "INTERRUPCAO",
         "motivo": str(motivo or "CONTINUIDADE_INDETERMINADA")[:120],
         "coletor_sessao": COLETOR_SESSAO,
         "coletor_seq": coletor_seq,
+        "interrupcao_id": id_interrupcao_fluxo(interrupcao),
+        "interrupcao_geracao": interrupcao["geracao"],
         "timestamp_coleta": int(timestamp_ms or time.time() * 1000),
     }
     try:
@@ -684,6 +703,38 @@ def atualizar_estado_mesa_player(dados):
         estado_mesa["atualizado_em_ms"] = int(time.time() * 1000)
 
     return motivo_interrupcao
+
+
+def snapshot_estado_mesa():
+    with estado_mesa_lock:
+        return {
+            "round_id": str(estado_mesa.get("round_id") or ""),
+            "round_resolvido": bool(estado_mesa.get("round_resolvido")),
+            "stage": str(estado_mesa.get("stage") or ""),
+            "atualizado_em_ms": int(estado_mesa.get("atualizado_em_ms") or 0),
+        }
+
+
+def classificar_reconexao_player_state(estado_anterior, dados, decorrido_segundos, limite_segundos):
+    anterior = estado_anterior if isinstance(estado_anterior, dict) else {}
+    game_info = dados.get("args", {}).get("game", {}) if isinstance(dados, dict) else {}
+    round_anterior = str(anterior.get("round_id") or "").strip()
+    round_atual = identidade_rodada_evolution(game_info)
+    stage_atual = str(game_info.get("stage") or "").strip()
+    decorrido = max(0.0, float(decorrido_segundos or 0.0))
+    limite = max(0.0, float(limite_segundos or 0.0))
+
+    if not stage_atual:
+        return {"segura": False, "motivo": "RECONEXAO_PLAYER_STATE_SEM_STAGE", "tipo": "AMBIGUA"}
+    if not round_anterior or not round_atual:
+        return {"segura": False, "motivo": "RECONEXAO_SEM_ROUND_ID", "tipo": "AMBIGUA"}
+    if decorrido > limite:
+        return {"segura": False, "motivo": "RECONEXAO_FORA_DA_JANELA", "tipo": "AMBIGUA"}
+    if round_atual == round_anterior:
+        return {"segura": True, "motivo": "MESMA_RODADA", "tipo": "MESMA_RODADA"}
+    if bool(anterior.get("round_resolvido")) and stage_atual.lower() != "resolved":
+        return {"segura": True, "motivo": "PROXIMA_RODADA_APOS_RESOLVED", "tipo": "PROXIMA_RODADA"}
+    return {"segura": False, "motivo": "TROCA_RODADA_DURANTE_RECONEXAO", "tipo": "BURACO_ESTRUTURAL"}
 
 
 def avaliar_contexto_janela_aposta(aposta):
@@ -1052,6 +1103,8 @@ def processar_resultado(dados):
                 "rodada_origem": identidade_rodada_evolution(game_info),
                 "interrupcao_fluxo": houve_interrupcao,
                 "motivo_interrupcao": motivo_interrupcao,
+                "interrupcao_id": id_interrupcao_fluxo(interrupcao_pendente) if houve_interrupcao else "",
+                "interrupcao_geracao": interrupcao_pendente["geracao"] if houve_interrupcao else 0,
                 "timestamp_coleta": int(tempo_atual * 1000)
             }
 
@@ -1120,6 +1173,7 @@ def iniciar_robo_blindado():
             "ws_conectado": False,
             "ws_oficial": None,
             "ultimo_player_state_monotonic": 0.0,
+            "reconexao_pendente": None,
         }
         estado_saldo = {
             "ultima_tentativa": 0.0,
@@ -1140,14 +1194,20 @@ def iniciar_robo_blindado():
                     if status_conexao.get("ws_oficial") is not ws:
                         return
                     executor_pronto.clear()
+                    if status_conexao.get("reconexao_pendente") is not None:
+                        return
                     status_conexao.update({
-                        "ativa": False,
                         "ws_conectado": False,
                         "ws_oficial": None,
+                        "reconexao_pendente": {
+                            "iniciada_monotonic": time.monotonic(),
+                            "estado_anterior": snapshot_estado_mesa(),
+                        },
                     })
-                    if marcar_interrupcao_fluxo("WEBSOCKET_PLAYER_STATE_FECHADO"):
-                        print("🚨 WebSocket oficial da mesa foi fechado; sinais pendentes serão invalidados.")
-                        notificar_interrupcao_node("WEBSOCKET_PLAYER_STATE_FECHADO")
+                    print(
+                        "🔄 WebSocket oficial da mesa foi fechado; novas apostas estão bloqueadas enquanto "
+                        f"a continuidade é verificada por até {WEBSOCKET_RECONNECT_GRACE_SECONDS:g}s."
+                    )
 
                 ws.on("close", websocket_fechado)
 
@@ -1163,22 +1223,46 @@ def iniciar_robo_blindado():
                     ws_oficial = status_conexao.get("ws_oficial")
                     if ws_oficial is not None and ws_oficial is not ws:
                         return
+                    reconexao = status_conexao.get("reconexao_pendente")
+                    classificacao_reconexao = None
+                    if isinstance(reconexao, dict):
+                        decorrido = time.monotonic() - float(reconexao.get("iniciada_monotonic") or 0.0)
+                        classificacao_reconexao = classificar_reconexao_player_state(
+                            reconexao.get("estado_anterior"),
+                            dados,
+                            decorrido,
+                            WEBSOCKET_RECONNECT_GRACE_SECONDS,
+                        )
                     status_conexao.update({
                         "ativa": True,
                         "ws_conectado": True,
                         "ws_oficial": ws,
                         "ultimo_player_state_monotonic": time.monotonic(),
+                        "reconexao_pendente": None,
                     })
                     # Atualiza o stage antes de processar Resolved. O POST ao Node pode
                     # gerar uma ordem imediatamente, e ela precisa nascer vinculada a
                     # um estado explicitamente Resolved.
                     motivo_estado = atualizar_estado_mesa_player(dados)
-                    if motivo_estado:
+                    motivo_reconexao = ""
+                    if classificacao_reconexao is not None:
+                        if classificacao_reconexao["segura"]:
+                            print(
+                                "✅ WebSocket restabelecido com continuidade confirmada "
+                                f"({classificacao_reconexao['motivo']}); sessão estatística preservada."
+                            )
+                        else:
+                            motivo_reconexao = classificacao_reconexao["motivo"]
+
+                    motivo_interrupcao = motivo_estado or motivo_reconexao
+                    if motivo_interrupcao:
                         executor_pronto.clear()
-                        if marcar_interrupcao_fluxo(motivo_estado):
-                            print(f"🚨 Continuidade da rodada Evolution inválida ({motivo_estado}).")
-                            notificar_interrupcao_node(motivo_estado)
+                        if marcar_interrupcao_fluxo(motivo_interrupcao):
+                            print(f"🚨 Continuidade da rodada Evolution inválida ({motivo_interrupcao}).")
+                            notificar_interrupcao_node(motivo_interrupcao)
                     processar_resultado(dados)
+                    if not snapshot_interrupcao_fluxo()["interrompida"]:
+                        executor_pronto.set()
             except json.JSONDecodeError:
                 registrar_erro_limitado(
                     "frame_websocket_json_invalido",
@@ -1200,6 +1284,7 @@ def iniciar_robo_blindado():
                 status_conexao["ws_conectado"] = False
                 status_conexao["ws_oficial"] = None
                 status_conexao["ultimo_player_state_monotonic"] = 0.0
+                status_conexao["reconexao_pendente"] = None
                 page.goto(URL_CASSINO, wait_until="domcontentloaded", timeout=60000)
                 fechar_popups(page)
                 
@@ -1231,6 +1316,22 @@ def iniciar_robo_blindado():
                             ordem = fila_apostas.get()
                             processar_ordem_executor(page, ordem)
                         page.wait_for_timeout(500)
+
+                        reconexao = status_conexao.get("reconexao_pendente")
+                        if isinstance(reconexao, dict):
+                            decorrido_reconexao = time.monotonic() - float(reconexao.get("iniciada_monotonic") or 0.0)
+                            if decorrido_reconexao > WEBSOCKET_RECONNECT_GRACE_SECONDS:
+                                status_conexao["reconexao_pendente"] = None
+                                status_conexao["ativa"] = False
+                                motivo = "WEBSOCKET_RECONEXAO_TIMEOUT"
+                                if marcar_interrupcao_fluxo(motivo):
+                                    print(
+                                        "🚨 WebSocket oficial não foi restabelecido com evidência segura; "
+                                        "sinais pendentes serão invalidados."
+                                    )
+                                    notificar_interrupcao_node(motivo)
+                                break
+                            continue
 
                         ultimo_player_state = float(status_conexao.get("ultimo_player_state_monotonic") or 0.0)
                         if ultimo_player_state > 0 and time.monotonic() - ultimo_player_state > COLLECTOR_PLAYER_STATE_STALE_SECONDS:
