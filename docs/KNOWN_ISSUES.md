@@ -91,6 +91,16 @@ Risco residual externo:
 
 ## Itens mitigados
 
+### BUG-026 — Handover legítimo sem `roundId` ainda podia expirar sem evidência alternativa
+
+Status: **mitigado em código; validação operacional da semântica da roadmap pendente**.
+
+Na mesa real observada, a reconexão pode retornar `bacbo.playerState` com `stage`, mas sem uma identidade de rodada que possa ser comparada ao socket anterior. Esperar mais tempo não prova continuidade e, por isso, o timeout do BUG-025 ainda produzia uma interrupção mesmo quando a sequência visível na mesa estava correta.
+
+Durante a quarentena, o coletor agora extrai somente marcadores semânticos P/B/T de contêineres de roadmap/histórico/resultados no DOM, inclusive dentro de iframes. A retomada sem `roundId` é aceita apenas quando os últimos `ROADMAP_RECONCILIATION_MIN_RESULTS` resultados da roadmap (6 por padrão) coincidem exatamente, em ordem direta ou inversa, com a cauda dos resultados que o Python já entregou com sucesso ao Node. Não há leitura de texto bruto, cookies ou payload de jogo; os diagnósticos registram somente quantidades de frames, raízes e trilhas.
+
+Risco residual: o HTML/semântica visual da Evolution é externo e pode mudar. Se a roadmap não for reconhecida, se houver menos de seis resultados locais ou se a cauda divergir, o timeout permanece propositalmente fail-closed e a continuidade é invalidada. A validação em mesa real deve conferir os diagnósticos `frames`, `raízes` e `trilhas`; uma reconciliação bem-sucedida registra `ROADMAP_DOM_CAUSA_COMPATIVEL`.
+
 ### BUG-025 — Frame parcial na reconexão encerrava a quarentena antes da evidência estrutural
 
 Status: **mitigado em código; validação operacional pendente**.
