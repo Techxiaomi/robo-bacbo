@@ -490,9 +490,11 @@ class TestEstadoRodadaEvolution(unittest.TestCase):
         carregar_funcoes([
             "identidade_rodada_evolution",
             "atualizar_estado_mesa_player",
+            "player_state_reconexao_elegivel",
             "classificar_reconexao_player_state",
         ], self.ns)
         self.atualizar = self.ns["atualizar_estado_mesa_player"]
+        self.reconexao_elegivel = self.ns["player_state_reconexao_elegivel"]
         self.classificar_reconexao = self.ns["classificar_reconexao_player_state"]
 
     @staticmethod
@@ -527,6 +529,11 @@ class TestEstadoRodadaEvolution(unittest.TestCase):
             self.atualizar({"args": {"game": {"roundId": "100"}}}),
             "PLAYER_STATE_SEM_STAGE",
         )
+
+    def test_reconexao_aguarda_frame_completo_antes_de_classificar(self):
+        self.assertFalse(self.reconexao_elegivel(self.estado("Betting")))
+        self.assertFalse(self.reconexao_elegivel({"args": {"game": {"roundId": "100"}}}))
+        self.assertTrue(self.reconexao_elegivel(self.estado("Betting", "100")))
 
     def test_reconexao_na_mesma_rodada_preserva_continuidade(self):
         resultado = self.classificar_reconexao(
@@ -586,6 +593,8 @@ class TestContratoWebSocketFailClosed(unittest.TestCase):
         self.assertIn('WEBSOCKET_RECONNECT_GRACE_SECONDS', SOURCE)
         self.assertNotIn('marcar_interrupcao_fluxo("WEBSOCKET_PLAYER_STATE_FECHADO")', SOURCE)
         self.assertIn('motivo = "WEBSOCKET_RECONEXAO_TIMEOUT"', SOURCE)
+        self.assertIn('not player_state_reconexao_elegivel(dados)', SOURCE)
+        self.assertIn('aguardando playerState completo com stage e roundId', SOURCE)
 
     def test_sessao_saudavel_nao_e_recarregada_por_tempo_fixo(self):
         self.assertIn('while status_conexao["ativa"]:', SOURCE)
