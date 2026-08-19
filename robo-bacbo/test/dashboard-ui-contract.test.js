@@ -94,14 +94,29 @@ test('BUG-017: seletores e card de sinal continuam ligados ao ciclo principal da
     assert.match(appHtml, /fetch\('\/api\/estrategias'\+q\)/);
     assert.match(appHtml, /fetch\('\/api\/origens'\+q\)/);
     assert.match(appHtml, /fetch\('\/api\/robos\?_t=' \+ Date\.now\(\)\)/);
-    assert.match(appHtml, /document\.getElementById\('select-origem-filtro'\)\.innerHTML = ops/);
-    assert.match(appHtml, /document\.getElementById\('select-origem-dash'\)\.innerHTML = ops/);
-    assert.match(appHtml, /renderizarCardsRobos\(\); atualizarFiltrosRoboUI\(\); await atualizarDashboardValores\(\)/);
+    assert.match(appHtml, /document\.getElementById\('select-origem-dash'\)\.innerHTML = opsDash/);
+    assert.match(appHtml, /atualizarFiltroOrigensPadroes\(\);/);
+    assert.match(appHtml, /aplicarFiltrosEOrdenar\(\);/);
+    assert.match(appHtml, /renderizarCardsRobos\(\);/);
+    assert.match(appHtml, /atualizarFiltrosRoboUI\(\);/);
+    assert.match(appHtml, /await atualizarDashboardValores\(\);/);
     assert.match(appHtml, /sintonizador\.innerHTML = '<option value="TODOS">Todos os Robôs<\/option>' \+/);
     assert.match(appHtml, /filtroDash\.innerHTML = '<option value="TODOS">🤖 Todos os Robôs<\/option>' \+/);
 
     assert.match(appHtml, /document\.getElementById\('conteudo-card-ativo'\)\.innerHTML = gerarHtmlCardEstrategia\(est, 'ativo', dashPeriodoAtual\)/);
     assert.match(appHtml, /document\.getElementById\('container-card-ativo'\)\.style\.display = 'block'/);
+});
+
+test('aba Padroes separa origens manuais de fontes Auto IA e normaliza o tipo', () => {
+    assert.match(appHtml, /function estrategiaEhDinamica\(est\)/);
+    assert.match(appHtml, /valor === true \|\| valor === 1 \|\| valor === '1'/);
+    assert.match(appHtml, /function atualizarFiltroOrigensPadroes\(\)/);
+    assert.match(appHtml, /\.filter\(est => !estrategiaEhDinamica\(est\)\)/);
+    assert.match(appHtml, /\.filter\(estrategiaEhDinamica\)/);
+    assert.match(appHtml, /value="MANUAL:\$\{encodeURIComponent\(origem\)\}"/);
+    assert.match(appHtml, /value="IA:\$\{encodeURIComponent\(id\)\}"/);
+    assert.match(appHtml, /Auto - IA — \$\{escaparHtmlRobo\(nome\)\}/);
+    assert.match(appHtml, /String\(est\.robo_dono_id\) === roboDonoId/);
 });
 
 test('UX-002/003: aprimoramentos carregam depois do JavaScript principal sem alterar o bootstrap', () => {
