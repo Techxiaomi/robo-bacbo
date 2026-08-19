@@ -212,32 +212,54 @@ class TestProcessarResultado(unittest.TestCase):
             "requests": FakeRequests,
             "WEBHOOK_JS": "http://127.0.0.1:3000/receber-sinal",
             "INTERNAL_API_TOKEN": "token-teste",
+            "executor_pronto": threading.Event(),
             "ultimo_tempo_rodada": 0,
             "COLETOR_SESSAO": "sessao-teste",
             "coletor_seq": 0,
             "ultimo_resultado_chave": None,
             "ultimo_resultado_chave_em": 0.0,
             "RESULT_DEDUP_WINDOW_SECONDS": 3.0,
+            "continuidade_fluxo_lock": threading.Lock(),
+            "continuidade_fluxo": {
+                "interrompida": False,
+                "motivo": "",
+                "geracao": 0,
+            },
+            "notificar_interrupcao_node": lambda motivo, timestamp_ms=None: True,
             "registrar_erro_limitado": lambda chave, mensagem, intervalo_segundos=30: self.logs.append(
                 (chave, mensagem, intervalo_segundos)
             ),
         }
-        carregar_funcoes(["chave_resultado_resolvido", "resultado_resolvido_duplicado", "processar_resultado"], ns)
+        carregar_funcoes([
+            "chave_resultado_resolvido",
+            "identidade_rodada_evolution",
+            "resultado_resolvido_duplicado",
+            "marcar_interrupcao_fluxo",
+            "snapshot_interrupcao_fluxo",
+            "confirmar_interrupcao_reportada",
+            "validar_resultado_resolvido",
+            "processar_resultado",
+        ], ns)
         self.ns = ns
         self.processar = ns["processar_resultado"]
 
     @staticmethod
     def dados_resolvidos(resultado="PlayerWon"):
+        valores = {
+            "PlayerWon": [3, 2, 5, 4],
+            "BankerWon": [3, 4, 5, 6],
+            "TieWon": [3, 4, 5, 4],
+        }.get(resultado, [3, 2, 5, 4])
         return {
             "args": {
                 "game": {
                     "stage": "Resolved",
                     "result": resultado,
                     "dice": [
-                        {"id": 1, "value": 3},
-                        {"id": 2, "value": 4},
-                        {"id": 3, "value": 5},
-                        {"id": 4, "value": 6},
+                        {"id": 1, "value": valores[0]},
+                        {"id": 2, "value": valores[1]},
+                        {"id": 3, "value": valores[2]},
+                        {"id": 4, "value": valores[3]},
                     ],
                 }
             }
@@ -263,12 +285,14 @@ class TestProcessarResultado(unittest.TestCase):
         self.assertEqual(payload["vencedor"], "PlayerWon")
         self.assertEqual(payload["resultado_bruto"], "PlayerWon")
         self.assertEqual(payload["pontos_jogador"], 8)
-        self.assertEqual(payload["pontos_banca"], 10)
+        self.assertEqual(payload["pontos_banca"], 6)
         self.assertEqual(payload["dados_jogador"], [3, 5])
-        self.assertEqual(payload["dados_banca"], [4, 6])
+        self.assertEqual(payload["dados_banca"], [2, 4])
         self.assertEqual(payload["coletor_sessao"], "sessao-teste")
         self.assertEqual(payload["coletor_seq"], 1)
+        self.assertEqual(payload["rodada_origem"], "")
         self.assertFalse(payload["interrupcao_fluxo"])
+        self.assertEqual(payload["motivo_interrupcao"], "")
         self.assertEqual(payload["timestamp_coleta"], 100000)
         self.assertEqual(self.ns["ultimo_tempo_rodada"], 100.0)
 
@@ -282,6 +306,7 @@ class TestProcessarResultado(unittest.TestCase):
         self.assertEqual(payload["vencedor"], "Tie")
         self.assertEqual(payload["resultado_bruto"], "TieWon")
         self.assertTrue(payload["interrupcao_fluxo"])
+        self.assertEqual(payload["motivo_interrupcao"], "INTERVALO_RESULTADOS")
         self.assertEqual(payload["timestamp_coleta"], 100500)
 
     def test_exatamente_60s_nao_e_interrupcao(self):
@@ -362,6 +387,7 @@ class TestProcessarResultado(unittest.TestCase):
         self.assertEqual(chave, "resultado_node")
         self.assertIn("HTTP 500", mensagem)
         self.assertEqual(intervalo, 30)
+        self.assertTrue(self.ns["continuidade_fluxo"]["interrompida"])
 
     def test_falha_de_post_consume_seq_e_deixa_salto_observavel(self):
         FakeRequests.proxima_resposta = FakeResponse(RuntimeError("HTTP 500"))
@@ -378,7 +404,132 @@ class TestProcessarResultado(unittest.TestCase):
         segundo = FakeRequests.chamadas[1]["kwargs"]["json"]
         self.assertEqual(segundo["coletor_sessao"], "sessao-teste")
         self.assertEqual(segundo["coletor_seq"], 2)
+        self.assertTrue(segundo["interrupcao_fluxo"])
+        self.assertEqual(segundo["motivo_interrupcao"], "FALHA_ENVIO_RESULTADO_NODE")
         self.assertEqual(self.ns["coletor_seq"], 2)
+
+    def test_lacre_de_interrupcao_invalida_proximo_resultado_e_so_limpa_apos_ack(self):
+        self.assertTrue(self.ns["marcar_interrupcao_fluxo"]("PLAYER_STATE_STALE"))
+
+        self.processar(self.dados_resolvidos("PlayerWon"))
+
+        payload = FakeRequests.chamadas[0]["kwargs"]["json"]
+        self.assertTrue(payload["interrupcao_fluxo"])
+        self.assertEqual(payload["motivo_interrupcao"], "PLAYER_STATE_STALE")
+        self.assertFalse(self.ns["continuidade_fluxo"]["interrompida"])
+
+    def test_nova_interrupcao_nao_e_apagada_por_ack_de_snapshot_anterior(self):
+        self.ns["marcar_interrupcao_fluxo"]("WEBSOCKET_PLAYER_STATE_FECHADO")
+        snapshot = self.ns["snapshot_interrupcao_fluxo"]()
+        self.ns["marcar_interrupcao_fluxo"]("PLAYER_STATE_STALE")
+
+        self.assertFalse(self.ns["confirmar_interrupcao_reportada"](snapshot["geracao"]))
+        atual = self.ns["snapshot_interrupcao_fluxo"]()
+        self.assertTrue(atual["interrompida"])
+        self.assertEqual(atual["motivo"], "PLAYER_STATE_STALE")
+
+    def test_resultado_incompleto_e_rejeitado_sem_consumir_sequencia(self):
+        dados = self.dados_resolvidos("PlayerWon")
+        dados["args"]["game"]["dice"] = dados["args"]["game"]["dice"][:3]
+
+        self.processar(dados)
+
+        self.assertEqual(FakeRequests.chamadas, [])
+        self.assertEqual(self.ns["coletor_seq"], 0)
+        self.assertTrue(self.ns["continuidade_fluxo"]["interrompida"])
+        self.assertTrue(any(chave == "resultado_resolved_invalido" for chave, _, _ in self.logs))
+
+    def test_resultado_rejeita_dado_duplicado_fora_de_faixa_e_vencedor_desconhecido(self):
+        casos = []
+        duplicado = self.dados_resolvidos()
+        duplicado["args"]["game"]["dice"][3]["id"] = 3
+        casos.append(duplicado)
+
+        fora_faixa = self.dados_resolvidos()
+        fora_faixa["args"]["game"]["dice"][0]["value"] = 7
+        casos.append(fora_faixa)
+
+        vencedor_invalido = self.dados_resolvidos("Unknown")
+        casos.append(vencedor_invalido)
+
+        for dados in casos:
+            with self.subTest(dados=dados):
+                with self.assertRaises(ValueError):
+                    self.ns["validar_resultado_resolvido"](dados["args"]["game"])
+
+        vencedor_incoerente = self.dados_resolvidos("PlayerWon")
+        vencedor_incoerente["args"]["game"]["dice"] = [
+            {"id": 1, "value": 1}, {"id": 2, "value": 6},
+            {"id": 3, "value": 1}, {"id": 4, "value": 6},
+        ]
+        with self.assertRaisesRegex(ValueError, "incompatível"):
+            self.ns["validar_resultado_resolvido"](vencedor_incoerente["args"]["game"])
+
+
+class TestEstadoRodadaEvolution(unittest.TestCase):
+    def setUp(self):
+        self.ns = {
+            "time": FakeTime,
+            "threading": threading,
+            "estado_mesa_lock": threading.Lock(),
+            "estado_mesa": {
+                "stage": "",
+                "atualizado_em_ms": 0,
+                "round_id": "",
+                "round_resolvido": False,
+            },
+        }
+        carregar_funcoes([
+            "identidade_rodada_evolution",
+            "atualizar_estado_mesa_player",
+        ], self.ns)
+        self.atualizar = self.ns["atualizar_estado_mesa_player"]
+
+    @staticmethod
+    def estado(stage, round_id=None):
+        game = {"stage": stage}
+        if round_id is not None:
+            game["roundId"] = round_id
+        return {"args": {"game": game}}
+
+    def test_troca_de_round_sem_resolved_lacra_continuidade(self):
+        self.assertEqual(self.atualizar(self.estado("Betting", "100")), "")
+        self.assertEqual(
+            self.atualizar(self.estado("Betting", "101")),
+            "TROCA_RODADA_SEM_RESOLVED",
+        )
+
+    def test_round_id_nao_e_assumido_sequencial_sem_contrato_da_evolution(self):
+        self.assertEqual(self.atualizar(self.estado("Resolved", "100")), "")
+        self.assertEqual(self.atualizar(self.estado("Betting", "102")), "")
+
+    def test_round_seguinte_contiguo_apos_resolved_e_aceito(self):
+        self.assertEqual(self.atualizar(self.estado("Resolved", "100")), "")
+        self.assertEqual(self.atualizar(self.estado("Betting", "101")), "")
+
+    def test_resolved_sem_repetir_round_id_fecha_round_atual(self):
+        self.assertEqual(self.atualizar(self.estado("Betting", "100")), "")
+        self.assertEqual(self.atualizar(self.estado("Resolved")), "")
+        self.assertEqual(self.atualizar(self.estado("Betting", "101")), "")
+
+    def test_player_state_sem_stage_e_invalido(self):
+        self.assertEqual(
+            self.atualizar({"args": {"game": {"roundId": "100"}}}),
+            "PLAYER_STATE_SEM_STAGE",
+        )
+
+
+class TestContratoWebSocketFailClosed(unittest.TestCase):
+    def test_socket_oficial_exige_player_state_e_close_lacra_fluxo(self):
+        self.assertIn('dados.get("type") == "bacbo.playerState"', SOURCE)
+        self.assertIn('"ws_oficial": ws', SOURCE)
+        self.assertIn('if status_conexao.get("ws_oficial") is not ws:', SOURCE)
+        self.assertIn('marcar_interrupcao_fluxo("WEBSOCKET_PLAYER_STATE_FECHADO")', SOURCE)
+
+    def test_watchdog_reinicia_coletor_e_notifica_node(self):
+        self.assertIn("COLLECTOR_PLAYER_STATE_STALE_SECONDS", SOURCE)
+        self.assertIn('marcar_interrupcao_fluxo("PLAYER_STATE_STALE")', SOURCE)
+        self.assertIn('notificar_interrupcao_node("PLAYER_STATE_STALE")', SOURCE)
 
 
 
