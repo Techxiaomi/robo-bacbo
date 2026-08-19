@@ -313,6 +313,27 @@ function idCandidato(roboId, padrao, entrada, config) {
     return `ia_${Number(roboId)}_${hash}`;
 }
 
+function normalizarPadraoPersistido(valor) {
+    if (Array.isArray(valor)) return valor.map(String).filter(Boolean);
+    try {
+        const convertido = JSON.parse(String(valor || '[]'));
+        return Array.isArray(convertido) ? convertido.map(String).filter(Boolean) : [];
+    } catch (e) {
+        return [];
+    }
+}
+
+function chaveCandidato(padrao, entrada) {
+    return `${padraoCanonico(padrao)}|${String(entrada || '')}`;
+}
+
+function limitesShadowHistorico(config) {
+    return {
+        ocorrencias: Math.max(1, Math.min(5, Math.ceil(config.ocorr_min * 0.25))),
+        assertividade: Math.max(config.drop_assert, config.assert_min - 10)
+    };
+}
+
 function gerarPadroesUnicos(dados, config, inicio = 0, fim = null) {
     const arr = Array.isArray(dados) ? dados : [];
     const fimReal = fim === null ? arr.length : Math.min(arr.length, Math.max(0, Math.trunc(Number(fim) || 0)));
@@ -339,13 +360,25 @@ function minerarCandidatos(dados, configBruta = {}, opcoes = {}) {
     const arrOriginal = (Array.isArray(dados) ? dados : [])
         .filter(g => g && RESULTADOS_VALIDOS.has(String(g.resultado || '')));
     const arr = arrOriginal.slice(-config.range);
-    if (arr.length < config.tam_min + config.gales + 2) return [];
-
     const incumbentes = new Set((opcoes.incumbentes || []).map(String));
+    const incumbentesDetalhes = (Array.isArray(opcoes.incumbentes_detalhes) ? opcoes.incumbentes_detalhes : [])
+        .map(item => ({
+            id: String(item?.id || ''),
+            padrao: normalizarPadraoPersistido(item?.padrao),
+            entrada: String(item?.entrada || ''),
+            gales: Math.max(0, Math.trunc(Number(item?.gales) || 0)),
+            proteger_empate: item?.proteger_empate === true || item?.proteger_empate === 1
+        }))
+        .filter(item => item.id && item.padrao.length > 0 && ALVOS.includes(item.entrada));
+    const incumbentesPorRegra = new Map(
+        incumbentesDetalhes.map(item => [chaveCandidato(item.padrao, item.entrada), item])
+    );
     const shadow = Math.min(config.shadow_giros, Math.max(0, arr.length - Math.max(20, config.ocorr_min)));
     const limiteTreino = shadow > 0 ? arr.length - shadow : arr.length;
-    const padroes = gerarPadroesUnicos(arr, config, 0, limiteTreino);
+    const historicoSuficiente = arr.length >= config.tam_min + config.gales + 2;
+    const padroes = historicoSuficiente ? gerarPadroesUnicos(arr, config, 0, limiteTreino) : [];
     const candidatos = [];
+    const limitesShadow = limitesShadowHistorico(config);
     const diagnostico = {
         janela: arr.length,
         treino: limiteTreino,
@@ -355,15 +388,67 @@ function minerarCandidatos(dados, configBruta = {}, opcoes = {}) {
         reprovados_ocorrencias: 0,
         reprovados_assertividade: 0,
         reprovados_shadow_historico: 0,
-        blacklist_configurados: parseBlacklist(config.blacklist).size
+        blacklist_configurados: parseBlacklist(config.blacklist).size,
+        limites: {
+            treino_ocorrencias: config.ocorr_min,
+            treino_assertividade: config.assert_min,
+            shadow_ocorrencias: shadow > 0 ? limitesShadow.ocorrencias : 0,
+            shadow_assertividade: shadow > 0 ? limitesShadow.assertividade : 0,
+            live_ocorrencias_descarte: Math.max(5, config.ocorr_min),
+            live_assertividade: config.drop_assert,
+            live_reds: config.drop_reds
+        },
+        candidatos: []
     };
+
+    const auditoriaPorChave = new Map();
 
     for (const padrao of padroes) {
         for (const entrada of ALVOS) {
             const id = idCandidato(opcoes.robo_id || 0, padrao, entrada, config);
+            const chave = chaveCandidato(padrao, entrada);
+            const incumbenteAnterior = incumbentesPorRegra.get(chave) || null;
             const treino = ocorrenciasPadrao(arr, padrao, entrada, config, 0, limiteTreino);
-            if (treino.ocorrencias < config.ocorr_min) { diagnostico.reprovados_ocorrencias++; continue; }
-            if (treino.assertividade < config.assert_min) { diagnostico.reprovados_assertividade++; continue; }
+            const auditoria = {
+                id,
+                id_anterior: incumbenteAnterior?.id || null,
+                id_alterado: Boolean(incumbenteAnterior && incumbenteAnterior.id !== id),
+                motivo_id_alterado: incumbenteAnterior && incumbenteAnterior.id !== id
+                    ? 'GALES_OU_PROTECAO_EMPATE_ALTERADOS'
+                    : null,
+                padrao: descreverPadrao(padrao),
+                entrada: simboloCurto(entrada),
+                incumbent: incumbentes.has(id) || Boolean(incumbenteAnterior),
+                regra_anterior: incumbenteAnterior ? {
+                    gales: incumbenteAnterior.gales,
+                    proteger_empate: incumbenteAnterior.proteger_empate
+                } : null,
+                regra_atual: { gales: config.gales, proteger_empate: config.proteger_empate },
+                treino: {
+                    ocorrencias: treino.ocorrencias,
+                    assertividade: treino.assertividade,
+                    minimo_ocorrencias: config.ocorr_min,
+                    minimo_assertividade: config.assert_min
+                },
+                shadow: null,
+                status: 'EM_AVALIACAO',
+                motivos: []
+            };
+            diagnostico.candidatos.push(auditoria);
+            auditoriaPorChave.set(chave, auditoria);
+
+            if (treino.ocorrencias < config.ocorr_min) {
+                diagnostico.reprovados_ocorrencias++;
+                auditoria.status = 'REPROVADO_TREINO';
+                auditoria.motivos.push('OCORRENCIAS_TREINO_INSUFICIENTES');
+                continue;
+            }
+            if (treino.assertividade < config.assert_min) {
+                diagnostico.reprovados_assertividade++;
+                auditoria.status = 'REPROVADO_TREINO';
+                auditoria.motivos.push('ASSERTIVIDADE_TREINO_INSUFICIENTE');
+                continue;
+            }
 
             let shadowMetricas = null;
             let shadowOk = true;
@@ -377,13 +462,19 @@ function minerarCandidatos(dados, configBruta = {}, opcoes = {}) {
                 const resultadosShadow = bruto.resultados.filter(r => r.indice >= limiteTreino);
                 const winsShadow = resultadosShadow.filter(r => r.tipo === 'GREEN' || r.tipo === 'TIE').length;
                 const redsShadow = resultadosShadow.filter(r => r.tipo === 'RED').length;
-                const minShadow = Math.max(1, Math.min(5, Math.ceil(config.ocorr_min * 0.25)));
+                const minShadow = limitesShadow.ocorrencias;
                 const assertShadow = resultadosShadow.length > 0 ? (winsShadow / resultadosShadow.length) * 100 : 0;
                 const wilsonShadow = wilsonLowerBound(winsShadow, resultadosShadow.length) * 100;
-                shadowOk = resultadosShadow.length >= minShadow
-                    && assertShadow >= Math.max(config.drop_assert, config.assert_min - 10);
+                const ocorrenciasShadowOk = resultadosShadow.length >= minShadow;
+                const assertividadeShadowOk = assertShadow >= limitesShadow.assertividade;
+                shadowOk = ocorrenciasShadowOk && assertividadeShadowOk;
                 quarentenaRestante = Math.max(0, minShadow - resultadosShadow.length);
-                if (!shadowOk) diagnostico.reprovados_shadow_historico++;
+                if (!shadowOk) {
+                    diagnostico.reprovados_shadow_historico++;
+                    auditoria.status = 'REPROVADO_SHADOW_HISTORICO';
+                    if (!ocorrenciasShadowOk) auditoria.motivos.push('OCORRENCIAS_SHADOW_INSUFICIENTES');
+                    if (!assertividadeShadowOk) auditoria.motivos.push('ASSERTIVIDADE_SHADOW_INSUFICIENTE');
+                }
                 shadowMetricas = {
                     ocorrencias: resultadosShadow.length,
                     greens: winsShadow,
@@ -391,9 +482,13 @@ function minerarCandidatos(dados, configBruta = {}, opcoes = {}) {
                     reds: redsShadow,
                     assertividade: assertShadow,
                     wilson: wilsonShadow,
-                    minimo: minShadow
+                    minimo: minShadow,
+                    minimo_assertividade: limitesShadow.assertividade
                 };
+                auditoria.shadow = { ...shadowMetricas };
             }
+
+            if (shadowOk) auditoria.status = 'ELEGIVEL_HISTORICO';
 
             const scoreBase = scoreEstatistico(treino, config, padrao.length, incumbentes.has(id));
             let scoreFinal = scoreBase.score;
@@ -418,9 +513,34 @@ function minerarCandidatos(dados, configBruta = {}, opcoes = {}) {
                 shadow_ok: shadowOk,
                 shadow: shadowMetricas,
                 quarentena_restante: quarentenaRestante,
-                incumbent: incumbentes.has(id)
+                incumbent: incumbentes.has(id),
+                auditoria
             });
         }
+    }
+
+    const blacklist = parseBlacklist(config.blacklist);
+    for (const incumbente of incumbentesDetalhes) {
+        const chave = chaveCandidato(incumbente.padrao, incumbente.entrada);
+        if (auditoriaPorChave.has(chave)) continue;
+        const idAtual = idCandidato(opcoes.robo_id || 0, incumbente.padrao, incumbente.entrada, config);
+        diagnostico.candidatos.push({
+            id: idAtual,
+            id_anterior: incumbente.id,
+            id_alterado: incumbente.id !== idAtual,
+            motivo_id_alterado: incumbente.id !== idAtual ? 'GALES_OU_PROTECAO_EMPATE_ALTERADOS' : null,
+            padrao: descreverPadrao(incumbente.padrao),
+            entrada: simboloCurto(incumbente.entrada),
+            incumbent: true,
+            regra_anterior: { gales: incumbente.gales, proteger_empate: incumbente.proteger_empate },
+            regra_atual: { gales: config.gales, proteger_empate: config.proteger_empate },
+            treino: null,
+            shadow: null,
+            status: 'REPROVADO_ANTES_DA_AVALIACAO',
+            motivos: [blacklist.has(padraoCanonico(incumbente.padrao))
+                ? 'PADRAO_NA_BLACKLIST'
+                : (historicoSuficiente ? 'PADRAO_AUSENTE_NA_JANELA_DE_TREINO' : 'HISTORICO_INSUFICIENTE')]
+        });
     }
 
     candidatos.sort((a, b) => b.score - a.score || b.ocorrencias - a.ocorrencias || a.id.localeCompare(b.id));
@@ -430,6 +550,28 @@ function minerarCandidatos(dados, configBruta = {}, opcoes = {}) {
 
 function descreverPadrao(padrao) {
     return (Array.isArray(padrao) ? padrao : []).map(simboloCurto).join('-');
+}
+
+function formatarPercentualDiagnostico(valor) {
+    const n = Number(valor);
+    return Number.isFinite(n) ? `${n.toFixed(1)}%` : 'n/a';
+}
+
+function formatarLinhaAuditoriaCandidato(item) {
+    const treino = item?.treino
+        ? `treino n=${item.treino.ocorrencias}/${item.treino.minimo_ocorrencias}, assert=${formatarPercentualDiagnostico(item.treino.assertividade)}/${formatarPercentualDiagnostico(item.treino.minimo_assertividade)}`
+        : 'treino n/a';
+    const shadow = item?.shadow
+        ? `shadow n=${item.shadow.ocorrencias}/${item.shadow.minimo}, assert=${formatarPercentualDiagnostico(item.shadow.assertividade)}/${formatarPercentualDiagnostico(item.shadow.minimo_assertividade)}`
+        : 'shadow n/a';
+    const mudancaId = item?.id_alterado
+        ? ` | ID ALTERADO ${item.id_anterior} → ${item.id} (${item.motivo_id_alterado})`
+        : ` | ID ${item?.id || item?.id_anterior || 'n/a'} preservado`;
+    const motivos = Array.isArray(item?.motivos) && item.motivos.length > 0
+        ? item.motivos.join('+')
+        : 'SEM_REPROVACAO';
+    return `${item?.padrao || '?'} → ${item?.entrada || '?'} | ${treino} | ${shadow} | `
+        + `status=${item?.destino || item?.status || 'DESCONHECIDO'} | motivo=${motivos}${mudancaId}`;
 }
 
 function calcularStreakRed(resultados) {
@@ -642,6 +784,7 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
 
     function logarTelemetriaMineracao(robo, config, candidatos, resumo, motivo) {
         const d = candidatos?.diagnostico || {};
+        const limites = d.limites || {};
         const linhas = [
             '',
             `🧠 AUTO PILOT IA ${robo.id} — ${String(motivo || 'mineração').toUpperCase()}`,
@@ -649,8 +792,26 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
             `   Padrões únicos: ${d.padroes_unicos ?? '?'} | combinações avaliadas: ${d.combinacoes_avaliadas ?? '?'}`,
             `   Reprovados: ocorrências=${d.reprovados_ocorrencias ?? 0}, assertividade=${d.reprovados_assertividade ?? 0}, shadow histórico=${d.reprovados_shadow_historico ?? 0}`,
             `   Blacklist configurada: ${d.blacklist_configurados ?? 0}`,
+            `   Critérios: treino n>=${limites.treino_ocorrencias ?? '?'} e assert>=${formatarPercentualDiagnostico(limites.treino_assertividade)} | shadow n>=${limites.shadow_ocorrencias ?? 0} e assert>=${formatarPercentualDiagnostico(limites.shadow_assertividade)} | descarte live após n>=${limites.live_ocorrencias_descarte ?? '?'} se assert<${formatarPercentualDiagnostico(limites.live_assertividade)} ou streak RED>=${limites.live_reds ?? '?'}`,
             `   Pool: ${resumo.ativos.length}/${config.max_padroes} ativos | ${resumo.reservas} reservas | ${resumo.shadow_historico || 0} shadow histórico | ${resumo.shadow_live || 0} shadow live | ${resumo.rejeitados_shadow_live || 0} rejeitados live | ${resumo.fora_pool || 0} fora do pool`
         ];
+
+        if (Array.isArray(resumo.incumbentes_auditoria) && resumo.incumbentes_auditoria.length > 0) {
+            linhas.push('   🔎 DESTINO DOS PADRÕES ANTERIORMENTE ATIVOS');
+            resumo.incumbentes_auditoria.forEach((item, i) => {
+                const live = item.live?.ocorrencias > 0
+                    ? ` | live=${formatarPercentualDiagnostico(item.live.assertividade)} (${item.live.ocorrencias}), streak RED=${item.live.streak_red}`
+                    : ' | live=sem amostra';
+                linhas.push(`      #${i + 1} ${formatarLinhaAuditoriaCandidato(item)}${live}`);
+            });
+        }
+
+        if (Array.isArray(resumo.shadow_historico_auditoria) && resumo.shadow_historico_auditoria.length > 0) {
+            linhas.push('   🧪 REPROVADOS NA VALIDAÇÃO HISTÓRICA');
+            resumo.shadow_historico_auditoria.forEach((item, i) => linhas.push(
+                `      #${i + 1} ${formatarLinhaAuditoriaCandidato(item)}`
+            ));
+        }
 
         if (resumo.ativos.length > 0) {
             linhas.push('   🏆 ATIVOS');
@@ -756,7 +917,7 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
 
     async function reconciliar(robo, config, candidatos) {
         const [existentes] = await dbPool.query(
-            `SELECT id, padrao, entrada, ativo, criado_em, quarentena_restante
+            `SELECT id, padrao, entrada, gales, proteger_empate, ativo, criado_em, quarentena_restante
              FROM estrategias
              WHERE is_dinamico=true AND robo_dono_id=?`,
             [robo.id]
@@ -800,6 +961,49 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
         const sombra = [...shadowLive, ...shadowHistorico];
         const reter = [...ativos, ...reservas, ...sombra];
         const reterIds = new Set(reter.map(c => c.id));
+        const reservasIds = new Set(reservas.map(c => c.id));
+        const shadowHistoricoIds = new Set(shadowHistorico.map(c => c.id));
+        const shadowLiveIds = new Set(shadowLive.map(c => c.id));
+        const auditorias = Array.isArray(candidatos?.diagnostico?.candidatos)
+            ? candidatos.diagnostico.candidatos
+            : [];
+        const incumbentesAuditoria = existentes
+            .filter(e => e.ativo === true || e.ativo === 1)
+            .map(existente => {
+                const idAnterior = String(existente.id);
+                const auditoria = auditorias.find(a => a.id_anterior === idAnterior || a.id === idAnterior) || {
+                    id: idAnterior,
+                    id_anterior: idAnterior,
+                    id_alterado: false,
+                    padrao: descreverPadrao(normalizarPadraoPersistido(existente.padrao)),
+                    entrada: simboloCurto(existente.entrada),
+                    treino: null,
+                    shadow: null,
+                    status: 'SEM_DIAGNOSTICO',
+                    motivos: ['CANDIDATO_NAO_LOCALIZADO_NA_AUDITORIA']
+                };
+                const idAtual = String(auditoria.id || idAnterior);
+                let destino = auditoria.status;
+                if (auditoria.id_alterado) destino = `IDENTIDADE_ALTERADA_${auditoria.status}`;
+                else if (ativosIds.has(idAtual)) destino = 'MANTIDO_ATIVO';
+                else if (reservasIds.has(idAtual)) destino = 'MOVIDO_PARA_RESERVA';
+                else if (shadowHistoricoIds.has(idAtual)) destino = 'MOVIDO_PARA_SHADOW_HISTORICO';
+                else if (shadowLiveIds.has(idAtual)) destino = 'MOVIDO_PARA_SHADOW_LIVE';
+                else if (rejeitadosIds.has(idAtual)) destino = 'REJEITADO_SHADOW_LIVE';
+
+                const liveRows = liveMap.get(idAnterior) || [];
+                const liveValidos = liveRows.filter(r => ['GREEN', 'TIE', 'RED'].includes(String(r.tipo_resultado || '').toUpperCase()));
+                const liveWins = liveValidos.filter(r => ['GREEN', 'TIE'].includes(String(r.tipo_resultado || '').toUpperCase())).length;
+                return {
+                    ...auditoria,
+                    destino,
+                    live: {
+                        ocorrencias: liveValidos.length,
+                        assertividade: liveValidos.length > 0 ? (liveWins / liveValidos.length) * 100 : null,
+                        streak_red: calcularStreakRed(liveValidos)
+                    }
+                };
+            });
         const agora = Date.now();
         const ttlMs = config.ttl_horas * 60 * 60 * 1000;
         const tiesZerado = JSON.stringify({ direto:{}, gale1:{}, gale2:{} });
@@ -906,7 +1110,9 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
             shadow_live: shadowLive.length,
             rejeitados_shadow_live: rejeitadosShadowLive.length,
             fora_pool: Math.max(0, candidatos.length - reter.length - rejeitadosShadowLive.length),
-            candidatos: candidatos.length
+            candidatos: candidatos.length,
+            incumbentes_auditoria: incumbentesAuditoria,
+            shadow_historico_auditoria: auditorias.filter(a => a.shadow && a.status === 'REPROVADO_SHADOW_HISTORICO')
         };
     }
 
@@ -954,13 +1160,16 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
         }
 
         const [existentes] = await dbPool.query(
-            'SELECT id FROM estrategias WHERE is_dinamico=true AND robo_dono_id=? AND ativo=true',
+            `SELECT id, padrao, entrada, gales, proteger_empate
+             FROM estrategias
+             WHERE is_dinamico=true AND robo_dono_id=? AND ativo=true`,
             [robo.id]
         );
         const historico = await carregarHistorico(config.range);
         const candidatos = minerarCandidatos(historico, config, {
             robo_id: robo.id,
-            incumbentes: existentes.map(e => String(e.id))
+            incumbentes: existentes.map(e => String(e.id)),
+            incumbentes_detalhes: existentes
         });
         await aplicarShadowLiveAosCandidatos(candidatos, config);
         const resumo = await reconciliar(robo, config, candidatos);
@@ -1118,6 +1327,7 @@ module.exports = {
     avaliarShadowLive,
     combinarScoreShadowLive,
     formatarLogDesativacaoAutoPilot,
+    formatarLinhaAuditoriaCandidato,
     criarAutoPilotService,
     idCandidato
 };
