@@ -2440,10 +2440,24 @@
         function fecharFormularioAutoTrader() { document.getElementById('modal-autotrader').style.display = 'none'; }
 
         function renderizarCheckboxFontesAT(fontesAtivas) {
+            fontesAtivas = Array.isArray(fontesAtivas) ? fontesAtivas.map(String) : [];
             let box = document.getElementById('at-lista-fontes'); let html = '';
-            robosGlobais.forEach(r => { let nomeFonte = `[AUTO] ${r.nome}`; let checked = fontesAtivas.includes(nomeFonte) ? 'checked' : ''; html += `<label class="check-item"><input type="checkbox" class="chk-at-fonte" value="${nomeFonte}" ${checked}> <span style="color:#17a2b8;">⚡ ${nomeFonte} (IA Dinâmica)</span></label>`; });
+            robosGlobais.forEach(r => {
+                const nomeFonte = `[AUTO] ${r.nome}`;
+                const fonteCanonica = `AUTO_PILOT_IA:${Number(r.id)}`;
+                const checked = (fontesAtivas.includes(fonteCanonica) || fontesAtivas.includes(nomeFonte)) ? 'checked' : '';
+                html += `<label class="check-item"><input type="checkbox" class="chk-at-fonte" value="${fonteCanonica}" ${checked}> <span style="color:#17a2b8;">⚡ ${nomeFonte} (IA Dinâmica)</span></label>`;
+            });
             origensGlobais.forEach(o => { if (!o.nome.startsWith('[AUTO]')) { let checked = fontesAtivas.includes(o.nome) ? 'checked' : ''; html += `<label class="check-item"><input type="checkbox" class="chk-at-fonte" value="${o.nome}" ${checked}> <span>👤 ${o.nome} (Manuais)</span></label>`; } });
             box.innerHTML = html || '<span style="color:#666;">Nenhuma fonte de sinal disponível.</span>';
+        }
+
+        function rotuloFonteAutoTrader(fonte) {
+            const valor = String(fonte || '').trim();
+            const match = /^AUTO_PILOT_IA:(\d+)$/.exec(valor);
+            if (!match) return valor;
+            const robo = robosGlobais.find(item => Number(item.id) === Number(match[1]));
+            return robo ? `[AUTO] ${robo.nome}` : `[AUTO] Robô IA #${match[1]}`;
         }
 
         async function salvarAutoTrader() {
@@ -2575,7 +2589,11 @@
                     trailingHTML = `<div style="font-size:10px; color:#ffc107; margin-top:2px;">↳ Trailing habilitado, mas ainda sem recuo configurado.</div>`;
                 }
                 let camuflagemHTML = (cf.modo_camuflagem === 'PULOS') ? `<span style="display:inline-block; margin-top:5px; background:#111; padding:4px 8px; border-radius:4px; border:1px solid #333; font-size:11px;">🕵️ Camuflagem: Pulará <strong>${at.pulos_restantes}</strong> ordens.</span>` : '';
-                let strFontes = (cf.fontes_sinal || []).map(f => `<span style="font-size:10px; padding:2px 6px; border-radius:4px; background:${f.includes('[AUTO]')?'#17a2b8':'#444'}; color:white; margin-right:4px;">${f}</span>`).join('');
+                let strFontes = (cf.fontes_sinal || []).map(f => {
+                    const rotulo = rotuloFonteAutoTrader(f);
+                    const automatica = String(f || '').startsWith('AUTO_PILOT_IA:') || rotulo.includes('[AUTO]');
+                    return `<span style="font-size:10px; padding:2px 6px; border-radius:4px; background:${automatica?'#17a2b8':'#444'}; color:white; margin-right:4px;">${rotulo}</span>`;
+                }).join('');
 
                 div.innerHTML += `
                     <div class="card" style="border-left: 4px solid #28a745; ${at.ativo?'':'opacity:0.6; filter:grayscale(50%);'}">
