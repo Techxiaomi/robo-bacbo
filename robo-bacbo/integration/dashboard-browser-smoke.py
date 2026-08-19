@@ -339,6 +339,7 @@ def main():
         fonte_manual = page.locator("#lista-padroes .card")
         assert fonte_manual.count() == 1, fonte_manual.all_inner_texts()
         assert "Padrao Teste" in fonte_manual.first.inner_text()
+        page.evaluate("() => window.mudarAbaPrincipal('dashboard')")
 
         # BUG-019: o formulário do Auto-Trader expõe política de Tie por percentual
         # ou valor e mostra os valores efetivos após arredondamento e Gales.
