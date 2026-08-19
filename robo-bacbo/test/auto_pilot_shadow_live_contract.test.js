@@ -28,7 +28,7 @@ test('Shadow Live possui histórico próprio e idempotente no MySQL', () => {
 test('giro persistido entrega seu ID ao paper trading antes da próxima decisão', () => {
     assert.match(
         backend,
-        /autoPilotIA\.registrarNovoGiro\(\{\s*giro_id:\s*Number\(resultadoInsertGiro\.insertId\)\s*\|\|\s*0\s*\}\)/
+        /autoPilotIA\.registrarNovoGiro\(\{\s*giro_id:\s*giroIdPersistidoParaIA\s*\}\)/
     );
 });
 

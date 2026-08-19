@@ -3214,14 +3214,16 @@ app.post("/receber-sinal", async (req, res) => {
         console.log(`\n====================================\n🔥 Vencedor: ${logNomeVencedor}\n🔵 Jogador : ${totalP} | 🔴 Banca: ${totalB}\n====================================\n`);
 
         let giroPersistidoParaIA = false;
+        let giroIdPersistidoParaIA = 0;
         try {
             const timestampColetaNumero = Number(dados.timestamp_coleta);
             const timestampGiroAnalitico = Number.isFinite(timestampColetaNumero) && timestampColetaNumero > 0
                 ? timestampColetaNumero
                 : Date.now();
             const [resultadoInsertGiro] = await dbPool.query('INSERT INTO giros_recentes (resultado, p_d1, p_d2, b_d1, b_d2, numero_empate, multiplicador, id_sessao, data_hora) VALUES (?,?,?,?,?,?,?,?,FROM_UNIXTIME(?))', [vencedor, p1, p2, b1, b2, nEmp, mult, idSessaoContinua, timestampGiroAnalitico / 1000]);
+            giroIdPersistidoParaIA = Number(resultadoInsertGiro.insertId) || 0;
             historicoGirosAnalitico.push({
-                id: Number(resultadoInsertGiro.insertId) || 0,
+                id: giroIdPersistidoParaIA,
                 resultado: vencedor,
                 multiplicador: mult || '',
                 id_sessao: idSessaoContinua,
@@ -3235,9 +3237,9 @@ app.post("/receber-sinal", async (req, res) => {
         historicoRecente.push({ resultado: vencedor, placarStr: `[P:${p1+p2} B:${b1+b2}]`, id_sessao: idSessaoContinua });
         if (historicoRecente.length > 30) historicoRecente.shift();
 
-        if (giroPersistidoParaIA) {
+        if (giroPersistidoParaIA && giroIdPersistidoParaIA > 0) {
             try {
-                await autoPilotIA.registrarNovoGiro({ giro_id: Number(resultadoInsertGiro.insertId) || 0 });
+                await autoPilotIA.registrarNovoGiro({ giro_id: giroIdPersistidoParaIA });
             } catch (e) {
                 console.error('⚠️ Auto Pilot IA: mineração periódica falhou sem interromper a rodada:', e.message);
             }
