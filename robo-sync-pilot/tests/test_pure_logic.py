@@ -236,6 +236,7 @@ class TestProcessarResultado(unittest.TestCase):
             "resultado_resolvido_duplicado",
             "marcar_interrupcao_fluxo",
             "snapshot_interrupcao_fluxo",
+            "id_interrupcao_fluxo",
             "confirmar_interrupcao_reportada",
             "validar_resultado_resolvido",
             "processar_resultado",
@@ -421,6 +422,8 @@ class TestProcessarResultado(unittest.TestCase):
         payload = FakeRequests.chamadas[0]["kwargs"]["json"]
         self.assertTrue(payload["interrupcao_fluxo"])
         self.assertEqual(payload["motivo_interrupcao"], "PLAYER_STATE_STALE")
+        self.assertEqual(payload["interrupcao_id"], "sessao-teste:1")
+        self.assertEqual(payload["interrupcao_geracao"], 1)
         self.assertFalse(self.ns["continuidade_fluxo"]["interrompida"])
 
     def test_nova_interrupcao_nao_e_apagada_por_ack_de_snapshot_anterior(self):
@@ -487,8 +490,10 @@ class TestEstadoRodadaEvolution(unittest.TestCase):
         carregar_funcoes([
             "identidade_rodada_evolution",
             "atualizar_estado_mesa_player",
+            "classificar_reconexao_player_state",
         ], self.ns)
         self.atualizar = self.ns["atualizar_estado_mesa_player"]
+        self.classificar_reconexao = self.ns["classificar_reconexao_player_state"]
 
     @staticmethod
     def estado(stage, round_id=None):
@@ -523,13 +528,64 @@ class TestEstadoRodadaEvolution(unittest.TestCase):
             "PLAYER_STATE_SEM_STAGE",
         )
 
+    def test_reconexao_na_mesma_rodada_preserva_continuidade(self):
+        resultado = self.classificar_reconexao(
+            {"round_id": "100", "round_resolvido": False, "stage": "Dealing"},
+            self.estado("Dealing", "100"),
+            3,
+            10,
+        )
+        self.assertTrue(resultado["segura"])
+        self.assertEqual(resultado["motivo"], "MESMA_RODADA")
+
+    def test_reconexao_na_proxima_rodada_so_e_segura_apos_resolved(self):
+        segura = self.classificar_reconexao(
+            {"round_id": "100", "round_resolvido": True, "stage": "Resolved"},
+            self.estado("Betting", "qualquer-id-novo"),
+            4,
+            10,
+        )
+        self.assertTrue(segura["segura"])
+        self.assertEqual(segura["motivo"], "PROXIMA_RODADA_APOS_RESOLVED")
+
+        insegura = self.classificar_reconexao(
+            {"round_id": "100", "round_resolvido": False, "stage": "Dealing"},
+            self.estado("Betting", "101"),
+            4,
+            10,
+        )
+        self.assertFalse(insegura["segura"])
+        self.assertEqual(insegura["motivo"], "TROCA_RODADA_DURANTE_RECONEXAO")
+
+    def test_reconexao_ambigua_ou_fora_da_janela_falha_fechado(self):
+        sem_id = self.classificar_reconexao(
+            {"round_id": "100", "round_resolvido": True},
+            self.estado("Betting"),
+            2,
+            10,
+        )
+        self.assertFalse(sem_id["segura"])
+        self.assertEqual(sem_id["motivo"], "RECONEXAO_SEM_ROUND_ID")
+
+        tardia = self.classificar_reconexao(
+            {"round_id": "100", "round_resolvido": True},
+            self.estado("Betting", "101"),
+            10.01,
+            10,
+        )
+        self.assertFalse(tardia["segura"])
+        self.assertEqual(tardia["motivo"], "RECONEXAO_FORA_DA_JANELA")
+
 
 class TestContratoWebSocketFailClosed(unittest.TestCase):
-    def test_socket_oficial_exige_player_state_e_close_lacra_fluxo(self):
+    def test_socket_oficial_exige_player_state_e_close_entra_em_quarentena(self):
         self.assertIn('dados.get("type") == "bacbo.playerState"', SOURCE)
         self.assertIn('"ws_oficial": ws', SOURCE)
         self.assertIn('if status_conexao.get("ws_oficial") is not ws:', SOURCE)
-        self.assertIn('marcar_interrupcao_fluxo("WEBSOCKET_PLAYER_STATE_FECHADO")', SOURCE)
+        self.assertIn('"reconexao_pendente"', SOURCE)
+        self.assertIn('WEBSOCKET_RECONNECT_GRACE_SECONDS', SOURCE)
+        self.assertNotIn('marcar_interrupcao_fluxo("WEBSOCKET_PLAYER_STATE_FECHADO")', SOURCE)
+        self.assertIn('motivo = "WEBSOCKET_RECONEXAO_TIMEOUT"', SOURCE)
 
     def test_watchdog_reinicia_coletor_e_notifica_node(self):
         self.assertIn("COLLECTOR_PLAYER_STATE_STALE_SECONDS", SOURCE)
