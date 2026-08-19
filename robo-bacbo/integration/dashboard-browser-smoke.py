@@ -45,7 +45,7 @@ def main():
     enhancements_js = (PUBLIC / "ui-enhancements.js").read_text(encoding="utf-8")
     lab_js = (PUBLIC / "lab-enhancements.js").read_text(encoding="utf-8")
 
-    estrategia = {
+    estrategia_manual = {
         "id": "est-1",
         "nome": "Padrao Teste",
         "origem": "Origem A",
@@ -54,7 +54,21 @@ def main():
         "gales": 0,
         "proteger_empate": True,
         "ativo": True,
-        "is_dinamico": False,
+        "is_dinamico": "0",
+        "robo_dono_id": None,
+        "detalhes": detalhes_todos(detalhes_periodo()),
+    }
+    estrategia_dinamica = {
+        "id": "ia-7",
+        "nome": "Padrao Dinamico",
+        "origem": "AUTO_PILOT_IA:7",
+        "padrao": '["Banker","Player"]',
+        "entrada": "Banker",
+        "gales": 0,
+        "proteger_empate": False,
+        "ativo": True,
+        "is_dinamico": "1",
+        "robo_dono_id": 7,
         "detalhes": detalhes_todos(detalhes_periodo()),
     }
 
@@ -138,10 +152,10 @@ def main():
                 route.fulfill(status=200, content_type="application/javascript", body="window.html2pdf = function() {};" )
                 return
             if path == "http://bacbo.test/api/estrategias":
-                responder_json(route, [estrategia])
+                responder_json(route, [estrategia_manual, estrategia_dinamica])
                 return
             if path == "http://bacbo.test/api/origens":
-                responder_json(route, [{"id": 1, "nome": "Origem A"}])
+                responder_json(route, [{"id": 1, "nome": "Origem A"}, {"id": 2, "nome": "Auto Pilot 01"}])
                 return
             if path == "http://bacbo.test/api/robos":
                 # Mantém o fixture histórico dos seletores; os robôs adicionais são
@@ -171,9 +185,9 @@ def main():
         page.wait_for_function(
             """
             () => document.querySelectorAll('#sintonizador-web option').length === 2
-                && document.querySelectorAll('#select-origem-dash option').length === 2
+                && document.querySelectorAll('#select-origem-dash option').length === 3
                 && document.querySelectorAll('#select-robo-dash option').length === 2
-                && document.querySelectorAll('#select-origem-filtro option').length === 2
+                && document.querySelectorAll('#select-origem-filtro option').length === 3
             """,
             timeout=10000,
         )
@@ -230,6 +244,7 @@ def main():
                 origemDash: Array.from(document.querySelectorAll('#select-origem-dash option')).map(o => o.textContent.trim()),
                 roboDash: Array.from(document.querySelectorAll('#select-robo-dash option')).map(o => o.textContent.trim()),
                 origemPadroes: Array.from(document.querySelectorAll('#select-origem-filtro option')).map(o => o.textContent.trim()),
+                valoresOrigemPadroes: Array.from(document.querySelectorAll('#select-origem-filtro option')).map(o => o.value),
                 sinais: document.getElementById('dash-sinais').innerText,
                 greens: document.getElementById('dash-greens').innerText,
                 reds: document.getElementById('dash-reds').innerText,
@@ -257,7 +272,11 @@ def main():
         assert "Robo Teste" in opcoes["sintonia"], opcoes
         assert "Origem A" in opcoes["origemDash"], opcoes
         assert "Robo Teste" in opcoes["roboDash"], opcoes
-        assert "Origem A" in opcoes["origemPadroes"], opcoes
+        assert any("Origem A" in item for item in opcoes["origemPadroes"]), opcoes
+        assert any("Auto - IA — Robo Teste" in item for item in opcoes["origemPadroes"]), opcoes
+        assert not any("Auto Pilot 01" in item for item in opcoes["origemPadroes"]), opcoes
+        assert "MANUAL:Origem%20A" in opcoes["valoresOrigemPadroes"], opcoes
+        assert "IA:7" in opcoes["valoresOrigemPadroes"], opcoes
         assert opcoes["sinais"] == "6", opcoes
         assert opcoes["greens"] == "4", opcoes
         assert opcoes["reds"] == "2", opcoes
@@ -291,6 +310,30 @@ def main():
         assert opcoes["minerSelecionado"] == "1000", opcoes
         assert opcoes["dashboardBacktestSelecionado"] == "MAX", opcoes
         assert opcoes["socketRegistrado"] is True, opcoes
+
+        page.select_option("#select-origem-filtro", "TODAS")
+        page.select_option("#select-tipo-filtro", "MANUAIS")
+        manuais = page.locator("#lista-padroes .card")
+        assert manuais.count() == 1, manuais.all_inner_texts()
+        assert "Padrao Teste" in manuais.first.inner_text()
+        assert "Padrao Dinamico" not in manuais.first.inner_text()
+
+        page.select_option("#select-tipo-filtro", "DINAMICOS")
+        dinamicos = page.locator("#lista-padroes .card")
+        assert dinamicos.count() == 1, dinamicos.all_inner_texts()
+        assert "Padrao Dinamico" in dinamicos.first.inner_text()
+        assert "Padrao Teste" not in dinamicos.first.inner_text()
+
+        page.select_option("#select-tipo-filtro", "TODOS")
+        page.select_option("#select-origem-filtro", "IA:7")
+        fonte_ia = page.locator("#lista-padroes .card")
+        assert fonte_ia.count() == 1, fonte_ia.all_inner_texts()
+        assert "Padrao Dinamico" in fonte_ia.first.inner_text()
+
+        page.select_option("#select-origem-filtro", "MANUAL:Origem%20A")
+        fonte_manual = page.locator("#lista-padroes .card")
+        assert fonte_manual.count() == 1, fonte_manual.all_inner_texts()
+        assert "Padrao Teste" in fonte_manual.first.inner_text()
 
         # BUG-019: o formulário do Auto-Trader expõe política de Tie por percentual
         # ou valor e mostra os valores efetivos após arredondamento e Gales.
