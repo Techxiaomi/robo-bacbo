@@ -36,6 +36,10 @@ function carregarLogicaPura() {
             "function rotacionarSessaoAposInterrupcao"
         ),
         trechoEntre(
+            "function normalizarInterrupcaoColetorId",
+            "function criarEsperaResultadoExecutor"
+        ),
+        trechoEntre(
             "function nivelHistoricoResultado",
             "async function registrarHistoricoResultadoEstrategia"
         ),
@@ -69,6 +73,8 @@ function carregarLogicaPura() {
         Object,
         JSON
     };
+    contexto.INTERRUPCOES_COLETOR_PROCESSADAS = new Map();
+    contexto.LIMITE_INTERRUPCOES_COLETOR_MEMORIA = 1000;
     vm.createContext(contexto);
 
     vm.runInContext(
@@ -76,6 +82,10 @@ function carregarLogicaPura() {
             calcularFichaSegura,
             calcularDetalhesPadraoNoHistorico,
             avaliarContinuidadeResultado,
+            normalizarInterrupcaoColetorId,
+            reservarInterrupcaoColetor,
+            concluirInterrupcaoColetor,
+            interrupcaoColetorJaAplicada,
             nivelHistoricoResultado,
             contarTiesLegados,
             roboSintonizaEstrategia,
@@ -743,7 +753,7 @@ test("intervalo longo preserva continuidade e evidencias estruturais invalidam p
     assert.equal(r.buraco_confirmado, true);
     assert.equal(r.motivo, "METADADOS_COLETOR_AUSENTES");
 
-    assert.match(source, /if \(continuidade\.interrupcao\) \{[\s\S]*?await invalidarSequenciasAposBuracoDados\(continuidade\.motivo\);/);
+    assert.match(source, /if \(continuidade\.interrupcao\) \{[\s\S]*?interrupcaoColetorJaAplicada\(dados\)[\s\S]*?await invalidarSequenciasAposBuracoDados\(motivoInterrupcao\);/);
     assert.doesNotMatch(source, /if \(continuidade\.buraco_confirmado\) \{\s*await invalidarSequenciasAposBuracoDados/);
     assert.doesNotMatch(source, /INTERVALO_NODE/);
     assert.match(source, /app\.post\("\/collector-health"[\s\S]*?await invalidarSequenciasAposBuracoDados\(motivo\)/);
@@ -753,6 +763,27 @@ test("intervalo longo preserva continuidade e evidencias estruturais invalidam p
     assert.match(frontendSource, /sessaoAtual !== sessaoAnterior/);
     assert.match(frontendSource, /dadosArr\[i \+ p\]\.id_sessao !== sessaoBase/);
     assert.match(frontendSource, /dadosCorte\[i\+p\]\.id_sessao !== sessaoBase/);
+});
+
+test("interrupção do coletor é idempotente entre collector-health e próximo resultado", () => {
+    const evento = { interrupcao_id: "sessao-a:7" };
+    const primeira = logic.reservarInterrupcaoColetor(evento, 1000);
+    assert.equal(primeira.repetida, false);
+    assert.equal(logic.interrupcaoColetorJaAplicada(evento), false);
+
+    assert.equal(logic.concluirInterrupcaoColetor(primeira.id, true, 1100), true);
+    assert.equal(logic.interrupcaoColetorJaAplicada(evento), true);
+
+    const repetida = logic.reservarInterrupcaoColetor(evento, 1200);
+    assert.equal(repetida.repetida, true);
+    assert.equal(repetida.estado, "APLICADA");
+
+    const legado = logic.reservarInterrupcaoColetor({}, 1300);
+    assert.equal(legado.legado, true);
+    assert.equal(legado.repetida, false);
+
+    assert.equal(logic.normalizarInterrupcaoColetorId({ interrupcao_id: "../invalida" }), "");
+    assert.match(source, /interrupcaoColetorJaAplicada\(dados\)[\s\S]*?primeiro resultado apenas estabelece a nova fronteira estatística/);
 });
 
 test("exclusao de robo remove padroes IA filhos e historicos na mesma transacao", () => {
