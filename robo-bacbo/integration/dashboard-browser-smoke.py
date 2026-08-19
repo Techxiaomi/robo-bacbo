@@ -155,7 +155,7 @@ def main():
                 responder_json(route, [estrategia_manual, estrategia_dinamica])
                 return
             if path == "http://bacbo.test/api/origens":
-                responder_json(route, [{"id": 1, "nome": "Origem A"}, {"id": 2, "nome": "Auto Pilot 01"}])
+                responder_json(route, [{"id": 1, "nome": "Origem A"}, {"id": 2, "nome": "[AUTO] Auto Pilot 01"}])
                 return
             if path == "http://bacbo.test/api/robos":
                 # Mantém o fixture histórico dos seletores; os robôs adicionais são
@@ -166,15 +166,26 @@ def main():
                 responder_json(route, [])
                 return
             if path == "http://bacbo.test/api/dashboard-stats":
-                responder_json(route, {
-                    "sinais": 6,
-                    "greens": 4,
-                    "reds": 2,
-                    "ties": 1,
-                    "max_green_seq": 3,
-                    "max_red_seq": 2,
-                    "assertividade": "66.7%",
-                })
+                if "origem=AUTO_PILOT_IA%3A7" in url:
+                    responder_json(route, {
+                        "sinais": 2,
+                        "greens": 2,
+                        "reds": 0,
+                        "ties": 0,
+                        "max_green_seq": 2,
+                        "max_red_seq": 0,
+                        "assertividade": "100.0%",
+                    })
+                else:
+                    responder_json(route, {
+                        "sinais": 6,
+                        "greens": 4,
+                        "reds": 2,
+                        "ties": 1,
+                        "max_green_seq": 3,
+                        "max_red_seq": 2,
+                        "assertividade": "66.7%",
+                    })
                 return
 
             route.fulfill(status=404, content_type="text/plain", body="not found")
@@ -242,6 +253,7 @@ def main():
             () => ({
                 sintonia: Array.from(document.querySelectorAll('#sintonizador-web option')).map(o => o.textContent.trim()),
                 origemDash: Array.from(document.querySelectorAll('#select-origem-dash option')).map(o => o.textContent.trim()),
+                valoresOrigemDash: Array.from(document.querySelectorAll('#select-origem-dash option')).map(o => o.value),
                 roboDash: Array.from(document.querySelectorAll('#select-robo-dash option')).map(o => o.textContent.trim()),
                 origemPadroes: Array.from(document.querySelectorAll('#select-origem-filtro option')).map(o => o.textContent.trim()),
                 valoresOrigemPadroes: Array.from(document.querySelectorAll('#select-origem-filtro option')).map(o => o.value),
@@ -271,6 +283,9 @@ def main():
 
         assert "Robo Teste" in opcoes["sintonia"], opcoes
         assert "Origem A" in opcoes["origemDash"], opcoes
+        assert any("Auto - IA — Robo Teste" in item for item in opcoes["origemDash"]), opcoes
+        assert not any("Auto Pilot 01" in item for item in opcoes["origemDash"]), opcoes
+        assert "AUTO_PILOT_IA:7" in opcoes["valoresOrigemDash"], opcoes
         assert "Robo Teste" in opcoes["roboDash"], opcoes
         assert any("Origem A" in item for item in opcoes["origemPadroes"]), opcoes
         assert any("Auto - IA — Robo Teste" in item for item in opcoes["origemPadroes"]), opcoes
@@ -310,6 +325,21 @@ def main():
         assert opcoes["minerSelecionado"] == "1000", opcoes
         assert opcoes["dashboardBacktestSelecionado"] == "MAX", opcoes
         assert opcoes["socketRegistrado"] is True, opcoes
+
+        page.select_option("#select-origem-dash", "AUTO_PILOT_IA:7")
+        page.wait_for_function(
+            """
+            () => document.getElementById('dash-sinais')?.innerText === '2'
+                && document.getElementById('dash-greens')?.innerText === '2'
+                && document.getElementById('dash-assertividade')?.innerText === '100.0%'
+            """,
+            timeout=5000,
+        )
+        page.select_option("#select-origem-dash", "TODAS")
+        page.wait_for_function(
+            "() => document.getElementById('dash-sinais')?.innerText === '6'",
+            timeout=5000,
+        )
 
         page.evaluate("() => window.mudarAbaPrincipal('padroes')")
         page.wait_for_function(
