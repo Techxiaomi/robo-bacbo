@@ -19,8 +19,8 @@ load_env_file(os.path.join(PROJECT_ROOT, ".env"))
 # ====================================================================
 # CONFIGURAÇÕES GERAIS E CONTROLE DE VERSÃO
 # ====================================================================
-VERSAO_ROBO = "v1.6.1"
-NOME_ATUALIZACAO = "Continuidade Estrutural Fail-Closed"
+VERSAO_ROBO = "v1.6.2"
+NOME_ATUALIZACAO = "Reconciliação Roadmap Fail-Closed"
 
 URL_CASSINO = os.getenv("CASINO_GAME_URL", "")
 ARQUIVO_SESSAO = os.getenv("SESSION_STATE_FILE", os.path.join(BASE_DIR, "sessao_salva.json"))
@@ -90,6 +90,14 @@ try:
 except ValueError:
     WEBSOCKET_RECONNECT_GRACE_SECONDS = 10.0
 
+try:
+    ROADMAP_RECONCILIATION_MIN_RESULTS = max(
+        4,
+        min(12, int(os.getenv("ROADMAP_RECONCILIATION_MIN_RESULTS", "6")))
+    )
+except ValueError:
+    ROADMAP_RECONCILIATION_MIN_RESULTS = 6
+
 if not INTERNAL_API_TOKEN:
     raise RuntimeError("INTERNAL_API_TOKEN nao configurado. Defina o segredo compartilhado no .env antes de iniciar o executor.")
 
@@ -107,6 +115,9 @@ estado_mesa = {
     "round_id": "",
     "round_resolvido": False,
 }
+historico_resultados_confirmados_lock = threading.Lock()
+historico_resultados_confirmados = []
+HISTORICO_RESULTADOS_CONFIRMADOS_LIMITE = 12
 ORDEM_ID_LIMITE_MEMORIA = 5000
 app = Flask(__name__)
 log = logging.getLogger('werkzeug')
@@ -566,6 +577,144 @@ def identidade_rodada_evolution(game_info):
         if valor is not None and str(valor).strip():
             return str(valor).strip()
     return ""
+
+
+def marcador_resultado(resultado):
+    return {
+        "PlayerWon": "P",
+        "BankerWon": "B",
+        "Tie": "T",
+        "TieWon": "T",
+    }.get(str(resultado or "").strip(), "")
+
+
+def registrar_resultado_confirmado(resultado):
+    marcador = marcador_resultado(resultado)
+    if not marcador:
+        return []
+
+    with historico_resultados_confirmados_lock:
+        historico_resultados_confirmados.append(marcador)
+        del historico_resultados_confirmados[:-HISTORICO_RESULTADOS_CONFIRMADOS_LIMITE]
+        return list(historico_resultados_confirmados)
+
+
+def snapshot_resultados_confirmados():
+    with historico_resultados_confirmados_lock:
+        return list(historico_resultados_confirmados)
+
+
+def normalizar_marcador_roadmap(valor):
+    texto = str(valor or "").lower()
+    texto = re.sub(r"[^a-z0-9]+", " ", texto).strip()
+    if re.search(r"(?:^| )(?:playerwon|player|jogador|blue)(?: |$)", texto):
+        return "P"
+    if re.search(r"(?:^| )(?:bankerwon|banker|banca|red)(?: |$)", texto):
+        return "B"
+    if re.search(r"(?:^| )(?:tie|tiewon|empate|draw|green|yellow)(?: |$)", texto):
+        return "T"
+    return ""
+
+
+def reconciliar_trilhas_roadmap(historico_confirmado, trilhas, minimo_resultados):
+    minimo = max(4, int(minimo_resultados or 0))
+    historico = [m for m in (historico_confirmado or []) if m in {"P", "B", "T"}]
+    if len(historico) < minimo:
+        return {
+            "confirmada": False,
+            "motivo": "HISTORICO_LOCAL_INSUFICIENTE",
+            "amostra": len(historico),
+        }
+
+    cauda = historico[-minimo:]
+    for trilha in trilhas or []:
+        normalizada = [m for m in trilha if m in {"P", "B", "T"}]
+        if len(normalizada) < minimo:
+            continue
+        for orientacao, ordenada in (("DIRETA", normalizada), ("INVERSA", list(reversed(normalizada)))):
+            if ordenada[-minimo:] == cauda:
+                return {
+                    "confirmada": True,
+                    "motivo": "ROADMAP_DOM_CAUSA_COMPATIVEL",
+                    "orientacao": orientacao,
+                    "amostra": minimo,
+                }
+
+    return {
+        "confirmada": False,
+        "motivo": "ROADMAP_DOM_SEM_CAUSA_COMPATIVEL",
+        "amostra": minimo,
+    }
+
+
+def extrair_trilhas_roadmap_dom(page):
+    """Extrai somente marcadores P/B/T de contêineres semânticos da roadmap."""
+    diagnostico = {"frames": 0, "raizes": 0, "trilhas": 0}
+    trilhas = []
+    script = """() => {
+        const seletorRaizes = [
+            '[data-roadmap]', '[data-history]', '[data-results]',
+            '[class*="road" i]', '[class*="bead" i]', '[class*="history" i]', '[class*="result" i]'
+        ].join(',');
+        const seletorItens = '[data-result],[data-outcome],[data-winner],[data-role],[aria-label],[title],[class]';
+        const bruto = Array.from(document.querySelectorAll(seletorRaizes));
+        const raizes = bruto.filter(raiz => !bruto.some(outra => outra !== raiz && outra.contains(raiz)));
+        const marcador = (elemento) => {
+            const partes = [
+                elemento.getAttribute('data-result'), elemento.getAttribute('data-outcome'),
+                elemento.getAttribute('data-winner'), elemento.getAttribute('data-role'),
+                elemento.getAttribute('aria-label'), elemento.getAttribute('title'), elemento.getAttribute('class')
+            ].filter(Boolean).join(' ').toLowerCase();
+            if (/(^|[^a-z])(playerwon|player|jogador|blue)(?=$|[^a-z])/.test(partes)) return 'P';
+            if (/(^|[^a-z])(bankerwon|banker|banca|red)(?=$|[^a-z])/.test(partes)) return 'B';
+            if (/(^|[^a-z])(tie|tiewon|empate|draw|green|yellow)(?=$|[^a-z])/.test(partes)) return 'T';
+            return '';
+        };
+        const trilhas = [];
+        for (const raiz of raizes) {
+            const candidatos = Array.from(raiz.querySelectorAll(seletorItens))
+                .map(elemento => ({ elemento, marcador: marcador(elemento) }))
+                .filter(item => item.marcador);
+            const folhas = candidatos.filter(item => !candidatos.some(outra => (
+                outra.elemento !== item.elemento
+                && item.elemento.contains(outra.elemento)
+                && outra.marcador === item.marcador
+            )));
+            const sequencia = folhas.map(item => item.marcador);
+            if (sequencia.length >= 4) trilhas.push(sequencia);
+        }
+        return { raizes: raizes.length, trilhas };
+    }"""
+
+    for frame in getattr(page, "frames", []):
+        try:
+            resposta = frame.evaluate(script)
+            diagnostico["frames"] += 1
+            diagnostico["raizes"] += max(0, int(resposta.get("raizes") or 0))
+            for trilha in resposta.get("trilhas") or []:
+                if isinstance(trilha, list):
+                    trilhas.append([str(m) for m in trilha])
+        except Exception:
+            continue
+
+    diagnostico["trilhas"] = len(trilhas)
+    return {"trilhas": trilhas, "diagnostico": diagnostico}
+
+
+def reconciliar_reconexao_por_roadmap(page, dados):
+    game_info = dados.get("args", {}).get("game", {}) if isinstance(dados, dict) else {}
+    stage = str(game_info.get("stage") or "").strip()
+    if not stage:
+        return {"confirmada": False, "motivo": "PLAYER_STATE_SEM_STAGE", "diagnostico": {}}
+
+    extraido = extrair_trilhas_roadmap_dom(page)
+    resultado = reconciliar_trilhas_roadmap(
+        snapshot_resultados_confirmados(),
+        extraido["trilhas"],
+        ROADMAP_RECONCILIATION_MIN_RESULTS,
+    )
+    resultado["diagnostico"] = extraido["diagnostico"]
+    return resultado
 
 
 def resultado_resolvido_duplicado(game_info, agora=None):
@@ -1123,6 +1272,7 @@ def processar_resultado(dados):
                     timeout=2
                 )
                 resposta.raise_for_status()
+                registrar_resultado_confirmado(resultado)
                 if interrupcao_pendente["interrompida"]:
                     confirmar_interrupcao_reportada(interrupcao_pendente["geracao"])
                 executor_pronto.set()
@@ -1237,19 +1387,31 @@ def iniciar_robo_blindado():
                         # abrir um novo socket. Eles não provam continuidade nem
                         # buraco: aguarda o próximo playerState completo até o timeout.
                         if not player_state_reconexao_elegivel(dados):
-                            registrar_erro_limitado(
-                                "reconexao_player_state_incompleto",
-                                "⏳ WebSocket em reconexão: aguardando playerState completo com stage e roundId.",
-                                5,
+                            reconciliacao = reconciliar_reconexao_por_roadmap(page, dados)
+                            if reconciliacao["confirmada"]:
+                                classificacao_reconexao = {
+                                    "segura": True,
+                                    "motivo": reconciliacao["motivo"],
+                                    "tipo": "ROADMAP_DOM",
+                                }
+                            else:
+                                diagnostico = reconciliacao.get("diagnostico") or {}
+                                registrar_erro_limitado(
+                                    "reconexao_player_state_incompleto",
+                                    "⏳ WebSocket em reconexão: aguardando playerState completo ou roadmap "
+                                    f"compatível ({reconciliacao['motivo']}; frames={diagnostico.get('frames', 0)}, "
+                                    f"raízes={diagnostico.get('raizes', 0)}, trilhas={diagnostico.get('trilhas', 0)}).",
+                                    5,
+                                )
+                                return
+                        if classificacao_reconexao is None:
+                            decorrido = time.monotonic() - float(reconexao.get("iniciada_monotonic") or 0.0)
+                            classificacao_reconexao = classificar_reconexao_player_state(
+                                reconexao.get("estado_anterior"),
+                                dados,
+                                decorrido,
+                                WEBSOCKET_RECONNECT_GRACE_SECONDS,
                             )
-                            return
-                        decorrido = time.monotonic() - float(reconexao.get("iniciada_monotonic") or 0.0)
-                        classificacao_reconexao = classificar_reconexao_player_state(
-                            reconexao.get("estado_anterior"),
-                            dados,
-                            decorrido,
-                            WEBSOCKET_RECONNECT_GRACE_SECONDS,
-                        )
                     status_conexao.update({
                         "ativa": True,
                         "ws_conectado": True,
