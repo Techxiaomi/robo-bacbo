@@ -13,7 +13,7 @@ test.afterEach(() => {
 });
 
 test("config de metricas aplica defaults, limites e sanitiza nome do arquivo", () => {
-    const baseDir = path.join(path.sep, "tmp", "bacbo-metrics-base");
+    const baseDir = path.resolve(path.sep, "tmp", "bacbo-metrics-base");
     const config = metrics.configMetricas({
         baseDir,
         env: {

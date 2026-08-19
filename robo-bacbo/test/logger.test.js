@@ -106,7 +106,7 @@ test("escrita cria JSONL e rotaciona preservando arquivos anteriores", () => {
 });
 
 test("configLogging resolve diretorio relativo e impede path traversal no nome", () => {
-    const baseDir = path.join(path.sep, "tmp", "bacbo-base");
+    const baseDir = path.resolve(path.sep, "tmp", "bacbo-base");
     const config = logger.configLogging({
         baseDir,
         env: {
