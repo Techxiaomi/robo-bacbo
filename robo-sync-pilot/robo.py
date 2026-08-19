@@ -1305,9 +1305,10 @@ def iniciar_robo_blindado():
                 executor_pronto.set()
                 print("✅ Acesso validado! Executor liberado para novas ordens.")
                 
-                tempo_passado = 0
-                while tempo_passado < (2 * 60 * 60 * 1000): # Reinicia a cada 2 horas
-                    if not status_conexao["ativa"]: break
+                # Mantém a sessão saudável indefinidamente. A navegação é reiniciada
+                # somente por evidência operacional (WebSocket/stale/login/Playwright),
+                # nunca apenas pela idade da conexão.
+                while status_conexao["ativa"]:
                     
                     # CÉREBRO DE EXECUÇÃO: Checa a fila de apostas frequentemente
                     for _ in range(20):
@@ -1356,8 +1357,6 @@ def iniciar_robo_blindado():
                                 if btn.count() > 0 and btn.first.is_visible(): btn.first.click(force=True)
                             except: pass
                     
-                    tempo_passado += 10000
-
                 executor_pronto.clear()
                 
             except PlaywrightTimeoutError as e:
