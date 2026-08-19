@@ -2108,6 +2108,39 @@ function roboSintonizaEstrategia(robo, est) {
     return origens.includes(origem);
 }
 
+function fonteCanonicaAutoTrader(est) {
+    if (!est || typeof est !== 'object') return '';
+    if (est.is_dinamico) {
+        const roboDonoId = Number(est.robo_dono_id);
+        return Number.isInteger(roboDonoId) && roboDonoId > 0
+            ? `AUTO_PILOT_IA:${roboDonoId}`
+            : '';
+    }
+    return String(est.origem || '').trim();
+}
+
+function autoTraderAutorizaEstrategia(config, est, robos = []) {
+    const fontes = Array.isArray(config && config.fontes_sinal)
+        ? config.fontes_sinal.map(fonte => String(fonte || '').trim()).filter(Boolean)
+        : [];
+    const fonteCanonica = fonteCanonicaAutoTrader(est);
+    if (!fonteCanonica || fontes.length === 0) return false;
+    if (fontes.includes(fonteCanonica)) return true;
+
+    // Compatibilidade defensiva com configurações salvas antes do BUG-027.
+    // A autorização nova nunca depende do nome; o fallback existe apenas para
+    // não interromper traders legados enquanto eles ainda não forem recriados.
+    if (est && est.is_dinamico) {
+        const roboDono = (Array.isArray(robos) ? robos : []).find(
+            robo => Number(robo.id) === Number(est.robo_dono_id)
+        );
+        const nomeLegado = String(roboDono && roboDono.nome || '').trim();
+        return nomeLegado ? fontes.includes(`[AUTO] ${nomeLegado}`) : false;
+    }
+
+    return false;
+}
+
 function avaliarStopRedsRobo(robo, tipoResultado) {
     const limite = Math.max(0, Math.trunc(Number(robo && robo.stop_reds_seguidos) || 0));
     const redsAtuais = Math.max(0, Math.trunc(Number(robo && robo.reds_consecutivos) || 0));
@@ -3394,7 +3427,7 @@ app.post("/receber-sinal", async (req, res) => {
                     if (est.quarentena_restante <= 0) {
                         for (let trader of AUTO_TRADERS_MEMORIA) {
                             let cf = trader.config;
-                            if (trader.ativo && (trader.status_operacao === 'OPERANDO' || trader.status_operacao === 'STANDBY') && cf.fontes_sinal && cf.fontes_sinal.includes(est.origem)) {
+                            if (trader.ativo && (trader.status_operacao === 'OPERANDO' || trader.status_operacao === 'STANDBY') && autoTraderAutorizaEstrategia(cf, est, ROBOS_MEMORIA)) {
                                 const [pendentes] = await dbPool.query(`SELECT id, valor_entrada, valor_empate FROM auditoria_ordens WHERE trader_id = ? AND status_ordem = 'PENDENTE' LIMIT 1`, [trader.id]);
                                 if (pendentes.length > 0) {
                                     let vEntrada = parseFloat(pendentes[0].valor_entrada);
@@ -3432,7 +3465,7 @@ app.post("/receber-sinal", async (req, res) => {
                         if (est.quarentena_restante <= 0) {
                             for (let trader of AUTO_TRADERS_MEMORIA) {
                                 let cf = trader.config;
-                                if (trader.ativo && trader.status_operacao === 'OPERANDO' && cf.fontes_sinal && cf.fontes_sinal.includes(est.origem)) {
+                                if (trader.ativo && trader.status_operacao === 'OPERANDO' && autoTraderAutorizaEstrategia(cf, est, ROBOS_MEMORIA)) {
                                     const [pendentes] = await dbPool.query(`SELECT id, risco_total, valor_entrada, valor_empate FROM auditoria_ordens WHERE trader_id = ? AND status_ordem = 'PENDENTE' LIMIT 1`, [trader.id]);
                                     if (pendentes.length > 0) {
                                         let riscoAntigo = parseFloat(pendentes[0].risco_total);
@@ -3565,7 +3598,7 @@ app.post("/receber-sinal", async (req, res) => {
                         if (est.quarentena_restante <= 0) {
                             for (let trader of AUTO_TRADERS_MEMORIA) {
                                 let cf = trader.config;
-                                if (trader.ativo && (trader.status_operacao === 'OPERANDO' || trader.status_operacao === 'STANDBY') && cf.fontes_sinal && cf.fontes_sinal.includes(est.origem)) {
+                                if (trader.ativo && (trader.status_operacao === 'OPERANDO' || trader.status_operacao === 'STANDBY') && autoTraderAutorizaEstrategia(cf, est, ROBOS_MEMORIA)) {
                                     const [pendentes] = await dbPool.query(`SELECT id, valor_entrada, valor_empate FROM auditoria_ordens WHERE trader_id = ? AND status_ordem = 'PENDENTE' LIMIT 1`, [trader.id]);
                                     if (pendentes.length > 0) {
                                         let prejuizo = calcularPnLEtapa({
@@ -3647,7 +3680,12 @@ app.post("/receber-sinal", async (req, res) => {
                         if (est.quarentena_restante <= 0) {
                             for (let trader of AUTO_TRADERS_MEMORIA) {
                                 let cf = trader.config;
-                                if (trader.ativo && trader.status_operacao === 'OPERANDO' && cf.fontes_sinal && cf.fontes_sinal.includes(est.origem)) {
+                                if (trader.ativo && trader.status_operacao === 'OPERANDO' && autoTraderAutorizaEstrategia(cf, est, ROBOS_MEMORIA)) {
+
+                                    console.log(
+                                        `🎯 Auto-Trader ${trader.id} (${trader.nome}) autorizado para o sinal `
+                                        + `${est.id} pela fonte ${fonteCanonicaAutoTrader(est)}.`
+                                    );
 
                                     if (!traderDentroHorarioExecucao(cf)) {
                                         console.log(`Trader ${trader.id} fora da janela de execucao (${cf.hora_inicio || '00:00'}-${cf.hora_fim || '23:59'}). Nova entrada ignorada.`);
