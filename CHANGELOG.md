@@ -41,6 +41,8 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - O CI usa permissões `contents: read`, sem secrets, sem instalação de dependências e sem inicializar MySQL, Flask, Playwright ou rede do projeto.
 
 ### Fixed
+- BUG-024: removida a navegação preventiva que descartava uma sessão saudável aproximadamente a cada duas horas. O coletor agora permanece conectado indefinidamente e só reinicia a navegação diante de falha observável de WebSocket/playerState, login, página ou Playwright.
+- O reload periódico apagava o contexto do socket antes do `page.goto()` e podia criar uma janela sem observabilidade fora da quarentena do BUG-023. As recuperações fail-closed, o watchdog, o Auto-Login e o tratamento do botão `Continuar` permanecem ativos.
 - BUG-023: fechamento transitório do WebSocket oficial deixa de invalidar imediatamente uma sequência que continua íntegra. O coletor entra em quarentena curta, bloqueia novas execuções e confirma a retomada pela identidade estrutural da rodada antes de preservar a sessão.
 - Reconexão na mesma `roundId`, ou na rodada seguinte após um `Resolved` observado, preserva a continuidade dentro da janela configurável `WEBSOCKET_RECONNECT_GRACE_SECONDS` (10 s por padrão). Ausência de identidade, troca durante rodada não resolvida, payload inválido ou timeout continuam rompendo a continuidade em modo fail-closed.
 - Cada interrupção confirmada passa a carregar `interrupcao_id` estável entre `/collector-health` e o primeiro resultado posterior. O Node aplica a invalidação uma única vez, preserva o motivo original e rejeita com 503 uma confirmação idempotente ainda em processamento, evitando tanto invalidação duplicada quanto ACK prematuro.
