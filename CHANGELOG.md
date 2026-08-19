@@ -41,6 +41,9 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - O CI usa permissões `contents: read`, sem secrets, sem instalação de dependências e sem inicializar MySQL, Flask, Playwright ou rede do projeto.
 
 ### Fixed
+- BUG-026: quando um handover real da Evolution omite `roundId`, o coletor passa a tentar uma segunda evidência estrita antes do timeout: a cauda semântica da roadmap no DOM (P/B/T) deve coincidir exatamente com os últimos resultados que o Python já confirmou no Node.
+- A reconciliação exige ao menos seis resultados por padrão (`ROADMAP_RECONCILIATION_MIN_RESULTS`, limitado entre 4 e 12), não registra o DOM bruto e mantém o executor bloqueado. Ausência de trilha compatível, histórico local insuficiente, payload sem `stage` ou qualquer timeout continuam fail-closed; portanto não há aceitação baseada apenas no tempo ou no simples retorno do WebSocket.
+- Os logs de espera passam a informar somente a contagem de frames, raízes semânticas e trilhas encontradas, permitindo validar o seletor real da mesa sem expor payloads ou conteúdo da sessão.
 - BUG-025: um `playerState` transitório sem `roundId` durante a quarentena de reconexão não invalida mais imediatamente a continuidade. O executor permanece bloqueado e aguarda, dentro da janela do BUG-023, um frame completo com `stage` e identidade de rodada; timeout ou evidência estrutural incompatível continuam fail-closed.
 - BUG-024: removida a navegação preventiva que descartava uma sessão saudável aproximadamente a cada duas horas. O coletor agora permanece conectado indefinidamente e só reinicia a navegação diante de falha observável de WebSocket/playerState, login, página ou Playwright.
 - O reload periódico apagava o contexto do socket antes do `page.goto()` e podia criar uma janela sem observabilidade fora da quarentena do BUG-023. As recuperações fail-closed, o watchdog, o Auto-Login e o tratamento do botão `Continuar` permanecem ativos.
