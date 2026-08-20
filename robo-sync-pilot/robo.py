@@ -19,8 +19,8 @@ load_env_file(os.path.join(PROJECT_ROOT, ".env"))
 # ====================================================================
 # CONFIGURAÇÕES GERAIS E CONTROLE DE VERSÃO
 # ====================================================================
-VERSAO_ROBO = "v1.6.5"
-NOME_ATUALIZACAO = "DOM Batch Scan na Janela AcceptingBets"
+VERSAO_ROBO = "v1.6.6"
+NOME_ATUALIZACAO = "Reconhecimento Seguro de Ficha Selecionada"
 
 URL_CASSINO = os.getenv("CASINO_GAME_URL", "")
 ARQUIVO_SESSAO = os.getenv("SESSION_STATE_FILE", os.path.join(BASE_DIR, "sessao_salva.json"))
@@ -986,31 +986,60 @@ def elemento_apostavel(locator):
 def localizar_ficha_apostavel(frame, valor_ficha):
     try:
         candidatos = frame.locator("[data-role='chip'][data-value]")
-        valores_brutos = candidatos.evaluate_all(
-            "elementos => elementos.slice(0, 64).map(el => el.getAttribute('data-value') || '')"
+        estados_dom = candidatos.evaluate_all(
+            """elementos => elementos.slice(0, 64).map(el => {
+                const classe = String(el.className || '');
+                const estado = String(el.getAttribute('data-state') || '').toLowerCase();
+                const verdadeiro = valor => String(valor || '').toLowerCase() === 'true';
+                const classeSelecionada = /(^|[-_\\s])(selected|active|checked)($|[-_\\s])/i.test(classe);
+                return {
+                    valor: el.getAttribute('data-value') || '',
+                    selecionada: verdadeiro(el.getAttribute('aria-pressed'))
+                        || verdadeiro(el.getAttribute('aria-selected'))
+                        || verdadeiro(el.getAttribute('data-selected'))
+                        || verdadeiro(el.getAttribute('data-is-selected'))
+                        || verdadeiro(el.getAttribute('data-active'))
+                        || ['selected', 'active', 'checked'].includes(estado)
+                        || classeSelecionada
+                };
+            })"""
         )
     except Exception:
-        return None, 0
+        return None, 0, {"visiveis": 0, "selecionadas": 0, "acionaveis": 0}
 
     indices_correspondentes = []
-    for indice, valor_bruto in enumerate(valores_brutos or []):
+    for indice, estado_dom in enumerate(estados_dom or []):
         try:
+            valor_bruto = estado_dom.get("valor") if isinstance(estado_dom, dict) else ""
             valor_numerico = float(str(valor_bruto).strip().replace(" ", "").replace(",", "."))
         except Exception:
             continue
         if abs(valor_numerico - float(valor_ficha)) < 0.001:
             indices_correspondentes.append(indice)
 
+    estatisticas = {"visiveis": 0, "selecionadas": 0, "acionaveis": 0}
     for indice in indices_correspondentes:
         candidato = candidatos.nth(indice)
         try:
             if not candidato.is_visible():
                 continue
+            estatisticas["visiveis"] += 1
+            estado_dom = estados_dom[indice] if indice < len(estados_dom) else {}
+            if isinstance(estado_dom, dict) and estado_dom.get("selecionada") is True:
+                estatisticas["selecionadas"] += 1
+                return {
+                    "elemento": candidato,
+                    "modo": "JA_SELECIONADA",
+                }, len(indices_correspondentes), estatisticas
             candidato.click(trial=True, timeout=250)
-            return candidato, len(indices_correspondentes)
+            estatisticas["acionaveis"] += 1
+            return {
+                "elemento": candidato,
+                "modo": "CLICAR",
+            }, len(indices_correspondentes), estatisticas
         except Exception:
             continue
-    return None, len(indices_correspondentes)
+    return None, len(indices_correspondentes), estatisticas
 
 
 def inspecionar_frame_apostavel(frame, planos):
@@ -1026,12 +1055,21 @@ def inspecionar_frame_apostavel(frame, planos):
     elementos_fichas = {}
     elementos_alvos = {}
     fichas_encontradas = 0
+    fichas_visiveis = 0
+    fichas_selecionadas = 0
+    fichas_acionaveis = 0
     alvos_encontrados = 0
 
     for ficha in fichas_requeridas:
-        elemento, quantidade = localizar_ficha_apostavel(frame, ficha)
+        elemento, quantidade, estatisticas = localizar_ficha_apostavel(frame, ficha)
         if quantidade > 0:
             fichas_encontradas += 1
+        if estatisticas.get("visiveis", 0) > 0:
+            fichas_visiveis += 1
+        if estatisticas.get("selecionadas", 0) > 0:
+            fichas_selecionadas += 1
+        if estatisticas.get("acionaveis", 0) > 0:
+            fichas_acionaveis += 1
         if elemento is not None:
             elementos_fichas[ficha] = elemento
 
@@ -1050,7 +1088,10 @@ def inspecionar_frame_apostavel(frame, planos):
     diagnostico = {
         "fichas_necessarias": len(fichas_requeridas),
         "fichas_encontradas": fichas_encontradas,
-        "fichas_acionaveis": len(elementos_fichas),
+        "fichas_visiveis": fichas_visiveis,
+        "fichas_selecionadas": fichas_selecionadas,
+        "fichas_acionaveis": fichas_acionaveis,
+        "fichas_prontas": len(elementos_fichas),
         "alvos_necessarios": len(alvos_requeridos),
         "alvos_encontrados": alvos_encontrados,
         "alvos_acionaveis": len(elementos_alvos),
@@ -1078,7 +1119,10 @@ def localizar_contexto_apostavel(page, planos):
         "frames": len(frames),
         "fichas_necessarias": len({f for p in planos for f, _ in p["cliques_necessarios"]}),
         "fichas_encontradas": 0,
+        "fichas_visiveis": 0,
+        "fichas_selecionadas": 0,
         "fichas_acionaveis": 0,
+        "fichas_prontas": 0,
         "alvos_necessarios": len({p["seletor_alvo"] for p in planos}),
         "alvos_encontrados": 0,
         "alvos_acionaveis": 0,
@@ -1094,7 +1138,7 @@ def localizar_contexto_apostavel(page, planos):
             continue
         diagnostico = inspecao["diagnostico"]
         pontuacao = (
-            diagnostico["fichas_acionaveis"] + diagnostico["alvos_acionaveis"],
+            diagnostico["fichas_prontas"] + diagnostico["alvos_acionaveis"],
             diagnostico["fichas_encontradas"] + diagnostico["alvos_encontrados"],
         )
         if pontuacao > melhor_pontuacao:
@@ -1121,8 +1165,9 @@ def formatar_diagnostico_janela(contexto, diagnostico):
         f"stage={contexto.get('stage') or 'vazio'}, "
         f"seq={contexto.get('seq_atual')}/{contexto.get('seq_ordem')}, "
         f"stage_age_ms={idade_texto}, frames={diag.get('frames', 0)}, "
-        f"fichas={diag.get('fichas_acionaveis', 0)}/{diag.get('fichas_necessarias', 0)} "
-        f"(DOM {diag.get('fichas_encontradas', 0)}), "
+        f"fichas_prontas={diag.get('fichas_prontas', 0)}/{diag.get('fichas_necessarias', 0)} "
+        f"(DOM {diag.get('fichas_encontradas', 0)}, visíveis {diag.get('fichas_visiveis', 0)}, "
+        f"selecionadas {diag.get('fichas_selecionadas', 0)}, acionáveis {diag.get('fichas_acionaveis', 0)}), "
         f"alvos={diag.get('alvos_acionaveis', 0)}/{diag.get('alvos_necessarios', 0)} "
         f"(DOM {diag.get('alvos_encontrados', 0)})"
     )
@@ -1286,18 +1331,19 @@ def executar_aposta_na_tela(page, aposta):
                                 "cliques_alvo": cliques_alvo
                             }
 
-                    ficha_elemento = contexto_dom["fichas"].get(int(ficha))
-                    if ficha_elemento is None:
-                        ficha_elemento, _ = localizar_ficha_apostavel(frame_jogo, ficha)
-                    if ficha_elemento is None:
+                    ficha_contexto = contexto_dom["fichas"].get(int(ficha))
+                    if ficha_contexto is None:
+                        ficha_contexto, _, _ = localizar_ficha_apostavel(frame_jogo, ficha)
+                    if ficha_contexto is None:
                         status = "AMBIGUA" if cliques_alvo > 0 else "FALHOU"
                         return {
                             "status": status,
                             "motivo": f"Ficha R$ {ficha} deixou de estar acionável antes do clique",
                             "cliques_alvo": cliques_alvo
                         }
-                    ficha_elemento.click(timeout=2000)
-                    page.wait_for_timeout(150)
+                    if ficha_contexto.get("modo") == "CLICAR":
+                        ficha_contexto["elemento"].click(timeout=2000)
+                        page.wait_for_timeout(150)
 
                     for _ in range(int(qtd)):
                         if aposta.get("sincronizar_janela") is True:
