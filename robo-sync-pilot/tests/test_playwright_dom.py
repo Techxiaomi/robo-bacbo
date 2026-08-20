@@ -348,7 +348,7 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
         pagina = self.nova_pagina("/game-delayed.html")
         self.configurar_janela(10, "Resolved", timeout=2.0)
         timer = threading.Timer(0.35, lambda: FUNCOES["atualizar_estado_mesa_player"]({
-            "args": {"game": {"stage": "Betting"}}
+            "args": {"game": {"stage": "AcceptingBets"}}
         }))
         timer.start()
         try:
