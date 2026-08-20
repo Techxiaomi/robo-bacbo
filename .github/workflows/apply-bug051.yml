@@ -29,6 +29,7 @@ jobs:
 
       - name: Apply BUG-051
         run: |
+          sed -i "s#robo-bacbo/public/index.html#robo-bacbo/public/dashboard-app.html#" scripts/apply_bug051_autotrader_hardening.py
           python scripts/apply_bug051_autotrader_hardening.py
           python scripts/apply_bug051_followup.py
 
@@ -52,6 +53,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add robo-bacbo/bot2_coletor.js robo-bacbo/public/index.html robo-bacbo/support/pure-logic-suite.js robo-bacbo/test/bug051-contract.test.js robo-sync-pilot/robo.py robo-sync-pilot/tests/test_pure_logic.py
+          git add robo-bacbo/bot2_coletor.js robo-bacbo/public/dashboard-app.html robo-bacbo/support/pure-logic-suite.js robo-bacbo/test/bug051-contract.test.js robo-sync-pilot/robo.py robo-sync-pilot/tests/test_pure_logic.py
           git commit -m "fix: harden auto-trader lifecycle and audit [skip ci]"
           git push origin HEAD:agent/bug-023-websocket-reconnect-continuity
