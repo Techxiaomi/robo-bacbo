@@ -32,6 +32,7 @@ def carregar_funcoes_reais():
         "inspecionar_frame_apostavel",
         "localizar_contexto_apostavel",
         "localizar_frame_apostavel",
+        "clicar_superficie_ficha_playwright",
         "selecionar_ficha_com_confirmacao",
         "formatar_diagnostico_janela",
         "aguardar_janela_aposta",
@@ -199,10 +200,10 @@ HTML["/game-chip-overlay-frame.html"] = """<!doctype html>
 #chip5, #surface { position: absolute; inset: 0; }
 #surface { z-index: 2; }
 </style></head><body>
-<script>window.__surfaceClicks = 0; window.__targetClicks = 0;</script>
+<script>window.__surfaceClicks = 0; window.__surfacePointerDown = 0; window.__targetClicks = 0;</script>
 <div id="wrap">
   <div id="chip5" data-role="chip" data-value="5">5</div>
-  <div id="surface" onclick="
+  <div id="surface" onpointerdown="window.__surfacePointerDown++" onclick="
     window.__surfaceClicks++;
     document.getElementById('chip5').classList.add('selected');
   ">superfície</div>
@@ -512,11 +513,12 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
             frame = next(f for f in pagina.frames if "game-chip-overlay-frame" in f.url)
             self.assertEqual(resultado["status"], "EXECUTADA")
             self.assertEqual(frame.evaluate("window.__surfaceClicks"), 1)
+            self.assertEqual(frame.evaluate("window.__surfacePointerDown"), 1)
             self.assertEqual(frame.evaluate("window.__targetClicks"), 1)
         finally:
             pagina.close()
 
-    def test_bug034_ficha_ja_corrente_e_confirmada_por_troca_e_retorno(self):
+    def test_bug036_ficha_sem_marcador_dom_usa_input_real_uma_unica_vez(self):
         pagina = self.nova_pagina("/game-chip-roundtrip.html")
         self.configurar_janela(26, "AcceptingBets", timeout=4.0)
         try:
@@ -534,7 +536,7 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
             frame = next(f for f in pagina.frames if "game-chip-roundtrip-frame" in f.url)
             self.assertEqual(resultado["status"], "EXECUTADA")
             self.assertEqual(frame.evaluate("window.__selectedValue"), 5)
-            self.assertEqual(frame.evaluate("window.__surfaceClicks"), 3)
+            self.assertEqual(frame.evaluate("window.__surfaceClicks"), 1)
             self.assertEqual(frame.evaluate("window.__targetClicks"), 1)
         finally:
             pagina.close()
