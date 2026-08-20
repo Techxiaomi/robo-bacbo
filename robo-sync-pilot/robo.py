@@ -19,8 +19,8 @@ load_env_file(os.path.join(PROJECT_ROOT, ".env"))
 # ====================================================================
 # CONFIGURAÇÕES GERAIS E CONTROLE DE VERSÃO
 # ====================================================================
-VERSAO_ROBO = "v1.6.7"
-NOME_ATUALIZACAO = "Separação entre Seleção de Ficha e Clique Financeiro"
+VERSAO_ROBO = "v1.6.8"
+NOME_ATUALIZACAO = "Superfície DOM da Ficha com Confirmação"
 
 URL_CASSINO = os.getenv("CASINO_GAME_URL", "")
 ARQUIVO_SESSAO = os.getenv("SESSION_STATE_FILE", os.path.join(BASE_DIR, "sessao_salva.json"))
@@ -1165,6 +1165,93 @@ def localizar_frame_apostavel(page, planos):
     return contexto_dom["frame"] if contexto_dom is not None else None
 
 
+def selecionar_ficha_com_confirmacao(page, ficha_contexto, valor_ficha):
+    elemento = ficha_contexto.get("elemento") if isinstance(ficha_contexto, dict) else None
+    if elemento is None:
+        return {"confirmada": False, "motivo": "elemento da ficha ausente"}
+    if ficha_contexto.get("modo") == "JA_SELECIONADA":
+        return {"confirmada": True, "via": "JA_SELECIONADA"}
+
+    try:
+        elemento.click(timeout=2000)
+        return {"confirmada": True, "via": "PLAYWRIGHT"}
+    except PlaywrightTimeoutError:
+        pass
+    except Exception as erro:
+        return {
+            "confirmada": False,
+            "motivo": f"falha Playwright na ficha ({type(erro).__name__})",
+        }
+
+    script_snapshot = """el => {
+        const atributos = no => no ? [
+            no.className || '', no.getAttribute('aria-pressed') || '',
+            no.getAttribute('aria-selected') || '', no.getAttribute('data-selected') || '',
+            no.getAttribute('data-is-selected') || '', no.getAttribute('data-active') || '',
+            no.getAttribute('data-state') || ''
+        ].join('|') : '';
+        const nos = [el, el.parentElement, ...Array.from(el.children).slice(0, 8)];
+        const assinatura = nos.map(atributos).join('::');
+        const selecionada = nos.some(no => {
+            if (!no) return false;
+            const classe = String(no.className || '');
+            const verdadeiro = valor => String(valor || '').toLowerCase() === 'true';
+            const estado = String(no.getAttribute('data-state') || '').toLowerCase();
+            return verdadeiro(no.getAttribute('aria-pressed'))
+                || verdadeiro(no.getAttribute('aria-selected'))
+                || verdadeiro(no.getAttribute('data-selected'))
+                || verdadeiro(no.getAttribute('data-is-selected'))
+                || verdadeiro(no.getAttribute('data-active'))
+                || ['selected', 'active', 'checked'].includes(estado)
+                || /(^|[-_\\s])(selected|active|checked)($|[-_\\s])/i.test(classe);
+        });
+        return { assinatura, selecionada };
+    }"""
+
+    try:
+        antes = elemento.evaluate(script_snapshot)
+        superficie = elemento.evaluate("""el => {
+            const rect = el.getBoundingClientRect();
+            if (rect.width <= 0 || rect.height <= 0) return { acionada: false, relacao: 'SEM_AREA' };
+            const x = rect.left + rect.width / 2;
+            const y = rect.top + rect.height / 2;
+            const hit = el.ownerDocument.elementFromPoint(x, y);
+            if (!hit) return { acionada: false, relacao: 'SEM_SUPERFICIE' };
+            let relacao = 'EXTERNA';
+            if (hit === el) relacao = 'PROPRIA';
+            else if (el.contains(hit)) relacao = 'DESCENDENTE';
+            else if (hit.contains(el)) relacao = 'ANCESTRAL';
+            else if (el.parentElement && el.parentElement.contains(hit)) relacao = 'MESMO_CONTAINER';
+            if (relacao === 'EXTERNA') return { acionada: false, relacao };
+            hit.click();
+            return { acionada: true, relacao };
+        }""")
+        if not isinstance(superficie, dict) or superficie.get("acionada") is not True:
+            relacao = superficie.get("relacao", "n/a") if isinstance(superficie, dict) else "n/a"
+            return {
+                "confirmada": False,
+                "motivo": f"superfície da ficha não autorizada ({relacao})",
+            }
+        page.wait_for_timeout(120)
+        depois = elemento.evaluate(script_snapshot)
+        mudou = (depois or {}).get("assinatura") != (antes or {}).get("assinatura")
+        selecionada = (depois or {}).get("selecionada") is True
+        if not selecionada and not mudou:
+            return {
+                "confirmada": False,
+                "motivo": "superfície acionada, mas o DOM não confirmou mudança da ficha",
+            }
+        return {
+            "confirmada": True,
+            "via": f"SUPERFICIE_{superficie.get('relacao', 'DOM')}",
+        }
+    except Exception as erro:
+        return {
+            "confirmada": False,
+            "motivo": f"não foi possível confirmar a superfície da ficha ({type(erro).__name__})",
+        }
+
+
 def formatar_diagnostico_janela(contexto, diagnostico):
     diag = diagnostico or {}
     idade = contexto.get("idade_stage_ms")
@@ -1355,7 +1442,19 @@ def executar_aposta_na_tela(page, aposta):
                         and ficha_corrente != int(ficha)
                     )
                     if precisa_selecionar:
-                        ficha_contexto["elemento"].click(timeout=2000)
+                        selecao = selecionar_ficha_com_confirmacao(page, ficha_contexto, ficha)
+                        if selecao.get("confirmada") is not True:
+                            status = "AMBIGUA" if cliques_alvo > 0 else "FALHOU"
+                            return {
+                                "status": status,
+                                "motivo": f"Ficha R$ {ficha} não confirmou seleção: {selecao.get('motivo', 'motivo desconhecido')}",
+                                "cliques_alvo": cliques_alvo,
+                            }
+                        if str(selecao.get("via") or "").startswith("SUPERFICIE_"):
+                            print(
+                                f"✅ Ficha R$ {ficha} selecionada pela superfície DOM e confirmada "
+                                "antes do clique financeiro."
+                            )
                         ficha_corrente = int(ficha)
                         page.wait_for_timeout(150)
                     elif ficha_contexto.get("modo") == "JA_SELECIONADA":
