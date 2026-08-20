@@ -19,8 +19,8 @@ load_env_file(os.path.join(PROJECT_ROOT, ".env"))
 # ====================================================================
 # CONFIGURAÇÕES GERAIS E CONTROLE DE VERSÃO
 # ====================================================================
-VERSAO_ROBO = "v1.6.6"
-NOME_ATUALIZACAO = "Reconhecimento Seguro de Ficha Selecionada"
+VERSAO_ROBO = "v1.6.7"
+NOME_ATUALIZACAO = "Separação entre Seleção de Ficha e Clique Financeiro"
 
 URL_CASSINO = os.getenv("CASINO_GAME_URL", "")
 ARQUIVO_SESSAO = os.getenv("SESSION_STATE_FILE", os.path.join(BASE_DIR, "sessao_salva.json"))
@@ -1031,11 +1031,19 @@ def localizar_ficha_apostavel(frame, valor_ficha):
                     "elemento": candidato,
                     "modo": "JA_SELECIONADA",
                 }, len(indices_correspondentes), estatisticas
-            candidato.click(trial=True, timeout=250)
-            estatisticas["acionaveis"] += 1
+            try:
+                candidato.click(trial=True, timeout=250)
+                estatisticas["acionaveis"] += 1
+                modo = "CLICAR"
+            except Exception:
+                # Selecionar uma ficha não cria exposição financeira. Se o elemento
+                # exato está visível, a tentativa real pode aguardar a estabilidade;
+                # os alvos financeiros continuam pré-validados e o stage é revisto
+                # após esta seleção, antes de qualquer aposta.
+                modo = "CLICAR_AGUARDANDO_ESTABILIDADE"
             return {
                 "elemento": candidato,
-                "modo": "CLICAR",
+                "modo": modo,
             }, len(indices_correspondentes), estatisticas
         except Exception:
             continue
@@ -1258,6 +1266,7 @@ def aguardar_janela_aposta(page, aposta, planos):
 def executar_aposta_na_tela(page, aposta):
     """Pré-valida todas as pernas e só então executa a ordem lógica composta."""
     cliques_alvo = 0
+    ficha_corrente = None
     try:
         mapa_alvos = {
             "PlayerWon": "bacbo-bet-spot-Player",
@@ -1341,9 +1350,16 @@ def executar_aposta_na_tela(page, aposta):
                             "motivo": f"Ficha R$ {ficha} deixou de estar acionável antes do clique",
                             "cliques_alvo": cliques_alvo
                         }
-                    if ficha_contexto.get("modo") == "CLICAR":
+                    precisa_selecionar = (
+                        ficha_contexto.get("modo") != "JA_SELECIONADA"
+                        and ficha_corrente != int(ficha)
+                    )
+                    if precisa_selecionar:
                         ficha_contexto["elemento"].click(timeout=2000)
+                        ficha_corrente = int(ficha)
                         page.wait_for_timeout(150)
+                    elif ficha_contexto.get("modo") == "JA_SELECIONADA":
+                        ficha_corrente = int(ficha)
 
                     for _ in range(int(qtd)):
                         if aposta.get("sincronizar_janela") is True:
