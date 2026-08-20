@@ -32,6 +32,7 @@ def carregar_funcoes_reais():
         "inspecionar_frame_apostavel",
         "localizar_contexto_apostavel",
         "localizar_frame_apostavel",
+        "selecionar_ficha_com_confirmacao",
         "formatar_diagnostico_janela",
         "aguardar_janela_aposta",
         "executar_aposta_na_tela",
@@ -188,6 +189,26 @@ HTML["/game-chip-animating-frame.html"] = """<!doctype html>
   onclick="window.__chipClicks++">5</button>
 <button data-role="bacbo-bet-spot-Banker"
   onclick="window.__targetClicks++">Banker</button>
+</body></html>"""
+
+HTML["/game-chip-overlay.html"] = """<!doctype html>
+<html><body><iframe src="/game-chip-overlay-frame.html"></iframe></body></html>"""
+HTML["/game-chip-overlay-frame.html"] = """<!doctype html>
+<html><head><style>
+#wrap { position: relative; width: 100px; height: 40px; }
+#chip5, #surface { position: absolute; inset: 0; }
+#surface { z-index: 2; }
+</style></head><body>
+<script>window.__surfaceClicks = 0; window.__targetClicks = 0;</script>
+<div id="wrap">
+  <div id="chip5" data-role="chip" data-value="5">5</div>
+  <div id="surface" onclick="
+    window.__surfaceClicks++;
+    document.getElementById('chip5').classList.add('selected');
+  ">superfície</div>
+</div>
+<button data-role="bacbo-bet-spot-Player"
+  onclick="window.__targetClicks++">Player</button>
 </body></html>"""
 
 HTML["/opaque-hidden.html"] = """<!doctype html>
@@ -446,6 +467,28 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
             frame = next(f for f in pagina.frames if "game-chip-animating-frame" in f.url)
             self.assertEqual(resultado["status"], "EXECUTADA")
             self.assertEqual(frame.evaluate("window.__chipClicks"), 1)
+            self.assertEqual(frame.evaluate("window.__targetClicks"), 1)
+        finally:
+            pagina.close()
+
+    def test_bug032_superficie_interceptora_confirma_ficha_antes_do_alvo(self):
+        pagina = self.nova_pagina("/game-chip-overlay.html")
+        self.configurar_janela(24, "AcceptingBets", timeout=3.0)
+        try:
+            resultado = executar_aposta_na_tela(
+                pagina,
+                {
+                    "order_id": "123e4567-e89b-42d3-a456-426614174003",
+                    "alvo": "PlayerWon",
+                    "valor": 5,
+                    "sincronizar_janela": True,
+                    "coletor_seq_aceite": 24,
+                    "stage_aceite": "Resolved",
+                },
+            )
+            frame = next(f for f in pagina.frames if "game-chip-overlay-frame" in f.url)
+            self.assertEqual(resultado["status"], "EXECUTADA")
+            self.assertEqual(frame.evaluate("window.__surfaceClicks"), 1)
             self.assertEqual(frame.evaluate("window.__targetClicks"), 1)
         finally:
             pagina.close()
