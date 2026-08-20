@@ -38,12 +38,19 @@ jobs:
           node --check robo-bacbo/bot2_coletor.js
           python -m py_compile robo-sync-pilot/robo.py robo-sync-pilot/tests/test_pure_logic.py
 
-      - name: Run light contracts
+      - name: Run existing Node logic contracts
         run: |
           cd robo-bacbo
           node --test support/pure-logic-suite.js
+
+      - name: Run BUG-051 contract
+        run: |
+          cd robo-bacbo
           node --test test/bug051-contract.test.js
-          cd ../robo-sync-pilot
+
+      - name: Run Python logic contracts
+        run: |
+          cd robo-sync-pilot
           python tests/test_pure_logic.py
 
       - name: Validate diff
