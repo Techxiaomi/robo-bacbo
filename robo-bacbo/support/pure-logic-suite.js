@@ -295,6 +295,7 @@ test("BUG-028: executor espera AcceptingBets estrutural e Node preserva o callba
     assert.match(executorPythonSource, /candidatos\.evaluate_all/);
     assert.match(executorPythonSource, /última inspeção:/);
     assert.match(executorPythonSource, /JA_SELECIONADA/);
+    assert.match(executorPythonSource, /CLICAR_AGUARDANDO_ESTABILIDADE/);
     assert.match(executorPythonSource, /aria-pressed/);
 
     const localizador = executorPythonSource.slice(
