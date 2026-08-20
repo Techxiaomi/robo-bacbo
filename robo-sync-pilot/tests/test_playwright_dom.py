@@ -165,6 +165,17 @@ HTML["/game-closed-frame.html"] = """<!doctype html>
 <button style="display:none" data-role="bacbo-bet-spot-Player" onclick="window.__targetClicks++">Player</button>
 </body></html>"""
 
+HTML["/game-selected.html"] = """<!doctype html>
+<html><body><iframe src="/game-selected-frame.html"></iframe></body></html>"""
+HTML["/game-selected-frame.html"] = """<!doctype html>
+<html><body>
+<script>window.__chipClicks = 0; window.__targetClicks = 0;</script>
+<button disabled aria-pressed="true" data-role="chip" data-value="25"
+  onclick="window.__chipClicks++">25 selecionada</button>
+<button data-role="bacbo-bet-spot-Banker"
+  onclick="window.__targetClicks++">Banker</button>
+</body></html>"""
+
 HTML["/opaque-hidden.html"] = """<!doctype html>
 <html><body><iframe src="/table-shell.html"></iframe></body></html>"""
 HTML["/table-shell.html"] = """<!doctype html>
@@ -374,10 +385,32 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
             self.assertEqual(resultado["status"], "EXPIRADA")
             self.assertEqual(resultado["cliques_alvo"], 0)
             self.assertIn("stage=Betting", resultado["motivo"])
-            self.assertIn("fichas=0/1", resultado["motivo"])
+            self.assertIn("fichas_prontas=0/1", resultado["motivo"])
             self.assertIn("alvos=0/1", resultado["motivo"])
             self.assertEqual(frame.evaluate("window.__chipClicks"), 0)
             self.assertEqual(frame.evaluate("window.__targetClicks"), 0)
+        finally:
+            pagina.close()
+
+    def test_bug030_ficha_explicitamente_selecionada_nao_exige_novo_clique(self):
+        pagina = self.nova_pagina("/game-selected.html")
+        self.configurar_janela(22, "AcceptingBets", timeout=1.0)
+        try:
+            resultado = executar_aposta_na_tela(
+                pagina,
+                {
+                    "order_id": "123e4567-e89b-42d3-a456-426614174001",
+                    "alvo": "BankerWon",
+                    "valor": 25,
+                    "sincronizar_janela": True,
+                    "coletor_seq_aceite": 22,
+                    "stage_aceite": "Resolved",
+                },
+            )
+            frame = next(f for f in pagina.frames if "game-selected-frame" in f.url)
+            self.assertEqual(resultado["status"], "EXECUTADA")
+            self.assertEqual(frame.evaluate("window.__chipClicks"), 0)
+            self.assertEqual(frame.evaluate("window.__targetClicks"), 1)
         finally:
             pagina.close()
 
