@@ -1551,10 +1551,10 @@ def executar_aposta_na_tela(page, aposta):
                 "cliques_necessarios": cliques_necessarios
             })
 
-        # BUG-038: tudo que é não financeiro sai do caminho crítico de
-        # AcceptingBets. O saldo e, quando há uma única denominação, a ficha são
-        # preparados antes da abertura. Player/Banker/Tie continuam proibidos até
-        # a janela estrutural ficar ABERTA.
+        # BUG-038/040: a leitura do saldo continua fora do caminho crítico, mas a
+        # ficha não é mais pré-selecionada antes da abertura. A Evolution anima as
+        # fichas no início de AcceptingBets; toda seleção de ficha ocorre somente
+        # depois do delay de estabilização de 1500 ms da janela ABERTA.
         saldo_antes = ler_saldo_atual(page)
         if saldo_antes is None:
             return {
@@ -1569,16 +1569,9 @@ def executar_aposta_na_tela(page, aposta):
                 },
             }
 
-        preparo_ficha = preselecionar_ficha_unica_antes_da_janela(page, planos)
-        if preparo_ficha.get("confirmada") is True:
-            ficha_corrente = int(preparo_ficha["ficha"])
-            print(
-                f"⚡ Ficha R$ {ficha_corrente} preparada antes de AcceptingBets "
-                f"({preparo_ficha.get('via', 'PRESELECAO')})."
-            )
-
-        # BUG-019/038: principal e proteção Tie precisam estar acionáveis antes do
-        # primeiro clique financeiro, mas a preparação não financeira já ocorreu.
+        # BUG-019/040: principal e proteção Tie precisam estar acionáveis antes do
+        # primeiro clique financeiro. A ficha será selecionada somente depois que
+        # AcceptingBets permanecer ABERTA durante o delay de animação.
         contexto_dom, bloqueio = aguardar_janela_aposta(page, aposta, planos)
         if bloqueio is not None:
             print(f"⚠️ Ordem não executada: {bloqueio['motivo']}")

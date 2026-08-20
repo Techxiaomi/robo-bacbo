@@ -12,7 +12,8 @@ class Bug038FastPathContract(unittest.TestCase):
         fim = SOURCE.index("def parsear_valor_monetario", inicio)
         corpo = SOURCE[inicio:fim]
         self.assertLess(corpo.index("saldo_antes = ler_saldo_atual(page)"), corpo.index("aguardar_janela_aposta(page, aposta, planos)"))
-        self.assertLess(corpo.index("preselecionar_ficha_unica_antes_da_janela(page, planos)"), corpo.index("aguardar_janela_aposta(page, aposta, planos)"))
+        self.assertNotIn("preselecionar_ficha_unica_antes_da_janela(page, planos)", corpo)
+        self.assertIn("page.wait_for_timeout(1500)", SOURCE)
 
     def test_fast_path_nao_remove_gate_financeiro(self):
         inicio = SOURCE.index("def executar_aposta_na_tela")
