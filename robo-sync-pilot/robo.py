@@ -19,8 +19,8 @@ load_env_file(os.path.join(PROJECT_ROOT, ".env"))
 # ====================================================================
 # CONFIGURAÇÕES GERAIS E CONTROLE DE VERSÃO
 # ====================================================================
-VERSAO_ROBO = "v1.6.2"
-NOME_ATUALIZACAO = "Reconciliação Roadmap Fail-Closed"
+VERSAO_ROBO = "v1.6.3"
+NOME_ATUALIZACAO = "Janela Apostável Orientada por Rodada"
 
 URL_CASSINO = os.getenv("CASINO_GAME_URL", "")
 ARQUIVO_SESSAO = os.getenv("SESSION_STATE_FILE", os.path.join(BASE_DIR, "sessao_salva.json"))
@@ -52,9 +52,17 @@ except ValueError:
     EXECUTOR_ORDER_TTL_SECONDS = 8.0
 
 try:
-    EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS = max(3.0, min(30.0, float(os.getenv("EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS", "15"))))
+    _betting_window_timeout_config = float(os.getenv("EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS", "180"))
+    # Valores antigos (15/30 s) encerravam a ordem durante a transição normal
+    # pós-Resolved. A expiração primária é estrutural (novo Resolved, perda de
+    # continuidade ou indisponibilidade); este prazo é apenas um fusível final.
+    EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS = (
+        _betting_window_timeout_config
+        if 60.0 <= _betting_window_timeout_config <= 180.0
+        else 180.0
+    )
 except ValueError:
-    EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS = 15.0
+    EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS = 180.0
 
 try:
     RESULT_DEDUP_WINDOW_SECONDS = max(0.5, min(10.0, float(os.getenv("RESULT_DEDUP_WINDOW_SECONDS", "3"))))
@@ -243,8 +251,12 @@ def registrar_ordem_idempotente(dados, aceitar_nova=True):
     if lock_contexto is not None:
         with lock_contexto:
             stage_contexto = str(estado_contexto.get("stage") or "")
+            round_id_contexto = str(estado_contexto.get("round_id") or "")
+            round_resolvido_contexto = bool(estado_contexto.get("round_resolvido"))
     else:
         stage_contexto = str(estado_contexto.get("stage") or "") if isinstance(estado_contexto, dict) else ""
+        round_id_contexto = str(estado_contexto.get("round_id") or "") if isinstance(estado_contexto, dict) else ""
+        round_resolvido_contexto = bool(estado_contexto.get("round_resolvido")) if isinstance(estado_contexto, dict) else False
 
     ordem_normalizada = {
         "order_id": order_id,
@@ -253,7 +265,9 @@ def registrar_ordem_idempotente(dados, aceitar_nova=True):
         "apostas": apostas,
         "sincronizar_janela": True,
         "coletor_seq_aceite": seq_contexto,
-        "stage_aceite": stage_contexto
+        "stage_aceite": stage_contexto,
+        "round_id_aceite": round_id_contexto,
+        "round_resolvido_aceite": round_resolvido_contexto
     }
 
     with ordens_executor_lock:
@@ -893,70 +907,237 @@ def classificar_reconexao_player_state(estado_anterior, dados, decorrido_segundo
     return {"segura": False, "motivo": "TROCA_RODADA_DURANTE_RECONEXAO", "tipo": "BURACO_ESTRUTURAL"}
 
 
+def stage_evolution_apostavel(stage):
+    """Aceita somente a fase explícita em que a Evolution recebe apostas."""
+    return str(stage or "").strip().lower() == "betting"
+
+
 def avaliar_contexto_janela_aposta(aposta):
     if not aposta.get("sincronizar_janela"):
-        return {"estado": "ABERTA", "stage": "", "seq_atual": None, "seq_ordem": None}
+        return {
+            "estado": "ABERTA", "stage": "", "seq_atual": None, "seq_ordem": None,
+            "round_id": "", "round_id_aceite": "", "idade_stage_ms": 0
+        }
 
     seq_ordem = max(0, int(aposta.get("coletor_seq_aceite") or 0))
     seq_atual = max(0, int(globals().get("coletor_seq", 0) or 0))
     with estado_mesa_lock:
         stage = str(estado_mesa.get("stage") or "").strip()
+        round_id = str(estado_mesa.get("round_id") or "").strip()
+        atualizado_em_ms = max(0, int(estado_mesa.get("atualizado_em_ms") or 0))
+
+    agora_ms = int(time.time() * 1000)
+    idade_stage_ms = max(0, agora_ms - atualizado_em_ms) if atualizado_em_ms > 0 else None
+    contexto = {
+        "estado": "AGUARDAR_STAGE",
+        "stage": stage,
+        "seq_atual": seq_atual,
+        "seq_ordem": seq_ordem,
+        "round_id": round_id,
+        "round_id_aceite": str(aposta.get("round_id_aceite") or "").strip(),
+        "idade_stage_ms": idade_stage_ms,
+    }
 
     if seq_ordem <= 0:
-        return {"estado": "SEM_CONTEXTO", "stage": stage, "seq_atual": seq_atual, "seq_ordem": seq_ordem}
+        contexto["estado"] = "SEM_CONTEXTO"
+        return contexto
     if seq_atual > seq_ordem:
-        return {"estado": "EXPIRADA", "stage": stage, "seq_atual": seq_atual, "seq_ordem": seq_ordem}
+        contexto["estado"] = "EXPIRADA"
+        return contexto
     if seq_atual < seq_ordem:
-        return {"estado": "INCONSISTENTE", "stage": stage, "seq_atual": seq_atual, "seq_ordem": seq_ordem}
-    if not stage or stage.lower() == "resolved":
-        return {"estado": "AGUARDAR", "stage": stage, "seq_atual": seq_atual, "seq_ordem": seq_ordem}
-    return {"estado": "ABERTA", "stage": stage, "seq_atual": seq_atual, "seq_ordem": seq_ordem}
+        contexto["estado"] = "INCONSISTENTE"
+        return contexto
+    if not stage_evolution_apostavel(stage):
+        return contexto
+
+    limite_frescor_ms = int(max(1.0, float(globals().get("COLLECTOR_PLAYER_STATE_STALE_SECONDS", 20.0))) * 1000)
+    if idade_stage_ms is None or idade_stage_ms > limite_frescor_ms:
+        contexto["estado"] = "AGUARDAR_FRESCOR"
+        return contexto
+
+    contexto["estado"] = "ABERTA"
+    return contexto
+
+
+def primeiro_elemento_apostavel(locator, limite=32):
+    try:
+        quantidade = min(max(0, int(locator.count())), max(1, int(limite)))
+    except Exception:
+        return None
+
+    for indice in range(quantidade):
+        try:
+            elemento = locator.nth(indice)
+            if not elemento.is_visible():
+                continue
+            # trial=True executa actionability sem produzir clique financeiro.
+            elemento.click(trial=True, timeout=250)
+            return elemento
+        except Exception:
+            continue
+    return None
 
 
 def elemento_apostavel(locator):
+    return primeiro_elemento_apostavel(locator) is not None
+
+
+def localizar_ficha_apostavel(frame, valor_ficha):
     try:
-        if locator.count() <= 0:
-            return False
-        elemento = locator.first
-        if not elemento.is_visible():
-            return False
-        # trial=True executa as verificações de actionability do Playwright sem
-        # efetuar clique financeiro. É o gate DOM antes de qualquer interação real.
-        elemento.click(trial=True, timeout=250)
-        return True
+        candidatos = frame.locator("[data-role='chip'][data-value]")
+        quantidade = min(max(0, int(candidatos.count())), 64)
     except Exception:
-        return False
+        return None, 0
+
+    correspondentes = []
+    for indice in range(quantidade):
+        candidato = candidatos.nth(indice)
+        try:
+            valor_bruto = str(candidato.get_attribute("data-value", timeout=150) or "").strip()
+            valor_numerico = float(valor_bruto.replace(" ", "").replace(",", "."))
+        except Exception:
+            continue
+        if abs(valor_numerico - float(valor_ficha)) < 0.001:
+            correspondentes.append(candidato)
+
+    for candidato in correspondentes:
+        try:
+            if not candidato.is_visible():
+                continue
+            candidato.click(trial=True, timeout=250)
+            return candidato, len(correspondentes)
+        except Exception:
+            continue
+    return None, len(correspondentes)
+
+
+def inspecionar_frame_apostavel(frame, planos):
+    fichas_requeridas = sorted({
+        int(ficha)
+        for plano in planos
+        for ficha, _ in plano["cliques_necessarios"]
+    })
+    alvos_requeridos = sorted({
+        str(plano["seletor_alvo"])
+        for plano in planos
+    })
+    elementos_fichas = {}
+    elementos_alvos = {}
+    fichas_encontradas = 0
+    alvos_encontrados = 0
+
+    for ficha in fichas_requeridas:
+        elemento, quantidade = localizar_ficha_apostavel(frame, ficha)
+        if quantidade > 0:
+            fichas_encontradas += 1
+        if elemento is not None:
+            elementos_fichas[ficha] = elemento
+
+    for alvo in alvos_requeridos:
+        locator = frame.locator(f"[data-role='{alvo}']")
+        try:
+            quantidade = max(0, int(locator.count()))
+        except Exception:
+            quantidade = 0
+        if quantidade > 0:
+            alvos_encontrados += 1
+        elemento = primeiro_elemento_apostavel(locator)
+        if elemento is not None:
+            elementos_alvos[alvo] = elemento
+
+    diagnostico = {
+        "fichas_necessarias": len(fichas_requeridas),
+        "fichas_encontradas": fichas_encontradas,
+        "fichas_acionaveis": len(elementos_fichas),
+        "alvos_necessarios": len(alvos_requeridos),
+        "alvos_encontrados": alvos_encontrados,
+        "alvos_acionaveis": len(elementos_alvos),
+    }
+    completo = (
+        len(elementos_fichas) == len(fichas_requeridas)
+        and len(elementos_alvos) == len(alvos_requeridos)
+    )
+    return {
+        "completo": completo,
+        "frame": frame,
+        "fichas": elementos_fichas,
+        "alvos": elementos_alvos,
+        "diagnostico": diagnostico,
+    }
+
+
+def localizar_contexto_apostavel(page, planos):
+    try:
+        frames = list(page.frames)
+    except Exception:
+        frames = []
+
+    melhor = {
+        "frames": len(frames),
+        "fichas_necessarias": len({f for p in planos for f, _ in p["cliques_necessarios"]}),
+        "fichas_encontradas": 0,
+        "fichas_acionaveis": 0,
+        "alvos_necessarios": len({p["seletor_alvo"] for p in planos}),
+        "alvos_encontrados": 0,
+        "alvos_acionaveis": 0,
+    }
+    melhor_pontuacao = (-1, -1)
+
+    # A identidade da mesa é provada pelos data-role de todas as fichas/alvos,
+    # não por palavras frágeis na URL do iframe.
+    for frame in frames:
+        try:
+            inspecao = inspecionar_frame_apostavel(frame, planos)
+        except Exception:
+            continue
+        diagnostico = inspecao["diagnostico"]
+        pontuacao = (
+            diagnostico["fichas_acionaveis"] + diagnostico["alvos_acionaveis"],
+            diagnostico["fichas_encontradas"] + diagnostico["alvos_encontrados"],
+        )
+        if pontuacao > melhor_pontuacao:
+            melhor_pontuacao = pontuacao
+            melhor.update(diagnostico)
+        if inspecao["completo"]:
+            diagnostico_completo = {"frames": len(frames), **diagnostico}
+            inspecao["diagnostico"] = diagnostico_completo
+            return inspecao, diagnostico_completo
+
+    return None, melhor
 
 
 def localizar_frame_apostavel(page, planos):
-    seletores_fichas = []
-    seletores_alvos = []
-    for plano in planos:
-        seletores_fichas.extend(
-            f"div[data-role='chip'][data-value='{ficha}']" for ficha, _ in plano["cliques_necessarios"]
-        )
-        seletores_alvos.append(f"[data-role='{plano['seletor_alvo']}']")
+    contexto_dom, _ = localizar_contexto_apostavel(page, planos)
+    return contexto_dom["frame"] if contexto_dom is not None else None
 
-    for frame in page.frames:
-        url = str(frame.url or "").lower()
-        if not ("evolution" in url or "evocdn" in url or "game" in url):
-            continue
-        if not all(elemento_apostavel(frame.locator(seletor)) for seletor in set(seletores_fichas)):
-            continue
-        if not all(elemento_apostavel(frame.locator(seletor)) for seletor in set(seletores_alvos)):
-            continue
-        return frame
-    return None
+
+def formatar_diagnostico_janela(contexto, diagnostico):
+    diag = diagnostico or {}
+    idade = contexto.get("idade_stage_ms")
+    idade_texto = "n/a" if idade is None else str(int(idade))
+    return (
+        f"stage={contexto.get('stage') or 'vazio'}, "
+        f"seq={contexto.get('seq_atual')}/{contexto.get('seq_ordem')}, "
+        f"stage_age_ms={idade_texto}, frames={diag.get('frames', 0)}, "
+        f"fichas={diag.get('fichas_acionaveis', 0)}/{diag.get('fichas_necessarias', 0)} "
+        f"(DOM {diag.get('fichas_encontradas', 0)}), "
+        f"alvos={diag.get('alvos_acionaveis', 0)}/{diag.get('alvos_necessarios', 0)} "
+        f"(DOM {diag.get('alvos_encontrados', 0)})"
+    )
 
 
 def aguardar_janela_aposta(page, aposta, planos):
     sincronizar = aposta.get("sincronizar_janela") is True
     prazo = time.monotonic() + EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS
+    ultimo_contexto = avaliar_contexto_janela_aposta(aposta)
+    ultimo_diagnostico = {}
+    ultima_assinatura = None
 
     if sincronizar:
         print(
-            f"⏳ Ordem {aposta.get('order_id', 'n/a')} aguardando janela apostável "
-            f"da rodada após coletor_seq={aposta.get('coletor_seq_aceite', 0)}..."
+            f"⏳ Ordem {aposta.get('order_id', 'n/a')} aguardando stage Betting + DOM acionável "
+            f"da rodada após coletor_seq={aposta.get('coletor_seq_aceite', 0)}; "
+            f"fusível operacional={EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS:g}s."
         )
 
     while True:
@@ -968,6 +1149,15 @@ def aguardar_janela_aposta(page, aposta, planos):
             }
 
         contexto = avaliar_contexto_janela_aposta(aposta)
+        ultimo_contexto = contexto
+        assinatura = (contexto["estado"], contexto["stage"], contexto["seq_atual"])
+        if sincronizar and assinatura != ultima_assinatura:
+            print(
+                f"🧭 Ordem {aposta.get('order_id', 'n/a')}: estado={contexto['estado']}, "
+                f"stage={contexto['stage'] or 'vazio'}, seq={contexto['seq_atual']}/{contexto['seq_ordem']}."
+            )
+            ultima_assinatura = assinatura
+
         if contexto["estado"] == "SEM_CONTEXTO":
             return None, {
                 "status": "FALHOU",
@@ -988,14 +1178,18 @@ def aguardar_janela_aposta(page, aposta, planos):
             }
 
         if contexto["estado"] == "ABERTA":
-            frame_jogo = localizar_frame_apostavel(page, planos)
-            if frame_jogo is not None:
-                return frame_jogo, None
+            contexto_dom, ultimo_diagnostico = localizar_contexto_apostavel(page, planos)
+            if contexto_dom is not None:
+                return contexto_dom, None
 
         if time.monotonic() >= prazo:
+            diagnostico_texto = formatar_diagnostico_janela(ultimo_contexto, ultimo_diagnostico)
             return None, {
                 "status": "EXPIRADA",
-                "motivo": f"Janela de apostas não ficou acionável em {EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS:g}s",
+                "motivo": (
+                    f"Fusível operacional de {EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS:g}s atingido sem "
+                    f"janela segura; {diagnostico_texto}"
+                ),
                 "cliques_alvo": 0
             }
 
@@ -1042,21 +1236,69 @@ def executar_aposta_na_tela(page, aposta):
             })
 
         # BUG-019: principal e proteção Tie precisam estar acionáveis antes do primeiro clique real.
-        frame_jogo, bloqueio = aguardar_janela_aposta(page, aposta, planos)
+        contexto_dom, bloqueio = aguardar_janela_aposta(page, aposta, planos)
         if bloqueio is not None:
             print(f"⚠️ Ordem não executada: {bloqueio['motivo']}")
             return bloqueio
 
+        frame_jogo = contexto_dom["frame"]
         for plano in planos:
-            alvo_elemento = frame_jogo.locator(f"[data-role='{plano['seletor_alvo']}']").first
+            alvo_elemento = contexto_dom["alvos"].get(plano["seletor_alvo"])
+            if alvo_elemento is None:
+                alvo_elemento = primeiro_elemento_apostavel(
+                    frame_jogo.locator(f"[data-role='{plano['seletor_alvo']}']")
+                )
+            if alvo_elemento is None:
+                status = "AMBIGUA" if cliques_alvo > 0 else "FALHOU"
+                return {
+                    "status": status,
+                    "motivo": f"Alvo {plano['alvo']} deixou de estar acionável antes do clique",
+                    "cliques_alvo": cliques_alvo
+                }
+
             for ficha, qtd in plano["cliques_necessarios"]:
-                seletor_ficha = f"div[data-role='chip'][data-value='{ficha}']"
                 try:
-                    ficha_elemento = frame_jogo.locator(seletor_ficha).first
+                    if aposta.get("sincronizar_janela") is True:
+                        contexto_atual = avaliar_contexto_janela_aposta(aposta)
+                        if contexto_atual["estado"] != "ABERTA":
+                            status = "AMBIGUA" if cliques_alvo > 0 else "EXPIRADA"
+                            return {
+                                "status": status,
+                                "motivo": (
+                                    "Janela estrutural deixou de estar apostável antes da conclusão; "
+                                    f"stage={contexto_atual['stage'] or 'vazio'}, "
+                                    f"seq={contexto_atual['seq_atual']}/{contexto_atual['seq_ordem']}"
+                                ),
+                                "cliques_alvo": cliques_alvo
+                            }
+
+                    ficha_elemento = contexto_dom["fichas"].get(int(ficha))
+                    if ficha_elemento is None:
+                        ficha_elemento, _ = localizar_ficha_apostavel(frame_jogo, ficha)
+                    if ficha_elemento is None:
+                        status = "AMBIGUA" if cliques_alvo > 0 else "FALHOU"
+                        return {
+                            "status": status,
+                            "motivo": f"Ficha R$ {ficha} deixou de estar acionável antes do clique",
+                            "cliques_alvo": cliques_alvo
+                        }
                     ficha_elemento.click(timeout=2000)
                     page.wait_for_timeout(150)
 
                     for _ in range(int(qtd)):
+                        if aposta.get("sincronizar_janela") is True:
+                            contexto_atual = avaliar_contexto_janela_aposta(aposta)
+                            if contexto_atual["estado"] != "ABERTA":
+                                status = "AMBIGUA" if cliques_alvo > 0 else "EXPIRADA"
+                                return {
+                                    "status": status,
+                                    "motivo": (
+                                        "Janela estrutural fechou durante o plano composto; "
+                                        f"stage={contexto_atual['stage'] or 'vazio'}, "
+                                        f"seq={contexto_atual['seq_atual']}/{contexto_atual['seq_ordem']}"
+                                    ),
+                                    "cliques_alvo": cliques_alvo
+                                }
                         alvo_elemento.click(timeout=2000)
                         cliques_alvo += 1
                         page.wait_for_timeout(120)
