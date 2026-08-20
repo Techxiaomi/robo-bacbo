@@ -43,6 +43,14 @@ replace_once(
     'mensagem saldo por perna'
 )
 
+# O shell do painel é index.html; a UI funcional e o PDF vivem em dashboard-app.html.
+replace_once(
+    'robo-bacbo/test/bug051-contract.test.js',
+    'path.join(__dirname, "..", "public", "index.html")',
+    'path.join(__dirname, "..", "public", "dashboard-app.html")',
+    'contrato UI dashboard-app'
+)
+
 # A validação geral deve funcionar até em trader desligado legado; política Tie completa
 # só é obrigatória quando o motor será ativado.
 p = Path('robo-bacbo/bot2_coletor.js')
