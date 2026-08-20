@@ -157,6 +157,14 @@ Qualquer interrupção estrutural reconhecida ou sinalizada pelo Python invalida
 
 Risco residual externo: o projeto não presume que `roundId` seja numérico/sequencial sem contrato oficial. Se a plataforma omitir uma rodada completa, continuar enviando outros `playerState` válidos e retornar antes do watchdog, uma única fonte não consegue provar matematicamente a ausência. A proteção prioriza falhar fechado em fechamento, silêncio e transições observáveis; reconciliação por uma segunda fonte oficial/roadmap continua sendo a única forma de elevar essa garantia contra omissão totalmente invisível da fonte primária.
 
+### BUG-029 — Varredura DOM consumia a janela curta de AcceptingBets
+
+Status: **mitigado em código; validação operacional no site real pendente**.
+
+O primeiro teste com o stage real mostrou `ABERTA` em `AcceptingBets`, mas nenhum clique antes de `FirstDie`. A pré-validação fazia até 64 leituras Playwright individuais de `data-value` em cada frame; em uma fase curta, a própria varredura podia consumir a janela antes de concluir ficha + alvo.
+
+Os valores das fichas agora são extraídos em uma única avaliação DOM por frame. Apenas os índices numericamente correspondentes passam pela prova de actionability, mantendo a exigência do conjunto integral e o bloqueio de todas as fases não apostáveis. Se a próxima rodada resolver sem execução, o motivo inclui a última inspeção agregada de frames/fichas/alvos para separar seletor ausente, elemento não acionável e renderização tardia sem expor o DOM.
+
 ### BUG-028 — Ordem expirava antes de a próxima janela Betting abrir
 
 Status: **mitigado em código; validação operacional no site real pendente**.
