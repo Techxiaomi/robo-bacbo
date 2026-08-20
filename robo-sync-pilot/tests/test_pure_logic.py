@@ -622,6 +622,7 @@ class TestContratoWebSocketFailClosed(unittest.TestCase):
 class TestBug028JanelaApostavelEstrutural(unittest.TestCase):
     def setUp(self):
         self.ns = {
+            "re": re,
             "time": time,
             "threading": threading,
             "estado_mesa_lock": threading.Lock(),
