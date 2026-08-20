@@ -8,8 +8,10 @@ const vm = require("node:vm");
 
 const backendPath = path.join(__dirname, "..", "bot2_coletor.js");
 const frontendPath = path.join(__dirname, "..", "public", "index.html");
+const executorPythonPath = path.join(__dirname, "..", "..", "robo-sync-pilot", "robo.py");
 const source = fs.readFileSync(backendPath, "utf8").replace(/\r\n/g, "\n");
 const frontendSource = fs.readFileSync(frontendPath, "utf8").replace(/\r\n/g, "\n");
+const executorPythonSource = fs.readFileSync(executorPythonPath, "utf8").replace(/\r\n/g, "\n");
 
 function trechoEntre(inicio, fim) {
     const posInicio = source.indexOf(inicio);
@@ -280,6 +282,23 @@ test("BUG-027: painel persiste fonte IA canônica e backend usa o matcher centra
         4
     );
     assert.match(source, /Auto-Trader \$\{trader\.id\} \(\$\{trader\.nome\}\) autorizado para o sinal/);
+});
+
+test("BUG-028: executor espera Betting estrutural e Node preserva o callback", () => {
+    assert.match(executorPythonSource, /EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS = 180\.0/);
+    assert.match(executorPythonSource, /return str\(stage or ""\)\.strip\(\)\.lower\(\) ===? "betting"/);
+    assert.match(executorPythonSource, /if contexto\["estado"\] == "EXPIRADA":/);
+    assert.match(executorPythonSource, /Fusível operacional de .* atingido sem/);
+    assert.match(executorPythonSource, /fichas_acionaveis/);
+    assert.match(executorPythonSource, /alvos_acionaveis/);
+
+    const localizador = executorPythonSource.slice(
+        executorPythonSource.indexOf("def localizar_contexto_apostavel"),
+        executorPythonSource.indexOf("def localizar_frame_apostavel")
+    );
+    assert.doesNotMatch(localizador, /evolution|evocdn|game/);
+    assert.match(source, /process\.env\.EXECUTOR_EXECUTION_TIMEOUT_MS \|\| 210000/);
+    assert.match(source, /executorExecutionTimeoutConfig >= 195000/);
 });
 
 test("formatarPadraoTelegram preserva a representacao visual do sinal", () => {
