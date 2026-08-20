@@ -157,6 +157,14 @@ Qualquer interrupção estrutural reconhecida ou sinalizada pelo Python invalida
 
 Risco residual externo: o projeto não presume que `roundId` seja numérico/sequencial sem contrato oficial. Se a plataforma omitir uma rodada completa, continuar enviando outros `playerState` válidos e retornar antes do watchdog, uma única fonte não consegue provar matematicamente a ausência. A proteção prioriza falhar fechado em fechamento, silêncio e transições observáveis; reconciliação por uma segunda fonte oficial/roadmap continua sendo a única forma de elevar essa garantia contra omissão totalmente invisível da fonte primária.
 
+### BUG-032 — Camada interna interceptava o ponteiro da ficha
+
+Status: **mitigado em código; validação operacional no site real pendente**.
+
+O log Playwright comprovou que a ficha estava visível, habilitada e estável, mas outro `div` do componente interceptava os eventos de ponteiro. Repetir o timeout não resolveria, e usar `force=True` eliminaria uma proteção importante.
+
+Após o clique Playwright normal falhar, o executor pode identificar com `elementFromPoint` a superfície central da ficha. O acionamento só é permitido se essa superfície for o próprio elemento, descendente, ancestral ou membro do mesmo container. Como essa etapa apenas escolhe a denominação, ela não cria exposição; ainda assim, o executor exige que a assinatura/seleção DOM mude após o evento. Sem confirmação, termina com zero cliques de alvo. Player/Banker/Tie nunca passam por esse caminho e continuam protegidos pela actionability padrão, stage e sequência.
+
 ### BUG-031 — Prova curta de actionability da ficha bloqueava antes do clique financeiro
 
 Status: **mitigado em código; validação operacional no site real pendente**.
