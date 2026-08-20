@@ -19,8 +19,8 @@ load_env_file(os.path.join(PROJECT_ROOT, ".env"))
 # ====================================================================
 # CONFIGURAÇÕES GERAIS E CONTROLE DE VERSÃO
 # ====================================================================
-VERSAO_ROBO = "v1.6.8"
-NOME_ATUALIZACAO = "Superfície DOM da Ficha com Confirmação"
+VERSAO_ROBO = "v1.6.9"
+NOME_ATUALIZACAO = "Reconfirmação Controlada da Ficha"
 
 URL_CASSINO = os.getenv("CASINO_GAME_URL", "")
 ARQUIVO_SESSAO = os.getenv("SESSION_STATE_FILE", os.path.join(BASE_DIR, "sessao_salva.json"))
@@ -1184,12 +1184,20 @@ def selecionar_ficha_com_confirmacao(page, ficha_contexto, valor_ficha):
         }
 
     script_snapshot = """el => {
-        const atributos = no => no ? [
-            no.className || '', no.getAttribute('aria-pressed') || '',
-            no.getAttribute('aria-selected') || '', no.getAttribute('data-selected') || '',
-            no.getAttribute('data-is-selected') || '', no.getAttribute('data-active') || '',
-            no.getAttribute('data-state') || ''
-        ].join('|') : '';
+        const atributos = no => {
+            if (!no) return '';
+            const estilo = getComputedStyle(no);
+            const rect = no.getBoundingClientRect();
+            return [
+                no.className || '', no.getAttribute('aria-pressed') || '',
+                no.getAttribute('aria-selected') || '', no.getAttribute('data-selected') || '',
+                no.getAttribute('data-is-selected') || '', no.getAttribute('data-active') || '',
+                no.getAttribute('data-state') || '', no.getAttribute('style') || '',
+                estilo.backgroundColor, estilo.borderColor, estilo.boxShadow,
+                estilo.transform, estilo.opacity, estilo.filter,
+                Math.round(rect.width * 10), Math.round(rect.height * 10)
+            ].join('|');
+        };
         const nos = [el, el.parentElement, ...Array.from(el.children).slice(0, 8)];
         const assinatura = nos.map(atributos).join('::');
         const selecionada = nos.some(no => {
@@ -1208,24 +1216,26 @@ def selecionar_ficha_com_confirmacao(page, ficha_contexto, valor_ficha):
         return { assinatura, selecionada };
     }"""
 
+    script_superficie = """el => {
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return { acionada: false, relacao: 'SEM_AREA' };
+        const x = rect.left + rect.width / 2;
+        const y = rect.top + rect.height / 2;
+        const hit = el.ownerDocument.elementFromPoint(x, y);
+        if (!hit) return { acionada: false, relacao: 'SEM_SUPERFICIE' };
+        let relacao = 'EXTERNA';
+        if (hit === el) relacao = 'PROPRIA';
+        else if (el.contains(hit)) relacao = 'DESCENDENTE';
+        else if (hit.contains(el)) relacao = 'ANCESTRAL';
+        else if (el.parentElement && el.parentElement.contains(hit)) relacao = 'MESMO_CONTAINER';
+        if (relacao === 'EXTERNA') return { acionada: false, relacao };
+        hit.click();
+        return { acionada: true, relacao };
+    }"""
+
     try:
         antes = elemento.evaluate(script_snapshot)
-        superficie = elemento.evaluate("""el => {
-            const rect = el.getBoundingClientRect();
-            if (rect.width <= 0 || rect.height <= 0) return { acionada: false, relacao: 'SEM_AREA' };
-            const x = rect.left + rect.width / 2;
-            const y = rect.top + rect.height / 2;
-            const hit = el.ownerDocument.elementFromPoint(x, y);
-            if (!hit) return { acionada: false, relacao: 'SEM_SUPERFICIE' };
-            let relacao = 'EXTERNA';
-            if (hit === el) relacao = 'PROPRIA';
-            else if (el.contains(hit)) relacao = 'DESCENDENTE';
-            else if (hit.contains(el)) relacao = 'ANCESTRAL';
-            else if (el.parentElement && el.parentElement.contains(hit)) relacao = 'MESMO_CONTAINER';
-            if (relacao === 'EXTERNA') return { acionada: false, relacao };
-            hit.click();
-            return { acionada: true, relacao };
-        }""")
+        superficie = elemento.evaluate(script_superficie)
         if not isinstance(superficie, dict) or superficie.get("acionada") is not True:
             relacao = superficie.get("relacao", "n/a") if isinstance(superficie, dict) else "n/a"
             return {
@@ -1237,9 +1247,68 @@ def selecionar_ficha_com_confirmacao(page, ficha_contexto, valor_ficha):
         mudou = (depois or {}).get("assinatura") != (antes or {}).get("assinatura")
         selecionada = (depois or {}).get("selecionada") is True
         if not selecionada and not mudou:
+            alternativas = elemento.evaluate("""(el, valorAlvo) => {
+                const normalizar = valor => Number(String(valor || '').trim().replace(',', '.'));
+                return Array.from(el.ownerDocument.querySelectorAll('[data-role="chip"][data-value]'))
+                    .map((item, indice) => ({ item, indice }))
+                    .filter(({item}) => {
+                        const rect = item.getBoundingClientRect();
+                        const estilo = getComputedStyle(item);
+                        return rect.width > 0 && rect.height > 0
+                            && estilo.display !== 'none' && estilo.visibility !== 'hidden'
+                            && Math.abs(normalizar(item.getAttribute('data-value')) - Number(valorAlvo)) > 0.001;
+                    })
+                    .slice(0, 6)
+                    .map(({indice, item}) => ({ indice, valor: item.getAttribute('data-value') || '' }));
+            }""", float(valor_ficha))
+
+            script_superficie_indice = """(el, indice) => {
+                const item = el.ownerDocument.querySelectorAll('[data-role="chip"][data-value]')[indice];
+                if (!item) return { acionada: false, relacao: 'ALTERNATIVA_AUSENTE' };
+                const rect = item.getBoundingClientRect();
+                if (rect.width <= 0 || rect.height <= 0) return { acionada: false, relacao: 'SEM_AREA' };
+                const hit = item.ownerDocument.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+                if (!hit) return { acionada: false, relacao: 'SEM_SUPERFICIE' };
+                let relacao = 'EXTERNA';
+                if (hit === item) relacao = 'PROPRIA';
+                else if (item.contains(hit)) relacao = 'DESCENDENTE';
+                else if (hit.contains(item)) relacao = 'ANCESTRAL';
+                else if (item.parentElement && item.parentElement.contains(hit)) relacao = 'MESMO_CONTAINER';
+                if (relacao === 'EXTERNA') return { acionada: false, relacao };
+                hit.click();
+                return { acionada: true, relacao };
+            }"""
+
+            for alternativa in alternativas or []:
+                acao_alternativa = elemento.evaluate(
+                    script_superficie_indice,
+                    int(alternativa.get("indice")),
+                )
+                if not isinstance(acao_alternativa, dict) or acao_alternativa.get("acionada") is not True:
+                    continue
+                page.wait_for_timeout(120)
+                apos_alternativa = elemento.evaluate(script_snapshot)
+                if (apos_alternativa or {}).get("assinatura") == (depois or {}).get("assinatura"):
+                    continue
+
+                retorno = elemento.evaluate(script_superficie)
+                if not isinstance(retorno, dict) or retorno.get("acionada") is not True:
+                    return {
+                        "confirmada": False,
+                        "motivo": "ficha alternativa mudou o estado, mas não foi possível retornar ao valor solicitado",
+                    }
+                page.wait_for_timeout(120)
+                final = elemento.evaluate(script_snapshot)
+                voltou = (final or {}).get("assinatura") != (apos_alternativa or {}).get("assinatura")
+                if (final or {}).get("selecionada") is True or voltou:
+                    return {
+                        "confirmada": True,
+                        "via": "SUPERFICIE_RECONFIRMADA",
+                    }
+
             return {
                 "confirmada": False,
-                "motivo": "superfície acionada, mas o DOM não confirmou mudança da ficha",
+                "motivo": "superfície acionada, mas nem troca controlada de ficha confirmou o valor solicitado",
             }
         return {
             "confirmada": True,
