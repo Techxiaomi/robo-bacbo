@@ -24,9 +24,15 @@ def carregar_funcoes_reais():
         "extrair_trilhas_roadmap_dom",
         "identidade_rodada_evolution",
         "atualizar_estado_mesa_player",
+        "stage_evolution_apostavel",
         "avaliar_contexto_janela_aposta",
+        "primeiro_elemento_apostavel",
         "elemento_apostavel",
+        "localizar_ficha_apostavel",
+        "inspecionar_frame_apostavel",
+        "localizar_contexto_apostavel",
         "localizar_frame_apostavel",
+        "formatar_diagnostico_janela",
         "aguardar_janela_aposta",
         "executar_aposta_na_tela",
     }
@@ -49,6 +55,7 @@ def carregar_funcoes_reais():
         "PlaywrightTimeoutError": PlaywrightTimeoutError,
         "CASINO_BALANCE_SELECTOR": ".saldo-teste",
         "EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS": 1.5,
+        "COLLECTOR_PLAYER_STATE_STALE_SECONDS": 20.0,
         "executor_pronto": executor_pronto,
         "estado_mesa_lock": threading.Lock(),
         "estado_mesa": {
@@ -156,6 +163,24 @@ HTML["/game-closed-frame.html"] = """<!doctype html>
 <script>window.__chipClicks = 0; window.__targetClicks = 0;</script>
 <div style="display:none" data-role="chip" data-value="10" onclick="window.__chipClicks++">10</div>
 <button style="display:none" data-role="bacbo-bet-spot-Player" onclick="window.__targetClicks++">Player</button>
+</body></html>"""
+
+HTML["/opaque-hidden.html"] = """<!doctype html>
+<html><body><iframe src="/table-shell.html"></iframe></body></html>"""
+HTML["/table-shell.html"] = """<!doctype html>
+<html><body>
+<script>
+  window.__chipClicks = {hidden: 0, visible: 0};
+  window.__targetClicks = {hidden: 0, visible: 0};
+</script>
+<div style="display:none" data-role="chip" data-value="10.0"
+  onclick="window.__chipClicks.hidden++">10 oculto</div>
+<button style="display:none" data-role="bacbo-bet-spot-Player"
+  onclick="window.__targetClicks.hidden++">Player oculto</button>
+<div data-role="chip" data-value="10,00"
+  onclick="window.__chipClicks.visible++">10 visível</div>
+<button data-role="bacbo-bet-spot-Player"
+  onclick="window.__targetClicks.visible++">Player visível</button>
 </body></html>"""
 
 
@@ -287,6 +312,19 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
         finally:
             pagina.close()
 
+    def test_bug028_frame_opaco_usa_elementos_acionaveis_em_vez_do_primeiro(self):
+        pagina = self.nova_pagina("/opaque-hidden.html")
+        try:
+            pagina.locator("iframe").wait_for(state="attached")
+            frame = next(f for f in pagina.frames if "table-shell" in f.url)
+            resultado = executar_aposta_na_tela(pagina, {"alvo": "PlayerWon", "valor": 10})
+
+            self.assertEqual(resultado["status"], "EXECUTADA")
+            self.assertEqual(frame.evaluate("window.__chipClicks"), {"hidden": 0, "visible": 1})
+            self.assertEqual(frame.evaluate("window.__targetClicks"), {"hidden": 0, "visible": 1})
+        finally:
+            pagina.close()
+
     def configurar_janela(self, seq, stage="Resolved", timeout=1.5):
         FUNCOES["coletor_seq"] = seq
         FUNCOES["EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS"] = timeout
@@ -335,9 +373,32 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
             frame = next(f for f in pagina.frames if "game-closed-frame" in f.url)
             self.assertEqual(resultado["status"], "EXPIRADA")
             self.assertEqual(resultado["cliques_alvo"], 0)
+            self.assertIn("stage=Betting", resultado["motivo"])
+            self.assertIn("fichas=0/1", resultado["motivo"])
+            self.assertIn("alvos=0/1", resultado["motivo"])
             self.assertEqual(frame.evaluate("window.__chipClicks"), 0)
             self.assertEqual(frame.evaluate("window.__targetClicks"), 0)
         finally:
+            pagina.close()
+
+    def test_bug028_stage_dealing_nao_autoriza_dom_visivel(self):
+        pagina = self.nova_pagina("/game.html")
+        self.configurar_janela(25, "Dealing", timeout=1.0)
+
+        def resolver_sem_aposta():
+            FUNCOES["coletor_seq"] = 26
+            FUNCOES["atualizar_estado_mesa_player"]({"args": {"game": {"stage": "Resolved"}}})
+
+        timer = threading.Timer(0.2, resolver_sem_aposta)
+        timer.start()
+        try:
+            frame = self.frame_jogo(pagina)
+            resultado = executar_aposta_na_tela(pagina, self.ordem_sincronizada(25))
+            self.assertEqual(resultado["status"], "EXPIRADA")
+            self.assertEqual(frame.evaluate("window.__chipClicks")["10"], 0)
+            self.assertEqual(frame.evaluate("window.__targetClicks")["playerA"], 0)
+        finally:
+            timer.cancel()
             pagina.close()
 
     def test_bug018_novo_resolved_invalida_ordem_sem_cliques(self):
