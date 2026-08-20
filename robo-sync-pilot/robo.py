@@ -20,7 +20,7 @@ load_env_file(os.path.join(PROJECT_ROOT, ".env"))
 # CONFIGURAÇÕES GERAIS E CONTROLE DE VERSÃO
 # ====================================================================
 VERSAO_ROBO = "v1.6.13"
-NOME_ATUALIZACAO = "BUG-047 Fast Path Forcado Resolved + 8s"
+NOME_ATUALIZACAO = "BUG-048 Burst Composto + Debito Agregado"
 
 URL_CASSINO = os.getenv("CASINO_GAME_URL", "")
 ARQUIVO_SESSAO = os.getenv("SESSION_STATE_FILE", os.path.join(BASE_DIR, "sessao_salva.json"))
@@ -1474,7 +1474,7 @@ def confirmar_aceite_financeiro_aposta(page, saldo_antes, exposicao_esperada):
     if ultimo_saldo is None:
         motivo = "Saldo deixou de ser legível após os cliques financeiros"
     elif abs(float(ultimo_debito or 0.0)) <= tolerancia:
-        motivo = "Saldo permaneceu inalterado; a Evolution não comprovou o aceite"
+        motivo = "Saldo não sofreu débito adicional para esta perna; a Evolution não comprovou este aceite"
     else:
         motivo = (
             f"Variação de saldo R$ {float(ultimo_debito or 0.0):.2f} divergiu da "
@@ -1562,6 +1562,151 @@ def executar_aposta_na_tela(page, aposta):
 
         frame_jogo = contexto_dom["frame"]
         saldo_referencia = round(float(saldo_antes), 2)
+
+        # BUG-048: planos compostos precisam entrar na mesma janela real. No modelo
+        # anterior, a confirmação de saldo da primeira perna consumia ~2.5-3s antes
+        # do clique do Tie. Agora todas as pernas são clicadas em burst e somente
+        # depois o débito agregado é confirmado. Assim Player + Tie não perde a janela.
+        if len(planos) > 1:
+            total_composto = float(sum(p["valor"] for p in planos))
+            tentativas_compostas = []
+            for plano in planos:
+                if aposta.get("sincronizar_janela") is True:
+                    contexto_atual = avaliar_contexto_janela_aposta(aposta)
+                    if contexto_atual["estado"] != "ABERTA":
+                        return {
+                            "status": "AMBIGUA" if cliques_alvo > 0 else "EXPIRADA",
+                            "motivo": (
+                                "Janela estrutural fechou durante o burst composto; "
+                                f"stage={contexto_atual['stage'] or 'vazio'}, "
+                                f"seq={contexto_atual['seq_atual']}/{contexto_atual['seq_ordem']}"
+                            ),
+                            "cliques_alvo": cliques_alvo,
+                        }
+
+                alvo_elemento = contexto_dom["alvos"].get(plano["seletor_alvo"])
+                if alvo_elemento is None:
+                    alvo_elemento = primeiro_elemento_dom_visivel(
+                        frame_jogo.locator(f"[data-role='{plano['seletor_alvo']}']")
+                    )
+                if alvo_elemento is None:
+                    return {
+                        "status": "AMBIGUA" if cliques_alvo > 0 else "FALHOU",
+                        "motivo": f"Alvo {plano['alvo']} ausente/oculto durante o burst composto",
+                        "cliques_alvo": cliques_alvo,
+                    }
+
+                for ficha, qtd in plano["cliques_necessarios"]:
+                    ficha_contexto = contexto_dom["fichas"].get(int(ficha))
+                    if ficha_contexto is None:
+                        ficha_contexto, _, _ = localizar_ficha_apostavel(frame_jogo, ficha)
+                    if ficha_contexto is None:
+                        return {
+                            "status": "AMBIGUA" if cliques_alvo > 0 else "FALHOU",
+                            "motivo": f"Ficha R$ {ficha} ausente/oculta durante o burst composto",
+                            "cliques_alvo": cliques_alvo,
+                        }
+
+                    precisa_selecionar = (
+                        ficha_contexto.get("modo") != "JA_SELECIONADA"
+                        and ficha_corrente != int(ficha)
+                    )
+                    if precisa_selecionar:
+                        selecao = selecionar_ficha_com_confirmacao(page, ficha_contexto, ficha)
+                        if selecao.get("confirmada") is not True:
+                            return {
+                                "status": "AMBIGUA" if cliques_alvo > 0 else "FALHOU",
+                                "motivo": f"Ficha R$ {ficha} não confirmou seleção no burst: {selecao.get('motivo', 'motivo desconhecido')}",
+                                "cliques_alvo": cliques_alvo,
+                            }
+                        print(
+                            f"✅ Ficha R$ {ficha} preparada para burst composto "
+                            f"({selecao.get('via', 'n/a')})."
+                        )
+                        ficha_corrente = int(ficha)
+                    elif ficha_contexto.get("modo") == "JA_SELECIONADA":
+                        ficha_corrente = int(ficha)
+
+                    for _ in range(int(qtd)):
+                        if aposta.get("sincronizar_janela") is True:
+                            contexto_atual = avaliar_contexto_janela_aposta(aposta)
+                            if contexto_atual["estado"] != "ABERTA":
+                                return {
+                                    "status": "AMBIGUA" if cliques_alvo > 0 else "EXPIRADA",
+                                    "motivo": (
+                                        "Janela estrutural fechou antes de concluir o burst composto; "
+                                        f"stage={contexto_atual['stage'] or 'vazio'}"
+                                    ),
+                                    "cliques_alvo": cliques_alvo,
+                                }
+                        alvo_real = clicar_alvo_financeiro_playwright(page, alvo_elemento)
+                        if alvo_real.get("acionada") is not True:
+                            return {
+                                "status": "AMBIGUA" if cliques_alvo > 0 else "FALHOU",
+                                "motivo": (
+                                    f"Falha no clique do burst em {plano['alvo']}: "
+                                    f"{alvo_real.get('motivo', alvo_real.get('relacao', 'motivo desconhecido'))}"
+                                ),
+                                "cliques_alvo": cliques_alvo,
+                            }
+                        cliques_alvo += 1
+                        tentativas_compostas.append({
+                            "alvo": plano["alvo"],
+                            "ficha": int(ficha),
+                            "superficie": alvo_real.get("relacao"),
+                        })
+                        print(
+                            f"⚡ BURST COMPOSTO: clique {cliques_alvo} enviado para "
+                            f"R$ {int(ficha)} {plano['alvo']} via {alvo_real.get('relacao', 'n/a')}."
+                        )
+
+            # IMPORTANTE: confirmar_aceite_financeiro_aposta contém os 2500ms rígidos
+            # antes da primeira leitura do saldo. Aqui a referência continua sendo o
+            # saldo anterior ao primeiro clique, então a prova esperada é o débito total.
+            confirmacao_composta = confirmar_aceite_financeiro_aposta(
+                page, saldo_antes, total_composto
+            )
+            debito_observado = float(confirmacao_composta.get("debito_observado") or 0.0)
+            if confirmacao_composta.get("confirmada") is not True:
+                tolerancia = max(0.01, float(EXECUTOR_BET_ACCEPTANCE_TOLERANCE))
+                if debito_observado > tolerancia and debito_observado < total_composto - tolerancia:
+                    motivo = (
+                        f"Débito parcial no plano composto: R$ {debito_observado:.2f} de "
+                        f"R$ {total_composto:.2f}; uma ou mais pernas não foram aceitas"
+                    )
+                    print(f"🚨 {motivo}.")
+                elif abs(debito_observado) <= tolerancia:
+                    motivo = (
+                        f"Nenhum débito confirmado no plano composto; esperado R$ {total_composto:.2f}"
+                    )
+                    print(f"🚨 {motivo}.")
+                else:
+                    motivo = str(confirmacao_composta.get("motivo") or "Débito composto não confirmado")
+                    print(f"🚨 {motivo}.")
+                return {
+                    "status": "AMBIGUA",
+                    "motivo": motivo,
+                    "cliques_alvo": cliques_alvo,
+                    "confirmacao": {
+                        **confirmacao_composta,
+                        "confirmada": False,
+                        "metodo": "SALDO_COMPOSTO_NAO_CONFIRMADO",
+                        "pernas_tentadas": tentativas_compostas,
+                    },
+                }
+
+            print(
+                f"✅ PLANO COMPOSTO ACEITO: débito agregado R$ {total_composto:.2f} confirmado; "
+                f"saldo R$ {confirmacao_composta['saldo_antes']:.2f} -> "
+                f"R$ {confirmacao_composta['saldo_depois']:.2f}."
+            )
+            confirmacao_composta["pernas_tentadas"] = tentativas_compostas
+            return {
+                "status": "EXECUTADA",
+                "motivo": "Plano composto confirmado por débito agregado do saldo disponível",
+                "cliques_alvo": cliques_alvo,
+                "confirmacao": confirmacao_composta,
+            }
 
         for plano in planos:
             alvo_elemento = contexto_dom["alvos"].get(plano["seletor_alvo"])
