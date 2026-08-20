@@ -1,20 +1,15 @@
 name: Apply BUG-049 compound window
 
 on:
-  issue_comment:
-    types: [created]
+  pull_request:
+    types: [ready_for_review]
 
 permissions:
   contents: write
-  pull-requests: read
-  issues: read
 
 jobs:
   apply-bug049:
-    if: >-
-      github.event.issue.pull_request &&
-      github.event.issue.number == 68 &&
-      github.event.comment.body == '/apply-bug049'
+    if: github.event.pull_request.head.ref == 'agent/bug-023-websocket-reconnect-continuity'
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
