@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 51843)
-Total output lines: 2978
-
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -1789,7 +1786,89 @@ Total output lines: 2978
         function tocarSom() { if (!somAtivo) return; try { const ctx = new (window.AudioContext || window.webkitAudioContext)(); if (!ctx) return; const osc = ctx.createOscillator(); const gain = ctx.createGain(); osc.type = 'triangle'; osc.frequency.setValueAtTime(600, ctx.currentTime); osc.frequency.exponentialRampToValueAtTime(1200, ctx.currentTime + 0.1); gain.gain.setValueAtTime(0.4, ctx.currentTime); gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.2); osc.connect(gain); gain.connect(ctx.destination); osc.start(); osc.stop(ctx.currentTime + 0.2); } catch(e) {} }
 
         function verificarSintonizador(robosNotificados) {
-            if (!robosNotificados || !Array.isArray(robosNotificados) || robos…1843 tokens truncated… : 'none';
+            if (!robosNotificados || !Array.isArray(robosNotificados) || robosNotificados.length === 0) return false; 
+            let filtro = document.getElementById('sintonizador-web').value;
+            if (filtro === 'TODOS') return true; 
+            return robosNotificados.some(r => r.id.toString() === filtro);
+        }
+
+        socketWeb.on('alerta_painel', (dados) => {
+            if (!verificarSintonizador(dados.robosNotificados)) return; 
+            clearTimeout(alertaTimeout); tocarSom();
+            const banner = document.getElementById('banner-sinal'); const titulo = document.getElementById('banner-titulo'); const acao = document.getElementById('banner-acao'); const pulse = document.getElementById('banner-pulse'); const icon = document.getElementById('banner-icon'); const badgeAssert = document.getElementById('banner-assertividade'); const divPadrao = document.getElementById('banner-padrao'); const divTags = document.getElementById('banner-tags');
+            pulse.classList.add('piscar'); divTags.innerHTML = '';
+            dados.robosNotificados.forEach(r => { if (r.tag_visual) divTags.innerHTML += `<span class="robo-tag-badge" style="background-color: ${r.cor_hex};">${r.tag_visual}</span>`; });
+
+            if (dados.tipo === 'ENTRADA') {
+                let cor = dados.entrada === 'Player' ? '#007bff' : '#ff7777'; let txt = dados.entrada === 'Player' ? '🔵 PLAYER' : '🔴 BANKER';
+                banner.style.borderColor = cor; titulo.innerText = `🚨 SINAL: ${dados.nome}`; acao.innerText = `ENTRADA NO ${txt}`; acao.style.color = cor; pulse.style.background = cor; pulse.style.boxShadow = `0 0 10px ${cor}`; icon.style.filter = 'none';
+                if (dados.assertividade) { badgeAssert.innerText = `🎯 Confiança: ${dados.assertividade}%`; badgeAssert.style.display = 'inline-block'; }
+                if (dados.padrao && dados.padrao.length > 0) { divPadrao.innerHTML = dados.padrao.map(j => { let bk = j === 'Player' ? '#007bff' : (j === 'Banker' ? '#ff7777' : '#ffc107'); let cr = j === 'Tie' ? '#000' : '#fff'; return `<span style="background:${bk}; padding:2px 6px; font-size:10px; border-radius:4px; font-weight:bold; color:${cr};">${j.charAt(0)}</span>`; }).join('<span style="color:#666; font-size:10px; margin:0 2px;">➡️</span>'); divPadrao.style.display = 'flex'; }
+                let est = estrategiasGlobais.find(e => e.nome === dados.nome); if (est) { estrategiaAtivaAtualId = est.id; document.getElementById('conteudo-card-ativo').innerHTML = gerarHtmlCardEstrategia(est, 'ativo', dashPeriodoAtual); document.getElementById('container-card-ativo').style.display = 'block'; }
+            } else {
+                badgeAssert.style.display = 'none'; divPadrao.style.display = 'none';
+                if (dados.tipo === 'GALE') { let cor = dados.entrada === 'Player' ? '#007bff' : '#ff7777'; banner.style.borderColor = cor; acao.innerText = `GALE ${dados.nivel}: ${dados.entrada === 'Player' ? '🔵 PLAYER' : '🔴 BANKER'}`; acao.style.color = cor; pulse.style.background = cor; pulse.style.boxShadow = `0 0 10px ${cor}`; icon.style.filter = 'none'; }
+                else if (dados.tipo === 'GREEN') { banner.style.borderColor = '#28a745'; titulo.innerText = `✅ BATEU: ${dados.nome}`; acao.innerText = 'GREEN (WIN)!'; acao.style.color = '#28a745'; pulse.style.background = '#28a745'; pulse.style.boxShadow = '0 0 10px #28a745'; icon.style.filter = 'none'; alertaTimeout = setTimeout(resetarBanner, 10000); }
+                else if (dados.tipo === 'RED') { banner.style.borderColor = '#ff7777'; titulo.innerText = `❌ STOP: ${dados.nome}`; acao.innerText = 'RED (LOSS)'; acao.style.color = '#ff7777'; pulse.style.background = '#ff7777'; pulse.style.boxShadow = '0 0 10px #ff7777'; icon.style.filter = 'none'; alertaTimeout = setTimeout(resetarBanner, 10000); }
+            }
+        });
+
+        function resetarBanner() { document.getElementById('banner-sinal').style.borderColor = '#333'; document.getElementById('banner-titulo').innerText = 'Sem Sinal Ativo'; document.getElementById('banner-acao').innerText = 'AGUARDANDO...'; document.getElementById('banner-acao').style.color = '#fff'; document.getElementById('banner-pulse').style.background = '#555'; document.getElementById('banner-pulse').style.boxShadow = 'none'; document.getElementById('banner-pulse').classList.remove('piscar'); document.getElementById('banner-icon').style.filter = 'grayscale(100%)'; document.getElementById('banner-assertividade').style.display = 'none'; document.getElementById('banner-padrao').style.display = 'none'; document.getElementById('banner-tags').innerHTML = ''; document.getElementById('container-card-ativo').style.display = 'none'; estrategiaAtivaAtualId = null; }
+
+        socketWeb.on('atualizar_interface', () => { if (document.getElementById('modal-cadastro').style.display !== 'flex') { inicializarSistema(); if (document.getElementById('aba-backtest').classList.contains('visivel')) carregarHistoricoMemoria(false); } });
+        socketWeb.on('atualizar_robos', () => { if (document.getElementById('modal-robo').style.display !== 'flex') carregarRobos(); });
+
+        // 🌟 AUTO TRADER FUNÇÕES (FRONTEND)
+        // ==========================================
+        // ROBÔS / CANAIS — CRUD E SINTONIZAÇÃO
+        // ==========================================
+        function escaparHtmlRobo(valor) {
+            return String(valor ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        }
+
+        function boolRobo(valor) {
+            return valor === true || valor === 1 || valor === '1';
+        }
+
+        function mudarAbaRobo(aba) {
+            document.querySelectorAll('#modal-robo .robo-nav-btn').forEach(btn => btn.classList.remove('ativo'));
+            document.querySelectorAll('#modal-robo .robo-tab-content').forEach(content => content.classList.remove('ativo'));
+
+            const btn = document.getElementById('btn-robo-tab-' + aba);
+            const content = document.getElementById('robo-tab-' + aba);
+            if (btn) btn.classList.add('ativo');
+            if (content) content.classList.add('ativo');
+        }
+
+        function toggleFormIA(check) {
+            const box = document.getElementById('form-ia-campos');
+            if (!box) return;
+            const ativo = !!check.checked;
+            box.style.opacity = ativo ? '1' : '0.5';
+            box.style.pointerEvents = ativo ? 'auto' : 'none';
+        }
+
+        function toggleFormCooldown(check) {
+            const box = document.getElementById('form-cd-campos');
+            if (!box) return;
+            const ativo = !!check.checked;
+            box.style.opacity = ativo ? '1' : '0.5';
+            box.style.pointerEvents = ativo ? 'auto' : 'none';
+            toggleTipoCooldown();
+        }
+
+        function toggleTipoCooldown() {
+            const tipo = document.getElementById('robo-cd-tipo')?.value || 'CONSERVADOR';
+            const boxReds = document.getElementById('box-cd-reds');
+            const boxIntervalo = document.getElementById('box-cd-intervalo');
+            const mostrarAcumulo = tipo === 'DINAMICO';
+            if (boxReds) boxReds.style.display = mostrarAcumulo ? 'flex' : 'none';
+            if (boxIntervalo) boxIntervalo.style.display = mostrarAcumulo ? 'flex' : 'none';
         }
 
         function adicionarLinhaDestinatario(nome = '', chatId = '') {
