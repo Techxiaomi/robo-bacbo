@@ -806,9 +806,9 @@
             display: none;
             background: white;
             color: black;
-            padding: 40px;
+            padding: 28px;
             font-family: Arial, sans-serif;
-            width: 800px;
+            width: 1120px;
         }
         
         .pdf-header {
@@ -819,36 +819,53 @@
         }
         
         .pdf-resumo {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 15px;
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 10px;
             margin-bottom: 20px;
             background: #f8f9fa;
-            padding: 15px;
+            padding: 12px;
             border: 1px solid #ddd;
             border-radius: 5px;
         }
         
         .pdf-box {
-            flex: 1;
-            min-width: 150px;
+            min-width: 0;
+            font-size: 12px;
+            line-height: 1.3;
         }
         
         .pdf-table {
             width: 100%;
             border-collapse: collapse;
-            font-size: 11px;
+            table-layout: fixed;
+            font-size: 9px;
         }
         
         .pdf-table th, .pdf-table td {
             border: 1px solid #ccc;
-            padding: 8px;
+            padding: 6px;
             text-align: left;
+            vertical-align: top;
+            overflow-wrap: anywhere;
+            word-break: break-word;
         }
         
         .pdf-table th {
             background: #e9ecef;
             font-weight: bold;
+        }
+
+        .pdf-table thead { display: table-header-group; }
+        .pdf-table tr { break-inside: avoid; page-break-inside: avoid; }
+        .pdf-nota {
+            margin: 0 0 14px;
+            padding: 9px 11px;
+            border-left: 4px solid #b45309;
+            background: #fff7ed;
+            color: #7c2d12;
+            font-size: 10px;
+            line-height: 1.4;
         }
 
         /* RESPONSIVIDADE */
@@ -1745,20 +1762,23 @@
         <div id="config-modal" class="modal"><div class="modal-content"><h3 style="margin-top:0;">Configurar Cores</h3><div class="form-group"><label>Verde a partir de (%):</label><input type="number" id="cfg-green" value="80"></div><div class="form-group" style="margin-top:10px;"><label>Amarelo a partir de (%):</label><input type="number" id="cfg-yellow" value="50"></div><div style="display:flex; gap:10px; margin-top:20px;"><button class="btn" style="flex:1;" onclick="salvarConfig()">Salvar</button><button class="btn" style="flex:1; background:#6c757d;" onclick="toggleModalConfig(false)">Fechar</button></div></div></div>
 
         <!-- TEMPLATE PDF INVISÍVEL (AUDITORIA) -->
-        <div id="pdf-container" style="display:none; position:absolute; top:-9999px; left:-9999px; z-index:-1;">
+        <div id="pdf-container" style="position:fixed; top:0; left:-20000px; z-index:-1; pointer-events:none;">
             <div id="pdf-template">
-                <div class="pdf-header"><h2>RELATÓRIO DE AUDITORIA DE ORDENS - SNIPER AUTO-TRADER</h2><p style="margin:0; font-size:12px; color:#555;">Documento gerado automaticamente pelo Sistema de Inteligência Bac Bo Pro</p></div>
+                <div class="pdf-header"><h2>RELATÓRIO DE AUDITORIA OPERACIONAL - AUTO-TRADER</h2><p style="margin:0; font-size:12px; color:#555;">Ordens, evidências de aceite e resultados calculados pelo Sistema de Inteligência Bac Bo Pro</p></div>
                 <div class="pdf-resumo">
                     <div class="pdf-box"><strong>Auto-Trader (Motor):</strong><br><span id="pdf-nome-trader">-</span></div>
                     <div class="pdf-box"><strong>Período Auditado:</strong><br><span id="pdf-periodo">-</span></div>
-                    <div class="pdf-box"><strong>Lucro Líquido Real:</strong><br><span id="pdf-lucro-liquido" style="font-weight:bold; font-size:16px;">-</span></div>
-                    <div class="pdf-box"><strong>Turnover (Vol. Executado):</strong><br><span id="pdf-turnover">-</span></div>
-                    <div class="pdf-box"><strong>Banca Inicial:</strong><br><span id="pdf-banca-inicial">-</span></div>
-                    <div class="pdf-box"><strong>Saldo Final Auditado:</strong><br><span id="pdf-saldo-final" style="font-weight:bold;">-</span></div>
+                    <div class="pdf-box"><strong>P&amp;L calculado (aceites confirmados):</strong><br><span id="pdf-lucro-liquido" style="font-weight:bold; font-size:16px;">-</span></div>
+                    <div class="pdf-box"><strong>Volume aceito comprovado:</strong><br><span id="pdf-turnover">-</span></div>
+                    <div class="pdf-box"><strong>Saldo inicial de referência:</strong><br><span id="pdf-banca-inicial">-</span></div>
+                    <div class="pdf-box"><strong>Saldo sincronizado de referência:</strong><br><span id="pdf-saldo-final" style="font-weight:bold;">-</span></div>
+                    <div class="pdf-box"><strong>Ordens com aceite comprovado:</strong><br><span id="pdf-confirmadas">-</span></div>
+                    <div class="pdf-box"><strong>Registros sem aceite comprovado:</strong><br><span id="pdf-legadas">-</span></div>
                 </div>
+                <div class="pdf-nota">Somente ordens com confirmação <strong>SALDO_DEBITADO</strong> são tratadas como apostas aceitas. Registros anteriores sem essa evidência permanecem visíveis para rastreabilidade, mas não integram P&amp;L nem volume comprovado.</div>
                 <h3 style="font-size:14px; border-bottom:1px solid #ccc; padding-bottom:5px;">Registro Granular de Ordens</h3>
-                <table class="pdf-table"><thead><tr><th width="5%">ID</th><th width="15%">Data e Hora</th><th width="15%">Origem (Robô)</th><th width="20%">Estrutura (Alvo / Valor)</th><th width="10%">Nível</th><th width="15%">Placar da Mesa</th><th width="10%">Retorno Líquido</th><th width="10%">Saldo Após</th></tr></thead><tbody id="pdf-table-body"></tbody></table>
-                <div style="margin-top:30px; font-size:10px; color:#888; text-align:center;">Hash de Autenticidade: <span id="pdf-hash"></span></div>
+                <table class="pdf-table"><thead><tr><th style="width:4%">ID</th><th style="width:11%">Data e hora</th><th style="width:15%">Robô / estratégia</th><th style="width:12%">Aposta solicitada</th><th style="width:10%">Nível / estado</th><th style="width:22%">Evidência da Evolution</th><th style="width:13%">Resultado calculado</th><th style="width:13%">Saldo do modelo</th></tr></thead><tbody id="pdf-table-body"></tbody></table>
+                <div style="margin-top:24px; font-size:9px; color:#777; text-align:center;">ID de geração local (não constitui assinatura digital): <span id="pdf-hash"></span></div>
             </div>
         </div>
 
@@ -2655,6 +2675,7 @@
                 else if (at.status_operacao === 'STOP_REDS') tagStatus = `<span style="background:#dc3545; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">STOP REDS - DESLIGADO</span>`;
                 else if (at.status_operacao === 'STOP_REDS_PAUSA' && at.ativo) tagStatus = `<span style="background:#fd7e14; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">STOP REDS - ${pausaStopRedsMin > 0 ? `PAUSADO (${pausaStopRedsMin} min)` : 'REARMANDO'}</span>`;
                 else if (at.status_operacao === 'DADOS_INCOMPLETOS') tagStatus = `<span style="background:#b02a37; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">⚠️ DADOS INCOMPLETOS</span>`;
+                else if (at.status_operacao === 'BLOQUEADO_AMBIGUIDADE') tagStatus = `<span style="background:#7f1d1d; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">🚨 BLOQUEADO - ACEITE AMBÍGUO</span>`;
                 else if (!at.ativo) tagStatus = `<span style="background:#555; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">🔴 DESLIGADO</span>`;
                 else if (at.status_operacao === 'STANDBY') tagStatus = `<span style="background:#ffc107; color:black; padding:2px 8px; border-radius:4px; font-size:10px;">🟡 AGUARDANDO MESA</span>`;
                 else if (at.status_operacao === 'META_ATINGIDA') tagStatus = `<span style="background:#17a2b8; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">💤 META DO DIA BATIDA</span>`;
@@ -2691,7 +2712,7 @@
                                 <div style="font-size:13px; margin-bottom:5px;">Banca Inicial Lida: <strong style="color:#aaa;">R$ ${at.saldo_inicial.toFixed(2).replace('.',',')}</strong></div>
                                 <div style="font-size:13px; margin-bottom:10px;">Saldo Atual da Corretora: <strong style="color:#fff; font-size:16px;">R$ ${at.saldo_atual.toFixed(2).replace('.',',')}</strong></div>
                                 <div style="background:#111; border:1px solid #333; padding:10px; border-radius:6px;">
-                                    <span style="display:block; font-size:10px; color:#888; text-transform:uppercase;">Lucro Líquido Real</span>
+                                    <span style="display:block; font-size:10px; color:#888; text-transform:uppercase;">Variação do saldo sincronizado</span>
                                     <strong style="font-size:22px; color:${corLucro};">${sinalLucro} R$ ${Math.abs(lucroLiquido).toFixed(2).replace('.',',')}</strong>
                                     <span style="font-size:12px; color:${corLucro}; margin-left:10px;">(${sinalLucro}${percLucro.toFixed(2)}%)</span>
                                 </div>
@@ -2712,6 +2733,28 @@
             });
         }
 
+        function escaparHtmlPdf(valor) {
+            return String(valor ?? '')
+                .replaceAll('&', '&amp;')
+                .replaceAll('<', '&lt;')
+                .replaceAll('>', '&gt;')
+                .replaceAll('"', '&quot;')
+                .replaceAll("'", '&#039;');
+        }
+
+        function formatarMoedaPdf(valor) {
+            const numero = Number(valor);
+            return `R$ ${Number.isFinite(numero) ? numero.toFixed(2).replace('.', ',') : '0,00'}`;
+        }
+
+        function ordemPossuiAceiteComprovado(ordem) {
+            return String(ordem?.executor_confirmacao_metodo || '').toUpperCase() === 'SALDO_DEBITADO'
+                && Number.isFinite(Number(ordem?.executor_saldo_antes))
+                && Number.isFinite(Number(ordem?.executor_saldo_depois))
+                && Number.isFinite(Number(ordem?.executor_debito_observado))
+                && Number(ordem?.execucao_confirmada_em) > 0;
+        }
+
         async function gerarRelatorioPDF(traderId) {
             let at = autoTradersGlobais.find(x => x.id === traderId);
             if (!at) return alert("Motor não encontrado.");
@@ -2721,26 +2764,45 @@
 
             let dataAtual = new Date(); let dataFmt = `${dataAtual.getDate().toString().padStart(2,'0')}/${(dataAtual.getMonth()+1).toString().padStart(2,'0')}/${dataAtual.getFullYear()} às ${dataAtual.getHours().toString().padStart(2,'0')}:${dataAtual.getMinutes().toString().padStart(2,'0')}`;
             let hashValidador = Array.from(crypto.getRandomValues(new Uint8Array(16))).map(b => b.toString(16).padStart(2, '0')).join('');
-            let lucroLiquido = at.saldo_atual - at.saldo_inicial; let corLucro = lucroLiquido >= 0 ? '#28a745' : '#dc3545';
-            let turnover = 0; let wins = 0; let totalValidos = 0;
+            const ordensConfirmadas = ordens.filter(ordemPossuiAceiteComprovado);
+            const estadosFinalizados = new Set(['WIN', 'LOSS', 'TIE']);
+            const lucroLiquido = ordensConfirmadas
+                .filter(o => estadosFinalizados.has(String(o.status_ordem || '').toUpperCase()))
+                .reduce((total, o) => total + (Number(o.lucro_prejuizo) || 0), 0);
+            const turnover = ordensConfirmadas.reduce(
+                (total, o) => total + (Number(o.valor_entrada) || 0) + (Number(o.valor_empate) || 0),
+                0
+            );
+            const legadasSemProva = ordens.length - ordensConfirmadas.length;
+            const corLucro = lucroLiquido >= 0 ? '#28a745' : '#dc3545';
 
-            document.getElementById('pdf-nome-trader').innerText = at.nome; document.getElementById('pdf-periodo').innerText = `Até ${dataFmt}`; document.getElementById('pdf-lucro-liquido').innerText = `R$ ${lucroLiquido.toFixed(2).replace('.',',')}`; document.getElementById('pdf-lucro-liquido').style.color = corLucro; document.getElementById('pdf-banca-inicial').innerText = `R$ ${at.saldo_inicial.toFixed(2).replace('.',',')}`; document.getElementById('pdf-saldo-final').innerText = `R$ ${at.saldo_atual.toFixed(2).replace('.',',')}`; document.getElementById('pdf-hash').innerText = hashValidador;
+            document.getElementById('pdf-nome-trader').innerText = at.nome; document.getElementById('pdf-periodo').innerText = `Até ${dataFmt}`; document.getElementById('pdf-lucro-liquido').innerText = formatarMoedaPdf(lucroLiquido); document.getElementById('pdf-lucro-liquido').style.color = corLucro; document.getElementById('pdf-banca-inicial').innerText = formatarMoedaPdf(at.saldo_inicial); document.getElementById('pdf-saldo-final').innerText = formatarMoedaPdf(at.saldo_atual); document.getElementById('pdf-confirmadas').innerText = `${ordensConfirmadas.length} de ${ordens.length}`; document.getElementById('pdf-legadas').innerText = String(legadasSemProva); document.getElementById('pdf-hash').innerText = hashValidador;
             let tbody = document.getElementById('pdf-table-body'); tbody.innerHTML = '';
 
             ordens.forEach(o => {
                 let dOb = new Date(o.data_hora); let dObFmt = `${dOb.getDate().toString().padStart(2,'0')}/${(dOb.getMonth()+1).toString().padStart(2,'0')} ${dOb.getHours().toString().padStart(2,'0')}:${dOb.getMinutes().toString().padStart(2,'0')}:${dOb.getSeconds().toString().padStart(2,'0')}`;
-                let vRisco = parseFloat(o.risco_total) || 0; let vLucro = parseFloat(o.lucro_prejuizo) || 0; turnover += vRisco;
-                if (o.status_ordem === 'WIN' || o.status_ordem === 'TIE') wins++; if (o.status_ordem !== 'PENDENTE') totalValidos++;
+                const vPrincipal = Number(o.valor_entrada) || 0;
+                const vEmpate = Number(o.valor_empate) || 0;
+                const vLucro = Number(o.lucro_prejuizo) || 0;
+                const confirmada = ordemPossuiAceiteComprovado(o);
                 let corStatus = o.status_ordem === 'WIN' ? '#28a745' : (o.status_ordem === 'LOSS' ? '#dc3545' : (o.status_ordem === 'TIE' ? '#ffc107' : '#6c757d'));
                 let sinalResult = vLucro > 0 ? '+' : '';
+                const evidencia = confirmada
+                    ? `<strong style="color:#15803d;">ACEITE COMPROVADO</strong><br>${formatarMoedaPdf(o.executor_saldo_antes)} → ${formatarMoedaPdf(o.executor_saldo_depois)}<br><span style="color:#555;">Débito: ${formatarMoedaPdf(o.executor_debito_observado)}</span>`
+                    : `<strong style="color:#b45309;">SEM PROVA EXTERNA</strong><br><span style="color:#666;">Clique/resultado interno não comprova aposta na casa.</span>`;
+                const saldoModelo = confirmada && estadosFinalizados.has(String(o.status_ordem || '').toUpperCase())
+                    ? formatarMoedaPdf(o.saldo_pos)
+                    : 'Não auditável';
 
-                tbody.innerHTML += `<tr><td style="color:#666;">#${o.id}</td><td>${dObFmt}</td><td><strong>${o.fonte_sinal}</strong><br><span style="font-size:9px; color:#666;">${o.estrategia_nome}</span></td><td>Alvo: ${o.alvo.replace('Won','')}<br>Risco: R$ ${vRisco.toFixed(2).replace('.',',')}</td><td>${o.nivel}</td><td style="font-weight:bold; color:#0056b3;">${o.placar_mesa || 'Aguardando'}</td><td style="color:${corStatus}; font-weight:bold;">${o.status_ordem}<br>${sinalResult}R$ ${vLucro.toFixed(2).replace('.',',')}</td><td>R$ ${parseFloat(o.saldo_pos || 0).toFixed(2).replace('.',',')}</td></tr>`;
+                tbody.innerHTML += `<tr><td style="color:#666;">#${escaparHtmlPdf(o.id)}</td><td>${escaparHtmlPdf(dObFmt)}</td><td><strong>${escaparHtmlPdf(o.fonte_sinal)}</strong><br><span style="font-size:8px; color:#666;">${escaparHtmlPdf(o.estrategia_nome)}</span></td><td>${escaparHtmlPdf(String(o.alvo || '').replace('Won',''))}<br>Principal: ${formatarMoedaPdf(vPrincipal)}${vEmpate > 0 ? `<br>Tie: ${formatarMoedaPdf(vEmpate)}` : ''}</td><td>${escaparHtmlPdf(o.nivel)}<br><span style="color:#666;">${escaparHtmlPdf(o.status_ordem)}</span></td><td>${evidencia}</td><td style="color:${corStatus}; font-weight:bold;">${escaparHtmlPdf(o.status_ordem)}<br>${confirmada ? `${sinalResult}${formatarMoedaPdf(vLucro)}` : 'Excluído dos totais'}<br><span style="color:#0056b3;">${escaparHtmlPdf(o.placar_mesa || 'Sem placar')}</span></td><td>${saldoModelo}</td></tr>`;
             });
 
-            document.getElementById('pdf-turnover').innerText = `R$ ${turnover.toFixed(2).replace('.',',')}`;
+            document.getElementById('pdf-turnover').innerText = formatarMoedaPdf(turnover);
             const element = document.getElementById('pdf-template'); element.style.display = 'block';
-            const opt = { margin: 10, filename: `Auditoria_${at.nome.replace(/\s+/g, '_')}_${Date.now()}.pdf`, image: { type: 'jpeg', quality: 0.98 }, html2canvas: { scale: 2 }, jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' } };
-            html2pdf().set(opt).from(element).save().then(() => { element.style.display = 'none'; });
+            const opt = { margin: 7, filename: `Auditoria_${at.nome.replace(/\s+/g, '_')}_${Date.now()}.pdf`, image: { type: 'jpeg', quality: 0.98 }, html2canvas: { scale: 2, useCORS: true, windowWidth: 1120, scrollX: 0, scrollY: 0 }, pagebreak: { mode: ['css', 'legacy'], avoid: ['tr'] }, jsPDF: { unit: 'mm', format: 'a4', orientation: 'landscape' } };
+            html2pdf().set(opt).from(element).save()
+                .catch(() => alert('Falha ao gerar o PDF de auditoria.'))
+                .finally(() => { element.style.display = 'none'; });
         }
 
         // ==========================================

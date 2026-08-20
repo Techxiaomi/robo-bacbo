@@ -247,6 +247,11 @@ async function prepararBancoDeDados() {
                 valor_entrada DECIMAL(12,2),
                 valor_empate DECIMAL(12,2) DEFAULT 0,
                 executor_order_id VARCHAR(64) DEFAULT NULL,
+                executor_confirmacao_metodo VARCHAR(40) DEFAULT NULL,
+                executor_saldo_antes DECIMAL(12,2) DEFAULT NULL,
+                executor_saldo_depois DECIMAL(12,2) DEFAULT NULL,
+                executor_debito_observado DECIMAL(12,2) DEFAULT NULL,
+                execucao_confirmada_em BIGINT DEFAULT NULL,
                 status_ordem VARCHAR(20) DEFAULT 'PENDENTE',
                 placar_mesa VARCHAR(50) DEFAULT '',
                 lucro_prejuizo DECIMAL(12,2) DEFAULT 0,
@@ -284,6 +289,11 @@ async function prepararBancoDeDados() {
         await adicionarColuna("ALTER TABLE historico_disparos_robos ADD COLUMN estrategia_origem VARCHAR(100) DEFAULT ''");
         await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN executor_order_id VARCHAR(64) DEFAULT NULL");
         await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN valor_empate DECIMAL(12,2) DEFAULT 0");
+        await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN executor_confirmacao_metodo VARCHAR(40) DEFAULT NULL");
+        await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN executor_saldo_antes DECIMAL(12,2) DEFAULT NULL");
+        await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN executor_saldo_depois DECIMAL(12,2) DEFAULT NULL");
+        await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN executor_debito_observado DECIMAL(12,2) DEFAULT NULL");
+        await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN execucao_confirmada_em BIGINT DEFAULT NULL");
         await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN reds_consecutivos INT DEFAULT 0");
         await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN stop_reds_pausado_ate BIGINT DEFAULT 0");
         await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN trailing_pico_lucro DECIMAL(12,2) DEFAULT 0");
@@ -672,6 +682,55 @@ function interrupcaoColetorJaAplicada(dados) {
     return registro?.estado === 'APLICADA';
 }
 
+function normalizarConfirmacaoExecucao(statusRecebido, confirmacaoRecebida) {
+    const status = String(statusRecebido || '').trim().toUpperCase();
+    if (status !== 'EXECUTADA') {
+        return { status, confirmacao: null, motivo: null };
+    }
+
+    const confirmacao = confirmacaoRecebida && typeof confirmacaoRecebida === 'object'
+        ? confirmacaoRecebida
+        : {};
+    const metodo = String(confirmacao.metodo || '').trim().toUpperCase();
+    const saldoAntes = Number(confirmacao.saldo_antes);
+    const saldoDepois = Number(confirmacao.saldo_depois);
+    const exposicaoEsperada = Number(confirmacao.exposicao_esperada);
+    const debitoObservado = Number(confirmacao.debito_observado);
+    const confirmadaEm = Number(confirmacao.confirmada_em);
+    const debitoCalculado = saldoAntes - saldoDepois;
+    const tolerancia = 0.11;
+    const valida = confirmacao.confirmada === true
+        && metodo === 'SALDO_DEBITADO'
+        && Number.isFinite(saldoAntes) && saldoAntes >= 0
+        && Number.isFinite(saldoDepois) && saldoDepois >= 0
+        && Number.isFinite(exposicaoEsperada) && exposicaoEsperada > 0
+        && Number.isFinite(debitoObservado) && debitoObservado > 0
+        && Number.isFinite(confirmadaEm) && confirmadaEm > 0
+        && Math.abs(debitoCalculado - debitoObservado) <= tolerancia
+        && Math.abs(debitoObservado - exposicaoEsperada) <= tolerancia;
+
+    if (!valida) {
+        return {
+            status: 'AMBIGUA',
+            confirmacao: null,
+            motivo: 'Callback EXECUTADA recusado: aceite financeiro da Evolution ausente ou inconsistente'
+        };
+    }
+
+    return {
+        status: 'EXECUTADA',
+        motivo: null,
+        confirmacao: {
+            metodo,
+            saldo_antes: Number(saldoAntes.toFixed(2)),
+            saldo_depois: Number(saldoDepois.toFixed(2)),
+            exposicao_esperada: Number(exposicaoEsperada.toFixed(2)),
+            debito_observado: Number(debitoObservado.toFixed(2)),
+            confirmada_em: Math.trunc(confirmadaEm)
+        }
+    };
+}
+
 function criarEsperaResultadoExecutor(orderId) {
     const id = String(orderId || '').trim().toLowerCase();
     if (!id) throw new Error('order_id ausente ao criar espera de execução');
@@ -723,7 +782,8 @@ function registrarResultadoExecucaoExecutor(dados) {
     return pendente.finalizar({
         order_id: id,
         status: String(dados.status || '').trim().toUpperCase(),
-        motivo: String(dados.motivo || '').slice(0, 300)
+        motivo: String(dados.motivo || '').slice(0, 300),
+        confirmacao: dados.confirmacao || null
     });
 }
 
@@ -826,6 +886,22 @@ async function enviarOrdemAoExecutor(alvo, valor, orderId = crypto.randomUUID(),
             throw erroResultadoExecucaoExecutor(resultadoExecucao);
         }
 
+        const exposicaoEsperadaNode = Array.isArray(apostas) && apostas.length > 0
+            ? apostas.reduce((total, perna) => total + (Number(perna.valor) || 0), 0)
+            : Number(valor);
+        const exposicaoConfirmadaExecutor = Number(resultadoExecucao.confirmacao?.exposicao_esperada);
+        if (
+            !Number.isFinite(exposicaoEsperadaNode)
+            || exposicaoEsperadaNode <= 0
+            || !Number.isFinite(exposicaoConfirmadaExecutor)
+            || Math.abs(exposicaoConfirmadaExecutor - exposicaoEsperadaNode) > 0.11
+        ) {
+            throw erroResultadoExecucaoExecutor({
+                status: 'AMBIGUA',
+                motivo: 'Exposição confirmada pelo executor diverge do plano financeiro emitido pelo Node'
+            });
+        }
+
         if (!confirmacaoAceite && ultimoErro) {
             console.warn(
                 `⚠️ ACK HTTP da ordem ${orderId} ficou ambíguo, mas callback EXECUTADA foi recebido; `
@@ -900,6 +976,26 @@ async function marcarIntencaoAposFalhaEnvio(auditoriaId, erro, contexto) {
         );
     }
     return status;
+}
+
+async function bloquearTraderAposExecucaoAmbigua(trader, statusFalha, contexto) {
+    if (statusFalha !== 'ENVIO_AMBIGUO' || !trader) return false;
+    trader.ativo = false;
+    trader.status_operacao = 'BLOQUEADO_AMBIGUIDADE';
+    try {
+        await dbPool.query(
+            `UPDATE auto_traders SET ativo=false, status_operacao='BLOQUEADO_AMBIGUIDADE' WHERE id=?`,
+            [trader.id]
+        );
+        console.error(
+            `🚨 Auto-Trader ${trader.id} bloqueado por execução financeira ambígua (${contexto}). `
+            + `Revise a conta da Evolution antes de reativar.`
+        );
+        return true;
+    } catch (erro) {
+        console.error(`🚨 Falha ao persistir bloqueio de segurança do Auto-Trader ${trader.id}:`, erro.message);
+        return false;
+    }
 }
 
 if (!hostNodeEhLoopback(NODE_HOST)) {
@@ -3340,19 +3436,27 @@ app.post("/executor-status", (req, res) => {
 
     const dados = req.body || {};
     const orderId = String(dados.order_id || '').trim().toLowerCase();
-    const status = String(dados.status || '').trim().toUpperCase();
+    const statusRecebido = String(dados.status || '').trim().toUpperCase();
 
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(orderId)) {
         return res.status(400).json({ erro: 'order_id invalido' });
     }
-    if (!STATUS_EXECUTOR_VALIDOS.has(status)) {
+    if (!STATUS_EXECUTOR_VALIDOS.has(statusRecebido)) {
         return res.status(400).json({ erro: 'status_executor_invalido' });
+    }
+
+    const validacao = normalizarConfirmacaoExecucao(statusRecebido, dados.confirmacao);
+    const status = validacao.status;
+    const motivo = validacao.motivo || dados.motivo;
+    if (statusRecebido === 'EXECUTADA' && status !== 'EXECUTADA') {
+        console.error(`🚨 Callback EXECUTADA de ${orderId} rebaixado para AMBIGUA: ${validacao.motivo}.`);
     }
 
     const entregue = registrarResultadoExecucaoExecutor({
         order_id: orderId,
         status,
-        motivo: dados.motivo
+        motivo,
+        confirmacao: validacao.confirmacao
     });
 
     if (!entregue) {
@@ -3709,13 +3813,29 @@ app.post("/receber-sinal", async (req, res) => {
 
                                         let executorConfirmouGale = false;
                                         try {
-                                            await enviarOrdemAoExecutor(alvoPython, valorGale, ordemExecutorIdGale, planoGale.apostas);
+                                            const confirmacaoExecutorGale = await enviarOrdemAoExecutor(
+                                                alvoPython,
+                                                valorGale,
+                                                ordemExecutorIdGale,
+                                                planoGale.apostas
+                                            );
                                             executorConfirmouGale = true;
+                                            const evidenciaGale = confirmacaoExecutorGale.execucao.confirmacao;
                                             const [auditoriaAtualizada] = await dbPool.query(
                                                 `UPDATE auditoria_ordens
-                                                 SET status_ordem='PENDENTE'
+                                                 SET status_ordem='PENDENTE', executor_confirmacao_metodo=?,
+                                                     executor_saldo_antes=?, executor_saldo_depois=?,
+                                                     executor_debito_observado=?, execucao_confirmada_em=?
                                                  WHERE id=? AND executor_order_id=? AND status_ordem='PREPARANDO'`,
-                                                [intencaoGale.auditoria_id, ordemExecutorIdGale]
+                                                [
+                                                    evidenciaGale.metodo,
+                                                    evidenciaGale.saldo_antes,
+                                                    evidenciaGale.saldo_depois,
+                                                    evidenciaGale.debito_observado,
+                                                    evidenciaGale.confirmada_em,
+                                                    intencaoGale.auditoria_id,
+                                                    ordemExecutorIdGale
+                                                ]
                                             );
                                             if (Number(auditoriaAtualizada.affectedRows) !== 1) {
                                                 throw new Error('Intenção PREPARANDO do GALE não encontrada após ACK do executor');
@@ -3733,6 +3853,11 @@ app.post("/receber-sinal", async (req, res) => {
                                                     intencaoGale.auditoria_id,
                                                     e,
                                                     `GALE ${st.galeAtual} do trader ${trader.id}`
+                                                );
+                                                await bloquearTraderAposExecucaoAmbigua(
+                                                    trader,
+                                                    statusFalha,
+                                                    `GALE ${st.galeAtual}`
                                                 );
                                                 console.error(
                                                     `❌ GALE ${st.galeAtual} não confirmado para o trader ${trader.id}; `
@@ -3941,8 +4066,14 @@ app.post("/receber-sinal", async (req, res) => {
 
                                     let executorConfirmouDireto = false;
                                     try {
-                                        await enviarOrdemAoExecutor(alvoPython, valorArredondado, ordemExecutorIdDireto, planoDireto.apostas);
+                                        const confirmacaoExecutorDireto = await enviarOrdemAoExecutor(
+                                            alvoPython,
+                                            valorArredondado,
+                                            ordemExecutorIdDireto,
+                                            planoDireto.apostas
+                                        );
                                         executorConfirmouDireto = true;
+                                        const evidenciaDireto = confirmacaoExecutorDireto.execucao.confirmacao;
 
                                         const conexao = await dbPool.getConnection();
                                         try {
@@ -3951,9 +4082,19 @@ app.post("/receber-sinal", async (req, res) => {
                                             await conexao.query('UPDATE auto_traders SET entradas_feitas=? WHERE id=?', [novasEntradas, trader.id]);
                                             const [auditoriaAtualizada] = await conexao.query(
                                                 `UPDATE auditoria_ordens
-                                                 SET status_ordem='PENDENTE'
+                                                 SET status_ordem='PENDENTE', executor_confirmacao_metodo=?,
+                                                     executor_saldo_antes=?, executor_saldo_depois=?,
+                                                     executor_debito_observado=?, execucao_confirmada_em=?
                                                  WHERE id=? AND executor_order_id=? AND status_ordem='PREPARANDO'`,
-                                                [intencaoDireto.auditoria_id, ordemExecutorIdDireto]
+                                                [
+                                                    evidenciaDireto.metodo,
+                                                    evidenciaDireto.saldo_antes,
+                                                    evidenciaDireto.saldo_depois,
+                                                    evidenciaDireto.debito_observado,
+                                                    evidenciaDireto.confirmada_em,
+                                                    intencaoDireto.auditoria_id,
+                                                    ordemExecutorIdDireto
+                                                ]
                                             );
                                             if (Number(auditoriaAtualizada.affectedRows) !== 1) {
                                                 throw new Error('Intenção PREPARANDO DIRETO não encontrada após ACK do executor');
@@ -3979,6 +4120,11 @@ app.post("/receber-sinal", async (req, res) => {
                                                 intencaoDireto.auditoria_id,
                                                 e,
                                                 `DIRETO do trader ${trader.id}`
+                                            );
+                                            await bloquearTraderAposExecucaoAmbigua(
+                                                trader,
+                                                statusFalha,
+                                                'DIRETO'
                                             );
                                             console.error(
                                                 `❌ Ordem DIRETO não confirmada para o trader ${trader.id}; `

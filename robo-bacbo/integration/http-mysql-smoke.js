@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const mysql = require("mysql2/promise");
@@ -10,8 +11,15 @@ const HOST = "127.0.0.1";
 const PORT = Number(process.env.INTEGRATION_NODE_PORT || 3117);
 const BASE_URL = `http://${HOST}:${PORT}`;
 const ADMIN_USERNAME = "integration-admin";
-const ADMIN_PASSWORD = "integration-password";
-const INTERNAL_API_TOKEN = "integration-internal-token-123456789";
+const ADMIN_PASSWORD = String(process.env.E2E_ADMIN_PASSWORD ||
+    crypto.randomBytes(24).toString("hex"));
+const INTERNAL_API_TOKEN = String(process.env.E2E_INTERNAL_API_TOKEN ||
+    `e2e-${crypto.randomUUID()}-${crypto.randomBytes(16).toString("hex")}`);
+const DB_PASSWORD = String(process.env.E2E_DB_PASSWORD || "");
+
+if (!DB_PASSWORD) {
+    throw new Error("E2E_DB_PASSWORD é obrigatório para o teste de integração.");
+}
 
 const backendPath = path.join(__dirname, "..", "bot2_coletor.js");
 let backendSaida = "";
@@ -125,7 +133,7 @@ async function main() {
         DB_HOST: "127.0.0.1",
         DB_PORT: "3306",
         DB_USER: "root",
-        DB_PASSWORD: "root",
+        DB_PASSWORD,
         DB_NAME: "bacbo_integration",
         NODE_HOST: HOST,
         NODE_PORT: String(PORT),
@@ -266,7 +274,7 @@ async function main() {
             host: "127.0.0.1",
             port: 3306,
             user: "root",
-            password: "root",
+            password: DB_PASSWORD,
             database: "bacbo_integration"
         });
 

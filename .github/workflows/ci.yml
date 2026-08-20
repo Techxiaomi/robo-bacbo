@@ -90,13 +90,13 @@ jobs:
       mysql:
         image: mysql:8.4
         env:
-          MYSQL_ROOT_PASSWORD: root
+          MYSQL_ROOT_PASSWORD: bacbo-${{ github.run_id }}-${{ github.run_attempt }}
           MYSQL_ROOT_HOST: "%"
           MYSQL_DATABASE: bacbo_integration
         ports:
           - 3306:3306
         options: >-
-          --health-cmd="mysqladmin ping -h localhost -proot"
+          --health-cmd="mysqladmin ping -h localhost -pbacbo-${{ github.run_id }}-${{ github.run_attempt }}"
           --health-interval=5s
           --health-timeout=5s
           --health-retries=20
@@ -127,6 +127,8 @@ jobs:
       - name: Run real backend integration smoke
         run: node integration/http-mysql-smoke.js
         working-directory: robo-bacbo
+        env:
+          E2E_DB_PASSWORD: bacbo-${{ github.run_id }}-${{ github.run_attempt }}
 
   playwright-dom:
     name: Playwright controlled DOM integration
@@ -171,13 +173,13 @@ jobs:
       mysql:
         image: mysql:8.4
         env:
-          MYSQL_ROOT_PASSWORD: root
+          MYSQL_ROOT_PASSWORD: bacbo-${{ github.run_id }}-${{ github.run_attempt }}
           MYSQL_ROOT_HOST: "%"
           MYSQL_DATABASE: bacbo_e2e
         ports:
           - 3306:3306
         options: >-
-          --health-cmd="mysqladmin ping -h localhost -proot"
+          --health-cmd="mysqladmin ping -h localhost -pbacbo-${{ github.run_id }}-${{ github.run_attempt }}"
           --health-interval=5s
           --health-timeout=5s
           --health-retries=20
@@ -214,3 +216,5 @@ jobs:
       - name: Run controlled collector-to-audit E2E
         run: node integration/controlled-e2e-smoke.js
         working-directory: robo-bacbo
+        env:
+          E2E_DB_PASSWORD: bacbo-${{ github.run_id }}-${{ github.run_attempt }}

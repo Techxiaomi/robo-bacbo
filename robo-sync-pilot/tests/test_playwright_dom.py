@@ -36,6 +36,7 @@ def carregar_funcoes_reais():
         "selecionar_ficha_com_confirmacao",
         "formatar_diagnostico_janela",
         "aguardar_janela_aposta",
+        "confirmar_aceite_financeiro_aposta",
         "executar_aposta_na_tela",
     }
     corpo = [
@@ -57,6 +58,8 @@ def carregar_funcoes_reais():
         "PlaywrightTimeoutError": PlaywrightTimeoutError,
         "CASINO_BALANCE_SELECTOR": ".saldo-teste",
         "EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS": 1.5,
+        "EXECUTOR_BET_ACCEPTANCE_TIMEOUT_SECONDS": 0.35,
+        "EXECUTOR_BET_ACCEPTANCE_TOLERANCE": 0.10,
         "COLLECTOR_PLAYER_STATE_STALE_SECONDS": 20.0,
         "executor_pronto": executor_pronto,
         "estado_mesa_lock": threading.Lock(),
@@ -77,6 +80,9 @@ parsear_valor_monetario = FUNCOES["parsear_valor_monetario"]
 ler_saldo_atual = FUNCOES["ler_saldo_atual"]
 executar_aposta_na_tela = FUNCOES["executar_aposta_na_tela"]
 extrair_trilhas_roadmap_dom = FUNCOES["extrair_trilhas_roadmap_dom"]
+confirmar_aceite_financeiro_aposta = FUNCOES["confirmar_aceite_financeiro_aposta"]
+ler_saldo_atual_real = FUNCOES["ler_saldo_atual"]
+confirmar_aceite_financeiro_aposta_real = FUNCOES["confirmar_aceite_financeiro_aposta"]
 
 
 HTML = {
@@ -253,6 +259,25 @@ HTML["/table-shell.html"] = """<!doctype html>
   onclick="window.__targetClicks.visible++">Player visível</button>
 </body></html>"""
 
+HTML["/game-balance-accepted.html"] = """<!doctype html>
+<html><body>
+<div class="saldo-teste">R$ 1.000,00</div>
+<iframe src="/game-balance-accepted-frame.html"></iframe>
+</body></html>"""
+HTML["/game-balance-accepted-frame.html"] = """<!doctype html>
+<html><body>
+<div data-role="chip" data-value="5">5</div>
+<button data-role="bacbo-bet-spot-Player" onclick="
+  window.top.document.querySelector('.saldo-teste').textContent='R$ 995,00';
+">Player</button>
+</body></html>"""
+
+HTML["/game-balance-unchanged.html"] = """<!doctype html>
+<html><body>
+<div class="saldo-teste">R$ 1.000,00</div>
+<iframe src="/game-frame.html"></iframe>
+</body></html>"""
+
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -299,6 +324,22 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
         pagina.goto(f"http://127.0.0.1:{self.porta}{caminho}", wait_until="load")
         return pagina
 
+    def setUp(self):
+        FUNCOES["ler_saldo_atual"] = lambda _page: 1000.0
+        FUNCOES["confirmar_aceite_financeiro_aposta"] = lambda _page, saldo, exposicao: {
+            "confirmada": True,
+            "metodo": "SALDO_DEBITADO",
+            "saldo_antes": float(saldo),
+            "saldo_depois": float(saldo) - float(exposicao),
+            "exposicao_esperada": float(exposicao),
+            "debito_observado": float(exposicao),
+            "confirmada_em": int(time.time() * 1000),
+        }
+
+    def tearDown(self):
+        FUNCOES["ler_saldo_atual"] = ler_saldo_atual_real
+        FUNCOES["confirmar_aceite_financeiro_aposta"] = confirmar_aceite_financeiro_aposta_real
+
     def frame_jogo(self, pagina):
         pagina.locator("iframe").wait_for(state="attached")
         for frame in pagina.frames:
@@ -324,6 +365,43 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
         try:
             pagina.locator("iframe").wait_for(state="attached")
             self.assertEqual(ler_saldo_atual(pagina), 9876.54)
+        finally:
+            pagina.close()
+
+    def test_bug037_aceite_so_e_executada_apos_debito_exato_do_saldo(self):
+        pagina = self.nova_pagina("/game-balance-accepted.html")
+        FUNCOES["ler_saldo_atual"] = ler_saldo_atual_real
+        FUNCOES["confirmar_aceite_financeiro_aposta"] = confirmar_aceite_financeiro_aposta_real
+        try:
+            resultado = executar_aposta_na_tela(pagina, {"alvo": "PlayerWon", "valor": 5})
+            self.assertEqual(resultado["status"], "EXECUTADA")
+            self.assertEqual(resultado["confirmacao"]["metodo"], "SALDO_DEBITADO")
+            self.assertEqual(resultado["confirmacao"]["debito_observado"], 5.0)
+        finally:
+            pagina.close()
+
+    def test_bug037_cliques_com_saldo_inalterado_ficam_ambiguos(self):
+        pagina = self.nova_pagina("/game-balance-unchanged.html")
+        FUNCOES["ler_saldo_atual"] = ler_saldo_atual_real
+        FUNCOES["confirmar_aceite_financeiro_aposta"] = confirmar_aceite_financeiro_aposta_real
+        try:
+            resultado = executar_aposta_na_tela(pagina, {"alvo": "PlayerWon", "valor": 5})
+            self.assertEqual(resultado["status"], "AMBIGUA")
+            self.assertEqual(resultado["cliques_alvo"], 1)
+            self.assertIn("permaneceu inalterado", resultado["motivo"])
+        finally:
+            pagina.close()
+
+    def test_bug037_sem_saldo_legivel_bloqueia_antes_do_alvo(self):
+        pagina = self.nova_pagina("/game.html")
+        FUNCOES["ler_saldo_atual"] = ler_saldo_atual_real
+        FUNCOES["confirmar_aceite_financeiro_aposta"] = confirmar_aceite_financeiro_aposta_real
+        try:
+            frame = self.frame_jogo(pagina)
+            resultado = executar_aposta_na_tela(pagina, {"alvo": "PlayerWon", "valor": 5})
+            self.assertEqual(resultado["status"], "FALHOU")
+            self.assertEqual(resultado["cliques_alvo"], 0)
+            self.assertEqual(frame.evaluate("window.__targetClicks.playerA"), 0)
         finally:
             pagina.close()
 

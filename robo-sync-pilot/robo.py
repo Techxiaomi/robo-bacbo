@@ -19,8 +19,8 @@ load_env_file(os.path.join(PROJECT_ROOT, ".env"))
 # ====================================================================
 # CONFIGURAÇÕES GERAIS E CONTROLE DE VERSÃO
 # ====================================================================
-VERSAO_ROBO = "v1.6.10"
-NOME_ATUALIZACAO = "Superfície Playwright Real da Ficha"
+VERSAO_ROBO = "v1.6.11"
+NOME_ATUALIZACAO = "Aceite Financeiro Evolution Fail-Closed"
 
 URL_CASSINO = os.getenv("CASINO_GAME_URL", "")
 ARQUIVO_SESSAO = os.getenv("SESSION_STATE_FILE", os.path.join(BASE_DIR, "sessao_salva.json"))
@@ -89,6 +89,22 @@ try:
     )
 except ValueError:
     BALANCE_SYNC_HEARTBEAT_SECONDS = 60.0
+
+try:
+    EXECUTOR_BET_ACCEPTANCE_TIMEOUT_SECONDS = max(
+        2.0,
+        min(20.0, float(os.getenv("EXECUTOR_BET_ACCEPTANCE_TIMEOUT_SECONDS", "8")))
+    )
+except ValueError:
+    EXECUTOR_BET_ACCEPTANCE_TIMEOUT_SECONDS = 8.0
+
+try:
+    EXECUTOR_BET_ACCEPTANCE_TOLERANCE = max(
+        0.01,
+        min(1.0, float(os.getenv("EXECUTOR_BET_ACCEPTANCE_TOLERANCE", "0.10")))
+    )
+except ValueError:
+    EXECUTOR_BET_ACCEPTANCE_TOLERANCE = 0.10
 
 try:
     WEBSOCKET_RECONNECT_GRACE_SECONDS = max(
@@ -367,6 +383,17 @@ def reportar_status_execucao_node(ordem, resultado):
         status = "AMBIGUA"
     motivo = str((resultado or {}).get("motivo") or "").strip()[:300]
     payload = {"order_id": order_id, "status": status, "motivo": motivo}
+    confirmacao = (resultado or {}).get("confirmacao")
+    if isinstance(confirmacao, dict):
+        payload["confirmacao"] = {
+            "confirmada": confirmacao.get("confirmada") is True,
+            "metodo": str(confirmacao.get("metodo") or "")[:40],
+            "saldo_antes": confirmacao.get("saldo_antes"),
+            "saldo_depois": confirmacao.get("saldo_depois"),
+            "exposicao_esperada": confirmacao.get("exposicao_esperada"),
+            "debito_observado": confirmacao.get("debito_observado"),
+            "confirmada_em": confirmacao.get("confirmada_em"),
+        }
 
     ultimo_erro = None
     for _ in range(2):
@@ -1373,6 +1400,69 @@ def aguardar_janela_aposta(page, aposta, planos):
         page.wait_for_timeout(100)
 
 
+def confirmar_aceite_financeiro_aposta(page, saldo_antes, exposicao_esperada):
+    """Confirma o aceite pela redução observável do saldo disponível da conta."""
+    try:
+        saldo_inicial = round(float(saldo_antes), 2)
+        exposicao = round(float(exposicao_esperada), 2)
+    except (TypeError, ValueError):
+        return {
+            "confirmada": False,
+            "metodo": "SALDO_INDISPONIVEL",
+            "motivo": "Saldo anterior ou exposição inválidos",
+        }
+
+    if saldo_inicial < 0 or exposicao <= 0:
+        return {
+            "confirmada": False,
+            "metodo": "SALDO_INDISPONIVEL",
+            "motivo": "Saldo anterior ou exposição fora do contrato financeiro",
+        }
+
+    tolerancia = max(0.01, float(EXECUTOR_BET_ACCEPTANCE_TOLERANCE))
+    prazo = time.monotonic() + float(EXECUTOR_BET_ACCEPTANCE_TIMEOUT_SECONDS)
+    ultimo_saldo = None
+    ultimo_debito = None
+
+    while time.monotonic() <= prazo:
+        saldo_atual = ler_saldo_atual(page)
+        if saldo_atual is not None:
+            ultimo_saldo = round(float(saldo_atual), 2)
+            ultimo_debito = round(saldo_inicial - ultimo_saldo, 2)
+            if abs(ultimo_debito - exposicao) <= tolerancia:
+                return {
+                    "confirmada": True,
+                    "metodo": "SALDO_DEBITADO",
+                    "saldo_antes": saldo_inicial,
+                    "saldo_depois": ultimo_saldo,
+                    "exposicao_esperada": exposicao,
+                    "debito_observado": ultimo_debito,
+                    "confirmada_em": int(time.time() * 1000),
+                }
+        page.wait_for_timeout(150)
+
+    if ultimo_saldo is None:
+        motivo = "Saldo deixou de ser legível após os cliques financeiros"
+    elif abs(float(ultimo_debito or 0.0)) <= tolerancia:
+        motivo = "Saldo permaneceu inalterado; a Evolution não comprovou o aceite"
+    else:
+        motivo = (
+            f"Variação de saldo R$ {float(ultimo_debito or 0.0):.2f} divergiu da "
+            f"exposição esperada R$ {exposicao:.2f}"
+        )
+
+    return {
+        "confirmada": False,
+        "metodo": "SALDO_NAO_CONFIRMADO",
+        "saldo_antes": saldo_inicial,
+        "saldo_depois": ultimo_saldo,
+        "exposicao_esperada": exposicao,
+        "debito_observado": ultimo_debito,
+        "confirmada_em": None,
+        "motivo": motivo,
+    }
+
+
 def executar_aposta_na_tela(page, aposta):
     """Pré-valida todas as pernas e só então executa a ordem lógica composta."""
     cliques_alvo = 0
@@ -1420,6 +1510,20 @@ def executar_aposta_na_tela(page, aposta):
             return bloqueio
 
         frame_jogo = contexto_dom["frame"]
+        saldo_antes = ler_saldo_atual(page)
+        if saldo_antes is None:
+            return {
+                "status": "FALHOU",
+                "motivo": (
+                    "Saldo real não pôde ser lido antes da aposta; nenhum clique financeiro foi autorizado"
+                ),
+                "cliques_alvo": 0,
+                "confirmacao": {
+                    "confirmada": False,
+                    "metodo": "SALDO_INDISPONIVEL",
+                },
+            }
+
         for plano in planos:
             alvo_elemento = contexto_dom["alvos"].get(plano["seletor_alvo"])
             if alvo_elemento is None:
@@ -1519,11 +1623,29 @@ def executar_aposta_na_tela(page, aposta):
 
         total = sum(p["valor"] for p in planos)
         resumo = " + ".join(f"R$ {p['valor']} {p['alvo']}" for p in planos)
-        print(f"🎯 INTERAÇÃO DOM CONCLUÍDA: {resumo}; exposição total R$ {total}; {cliques_alvo} clique(s) de alvo.")
+        confirmacao = confirmar_aceite_financeiro_aposta(page, saldo_antes, total)
+        if confirmacao.get("confirmada") is not True:
+            motivo = str(confirmacao.get("motivo") or "Aceite financeiro não comprovado")
+            print(
+                f"🚨 CLIQUES SEM ACEITE COMPROVADO: {resumo}; exposição esperada R$ {total}; "
+                f"{cliques_alvo} clique(s) de alvo. {motivo}."
+            )
+            return {
+                "status": "AMBIGUA",
+                "motivo": motivo,
+                "cliques_alvo": cliques_alvo,
+                "confirmacao": confirmacao,
+            }
+
+        print(
+            f"✅ APOSTA ACEITA PELA EVOLUTION: {resumo}; exposição R$ {total}; "
+            f"saldo R$ {confirmacao['saldo_antes']:.2f} -> R$ {confirmacao['saldo_depois']:.2f}."
+        )
         return {
             "status": "EXECUTADA",
-            "motivo": "Plano DOM composto concluído localmente",
-            "cliques_alvo": cliques_alvo
+            "motivo": "Aceite confirmado por débito do saldo disponível",
+            "cliques_alvo": cliques_alvo,
+            "confirmacao": confirmacao,
         }
     except ValueError as e:
         return {"status": "FALHOU", "motivo": str(e), "cliques_alvo": cliques_alvo}

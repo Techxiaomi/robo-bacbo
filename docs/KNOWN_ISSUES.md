@@ -91,6 +91,18 @@ Risco residual externo:
 
 ## Itens mitigados
 
+### BUG-037 — cliques locais eram registrados como apostas reais sem aceite da casa
+
+Status: **mitigado em código; validação operacional com uma aposta mínima pendente**.
+
+O executor considerava `EXECUTADA` assim que terminava os cliques de ficha e alvo sem exceção Playwright. Essa condição prova apenas interação local: não prova que a Evolution aceitou a aposta. O Node promovia a intenção a `PENDENTE`, incrementava o volume e posteriormente calculava WIN/LOSS, produzindo auditoria financeira fictícia quando saldo e histórico da casa permaneciam inalterados.
+
+O contrato agora é fail-closed nos dois processos. O Python lê o saldo imediatamente antes do primeiro clique financeiro e, após o plano, aguarda a redução correspondente à exposição total. O callback inclui método e valores observados; o Node recalcula a coerência antes de aceitar `EXECUTADA`. Ausência de seletor/saldo bloqueia antes da aposta. Cliques sem débito geram `AMBIGUA`, não entram em P&L/volume e bloqueiam o Auto-Trader para impedir repetição de uma exposição cujo estado externo é desconhecido.
+
+Registros anteriores sem `executor_confirmacao_metodo=SALDO_DEBITADO` não são apagados nem reinterpretados automaticamente. O PDF os identifica como legados sem prova externa e os exclui dos totais comprovados. O relatório usa A4 paisagem, tabela de largura fixa e evidencia separadamente ordem solicitada, aceite externo, resultado calculado e saldo do modelo.
+
+Risco residual: a confirmação usa o saldo disponível exposto pela interface e depende de `CASINO_BALANCE_SELECTOR` correto. Créditos/débitos concorrentes na mesma conta durante a janela podem tornar a variação ambígua; nesse caso o comportamento intencional é bloquear, nunca presumir sucesso. A próxima validação deve usar stake mínima e conferir simultaneamente log `APOSTA ACEITA PELA EVOLUTION`, débito do saldo e histórico de apostas da casa.
+
 ### BUG-036 — clique programático na superfície da ficha não reproduzia input real
 
 Status: **mitigado em código; validação com a superfície real da Evolution pendente**.
@@ -99,7 +111,7 @@ O seletor encontrava corretamente a ficha de R$ 5 e o alvo financeiro, mas o ele
 
 O executor agora obtém o elemento superior seguro via `elementFromPoint` e executa nele um clique real do Playwright, com actionability e sem `force=True`. Isso produz o mesmo ciclo de ponteiro do caminho simples que já havia funcionado manualmente, mas continua restrito à janela `AcceptingBets`, à mesma sequência do coletor e à pré-validação de todas as pernas. A ficha continua sendo uma interação não financeira; antes do primeiro clique em Player/Banker/Tie, stage e sequência são novamente verificados.
 
-Risco residual: o DOM e os handlers internos da Evolution são externos. `EXECUTADA` continua significando que o ciclo local de cliques terminou sem erro observável, não confirmação transacional da aposta pelo site. A validação operacional deve confirmar a ficha visualmente e conferir o bilhete/saldo da plataforma.
+Risco residual: o DOM e os handlers internos da Evolution são externos. Desde o BUG-037, o ciclo local de cliques não basta para `EXECUTADA`; a ordem só avança com débito financeiro coerente. A validação operacional ainda deve confirmar o bilhete/histórico da plataforma porque o saldo é a evidência externa disponível, não uma API transacional oficial da Evolution.
 
 ### BUG-035 — Telegram ocultava a causa da falha e tinha mensagens pouco operacionais
 

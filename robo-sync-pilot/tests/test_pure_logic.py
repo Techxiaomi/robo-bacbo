@@ -103,6 +103,45 @@ class TestParsearValorMonetario(unittest.TestCase):
         self.assertIsNone(self.parsear("R$ -1.234,56"))
 
 
+class TestConfirmarAceiteFinanceiroAposta(unittest.TestCase):
+    class FakePage:
+        @staticmethod
+        def wait_for_timeout(_milissegundos):
+            return None
+
+    @staticmethod
+    def carregar_com_leitor(leitor, timeout=0.01):
+        ns = {
+            "time": time,
+            "ler_saldo_atual": leitor,
+            "EXECUTOR_BET_ACCEPTANCE_TIMEOUT_SECONDS": timeout,
+            "EXECUTOR_BET_ACCEPTANCE_TOLERANCE": 0.10,
+        }
+        carregar_funcoes(["confirmar_aceite_financeiro_aposta"], ns)
+        return ns["confirmar_aceite_financeiro_aposta"]
+
+    def test_debito_exato_confirma_aceite(self):
+        confirmar = self.carregar_com_leitor(lambda _page: 1595.0)
+        resultado = confirmar(self.FakePage(), 1600.0, 5.0)
+        self.assertTrue(resultado["confirmada"])
+        self.assertEqual(resultado["metodo"], "SALDO_DEBITADO")
+        self.assertEqual(resultado["debito_observado"], 5.0)
+
+    def test_saldo_inalterado_permanece_ambiguo(self):
+        confirmar = self.carregar_com_leitor(lambda _page: 1600.0)
+        resultado = confirmar(self.FakePage(), 1600.0, 5.0)
+        self.assertFalse(resultado["confirmada"])
+        self.assertEqual(resultado["metodo"], "SALDO_NAO_CONFIRMADO")
+        self.assertIn("permaneceu inalterado", resultado["motivo"])
+
+    def test_variacao_diferente_da_exposicao_nao_e_aceita(self):
+        confirmar = self.carregar_com_leitor(lambda _page: 1590.0)
+        resultado = confirmar(self.FakePage(), 1600.0, 5.0)
+        self.assertFalse(resultado["confirmada"])
+        self.assertEqual(resultado["debito_observado"], 10.0)
+        self.assertIn("divergiu", resultado["motivo"])
+
+
 class TestRegistrarOrdemIdempotente(unittest.TestCase):
     FUNCOES = [
         "normalizar_apostas_recebidas",

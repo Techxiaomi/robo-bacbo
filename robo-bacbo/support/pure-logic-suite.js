@@ -92,6 +92,7 @@ function carregarLogicaPura() {
             reservarInterrupcaoColetor,
             concluirInterrupcaoColetor,
             interrupcaoColetorJaAplicada,
+            normalizarConfirmacaoExecucao,
             nivelHistoricoResultado,
             contarTiesLegados,
             roboSintonizaEstrategia,
@@ -165,6 +166,49 @@ test("calcularFichaSegura arredonda para fichas de 5 e rejeita valores invalidos
     assert.equal(logic.calcularFichaSegura(7.4), 5);
     assert.equal(logic.calcularFichaSegura(7.5), 10);
     assert.equal(logic.calcularFichaSegura(12.5), 15);
+});
+
+test("BUG-037: callback EXECUTADA exige débito financeiro íntegro", () => {
+    const valido = logic.normalizarConfirmacaoExecucao("EXECUTADA", {
+        confirmada: true,
+        metodo: "SALDO_DEBITADO",
+        saldo_antes: 1600,
+        saldo_depois: 1595,
+        exposicao_esperada: 5,
+        debito_observado: 5,
+        confirmada_em: 1787190000000
+    });
+    assert.equal(valido.status, "EXECUTADA");
+    assert.equal(valido.confirmacao.debito_observado, 5);
+
+    const semEvidencia = logic.normalizarConfirmacaoExecucao("EXECUTADA", null);
+    assert.equal(semEvidencia.status, "AMBIGUA");
+    assert.equal(semEvidencia.confirmacao, null);
+
+    const inconsistente = logic.normalizarConfirmacaoExecucao("EXECUTADA", {
+        confirmada: true,
+        metodo: "SALDO_DEBITADO",
+        saldo_antes: 1600,
+        saldo_depois: 1600,
+        exposicao_esperada: 5,
+        debito_observado: 5,
+        confirmada_em: 1787190000000
+    });
+    assert.equal(inconsistente.status, "AMBIGUA");
+});
+
+test("BUG-037: PDF separa aceite comprovado de registros legados e usa A4 paisagem", () => {
+    assert.match(dashboardAppSource, /function ordemPossuiAceiteComprovado/);
+    assert.match(dashboardAppSource, /SALDO_DEBITADO/);
+    assert.match(dashboardAppSource, /SEM PROVA EXTERNA/);
+    assert.match(dashboardAppSource, /Excluído dos totais/);
+    assert.match(dashboardAppSource, /BLOQUEADO - ACEITE AMBÍGUO/);
+    assert.match(dashboardAppSource, /orientation: 'landscape'/);
+    assert.match(dashboardAppSource, /table-layout: fixed/);
+    assert.doesNotMatch(dashboardAppSource, /Lucro Líquido Real/);
+    assert.doesNotMatch(dashboardAppSource, /Hash de Autenticidade/);
+    assert.match(source, /exposicaoConfirmadaExecutor - exposicaoEsperadaNode/);
+    assert.match(source, /SET ativo=false, status_operacao='BLOQUEADO_AMBIGUIDADE'/);
 });
 
 test("nivelHistoricoResultado preserva DIRETO/GALE1/GALE2", () => {
