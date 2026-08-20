@@ -19,8 +19,8 @@ load_env_file(os.path.join(PROJECT_ROOT, ".env"))
 # ====================================================================
 # CONFIGURAÇÕES GERAIS E CONTROLE DE VERSÃO
 # ====================================================================
-VERSAO_ROBO = "v1.6.3"
-NOME_ATUALIZACAO = "Janela Apostável Orientada por Rodada"
+VERSAO_ROBO = "v1.6.4"
+NOME_ATUALIZACAO = "Stage AcceptingBets Fail-Closed"
 
 URL_CASSINO = os.getenv("CASINO_GAME_URL", "")
 ARQUIVO_SESSAO = os.getenv("SESSION_STATE_FILE", os.path.join(BASE_DIR, "sessao_salva.json"))
@@ -909,7 +909,8 @@ def classificar_reconexao_player_state(estado_anterior, dados, decorrido_segundo
 
 def stage_evolution_apostavel(stage):
     """Aceita somente a fase explícita em que a Evolution recebe apostas."""
-    return str(stage or "").strip().lower() == "betting"
+    normalizado = re.sub(r"[^a-z]", "", str(stage or "").strip().lower())
+    return normalizado in {"acceptingbets", "betting"}
 
 
 def avaliar_contexto_janela_aposta(aposta):
@@ -1135,7 +1136,7 @@ def aguardar_janela_aposta(page, aposta, planos):
 
     if sincronizar:
         print(
-            f"⏳ Ordem {aposta.get('order_id', 'n/a')} aguardando stage Betting + DOM acionável "
+            f"⏳ Ordem {aposta.get('order_id', 'n/a')} aguardando stage AcceptingBets + DOM acionável "
             f"da rodada após coletor_seq={aposta.get('coletor_seq_aceite', 0)}; "
             f"fusível operacional={EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS:g}s."
         )
