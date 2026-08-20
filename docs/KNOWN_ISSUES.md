@@ -91,6 +91,16 @@ Risco residual externo:
 
 ## Itens mitigados
 
+### BUG-035 — Telegram ocultava a causa da falha e tinha mensagens pouco operacionais
+
+Status: **mitigado em código; validação com token e Chat ID reais pendente**.
+
+O token já era removido corretamente de `GET /api/robos` e preservado no banco quando a edição enviava o campo vazio. A interface, porém, não explicava claramente esse contrato, não expunha o Chat ID principal e não oferecia teste da credencial salva. Além disso, qualquer rejeição da API do Telegram era convertida em `false`, eliminando a informação necessária para distinguir token inválido, chat inexistente, bot bloqueado, timeout ou indisponibilidade HTTP.
+
+O painel agora identifica o token como armazenado sem devolvê-lo ao navegador, permite editar o Chat ID principal e fornece um teste explícito após salvar. O backend devolve e registra diagnóstico por destino mascarado, sem registrar o token. O formato das mensagens foi reorganizado e a sequência Green exibida vem do contador do robô atualizado após o resultado, não de uma contagem global ou antecipada.
+
+Risco residual: a entrega depende do token, do Chat ID, de o usuário ter iniciado conversa com o bot ou de o bot possuir acesso ao grupo/canal. O teste operacional do painel passa a apresentar a rejeição concreta recebida da API para orientar essa correção externa.
+
 ### BUG-027 — Auto-Trader não reconhecia fontes dinâmicas selecionadas no painel
 
 Status: **mitigado em código; validação operacional com ordem real pendente**.
