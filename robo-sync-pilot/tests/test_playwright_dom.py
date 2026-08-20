@@ -176,6 +176,20 @@ HTML["/game-selected-frame.html"] = """<!doctype html>
   onclick="window.__targetClicks++">Banker</button>
 </body></html>"""
 
+HTML["/game-chip-animating.html"] = """<!doctype html>
+<html><body><iframe src="/game-chip-animating-frame.html"></iframe></body></html>"""
+HTML["/game-chip-animating-frame.html"] = """<!doctype html>
+<html><head><style>
+@keyframes mover { from { transform: translateX(0); } to { transform: translateX(20px); } }
+#chip5 { animation: mover 0.8s linear; }
+</style></head><body>
+<script>window.__chipClicks = 0; window.__targetClicks = 0;</script>
+<button id="chip5" data-role="chip" data-value="5"
+  onclick="window.__chipClicks++">5</button>
+<button data-role="bacbo-bet-spot-Banker"
+  onclick="window.__targetClicks++">Banker</button>
+</body></html>"""
+
 HTML["/opaque-hidden.html"] = """<!doctype html>
 <html><body><iframe src="/table-shell.html"></iframe></body></html>"""
 HTML["/table-shell.html"] = """<!doctype html>
@@ -410,6 +424,28 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
             frame = next(f for f in pagina.frames if "game-selected-frame" in f.url)
             self.assertEqual(resultado["status"], "EXECUTADA")
             self.assertEqual(frame.evaluate("window.__chipClicks"), 0)
+            self.assertEqual(frame.evaluate("window.__targetClicks"), 1)
+        finally:
+            pagina.close()
+
+    def test_bug031_ficha_visivel_pode_aguardar_estabilidade_sem_exposicao(self):
+        pagina = self.nova_pagina("/game-chip-animating.html")
+        self.configurar_janela(23, "AcceptingBets", timeout=2.0)
+        try:
+            resultado = executar_aposta_na_tela(
+                pagina,
+                {
+                    "order_id": "123e4567-e89b-42d3-a456-426614174002",
+                    "alvo": "BankerWon",
+                    "valor": 5,
+                    "sincronizar_janela": True,
+                    "coletor_seq_aceite": 23,
+                    "stage_aceite": "Resolved",
+                },
+            )
+            frame = next(f for f in pagina.frames if "game-chip-animating-frame" in f.url)
+            self.assertEqual(resultado["status"], "EXECUTADA")
+            self.assertEqual(frame.evaluate("window.__chipClicks"), 1)
             self.assertEqual(frame.evaluate("window.__targetClicks"), 1)
         finally:
             pagina.close()
