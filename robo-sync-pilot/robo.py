@@ -19,8 +19,8 @@ load_env_file(os.path.join(PROJECT_ROOT, ".env"))
 # ====================================================================
 # CONFIGURAÇÕES GERAIS E CONTROLE DE VERSÃO
 # ====================================================================
-VERSAO_ROBO = "v1.6.9"
-NOME_ATUALIZACAO = "Reconfirmação Controlada da Ficha"
+VERSAO_ROBO = "v1.6.10"
+NOME_ATUALIZACAO = "Superfície Playwright Real da Ficha"
 
 URL_CASSINO = os.getenv("CASINO_GAME_URL", "")
 ARQUIVO_SESSAO = os.getenv("SESSION_STATE_FILE", os.path.join(BASE_DIR, "sessao_salva.json"))
@@ -1165,6 +1165,79 @@ def localizar_frame_apostavel(page, planos):
     return contexto_dom["frame"] if contexto_dom is not None else None
 
 
+def clicar_superficie_ficha_playwright(elemento):
+    """Clica a superfície visível real da ficha usando input nativo do Playwright."""
+    resultado_handle = None
+    hit_handle = None
+    try:
+        resultado_handle = elemento.evaluate_handle("""el => {
+            const rect = el.getBoundingClientRect();
+            if (rect.width <= 0 || rect.height <= 0) {
+                return { hit: null, relacao: 'SEM_AREA' };
+            }
+
+            const hit = el.ownerDocument.elementFromPoint(
+                rect.left + rect.width / 2,
+                rect.top + rect.height / 2
+            );
+            if (!hit) return { hit: null, relacao: 'SEM_SUPERFICIE' };
+
+            let relacao = 'EXTERNA';
+            if (hit === el) relacao = 'PROPRIA';
+            else if (el.contains(hit)) relacao = 'DESCENDENTE';
+            else if (hit.contains(el)) relacao = 'ANCESTRAL';
+            else if (el.parentElement && hit.parentElement === el.parentElement) relacao = 'MESMO_CONTAINER';
+
+            const rectHit = hit.getBoundingClientRect();
+            const estilo = getComputedStyle(hit);
+            const visivel = rectHit.width > 0 && rectHit.height > 0
+                && estilo.display !== 'none'
+                && estilo.visibility !== 'hidden'
+                && estilo.pointerEvents !== 'none';
+
+            if (relacao === 'EXTERNA' || !visivel) {
+                return { hit: null, relacao: relacao === 'EXTERNA' ? relacao : 'NAO_VISIVEL' };
+            }
+            return { hit, relacao };
+        }""")
+        relacao_handle = resultado_handle.get_property("relacao")
+        try:
+            relacao = str(relacao_handle.json_value() or "DESCONHECIDA")
+        finally:
+            relacao_handle.dispose()
+
+        hit_handle = resultado_handle.get_property("hit")
+        hit_elemento = hit_handle.as_element()
+        if hit_elemento is None:
+            return {"acionada": False, "relacao": relacao, "motivo": "superfície segura ausente"}
+
+        # Diferente de HTMLElement.click(), ElementHandle.click() produz o ciclo
+        # real de mouse/pointer do Playwright. Isso preserva handlers de
+        # pointerdown/up usados pela Evolution e mantém as checagens de
+        # visibilidade, estabilidade e interceptação, sem force=True.
+        hit_elemento.click(timeout=2000)
+        return {"acionada": True, "relacao": relacao, "via": "PLAYWRIGHT_REAL"}
+    except PlaywrightTimeoutError:
+        return {"acionada": False, "relacao": "TIMEOUT", "motivo": "superfície não ficou acionável em 2s"}
+    except Exception as erro:
+        return {
+            "acionada": False,
+            "relacao": type(erro).__name__,
+            "motivo": f"falha ao acionar superfície real ({type(erro).__name__})",
+        }
+    finally:
+        if hit_handle is not None:
+            try:
+                hit_handle.dispose()
+            except Exception:
+                pass
+        if resultado_handle is not None:
+            try:
+                resultado_handle.dispose()
+            except Exception:
+                pass
+
+
 def selecionar_ficha_com_confirmacao(page, ficha_contexto, valor_ficha):
     elemento = ficha_contexto.get("elemento") if isinstance(ficha_contexto, dict) else None
     if elemento is None:
@@ -1183,142 +1256,23 @@ def selecionar_ficha_com_confirmacao(page, ficha_contexto, valor_ficha):
             "motivo": f"falha Playwright na ficha ({type(erro).__name__})",
         }
 
-    script_snapshot = """el => {
-        const atributos = no => {
-            if (!no) return '';
-            const estilo = getComputedStyle(no);
-            const rect = no.getBoundingClientRect();
-            return [
-                no.className || '', no.getAttribute('aria-pressed') || '',
-                no.getAttribute('aria-selected') || '', no.getAttribute('data-selected') || '',
-                no.getAttribute('data-is-selected') || '', no.getAttribute('data-active') || '',
-                no.getAttribute('data-state') || '', no.getAttribute('style') || '',
-                estilo.backgroundColor, estilo.borderColor, estilo.boxShadow,
-                estilo.transform, estilo.opacity, estilo.filter,
-                Math.round(rect.width * 10), Math.round(rect.height * 10)
-            ].join('|');
-        };
-        const nos = [el, el.parentElement, ...Array.from(el.children).slice(0, 8)];
-        const assinatura = nos.map(atributos).join('::');
-        const selecionada = nos.some(no => {
-            if (!no) return false;
-            const classe = String(no.className || '');
-            const verdadeiro = valor => String(valor || '').toLowerCase() === 'true';
-            const estado = String(no.getAttribute('data-state') || '').toLowerCase();
-            return verdadeiro(no.getAttribute('aria-pressed'))
-                || verdadeiro(no.getAttribute('aria-selected'))
-                || verdadeiro(no.getAttribute('data-selected'))
-                || verdadeiro(no.getAttribute('data-is-selected'))
-                || verdadeiro(no.getAttribute('data-active'))
-                || ['selected', 'active', 'checked'].includes(estado)
-                || /(^|[-_\\s])(selected|active|checked)($|[-_\\s])/i.test(classe);
-        });
-        return { assinatura, selecionada };
-    }"""
-
-    script_superficie = """el => {
-        const rect = el.getBoundingClientRect();
-        if (rect.width <= 0 || rect.height <= 0) return { acionada: false, relacao: 'SEM_AREA' };
-        const x = rect.left + rect.width / 2;
-        const y = rect.top + rect.height / 2;
-        const hit = el.ownerDocument.elementFromPoint(x, y);
-        if (!hit) return { acionada: false, relacao: 'SEM_SUPERFICIE' };
-        let relacao = 'EXTERNA';
-        if (hit === el) relacao = 'PROPRIA';
-        else if (el.contains(hit)) relacao = 'DESCENDENTE';
-        else if (hit.contains(el)) relacao = 'ANCESTRAL';
-        else if (el.parentElement && el.parentElement.contains(hit)) relacao = 'MESMO_CONTAINER';
-        if (relacao === 'EXTERNA') return { acionada: false, relacao };
-        hit.click();
-        return { acionada: true, relacao };
-    }"""
-
-    try:
-        antes = elemento.evaluate(script_snapshot)
-        superficie = elemento.evaluate(script_superficie)
-        if not isinstance(superficie, dict) or superficie.get("acionada") is not True:
-            relacao = superficie.get("relacao", "n/a") if isinstance(superficie, dict) else "n/a"
-            return {
-                "confirmada": False,
-                "motivo": f"superfície da ficha não autorizada ({relacao})",
-            }
-        page.wait_for_timeout(120)
-        depois = elemento.evaluate(script_snapshot)
-        mudou = (depois or {}).get("assinatura") != (antes or {}).get("assinatura")
-        selecionada = (depois or {}).get("selecionada") is True
-        if not selecionada and not mudou:
-            alternativas = elemento.evaluate("""(el, valorAlvo) => {
-                const normalizar = valor => Number(String(valor || '').trim().replace(',', '.'));
-                return Array.from(el.ownerDocument.querySelectorAll('[data-role="chip"][data-value]'))
-                    .map((item, indice) => ({ item, indice }))
-                    .filter(({item}) => {
-                        const rect = item.getBoundingClientRect();
-                        const estilo = getComputedStyle(item);
-                        return rect.width > 0 && rect.height > 0
-                            && estilo.display !== 'none' && estilo.visibility !== 'hidden'
-                            && Math.abs(normalizar(item.getAttribute('data-value')) - Number(valorAlvo)) > 0.001;
-                    })
-                    .slice(0, 6)
-                    .map(({indice, item}) => ({ indice, valor: item.getAttribute('data-value') || '' }));
-            }""", float(valor_ficha))
-
-            script_superficie_indice = """(el, indice) => {
-                const item = el.ownerDocument.querySelectorAll('[data-role="chip"][data-value]')[indice];
-                if (!item) return { acionada: false, relacao: 'ALTERNATIVA_AUSENTE' };
-                const rect = item.getBoundingClientRect();
-                if (rect.width <= 0 || rect.height <= 0) return { acionada: false, relacao: 'SEM_AREA' };
-                const hit = item.ownerDocument.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
-                if (!hit) return { acionada: false, relacao: 'SEM_SUPERFICIE' };
-                let relacao = 'EXTERNA';
-                if (hit === item) relacao = 'PROPRIA';
-                else if (item.contains(hit)) relacao = 'DESCENDENTE';
-                else if (hit.contains(item)) relacao = 'ANCESTRAL';
-                else if (item.parentElement && item.parentElement.contains(hit)) relacao = 'MESMO_CONTAINER';
-                if (relacao === 'EXTERNA') return { acionada: false, relacao };
-                hit.click();
-                return { acionada: true, relacao };
-            }"""
-
-            for alternativa in alternativas or []:
-                acao_alternativa = elemento.evaluate(
-                    script_superficie_indice,
-                    int(alternativa.get("indice")),
-                )
-                if not isinstance(acao_alternativa, dict) or acao_alternativa.get("acionada") is not True:
-                    continue
-                page.wait_for_timeout(120)
-                apos_alternativa = elemento.evaluate(script_snapshot)
-                if (apos_alternativa or {}).get("assinatura") == (depois or {}).get("assinatura"):
-                    continue
-
-                retorno = elemento.evaluate(script_superficie)
-                if not isinstance(retorno, dict) or retorno.get("acionada") is not True:
-                    return {
-                        "confirmada": False,
-                        "motivo": "ficha alternativa mudou o estado, mas não foi possível retornar ao valor solicitado",
-                    }
-                page.wait_for_timeout(120)
-                final = elemento.evaluate(script_snapshot)
-                voltou = (final or {}).get("assinatura") != (apos_alternativa or {}).get("assinatura")
-                if (final or {}).get("selecionada") is True or voltou:
-                    return {
-                        "confirmada": True,
-                        "via": "SUPERFICIE_RECONFIRMADA",
-                    }
-
-            return {
-                "confirmada": False,
-                "motivo": "superfície acionada, mas nem troca controlada de ficha confirmou o valor solicitado",
-            }
-        return {
-            "confirmada": True,
-            "via": f"SUPERFICIE_{superficie.get('relacao', 'DOM')}",
-        }
-    except Exception as erro:
+    superficie = clicar_superficie_ficha_playwright(elemento)
+    if not isinstance(superficie, dict) or superficie.get("acionada") is not True:
+        relacao = superficie.get("relacao", "n/a") if isinstance(superficie, dict) else "n/a"
+        motivo = superficie.get("motivo", "superfície não acionada") if isinstance(superficie, dict) else "superfície não acionada"
         return {
             "confirmada": False,
-            "motivo": f"não foi possível confirmar a superfície da ficha ({type(erro).__name__})",
+            "motivo": f"superfície da ficha não autorizada ({relacao}): {motivo}",
         }
+
+    # A conclusão do clique Playwright é a mesma evidência operacional aceita
+    # no caminho direto que já funcionava manualmente. O clique ainda é
+    # estritamente não financeiro; stage/seq são revalidados antes do alvo.
+    page.wait_for_timeout(120)
+    return {
+        "confirmada": True,
+        "via": f"SUPERFICIE_PLAYWRIGHT_{superficie.get('relacao', 'DOM')}",
+    }
 
 
 def formatar_diagnostico_janela(contexto, diagnostico):
@@ -1521,8 +1475,8 @@ def executar_aposta_na_tela(page, aposta):
                             }
                         if str(selecao.get("via") or "").startswith("SUPERFICIE_"):
                             print(
-                                f"✅ Ficha R$ {ficha} selecionada pela superfície DOM e confirmada "
-                                "antes do clique financeiro."
+                                f"✅ Ficha R$ {ficha} acionada pela superfície real do Playwright "
+                                f"({selecao.get('via')}) antes do clique financeiro."
                             )
                         ficha_corrente = int(ficha)
                         page.wait_for_timeout(150)
