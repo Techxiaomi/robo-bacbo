@@ -157,6 +157,14 @@ Qualquer interrupção estrutural reconhecida ou sinalizada pelo Python invalida
 
 Risco residual externo: o projeto não presume que `roundId` seja numérico/sequencial sem contrato oficial. Se a plataforma omitir uma rodada completa, continuar enviando outros `playerState` válidos e retornar antes do watchdog, uma única fonte não consegue provar matematicamente a ausência. A proteção prioriza falhar fechado em fechamento, silêncio e transições observáveis; reconciliação por uma segunda fonte oficial/roadmap continua sendo a única forma de elevar essa garantia contra omissão totalmente invisível da fonte primária.
 
+### BUG-030 — Ficha já selecionada era tratada como não acionável
+
+Status: **mitigado em código; validação operacional no site real pendente**.
+
+O diagnóstico do teste seguinte comprovou `fichas=0/1 (DOM 1)` e `alvos=1/1 (DOM 1)`: a ficha R$25 existia, mas não aceitava novo clique, enquanto Banker estava acionável. Isso é compatível com uma ficha corrente que o frontend mantém selecionada e desabilita contra reclick.
+
+O executor agora reconhece uma ficha já selecionada somente quando o elemento correspondente está visível e possui evidência semântica explícita (`aria-pressed`, `aria-selected`, `data-selected`, `data-is-selected`, `data-active`, `data-state` ou token de classe selecionado/ativo). Nesse caso ele preserva a ficha corrente e prova o alvo com `trial=True`. Ausência dessa evidência continua fail-closed; não há `force=True` nem aceitação baseada apenas em presença no DOM.
+
 ### BUG-029 — Varredura DOM consumia a janela curta de AcceptingBets
 
 Status: **mitigado em código; validação operacional no site real pendente**.
