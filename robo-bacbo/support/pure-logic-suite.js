@@ -326,8 +326,9 @@ test("BUG-028: executor espera AcceptingBets estrutural e Node preserva o callba
     assert.match(executorPythonSource, /selecionar_ficha_com_confirmacao/);
     assert.match(executorPythonSource, /elementFromPoint/);
     assert.match(executorPythonSource, /SUPERFICIE_/);
-    assert.match(executorPythonSource, /SUPERFICIE_RECONFIRMADA/);
-    assert.match(executorPythonSource, /troca controlada de ficha/);
+    assert.match(executorPythonSource, /SUPERFICIE_PLAYWRIGHT_/);
+    assert.match(executorPythonSource, /hit_elemento\.click\(timeout=2000\)/);
+    assert.doesNotMatch(executorPythonSource, /hit\.click\(\)/);
     assert.match(executorPythonSource, /aria-pressed/);
 
     const localizador = executorPythonSource.slice(
