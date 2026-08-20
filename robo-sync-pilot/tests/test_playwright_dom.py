@@ -450,7 +450,7 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
             self.assertEqual(resultado["status"], "EXPIRADA")
             self.assertIn("Nova rodada", resultado["motivo"])
             self.assertIn("última inspeção:", resultado["motivo"])
-            self.assertIn("fichas=", resultado["motivo"])
+            self.assertIn("fichas_prontas=", resultado["motivo"])
             self.assertIn("alvos=", resultado["motivo"])
             self.assertEqual(frame.evaluate("window.__chipClicks"), 0)
             self.assertEqual(frame.evaluate("window.__targetClicks"), 0)
