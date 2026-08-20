@@ -284,9 +284,10 @@ test("BUG-027: painel persiste fonte IA canônica e backend usa o matcher centra
     assert.match(source, /Auto-Trader \$\{trader\.id\} \(\$\{trader\.nome\}\) autorizado para o sinal/);
 });
 
-test("BUG-028: executor espera Betting estrutural e Node preserva o callback", () => {
+test("BUG-028: executor espera AcceptingBets estrutural e Node preserva o callback", () => {
     assert.match(executorPythonSource, /EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS = 180\.0/);
-    assert.match(executorPythonSource, /return str\(stage or ""\)\.strip\(\)\.lower\(\) ===? "betting"/);
+    assert.match(executorPythonSource, /normalizado in \{"acceptingbets", "betting"\}/);
+    assert.match(executorPythonSource, /aguardando stage AcceptingBets \+ DOM acionável/);
     assert.match(executorPythonSource, /if contexto\["estado"\] == "EXPIRADA":/);
     assert.match(executorPythonSource, /Fusível operacional de .* atingido sem/);
     assert.match(executorPythonSource, /fichas_acionaveis/);
