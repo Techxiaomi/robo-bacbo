@@ -33,6 +33,7 @@ def carregar_funcoes_reais():
         "localizar_contexto_apostavel",
         "localizar_frame_apostavel",
         "clicar_superficie_ficha_playwright",
+        "clicar_alvo_financeiro_playwright",
         "selecionar_ficha_com_confirmacao",
         "preselecionar_ficha_unica_antes_da_janela",
         "formatar_diagnostico_janela",
@@ -280,6 +281,38 @@ HTML["/game-balance-unchanged.html"] = """<!doctype html>
 </body></html>"""
 
 
+HTML["/game-target-overlay-accepted.html"] = """<!doctype html>
+<html><body>
+<div class="saldo-teste">R$ 1.000,00</div>
+<iframe src="/game-target-overlay-accepted-frame.html"></iframe>
+</body></html>"""
+HTML["/game-target-overlay-accepted-frame.html"] = """<!doctype html>
+<html><head><style>
+#wrap { position: relative; width: 180px; height: 70px; }
+#player, #surface { position:absolute; inset:0; }
+#surface { z-index:2; }
+</style></head><body>
+<div data-role="chip" data-value="5" aria-pressed="true">5</div>
+<div id="wrap">
+  <button id="player" data-role="bacbo-bet-spot-Player">Player</button>
+  <div id="surface" onclick="window.top.document.querySelector('.saldo-teste').textContent='R$ 995,00'; window.__surfaceClicks=(window.__surfaceClicks||0)+1">Player surface</div>
+</div>
+</body></html>"""
+
+HTML["/game-composite-first-rejected.html"] = """<!doctype html>
+<html><body>
+<div class="saldo-teste">R$ 1.000,00</div>
+<iframe src="/game-composite-first-rejected-frame.html"></iframe>
+</body></html>"""
+HTML["/game-composite-first-rejected-frame.html"] = """<!doctype html>
+<html><body>
+<script>window.__playerClicks=0; window.__tieClicks=0;</script>
+<div data-role="chip" data-value="5" aria-pressed="true">5</div>
+<button data-role="bacbo-bet-spot-Player" onclick="window.__playerClicks++">Player</button>
+<button data-role="bacbo-bet-spot-Tie" onclick="window.__tieClicks++; window.top.document.querySelector('.saldo-teste').textContent='R$ 995,00'">Tie</button>
+</body></html>"""
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         corpo = HTML.get(self.path)
@@ -366,6 +399,53 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
         try:
             pagina.locator("iframe").wait_for(state="attached")
             self.assertEqual(ler_saldo_atual(pagina), 9876.54)
+        finally:
+            pagina.close()
+
+    def test_bug039_superficie_real_do_alvo_confirma_debito(self):
+        pagina = self.nova_pagina("/game-target-overlay-accepted.html")
+        self.configurar_janela(39, "AcceptingBets", timeout=2.0)
+        try:
+            resultado = executar_aposta_na_tela(
+                pagina,
+                {
+                    "order_id": "123e4567-e89b-42d3-a456-426614174039",
+                    "alvo": "PlayerWon",
+                    "valor": 5,
+                    "sincronizar_janela": True,
+                    "coletor_seq_aceite": 39,
+                    "stage_aceite": "Resolved",
+                },
+            )
+            frame = next(f for f in pagina.frames if "game-target-overlay-accepted-frame" in f.url)
+            self.assertEqual(resultado["status"], "EXECUTADA")
+            self.assertEqual(resultado["confirmacao"]["metodo"], "SALDO_DEBITADO")
+            self.assertEqual(frame.evaluate("window.__surfaceClicks"), 1)
+        finally:
+            pagina.close()
+
+    def test_bug039_ordem_composta_para_apos_primeira_perna_sem_debito(self):
+        pagina = self.nova_pagina("/game-composite-first-rejected.html")
+        self.configurar_janela(40, "AcceptingBets", timeout=2.0)
+        try:
+            resultado = executar_aposta_na_tela(
+                pagina,
+                {
+                    "order_id": "123e4567-e89b-42d3-a456-426614174040",
+                    "apostas": [
+                        {"alvo": "PlayerWon", "valor": 5},
+                        {"alvo": "Tie", "valor": 5},
+                    ],
+                    "sincronizar_janela": True,
+                    "coletor_seq_aceite": 40,
+                    "stage_aceite": "Resolved",
+                },
+            )
+            frame = next(f for f in pagina.frames if "game-composite-first-rejected-frame" in f.url)
+            self.assertEqual(resultado["status"], "AMBIGUA")
+            self.assertEqual(frame.evaluate("window.__playerClicks"), 1)
+            self.assertEqual(frame.evaluate("window.__tieClicks"), 0)
+            self.assertEqual(resultado["cliques_alvo"], 1)
         finally:
             pagina.close()
 

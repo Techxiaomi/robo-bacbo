@@ -19,8 +19,8 @@ load_env_file(os.path.join(PROJECT_ROOT, ".env"))
 # ====================================================================
 # CONFIGURAÇÕES GERAIS E CONTROLE DE VERSÃO
 # ====================================================================
-VERSAO_ROBO = "v1.6.12"
-NOME_ATUALIZACAO = "BUG-038 Fast Path da Janela Evolution"
+VERSAO_ROBO = "v1.6.13"
+NOME_ATUALIZACAO = "BUG-039 Confirmação Financeira por Perna"
 
 URL_CASSINO = os.getenv("CASINO_GAME_URL", "")
 ARQUIVO_SESSAO = os.getenv("SESSION_STATE_FILE", os.path.join(BASE_DIR, "sessao_salva.json"))
@@ -1357,6 +1357,7 @@ def aguardar_janela_aposta(page, aposta, planos):
     ultimo_diagnostico = {}
     ultima_assinatura = None
     ultima_assinatura_dom = None
+    aberta_detectada_em = None
 
     if sincronizar:
         print(
@@ -1407,12 +1408,16 @@ def aguardar_janela_aposta(page, aposta, planos):
             }
 
         if contexto["estado"] == "ABERTA":
+            if aberta_detectada_em is None:
+                aberta_detectada_em = time.monotonic()
             contexto_dom, ultimo_diagnostico = localizar_contexto_apostavel(page, planos)
             if contexto_dom is not None:
                 if sincronizar:
                     print(
                         f"⚡ Ordem {aposta.get('order_id', 'n/a')}: DOM pronto em "
-                        f"{(time.monotonic() - inicio_espera) * 1000:.0f}ms; iniciando fast path financeiro."
+                        f"{(time.monotonic() - inicio_espera) * 1000:.0f}ms total / "
+                        f"{(time.monotonic() - aberta_detectada_em) * 1000:.0f}ms desde AcceptingBets; "
+                        f"iniciando fast path financeiro."
                     )
                 return contexto_dom, None
             assinatura_dom = tuple(sorted(ultimo_diagnostico.items()))
@@ -1435,6 +1440,81 @@ def aguardar_janela_aposta(page, aposta, planos):
             }
 
         page.wait_for_timeout(25)
+
+
+def clicar_alvo_financeiro_playwright(elemento):
+    """Aciona a superfície real do alvo sem force=True e sem sair do componente financeiro."""
+    resultado_handle = None
+    hit_handle = None
+    try:
+        resultado_handle = elemento.evaluate_handle("""el => {
+            const rect = el.getBoundingClientRect();
+            if (rect.width <= 0 || rect.height <= 0) return { hit: null, relacao: 'SEM_AREA' };
+            const x = rect.left + rect.width / 2;
+            const y = rect.top + rect.height / 2;
+            const hit = el.ownerDocument.elementFromPoint(x, y);
+            if (!hit) return { hit: null, relacao: 'SEM_SUPERFICIE' };
+
+            const rectHit = hit.getBoundingClientRect();
+            const estilo = getComputedStyle(hit);
+            const visivel = rectHit.width > 0 && rectHit.height > 0
+                && estilo.display !== 'none'
+                && estilo.visibility !== 'hidden'
+                && estilo.pointerEvents !== 'none';
+            if (!visivel) return { hit: null, relacao: 'NAO_VISIVEL' };
+
+            let relacao = 'EXTERNA';
+            if (hit === el) relacao = 'PROPRIA';
+            else if (el.contains(hit)) relacao = 'DESCENDENTE';
+            else if (hit.contains(el)) relacao = 'ANCESTRAL';
+            else if (el.parentElement && hit.parentElement === el.parentElement) relacao = 'MESMO_CONTAINER';
+
+            if (relacao === 'PROPRIA' || relacao === 'DESCENDENTE') return { hit, relacao };
+
+            // Para ancestral/irmão, exige sobreposição quase integral e que o mesmo
+            // pequeno container possua exatamente um alvo financeiro. Isso evita
+            // clicar em wrappers genéricos da mesa.
+            if (relacao === 'ANCESTRAL' || relacao === 'MESMO_CONTAINER') {
+                const pai = el.parentElement;
+                const escopo = relacao === 'ANCESTRAL' ? hit : pai;
+                if (!escopo) return { hit: null, relacao: 'EXTERNA' };
+                const alvos = escopo.querySelectorAll("[data-role^='bacbo-bet-spot-']");
+                const areaEl = Math.max(1, rect.width * rect.height);
+                const areaHit = Math.max(1, rectHit.width * rectHit.height);
+                const ix = Math.max(0, Math.min(rect.right, rectHit.right) - Math.max(rect.left, rectHit.left));
+                const iy = Math.max(0, Math.min(rect.bottom, rectHit.bottom) - Math.max(rect.top, rectHit.top));
+                const sobreposicao = (ix * iy) / areaEl;
+                const razaoArea = areaHit / areaEl;
+                if (alvos.length === 1 && sobreposicao >= 0.80 && razaoArea <= 1.60) {
+                    return { hit, relacao };
+                }
+            }
+            return { hit: null, relacao: 'EXTERNA' };
+        }""")
+        relacao_handle = resultado_handle.get_property("relacao")
+        try:
+            relacao = str(relacao_handle.json_value() or "DESCONHECIDA")
+        finally:
+            relacao_handle.dispose()
+        hit_handle = resultado_handle.get_property("hit")
+        hit_elemento = hit_handle.as_element()
+        if hit_elemento is None:
+            return {"acionada": False, "relacao": relacao, "motivo": "superfície financeira não autorizada"}
+        hit_elemento.click(timeout=650)
+        return {"acionada": True, "relacao": relacao}
+    except Exception as erro:
+        return {"acionada": False, "relacao": type(erro).__name__, "motivo": f"falha ao acionar alvo ({type(erro).__name__})"}
+    finally:
+        if hit_handle is not None:
+            try:
+                hit_handle.dispose()
+            except Exception:
+                pass
+        if resultado_handle is not None:
+            try:
+                resultado_handle.dispose()
+            except Exception:
+                pass
 
 
 def confirmar_aceite_financeiro_aposta(page, saldo_antes, exposicao_esperada):
@@ -1504,6 +1584,7 @@ def executar_aposta_na_tela(page, aposta):
     """Pré-valida todas as pernas e só então executa a ordem lógica composta."""
     cliques_alvo = 0
     ficha_corrente = None
+    confirmacoes_financeiras = []
     try:
         mapa_alvos = {
             "PlayerWon": "bacbo-bet-spot-Player",
@@ -1574,6 +1655,7 @@ def executar_aposta_na_tela(page, aposta):
             return bloqueio
 
         frame_jogo = contexto_dom["frame"]
+        saldo_referencia = round(float(saldo_antes), 2)
 
         for plano in planos:
             alvo_elemento = contexto_dom["alvos"].get(plano["seletor_alvo"])
@@ -1651,11 +1733,56 @@ def executar_aposta_na_tela(page, aposta):
                                     ),
                                     "cliques_alvo": cliques_alvo
                                 }
-                        alvo_elemento.click(timeout=750)
+                        inicio_clique = time.monotonic()
+                        alvo_real = clicar_alvo_financeiro_playwright(alvo_elemento)
+                        if alvo_real.get("acionada") is not True:
+                            status = "AMBIGUA" if cliques_alvo > 0 else "FALHOU"
+                            return {
+                                "status": status,
+                                "motivo": (
+                                    f"Superfície financeira de {plano['alvo']} não foi autorizada: "
+                                    f"{alvo_real.get('motivo', alvo_real.get('relacao', 'motivo desconhecido'))}"
+                                ),
+                                "cliques_alvo": cliques_alvo,
+                            }
                         cliques_alvo += 1
-                        # O clique Playwright já conclui o ciclo de input. Uma pausa
-                        # mínima preserva o processamento do DOM sem consumir a janela.
-                        page.wait_for_timeout(20)
+
+                        # BUG-039: cada clique precisa produzir o débito da própria
+                        # ficha antes que qualquer outra perna/clique seja autorizado.
+                        confirmacao_perna = confirmar_aceite_financeiro_aposta(
+                            page, saldo_referencia, float(ficha)
+                        )
+                        confirmacao_perna["alvo"] = plano["alvo"]
+                        confirmacao_perna["ficha"] = int(ficha)
+                        confirmacao_perna["superficie"] = alvo_real.get("relacao")
+                        confirmacoes_financeiras.append(confirmacao_perna)
+                        if confirmacao_perna.get("confirmada") is not True:
+                            motivo = str(confirmacao_perna.get("motivo") or "Aceite financeiro da perna não comprovado")
+                            print(
+                                f"🚨 CLIQUE SEM ACEITE COMPROVADO: R$ {int(ficha)} {plano['alvo']}; "
+                                f"superfície={alvo_real.get('relacao', 'n/a')}; {motivo}."
+                            )
+                            return {
+                                "status": "AMBIGUA",
+                                "motivo": motivo,
+                                "cliques_alvo": cliques_alvo,
+                                "confirmacao": {
+                                    "confirmada": False,
+                                    "metodo": "SALDO_NAO_CONFIRMADO",
+                                    "saldo_antes": saldo_antes,
+                                    "saldo_depois": confirmacao_perna.get("saldo_depois"),
+                                    "exposicao_esperada": sum(p["valor"] for p in planos),
+                                    "pernas": confirmacoes_financeiras,
+                                },
+                            }
+                        saldo_referencia = round(float(confirmacao_perna["saldo_depois"]), 2)
+                        print(
+                            f"✅ PERNA ACEITA: R$ {int(ficha)} {plano['alvo']} via "
+                            f"{alvo_real.get('relacao', 'n/a')}; débito confirmado em "
+                            f"{(time.monotonic() - inicio_clique) * 1000:.0f}ms; "
+                            f"saldo R$ {confirmacao_perna['saldo_antes']:.2f} -> "
+                            f"R$ {confirmacao_perna['saldo_depois']:.2f}."
+                        )
                 except PlaywrightTimeoutError as e:
                     status = "AMBIGUA" if cliques_alvo > 0 else "FALHOU"
                     print(f"⚠️ Timeout durante tentativa DOM da ficha {ficha}: {e}")
@@ -1675,19 +1802,34 @@ def executar_aposta_na_tela(page, aposta):
 
         total = sum(p["valor"] for p in planos)
         resumo = " + ".join(f"R$ {p['valor']} {p['alvo']}" for p in planos)
-        confirmacao = confirmar_aceite_financeiro_aposta(page, saldo_antes, total)
-        if confirmacao.get("confirmada") is not True:
-            motivo = str(confirmacao.get("motivo") or "Aceite financeiro não comprovado")
-            print(
-                f"🚨 CLIQUES SEM ACEITE COMPROVADO: {resumo}; exposição esperada R$ {total}; "
-                f"{cliques_alvo} clique(s) de alvo. {motivo}."
-            )
+        debito_total = round(float(saldo_antes) - float(saldo_referencia), 2)
+        if abs(debito_total - float(total)) > float(EXECUTOR_BET_ACCEPTANCE_TOLERANCE):
             return {
                 "status": "AMBIGUA",
-                "motivo": motivo,
+                "motivo": (
+                    f"Débito agregado R$ {debito_total:.2f} divergiu da exposição esperada R$ {float(total):.2f}"
+                ),
                 "cliques_alvo": cliques_alvo,
-                "confirmacao": confirmacao,
+                "confirmacao": {
+                    "confirmada": False,
+                    "metodo": "SALDO_NAO_CONFIRMADO",
+                    "saldo_antes": round(float(saldo_antes), 2),
+                    "saldo_depois": round(float(saldo_referencia), 2),
+                    "exposicao_esperada": float(total),
+                    "debito_observado": debito_total,
+                    "pernas": confirmacoes_financeiras,
+                },
             }
+        confirmacao = {
+            "confirmada": True,
+            "metodo": "SALDO_DEBITADO",
+            "saldo_antes": round(float(saldo_antes), 2),
+            "saldo_depois": round(float(saldo_referencia), 2),
+            "exposicao_esperada": float(total),
+            "debito_observado": debito_total,
+            "confirmada_em": int(time.time() * 1000),
+            "pernas": confirmacoes_financeiras,
+        }
 
         print(
             f"✅ APOSTA ACEITA PELA EVOLUTION: {resumo}; exposição R$ {total}; "
