@@ -91,6 +91,16 @@ Risco residual externo:
 
 ## Itens mitigados
 
+### BUG-036 — clique programático na superfície da ficha não reproduzia input real
+
+Status: **mitigado em código; validação com a superfície real da Evolution pendente**.
+
+O seletor encontrava corretamente a ficha de R$ 5 e o alvo financeiro, mas o elemento da ficha era coberto pela própria superfície visual do componente. O clique normal no contêiner expirava por interceptação. O fallback então chamava `HTMLElement.click()` no elemento superior e exigia uma mudança de classe/atributo no contêiner; na mesa real, a Evolution pode tratar a denominação em estado interno e depender de eventos de ponteiro, sem refletir a seleção nos atributos inspecionados.
+
+O executor agora obtém o elemento superior seguro via `elementFromPoint` e executa nele um clique real do Playwright, com actionability e sem `force=True`. Isso produz o mesmo ciclo de ponteiro do caminho simples que já havia funcionado manualmente, mas continua restrito à janela `AcceptingBets`, à mesma sequência do coletor e à pré-validação de todas as pernas. A ficha continua sendo uma interação não financeira; antes do primeiro clique em Player/Banker/Tie, stage e sequência são novamente verificados.
+
+Risco residual: o DOM e os handlers internos da Evolution são externos. `EXECUTADA` continua significando que o ciclo local de cliques terminou sem erro observável, não confirmação transacional da aposta pelo site. A validação operacional deve confirmar a ficha visualmente e conferir o bilhete/saldo da plataforma.
+
 ### BUG-035 — Telegram ocultava a causa da falha e tinha mensagens pouco operacionais
 
 Status: **mitigado em código; validação com token e Chat ID reais pendente**.
