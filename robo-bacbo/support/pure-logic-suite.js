@@ -11,6 +11,10 @@ const frontendPath = path.join(__dirname, "..", "public", "index.html");
 const executorPythonPath = path.join(__dirname, "..", "..", "robo-sync-pilot", "robo.py");
 const source = fs.readFileSync(backendPath, "utf8").replace(/\r\n/g, "\n");
 const frontendSource = fs.readFileSync(frontendPath, "utf8").replace(/\r\n/g, "\n");
+const dashboardAppSource = fs.readFileSync(
+    path.join(__dirname, "..", "public", "dashboard-app.html"),
+    "utf8"
+).replace(/\r\n/g, "\n");
 const executorPythonSource = fs.readFileSync(executorPythonPath, "utf8").replace(/\r\n/g, "\n");
 
 function trechoEntre(inicio, fim) {
@@ -343,7 +347,7 @@ test("formatarPadraoTelegram preserva a representacao visual do sinal", () => {
     assert.equal(logic.formatarPadraoTelegram(null), "");
 });
 
-test("montarMensagemTelegram respeita flags e limita texto a 4096 caracteres", () => {
+test("montarMensagemTelegram usa layout profissional, respeita flags e limita texto", () => {
     const est = {
         nome: "Padrao Teste",
         entrada: "Player",
@@ -356,6 +360,8 @@ test("montarMensagemTelegram respeita flags e limita texto a 4096 caracteres", (
         est,
         estado,
         {
+            nome: "Robo Premium",
+            greens_consecutivos: 3,
             config: {
                 cabecalho: "SALA A",
                 rodape: "FIM",
@@ -366,11 +372,14 @@ test("montarMensagemTelegram respeita flags e limita texto a 4096 caracteres", (
         }
     );
 
-    assert.match(mensagem, /🎯 ENTRADA/);
-    assert.match(mensagem, /Estratégia: Padrao Teste/);
-    assert.match(mensagem, /Padrão: 🔵 P → 🔴 B/);
-    assert.match(mensagem, /Assertividade: 87\.3%/);
-    assert.match(mensagem, /Entrada: 🔵 PLAYER/);
+    assert.match(mensagem, /🎯 NOVA ENTRADA/);
+    assert.match(mensagem, /🤖 Robô: Robo Premium/);
+    assert.match(mensagem, /📊 Estratégia: Padrao Teste/);
+    assert.match(mensagem, /🧩 Padrão: 🔵 P → 🔴 B/);
+    assert.match(mensagem, /📈 Assertividade: 87\.3%/);
+    assert.match(mensagem, /💰 Entrada: 🔵 PLAYER/);
+    assert.match(mensagem, /🔥 Sequência atual: 3 Greens/);
+    assert.match(mensagem, /⏳ Aguardando resultado da mesa/);
 
     const enorme = logic.montarMensagemTelegram(
         "RED",
@@ -379,6 +388,35 @@ test("montarMensagemTelegram respeita flags e limita texto a 4096 caracteres", (
         { config: { cabecalho: "X".repeat(5000) } }
     );
     assert.equal(enorme.length, 4096);
+});
+
+test("mensagem GREEN informa nível e sequência atualizada do robô", () => {
+    const mensagem = logic.montarMensagemTelegram(
+        "GREEN",
+        { nome: "Padrao Live", entrada: "Banker", padrao: [] },
+        { assertividadeSinal: 96.4, galeAtual: 1 },
+        { nome: "Robo Live", greens_consecutivos: 2, config: {} },
+        { resultado: "GREEN", greens_consecutivos: 5 }
+    );
+
+    assert.match(mensagem, /✅ GREEN CONFIRMADO/);
+    assert.match(mensagem, /🏁 Resultado: GALE 1/);
+    assert.match(mensagem, /🔥 Sequência atual: 5 Greens/);
+});
+
+test("BUG-035: token Telegram não retorna ao painel e teste expõe erro sem segredo", () => {
+    assert.match(source, /const \{ telegram_token: telegramTokenPrivado, \.\.\.roboPublico \} = r/);
+    assert.match(source, /telegram_configurado: Boolean\(String\(telegramTokenPrivado \|\| ''\)\.trim\(\)\)/);
+    assert.match(source, /telegram_token=COALESCE\(NULLIF\(\?, ''\), telegram_token\)/);
+    assert.match(source, /app\.post\("\/api\/robo\/:id\/testar-telegram"/);
+    assert.match(source, /mascararChatIdTelegram\(destinos\[indice\]\)/);
+    assert.match(source, /descricaoErroTelegram\(corpo\?\.description/);
+
+    assert.match(dashboardAppSource, /type="password" id="robo-token" autocomplete="new-password"/);
+    assert.match(dashboardAppSource, /id="robo-chat-id"/);
+    assert.match(dashboardAppSource, /Token armazenado com segurança/);
+    assert.match(dashboardAppSource, /async function testarTelegramRobo\(\)/);
+    assert.doesNotMatch(source, /res\.json\([^\n]*telegram_token/);
 });
 
 test("horarioParaMinutos valida formato HH:MM estrito", () => {
