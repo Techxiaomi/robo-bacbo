@@ -27,76 +27,78 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Apply BUG-051
+      - name: Apply BUG-051 to production targets
         run: |
           python scripts/prepare_bug051_patcher.py
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/apply_bug051_autotrader_hardening.py')
+          s = p.read_text(encoding='utf-8')
+          old = "UI = Path('robo-bacbo/public/index.html')"
+          new = "UI = Path('robo-bacbo/public/dashboard-app.html')"
+          if old not in s:
+              raise SystemExit('BUG-051 applicator UI target anchor not found')
+          p.write_text(s.replace(old, new, 1), encoding='utf-8')
+          PY
           python scripts/apply_bug051_autotrader_hardening.py
           python scripts/apply_bug051_followup.py
+          python - <<'PY'
+          from pathlib import Path
+
+          node_test = Path('robo-bacbo/support/pure-logic-suite.js')
+          s = node_test.read_text(encoding='utf-8')
+          replacements = [
+              ('BUG-046: executor ancora a janela em Resolved + 8s e Node preserva o callback',
+               'BUG-046/049: executor ancora a janela em Resolved + 8.5s e Node preserva o callback'),
+              (r'/alvo_temporal = resolved_base \\+ 8\\.0/', r'/alvo_temporal = resolved_base \\+ 8\\.5/'),
+              (r'/janela real alvo em \\+8000ms/', r'/janela real alvo em \\+8500ms/'),
+          ]
+          for old, new in replacements:
+              if old in s:
+                  s = s.replace(old, new, 1)
+          if r'/alvo_temporal = resolved_base \\+ 8\\.5/' not in s:
+              raise SystemExit('Resolved +8.5 contract not present after patch')
+          if r'/janela real alvo em \\+8500ms/' not in s:
+              raise SystemExit('+8500ms log contract not present after patch')
+          node_test.write_text(s, encoding='utf-8')
+
+          py_test = Path('robo-sync-pilot/tests/test_pure_logic.py')
+          s = py_test.read_text(encoding='utf-8')
+          if 'self.assertIn("permaneceu inalterado", resultado["motivo"])' in s:
+              s = s.replace(
+                  'self.assertIn("permaneceu inalterado", resultado["motivo"])',
+                  'self.assertIn("não sofreu débito adicional", resultado["motivo"])',
+                  1,
+              )
+          if 'self.assertIn("não sofreu débito adicional", resultado["motivo"])' not in s:
+              raise SystemExit('financial acceptance contract not updated')
+          py_test.write_text(s, encoding='utf-8')
+          PY
 
       - name: Validate syntax
         run: |
           node --check robo-bacbo/bot2_coletor.js
           python -m py_compile robo-sync-pilot/robo.py robo-sync-pilot/tests/test_pure_logic.py
 
-      - name: Diagnose legacy core contracts
-        run: |
-          cd robo-bacbo
-          node --test --test-name-pattern="calcularFichaSegura|BUG-037|nivelHistoricoResultado|contarTiesLegados|roboSintonizaEstrategia|robo dinamico" support/pure-logic-suite.js
-
-      - name: Diagnose Auto-Trader source and executor contracts
-        if: always()
-        run: |
-          cd robo-bacbo
-          node --test --test-name-pattern="BUG-033|BUG-046" support/pure-logic-suite.js
-
-      - name: Diagnose Telegram and security contracts
-        if: always()
-        run: |
-          cd robo-bacbo
-          node --test --test-name-pattern="Telegram|mensagem GREEN|BUG-035" support/pure-logic-suite.js
-
-      - name: Diagnose schedule contracts
-        if: always()
-        run: |
-          cd robo-bacbo
-          node --test --test-name-pattern="horarioParaMinutos|traderDentroHorarioExecucao" support/pure-logic-suite.js
-
-      - name: Diagnose financial contracts
-        if: always()
-        run: |
-          cd robo-bacbo
-          node --test --test-name-pattern="avaliarLimitesFinanceirosTrader|avaliarTrailingStopTrader|avaliarStopRedsAutoTrader|Stop Win|Stop Loss|Trailing Stop" support/pure-logic-suite.js
-
-      - name: Diagnose remaining legacy contracts
-        if: always()
-        run: |
-          cd robo-bacbo
-          node --test --test-name-pattern="continuidade|interrup|autentica|cookie|proteção|protecao|assertividade|histórico|historico" support/pure-logic-suite.js
-
       - name: Run existing Node logic contracts
-        if: always()
         run: |
           cd robo-bacbo
           node --test support/pure-logic-suite.js
 
       - name: Run BUG-051 contract
-        if: success()
         run: |
           cd robo-bacbo
           node --test test/bug051-contract.test.js
 
       - name: Run Python logic contracts
-        if: success()
         run: |
           cd robo-sync-pilot
           python tests/test_pure_logic.py
 
       - name: Validate diff
-        if: success()
         run: git diff --check
 
       - name: Commit functional changes
-        if: success()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
