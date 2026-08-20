@@ -43,6 +43,10 @@ class FakeTime:
     def time(cls):
         return cls.atual
 
+    @classmethod
+    def monotonic(cls):
+        return cls.atual
+
 
 class FakeResponse:
     def __init__(self, erro=None):
@@ -689,24 +693,19 @@ class TestBug028JanelaApostavelEstrutural(unittest.TestCase):
     def test_somente_stage_apostavel_fresco_abre_e_novo_resolved_expira(self):
         self.assertEqual(self.avaliar(self.ordem)["estado"], "AGUARDAR_STAGE")
 
+        for stage_aberto in ("WaitingForBets", "ClosingBets", "AcceptingBets", "Betting"):
+            with self.ns["estado_mesa_lock"]:
+                self.ns["estado_mesa"]["stage"] = stage_aberto
+                self.ns["estado_mesa"]["atualizado_em_ms"] = int(time.time() * 1000)
+            self.assertEqual(self.avaliar(self.ordem)["estado"], "ABERTA")
+
         for stage_fechado in (
-            "WaitingForBets", "ClosingBets", "FirstDie", "SecondDie",
-            "ThirdDie", "FourthDie", "Confirmation", "Resolved"
+            "FirstDie", "SecondDie", "ThirdDie", "FourthDie", "Confirmation", "Resolved"
         ):
             with self.ns["estado_mesa_lock"]:
                 self.ns["estado_mesa"]["stage"] = stage_fechado
                 self.ns["estado_mesa"]["atualizado_em_ms"] = int(time.time() * 1000)
             self.assertEqual(self.avaliar(self.ordem)["estado"], "AGUARDAR_STAGE")
-
-        with self.ns["estado_mesa_lock"]:
-            self.ns["estado_mesa"]["stage"] = "AcceptingBets"
-            self.ns["estado_mesa"]["atualizado_em_ms"] = int(time.time() * 1000)
-        self.assertEqual(self.avaliar(self.ordem)["estado"], "ABERTA")
-
-        with self.ns["estado_mesa_lock"]:
-            self.ns["estado_mesa"]["stage"] = "Betting"
-            self.ns["estado_mesa"]["atualizado_em_ms"] = int(time.time() * 1000)
-        self.assertEqual(self.avaliar(self.ordem)["estado"], "ABERTA")
 
         self.ns["coletor_seq"] = 11
         self.assertEqual(self.avaliar(self.ordem)["estado"], "EXPIRADA")
