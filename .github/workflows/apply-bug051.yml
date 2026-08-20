@@ -1,4 +1,4 @@
-name: Apply BUG-051 Auto-Trader hardening
+name: Apply isolated BUG-051A settlement balance hardening
 
 on:
   pull_request:
@@ -12,7 +12,7 @@ jobs:
   apply:
     if: github.head_ref == 'agent/bug-023-websocket-reconnect-continuity'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
         with:
@@ -27,55 +27,200 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Apply BUG-051 to production targets
+      - name: Apply BUG-051A only
         run: |
-          python scripts/prepare_bug051_patcher.py
-          python scripts/apply_bug051_autotrader_hardening.py
-          python scripts/apply_bug051_followup.py
           python - <<'PY'
           from pathlib import Path
 
-          node_test = Path('robo-bacbo/support/pure-logic-suite.js')
-          s = node_test.read_text(encoding='utf-8')
-          if 'resolved_base \\+ 8\\.0' in s:
-              s = s.replace('resolved_base \\+ 8\\.0', 'resolved_base \\+ 8\\.5', 1)
-          if 'janela real alvo em \\+8000ms' in s:
-              s = s.replace('janela real alvo em \\+8000ms', 'janela real alvo em \\+8500ms', 1)
-          if 'resolved_base \\+ 8\\.5' not in s:
-              raise SystemExit('Resolved +8.5 contract not present after follow-up')
-          if 'janela real alvo em \\+8500ms' not in s:
-              raise SystemExit('+8500ms log contract not present after patch')
-          node_test.write_text(s, encoding='utf-8')
+          def replace_once(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f'{label}: expected 1 occurrence, found {count}')
+              return text.replace(old, new, 1)
 
-          py_test = Path('robo-sync-pilot/tests/test_pure_logic.py')
-          s = py_test.read_text(encoding='utf-8')
-          if 'self.assertIn("permaneceu inalterado", resultado["motivo"])' in s:
-              s = s.replace(
-                  'self.assertIn("permaneceu inalterado", resultado["motivo"])',
-                  'self.assertIn("não sofreu débito adicional", resultado["motivo"])',
-                  1,
-              )
-          if 'self.assertIn("não sofreu débito adicional", resultado["motivo"])' not in s:
-              raise SystemExit('financial acceptance contract not updated')
-          py_test.write_text(s, encoding='utf-8')
+          bot_path = Path('robo-bacbo/bot2_coletor.js')
+          bot = bot_path.read_text(encoding='utf-8')
+
+          bot = replace_once(
+              bot,
+              "                lucro_prejuizo DECIMAL(12,2) DEFAULT 0,\n                saldo_pos DECIMAL(12,2) DEFAULT 0,\n                data_hora DATETIME DEFAULT CURRENT_TIMESTAMP,",
+              "                lucro_prejuizo DECIMAL(12,2) DEFAULT 0,\n                saldo_pos DECIMAL(12,2) DEFAULT NULL,\n                resultado_confirmado_em BIGINT DEFAULT NULL,\n                saldo_pos_confirmado_em BIGINT DEFAULT NULL,\n                data_hora DATETIME DEFAULT CURRENT_TIMESTAMP,",
+              'audit schema settlement timestamps'
+          )
+
+          bot = replace_once(
+              bot,
+              '        await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN execucao_confirmada_em BIGINT DEFAULT NULL");\n        await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN reds_consecutivos INT DEFAULT 0");',
+              '        await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN execucao_confirmada_em BIGINT DEFAULT NULL");\n        await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN resultado_confirmado_em BIGINT DEFAULT NULL");\n        await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN saldo_pos_confirmado_em BIGINT DEFAULT NULL");\n        await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN reds_consecutivos INT DEFAULT 0");',
+              'audit settlement migrations'
+          )
+
+          helpers = r'''async function traderPossuiLiquidacaoPendente(traderId) {
+              const [linhas] = await dbPool.query(
+                  `SELECT id
+                   FROM auditoria_ordens
+                   WHERE trader_id=?
+                     AND status_ordem IN ('WIN','LOSS','TIE')
+                     AND resultado_confirmado_em IS NOT NULL
+                     AND saldo_pos_confirmado_em IS NULL
+                   ORDER BY id DESC LIMIT 1`,
+                  [traderId]
+              );
+              return linhas.length > 0;
+          }
+
+          async function confirmarSaldosPosLiquidacao(saldo, sincronizadoEm = Date.now()) {
+              const saldoNumero = Number(saldo);
+              const syncMs = Number(sincronizadoEm);
+              if (!Number.isFinite(saldoNumero) || saldoNumero < 0 || !Number.isFinite(syncMs) || syncMs <= 0) return 0;
+
+              const [linhas] = await dbPool.query(
+                  `SELECT id, trader_id, resultado_confirmado_em
+                   FROM auditoria_ordens
+                   WHERE status_ordem IN ('WIN','LOSS','TIE')
+                     AND resultado_confirmado_em IS NOT NULL
+                     AND resultado_confirmado_em < ?
+                     AND saldo_pos_confirmado_em IS NULL
+                   ORDER BY id ASC`,
+                  [Math.trunc(syncMs)]
+              );
+              if (linhas.length === 0) return 0;
+
+              const ids = linhas.map(row => Number(row.id)).filter(Number.isInteger);
+              const placeholders = ids.map(() => '?').join(',');
+              const [resultado] = await dbPool.query(
+                  `UPDATE auditoria_ordens
+                   SET saldo_pos=?, saldo_pos_confirmado_em=?
+                   WHERE id IN (${placeholders})
+                     AND saldo_pos_confirmado_em IS NULL
+                     AND resultado_confirmado_em < ?`,
+                  [saldoNumero, Math.trunc(syncMs), ...ids, Math.trunc(syncMs)]
+              );
+
+              const confirmadas = Math.max(0, Number(resultado.affectedRows) || 0);
+              if (confirmadas > 0) {
+                  console.log(`✅ BUG-051A: ${confirmadas} saldo(s) pós-liquidação confirmado(s) por sincronização posterior ao resultado.`);
+              }
+              return confirmadas;
+          }
+
+          '''
+          bot = replace_once(
+              bot,
+              'async function autorizarNovaEntradaFinanceiraTrader(trader) {\n    const avaliacao = avaliarLimitesFinanceirosTrader(trader, snapshotSaldoGlobal());',
+              helpers + "async function autorizarNovaEntradaFinanceiraTrader(trader) {\n    if (await traderPossuiLiquidacaoPendente(trader.id)) {\n        console.warn(`⛔ BUG-051A Trader ${trader.id}: nova entrada bloqueada; saldo real após liquidação ainda NÃO CONFIRMADO.`);\n        return false;\n    }\n\n    const avaliacao = avaliarLimitesFinanceirosTrader(trader, snapshotSaldoGlobal());",
+              'block next cycle while settlement balance pending'
+          )
+
+          bot = replace_once(
+              bot,
+              '                    saldoGlobalCorretora = saldoRecebido;\n                    saldoGlobalAtualizadoEm = Date.now();\n                    for (let trader of AUTO_TRADERS_MEMORIA) {',
+              '                    saldoGlobalCorretora = saldoRecebido;\n                    saldoGlobalAtualizadoEm = Date.now();\n                    await confirmarSaldosPosLiquidacao(saldoRecebido, saldoGlobalAtualizadoEm);\n                    for (let trader of AUTO_TRADERS_MEMORIA) {',
+              'confirm settlement only from later balance synchronization'
+          )
+
+          bot = replace_once(
+              bot,
+              "                                        await dbPool.query(`UPDATE auditoria_ordens SET status_ordem = ?, lucro_prejuizo = ?, saldo_pos = ?, placar_mesa = ? WHERE id = ?`, [isTie ? 'TIE' : 'WIN', vLucro, trader.saldo_atual, `[P:${p1+p2} B:${b1+b2}]`, pendentes[0].id]);",
+              "                                        await dbPool.query(`UPDATE auditoria_ordens SET status_ordem = ?, lucro_prejuizo = ?, saldo_pos = NULL, resultado_confirmado_em = ?, saldo_pos_confirmado_em = NULL, placar_mesa = ? WHERE id = ?`, [isTie ? 'TIE' : 'WIN', vLucro, Date.now(), `[P:${p1+p2} B:${b1+b2}]`, pendentes[0].id]);",
+              'terminal win tie leaves balance unconfirmed'
+          )
+
+          bot = replace_once(
+              bot,
+              "                                            await dbPool.query(`UPDATE auditoria_ordens SET status_ordem = 'LOSS', lucro_prejuizo = ?, saldo_pos = ?, placar_mesa = ? WHERE id = ?`, [prejuizo, trader.saldo_atual, `[P:${p1+p2} B:${b1+b2}]`, pendentes[0].id]);",
+              "                                            await dbPool.query(`UPDATE auditoria_ordens SET status_ordem = 'LOSS', lucro_prejuizo = ?, saldo_pos = NULL, resultado_confirmado_em = ?, saldo_pos_confirmado_em = NULL, placar_mesa = ? WHERE id = ?`, [prejuizo, Date.now(), `[P:${p1+p2} B:${b1+b2}]`, pendentes[0].id]);",
+              'terminal red leaves balance unconfirmed'
+          )
+
+          bot_path.write_text(bot, encoding='utf-8')
+
+          ui_path = Path('robo-bacbo/public/dashboard-app.html')
+          ui = ui_path.read_text(encoding='utf-8')
+          ui = replace_once(
+              ui,
+              '<div class="pdf-box"><strong>Saldo sincronizado de referência:</strong><br><span id="pdf-saldo-final" style="font-weight:bold;">-</span></div>',
+              '<div class="pdf-box"><strong>Banca atual sincronizada:</strong><br><span id="pdf-saldo-final" style="font-weight:bold;">-</span></div>\n                    <div class="pdf-box"><strong>Saldo real após liquidação:</strong><br><span id="pdf-saldo-liquidacao" style="font-weight:bold;">NÃO CONFIRMADO</span></div>',
+              'report balance labels'
+          )
+          ui = replace_once(
+              ui,
+              "            document.getElementById('pdf-nome-trader').innerText = at.nome; document.getElementById('pdf-periodo').innerText = `Até ${dataFmt}`; document.getElementById('pdf-lucro-liquido').innerText = formatarMoedaPdf(lucroLiquido); document.getElementById('pdf-lucro-liquido').style.color = corLucro; document.getElementById('pdf-banca-inicial').innerText = formatarMoedaPdf(at.saldo_inicial); document.getElementById('pdf-saldo-final').innerText = formatarMoedaPdf(at.saldo_atual); document.getElementById('pdf-confirmadas').innerText = `${ordensConfirmadas.length} de ${ordens.length}`; document.getElementById('pdf-legadas').innerText = String(legadasSemProva); document.getElementById('pdf-hash').innerText = hashValidador;",
+              "            const ultimaLiquidacao = ordens.find(o => ['WIN','LOSS','TIE'].includes(String(o.status_ordem || '').toUpperCase()) && Number(o.resultado_confirmado_em) > 0);\n            const saldoLiquidacaoConfirmado = ultimaLiquidacao\n                && ultimaLiquidacao.saldo_pos !== null\n                && ultimaLiquidacao.saldo_pos !== undefined\n                && Number(ultimaLiquidacao.saldo_pos_confirmado_em) > Number(ultimaLiquidacao.resultado_confirmado_em);\n            document.getElementById('pdf-nome-trader').innerText = at.nome; document.getElementById('pdf-periodo').innerText = `Até ${dataFmt}`; document.getElementById('pdf-lucro-liquido').innerText = formatarMoedaPdf(lucroLiquido); document.getElementById('pdf-lucro-liquido').style.color = corLucro; document.getElementById('pdf-banca-inicial').innerText = formatarMoedaPdf(at.saldo_inicial); document.getElementById('pdf-saldo-final').innerText = formatarMoedaPdf(at.saldo_atual); document.getElementById('pdf-saldo-liquidacao').innerText = saldoLiquidacaoConfirmado ? formatarMoedaPdf(ultimaLiquidacao.saldo_pos) : 'NÃO CONFIRMADO'; document.getElementById('pdf-confirmadas').innerText = `${ordensConfirmadas.length} de ${ordens.length}`; document.getElementById('pdf-legadas').innerText = String(legadasSemProva); document.getElementById('pdf-hash').innerText = hashValidador;",
+              'report latest settlement balance'
+          )
+          ui = replace_once(
+              ui,
+              "                const saldoModelo = confirmada && estadosFinalizados.has(String(o.status_ordem || '').toUpperCase())\n                    ? formatarMoedaPdf(o.saldo_pos)\n                    : 'Não auditável';",
+              "                const saldoPosConfirmado = o.saldo_pos !== null\n                    && o.saldo_pos !== undefined\n                    && Number(o.resultado_confirmado_em) > 0\n                    && Number(o.saldo_pos_confirmado_em) > Number(o.resultado_confirmado_em);\n                const saldoModelo = confirmada && estadosFinalizados.has(String(o.status_ordem || '').toUpperCase())\n                    ? (saldoPosConfirmado ? formatarMoedaPdf(o.saldo_pos) : 'NÃO CONFIRMADO')\n                    : 'Não auditável';",
+              'report never invents settlement balance'
+          )
+          ui_path.write_text(ui, encoding='utf-8')
+
+          py_path = Path('robo-sync-pilot/robo.py')
+          py = py_path.read_text(encoding='utf-8')
+          py = replace_once(py, 'float(os.getenv("BALANCE_SYNC_HEARTBEAT_SECONDS", "60"))', 'float(os.getenv("BALANCE_SYNC_HEARTBEAT_SECONDS", "4"))', 'balance heartbeat env default')
+          py = replace_once(py, 'BALANCE_SYNC_HEARTBEAT_SECONDS = 60.0', 'BALANCE_SYNC_HEARTBEAT_SECONDS = 4.0', 'balance heartbeat fallback')
+          py_path.write_text(py, encoding='utf-8')
+
+          test_path = Path('robo-bacbo/test/bug051a-contract.test.js')
+          test_path.parent.mkdir(parents=True, exist_ok=True)
+          test_path.write_text(r'''const test = require('node:test');
+          const assert = require('node:assert/strict');
+          const fs = require('node:fs');
+          const path = require('node:path');
+
+          const bot = fs.readFileSync(path.join(__dirname, '..', 'bot2_coletor.js'), 'utf8');
+          const ui = fs.readFileSync(path.join(__dirname, '..', 'public', 'dashboard-app.html'), 'utf8');
+          const py = fs.readFileSync(path.join(__dirname, '..', '..', 'robo-sync-pilot', 'robo.py'), 'utf8');
+
+          test('BUG-051A: resultado terminal nunca reaproveita saldo antigo', () => {
+            assert.match(bot, /saldo_pos = NULL, resultado_confirmado_em = \?, saldo_pos_confirmado_em = NULL/);
+            assert.doesNotMatch(bot, /status_ordem = \?, lucro_prejuizo = \?, saldo_pos = \?, placar_mesa = \?/);
+            assert.match(bot, /status_ordem = 'LOSS', lucro_prejuizo = \?, saldo_pos = NULL, resultado_confirmado_em = \?/);
+          });
+
+          test('BUG-051A: saldo final exige sincronizacao estritamente posterior', () => {
+            assert.match(bot, /resultado_confirmado_em < \?/);
+            assert.match(bot, /SET saldo_pos=\?, saldo_pos_confirmado_em=\?/);
+            assert.match(bot, /traderPossuiLiquidacaoPendente/);
+            assert.match(bot, /nova entrada bloqueada; saldo real após liquidação ainda NÃO CONFIRMADO/);
+          });
+
+          test('BUG-051A: relatorio distingue banca sincronizada de liquidacao confirmada', () => {
+            assert.match(ui, /Banca atual sincronizada:/);
+            assert.match(ui, /Saldo real após liquidação:/);
+            assert.match(ui, /NÃO CONFIRMADO/);
+            assert.match(ui, /saldo_pos_confirmado_em/);
+          });
+
+          test('BUG-051A: heartbeat de saldo e frequente sem tocar na janela financeira', () => {
+            assert.match(py, /BALANCE_SYNC_HEARTBEAT_SECONDS\", \"4\"/);
+            assert.match(py, /BALANCE_SYNC_HEARTBEAT_SECONDS = 4\.0/);
+            assert.match(py, /alvo_temporal = resolved_base \+ 8\.5/);
+          });
+          ''', encoding='utf-8')
+
+          print('BUG-051A isolated patch applied')
           PY
 
       - name: Validate syntax
         run: |
           node --check robo-bacbo/bot2_coletor.js
-          python -m py_compile robo-sync-pilot/robo.py robo-sync-pilot/tests/test_pure_logic.py
+          node --check robo-bacbo/test/bug051a-contract.test.js
+          python -m py_compile robo-sync-pilot/robo.py
 
       - name: Run existing Node logic contracts
         run: |
           cd robo-bacbo
           node --test support/pure-logic-suite.js
 
-      - name: Run BUG-051 contract
+      - name: Run BUG-051A contract
         run: |
           cd robo-bacbo
-          node --test test/bug051-contract.test.js
+          node --test test/bug051a-contract.test.js
 
-      - name: Run Python logic contracts
+      - name: Run existing Python logic contracts
         run: |
           cd robo-sync-pilot
           python tests/test_pure_logic.py
@@ -83,10 +228,18 @@ jobs:
       - name: Validate diff
         run: git diff --check
 
-      - name: Commit functional changes
+      - name: Guard scope and commit BUG-051A
         run: |
+          git diff --name-only
+          allowed='robo-bacbo/bot2_coletor.js robo-bacbo/public/dashboard-app.html robo-bacbo/test/bug051a-contract.test.js robo-sync-pilot/robo.py'
+          for f in $(git diff --name-only); do
+            case " $allowed " in
+              *" $f "*) ;;
+              *) echo "Unexpected BUG-051A file: $f"; exit 1 ;;
+            esac
+          done
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add robo-bacbo/bot2_coletor.js robo-bacbo/public/dashboard-app.html robo-bacbo/support/pure-logic-suite.js robo-bacbo/test/bug051-contract.test.js robo-sync-pilot/robo.py robo-sync-pilot/tests/test_pure_logic.py
-          git commit -m "fix: harden auto-trader lifecycle and audit [skip ci]"
+          git add -- robo-bacbo/bot2_coletor.js robo-bacbo/public/dashboard-app.html robo-bacbo/test/bug051a-contract.test.js robo-sync-pilot/robo.py
+          git commit -m "fix: audit post-settlement balance for BUG-051A [skip ci]"
           git push origin HEAD:agent/bug-023-websocket-reconnect-continuity
