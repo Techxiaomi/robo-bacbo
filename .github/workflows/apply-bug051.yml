@@ -38,25 +38,65 @@ jobs:
           node --check robo-bacbo/bot2_coletor.js
           python -m py_compile robo-sync-pilot/robo.py robo-sync-pilot/tests/test_pure_logic.py
 
+      - name: Diagnose legacy core contracts
+        run: |
+          cd robo-bacbo
+          node --test --test-name-pattern="calcularFichaSegura|BUG-037|nivelHistoricoResultado|contarTiesLegados|roboSintonizaEstrategia|robo dinamico" support/pure-logic-suite.js
+
+      - name: Diagnose Auto-Trader source and executor contracts
+        if: always()
+        run: |
+          cd robo-bacbo
+          node --test --test-name-pattern="BUG-033|BUG-046" support/pure-logic-suite.js
+
+      - name: Diagnose Telegram and security contracts
+        if: always()
+        run: |
+          cd robo-bacbo
+          node --test --test-name-pattern="Telegram|mensagem GREEN|BUG-035" support/pure-logic-suite.js
+
+      - name: Diagnose schedule contracts
+        if: always()
+        run: |
+          cd robo-bacbo
+          node --test --test-name-pattern="horarioParaMinutos|traderDentroHorarioExecucao" support/pure-logic-suite.js
+
+      - name: Diagnose financial contracts
+        if: always()
+        run: |
+          cd robo-bacbo
+          node --test --test-name-pattern="avaliarLimitesFinanceirosTrader|avaliarTrailingStopTrader|avaliarStopRedsAutoTrader|Stop Win|Stop Loss|Trailing Stop" support/pure-logic-suite.js
+
+      - name: Diagnose remaining legacy contracts
+        if: always()
+        run: |
+          cd robo-bacbo
+          node --test --test-name-pattern="continuidade|interrup|autentica|cookie|proteção|protecao|assertividade|histórico|historico" support/pure-logic-suite.js
+
       - name: Run existing Node logic contracts
+        if: always()
         run: |
           cd robo-bacbo
           node --test support/pure-logic-suite.js
 
       - name: Run BUG-051 contract
+        if: success()
         run: |
           cd robo-bacbo
           node --test test/bug051-contract.test.js
 
       - name: Run Python logic contracts
+        if: success()
         run: |
           cd robo-sync-pilot
           python tests/test_pure_logic.py
 
       - name: Validate diff
+        if: success()
         run: git diff --check
 
       - name: Commit functional changes
+        if: success()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
