@@ -211,6 +211,29 @@ HTML["/game-chip-overlay-frame.html"] = """<!doctype html>
   onclick="window.__targetClicks++">Player</button>
 </body></html>"""
 
+HTML["/game-chip-roundtrip.html"] = """<!doctype html>
+<html><body><iframe src="/game-chip-roundtrip-frame.html"></iframe></body></html>"""
+HTML["/game-chip-roundtrip-frame.html"] = """<!doctype html>
+<html><head><style>
+.wrap { position: relative; width: 100px; height: 40px; margin-bottom: 5px; }
+.chip, .surface { position: absolute; inset: 0; }
+.surface { z-index: 2; }
+</style></head><body>
+<script>
+window.__surfaceClicks = 0; window.__targetClicks = 0; window.__selectedValue = 5;
+function escolher(valor) {
+  window.__surfaceClicks++;
+  window.__selectedValue = valor;
+  document.getElementById('chip5').className = valor === 5 ? 'chip' : 'chip nao-atual';
+}
+</script>
+<div class="wrap"><div id="chip5" class="chip" data-role="chip" data-value="5">5</div>
+  <div class="surface" onclick="escolher(5)">superfície 5</div></div>
+<div class="wrap"><div class="chip" data-role="chip" data-value="10">10</div>
+  <div class="surface" onclick="escolher(10)">superfície 10</div></div>
+<button data-role="bacbo-bet-spot-Player" onclick="window.__targetClicks++">Player</button>
+</body></html>"""
+
 HTML["/opaque-hidden.html"] = """<!doctype html>
 <html><body><iframe src="/table-shell.html"></iframe></body></html>"""
 HTML["/table-shell.html"] = """<!doctype html>
@@ -489,6 +512,29 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
             frame = next(f for f in pagina.frames if "game-chip-overlay-frame" in f.url)
             self.assertEqual(resultado["status"], "EXECUTADA")
             self.assertEqual(frame.evaluate("window.__surfaceClicks"), 1)
+            self.assertEqual(frame.evaluate("window.__targetClicks"), 1)
+        finally:
+            pagina.close()
+
+    def test_bug034_ficha_ja_corrente_e_confirmada_por_troca_e_retorno(self):
+        pagina = self.nova_pagina("/game-chip-roundtrip.html")
+        self.configurar_janela(26, "AcceptingBets", timeout=4.0)
+        try:
+            resultado = executar_aposta_na_tela(
+                pagina,
+                {
+                    "order_id": "123e4567-e89b-42d3-a456-426614174004",
+                    "alvo": "PlayerWon",
+                    "valor": 5,
+                    "sincronizar_janela": True,
+                    "coletor_seq_aceite": 26,
+                    "stage_aceite": "Resolved",
+                },
+            )
+            frame = next(f for f in pagina.frames if "game-chip-roundtrip-frame" in f.url)
+            self.assertEqual(resultado["status"], "EXECUTADA")
+            self.assertEqual(frame.evaluate("window.__selectedValue"), 5)
+            self.assertEqual(frame.evaluate("window.__surfaceClicks"), 3)
             self.assertEqual(frame.evaluate("window.__targetClicks"), 1)
         finally:
             pagina.close()
