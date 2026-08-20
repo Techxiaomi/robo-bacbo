@@ -41,6 +41,8 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - O CI usa permissões `contents: read`, sem secrets, sem instalação de dependências e sem inicializar MySQL, Flask, Playwright ou rede do projeto.
 
 ### Fixed
+- BUG-031: a seleção não financeira da ficha deixa de exigir que `click(trial=True)` conclua em 250 ms. Uma ficha de valor exato e visível pode aguardar até 2 s por estabilidade no clique real; após isso o executor revalida `AcceptingBets` e a sequência antes de clicar em qualquer alvo financeiro.
+- Falha/timeout na ficha continua encerrando com zero cliques de alvo, sem `force=True`. Fichas repetidas em um plano composto não são reclicadas desnecessariamente.
 - BUG-030: uma ficha correspondente que esteja visível, porém não clicável por já estar selecionada, passa a ser aceita somente quando o DOM fornece marca explícita de seleção. Nesse caso o executor não tenta reclicar a ficha e mantém a prova de actionability do alvo antes da aposta.
 - Elementos ocultos, cobertos, desabilitados sem prova de seleção ou apenas semelhantes continuam bloqueados. O diagnóstico separa fichas presentes, visíveis, explicitamente selecionadas, acionáveis e prontas.
 - BUG-029: a inspeção das fichas durante `AcceptingBets` deixa de consultar até 64 atributos individualmente por frame. Os `data-value` passam a ser lidos em lote e somente candidatos numericamente compatíveis recebem a prova `click(trial=True)`, reduzindo a latência crítica sem efetuar clique financeiro.
