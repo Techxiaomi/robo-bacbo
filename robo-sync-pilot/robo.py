@@ -19,8 +19,8 @@ load_env_file(os.path.join(PROJECT_ROOT, ".env"))
 # ====================================================================
 # CONFIGURAÇÕES GERAIS E CONTROLE DE VERSÃO
 # ====================================================================
-VERSAO_ROBO = "v1.6.11"
-NOME_ATUALIZACAO = "Aceite Financeiro Evolution Fail-Closed"
+VERSAO_ROBO = "v1.6.12"
+NOME_ATUALIZACAO = "BUG-038 Fast Path da Janela Evolution"
 
 URL_CASSINO = os.getenv("CASINO_GAME_URL", "")
 ARQUIVO_SESSAO = os.getenv("SESSION_STATE_FILE", os.path.join(BASE_DIR, "sessao_salva.json"))
@@ -1242,10 +1242,10 @@ def clicar_superficie_ficha_playwright(elemento):
         # real de mouse/pointer do Playwright. Isso preserva handlers de
         # pointerdown/up usados pela Evolution e mantém as checagens de
         # visibilidade, estabilidade e interceptação, sem force=True.
-        hit_elemento.click(timeout=2000)
+        hit_elemento.click(timeout=700)
         return {"acionada": True, "relacao": relacao, "via": "PLAYWRIGHT_REAL"}
     except PlaywrightTimeoutError:
-        return {"acionada": False, "relacao": "TIMEOUT", "motivo": "superfície não ficou acionável em 2s"}
+        return {"acionada": False, "relacao": "TIMEOUT", "motivo": "superfície não ficou acionável em 700ms"}
     except Exception as erro:
         return {
             "acionada": False,
@@ -1273,7 +1273,7 @@ def selecionar_ficha_com_confirmacao(page, ficha_contexto, valor_ficha):
         return {"confirmada": True, "via": "JA_SELECIONADA"}
 
     try:
-        elemento.click(timeout=2000)
+        elemento.click(timeout=700)
         return {"confirmada": True, "via": "PLAYWRIGHT"}
     except PlaywrightTimeoutError:
         pass
@@ -1292,14 +1292,45 @@ def selecionar_ficha_com_confirmacao(page, ficha_contexto, valor_ficha):
             "motivo": f"superfície da ficha não autorizada ({relacao}): {motivo}",
         }
 
-    # A conclusão do clique Playwright é a mesma evidência operacional aceita
-    # no caminho direto que já funcionava manualmente. O clique ainda é
-    # estritamente não financeiro; stage/seq são revalidados antes do alvo.
-    page.wait_for_timeout(120)
+    # Selecionar a ficha não cria exposição financeira. Não há sleep artificial
+    # aqui: o caminho crítico deve chegar ao alvo enquanto AcceptingBets ainda está
+    # vigente; stage/seq continuam revalidados imediatamente antes do clique financeiro.
     return {
         "confirmada": True,
         "via": f"SUPERFICIE_PLAYWRIGHT_{superficie.get('relacao', 'DOM')}",
     }
+
+
+def preselecionar_ficha_unica_antes_da_janela(page, planos):
+    """Tenta preparar uma única denominação antes da janela; nunca clica alvo financeiro."""
+    fichas = sorted({
+        int(ficha)
+        for plano in (planos or [])
+        for ficha, _ in plano.get("cliques_necessarios", [])
+    })
+    if len(fichas) != 1:
+        return {"confirmada": False, "ficha": None, "motivo": "PLANO_MULTIFICHAS"}
+
+    ficha = fichas[0]
+    for frame in list(getattr(page, "frames", []) or []):
+        ficha_contexto, _, _ = localizar_ficha_apostavel(frame, ficha)
+        if ficha_contexto is None:
+            continue
+        if ficha_contexto.get("modo") == "JA_SELECIONADA":
+            return {"confirmada": True, "ficha": ficha, "via": "JA_SELECIONADA"}
+
+        elemento = ficha_contexto.get("elemento")
+        if elemento is None:
+            continue
+        try:
+            # Preparação não financeira e oportunista. Falha aqui não invalida a
+            # ordem; o caminho normal ainda pode selecionar a ficha em AcceptingBets.
+            elemento.click(timeout=300)
+            return {"confirmada": True, "ficha": ficha, "via": "PRESELECAO_PLAYWRIGHT"}
+        except Exception:
+            continue
+
+    return {"confirmada": False, "ficha": ficha, "motivo": "PRESELECAO_INDISPONIVEL"}
 
 
 def formatar_diagnostico_janela(contexto, diagnostico):
@@ -1320,7 +1351,8 @@ def formatar_diagnostico_janela(contexto, diagnostico):
 
 def aguardar_janela_aposta(page, aposta, planos):
     sincronizar = aposta.get("sincronizar_janela") is True
-    prazo = time.monotonic() + EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS
+    inicio_espera = time.monotonic()
+    prazo = inicio_espera + EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS
     ultimo_contexto = avaliar_contexto_janela_aposta(aposta)
     ultimo_diagnostico = {}
     ultima_assinatura = None
@@ -1377,6 +1409,11 @@ def aguardar_janela_aposta(page, aposta, planos):
         if contexto["estado"] == "ABERTA":
             contexto_dom, ultimo_diagnostico = localizar_contexto_apostavel(page, planos)
             if contexto_dom is not None:
+                if sincronizar:
+                    print(
+                        f"⚡ Ordem {aposta.get('order_id', 'n/a')}: DOM pronto em "
+                        f"{(time.monotonic() - inicio_espera) * 1000:.0f}ms; iniciando fast path financeiro."
+                    )
                 return contexto_dom, None
             assinatura_dom = tuple(sorted(ultimo_diagnostico.items()))
             if sincronizar and assinatura_dom != ultima_assinatura_dom:
@@ -1397,7 +1434,7 @@ def aguardar_janela_aposta(page, aposta, planos):
                 "cliques_alvo": 0
             }
 
-        page.wait_for_timeout(100)
+        page.wait_for_timeout(25)
 
 
 def confirmar_aceite_financeiro_aposta(page, saldo_antes, exposicao_esperada):
@@ -1503,13 +1540,10 @@ def executar_aposta_na_tela(page, aposta):
                 "cliques_necessarios": cliques_necessarios
             })
 
-        # BUG-019: principal e proteção Tie precisam estar acionáveis antes do primeiro clique real.
-        contexto_dom, bloqueio = aguardar_janela_aposta(page, aposta, planos)
-        if bloqueio is not None:
-            print(f"⚠️ Ordem não executada: {bloqueio['motivo']}")
-            return bloqueio
-
-        frame_jogo = contexto_dom["frame"]
+        # BUG-038: tudo que é não financeiro sai do caminho crítico de
+        # AcceptingBets. O saldo e, quando há uma única denominação, a ficha são
+        # preparados antes da abertura. Player/Banker/Tie continuam proibidos até
+        # a janela estrutural ficar ABERTA.
         saldo_antes = ler_saldo_atual(page)
         if saldo_antes is None:
             return {
@@ -1523,6 +1557,23 @@ def executar_aposta_na_tela(page, aposta):
                     "metodo": "SALDO_INDISPONIVEL",
                 },
             }
+
+        preparo_ficha = preselecionar_ficha_unica_antes_da_janela(page, planos)
+        if preparo_ficha.get("confirmada") is True:
+            ficha_corrente = int(preparo_ficha["ficha"])
+            print(
+                f"⚡ Ficha R$ {ficha_corrente} preparada antes de AcceptingBets "
+                f"({preparo_ficha.get('via', 'PRESELECAO')})."
+            )
+
+        # BUG-019/038: principal e proteção Tie precisam estar acionáveis antes do
+        # primeiro clique financeiro, mas a preparação não financeira já ocorreu.
+        contexto_dom, bloqueio = aguardar_janela_aposta(page, aposta, planos)
+        if bloqueio is not None:
+            print(f"⚠️ Ordem não executada: {bloqueio['motivo']}")
+            return bloqueio
+
+        frame_jogo = contexto_dom["frame"]
 
         for plano in planos:
             alvo_elemento = contexto_dom["alvos"].get(plano["seletor_alvo"])
@@ -1583,7 +1634,6 @@ def executar_aposta_na_tela(page, aposta):
                                 f"({selecao.get('via')}) antes do clique financeiro."
                             )
                         ficha_corrente = int(ficha)
-                        page.wait_for_timeout(150)
                     elif ficha_contexto.get("modo") == "JA_SELECIONADA":
                         ficha_corrente = int(ficha)
 
@@ -1601,9 +1651,11 @@ def executar_aposta_na_tela(page, aposta):
                                     ),
                                     "cliques_alvo": cliques_alvo
                                 }
-                        alvo_elemento.click(timeout=2000)
+                        alvo_elemento.click(timeout=750)
                         cliques_alvo += 1
-                        page.wait_for_timeout(120)
+                        # O clique Playwright já conclui o ciclo de input. Uma pausa
+                        # mínima preserva o processamento do DOM sem consumir a janela.
+                        page.wait_for_timeout(20)
                 except PlaywrightTimeoutError as e:
                     status = "AMBIGUA" if cliques_alvo > 0 else "FALHOU"
                     print(f"⚠️ Timeout durante tentativa DOM da ficha {ficha}: {e}")
@@ -2057,7 +2109,9 @@ def iniciar_robo_blindado():
                         if not fila_apostas.empty():
                             ordem = fila_apostas.get()
                             processar_ordem_executor(page, ordem)
-                        page.wait_for_timeout(500)
+                        # 500ms de polling consumiam uma fração grande da janela
+                        # real de aposta. Mantém o event loop responsivo sem busy-wait.
+                        page.wait_for_timeout(50)
 
                         reconexao = status_conexao.get("reconexao_pendente")
                         if isinstance(reconexao, dict):
