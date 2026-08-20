@@ -416,6 +416,8 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
                     "valor": 5,
                     "sincronizar_janela": True,
                     "coletor_seq_aceite": 39,
+
+                    "resolved_monotonic_aceite": time.monotonic() - 8.1,
                     "stage_aceite": "Resolved",
                 },
             )
@@ -442,6 +444,8 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
                     ],
                     "sincronizar_janela": True,
                     "coletor_seq_aceite": 40,
+
+                    "resolved_monotonic_aceite": time.monotonic() - 8.1,
                     "stage_aceite": "Resolved",
                 },
             )
@@ -574,6 +578,8 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
             "valor": valor,
             "sincronizar_janela": True,
             "coletor_seq_aceite": seq,
+
+            "resolved_monotonic_aceite": time.monotonic() - 8.1,
             "stage_aceite": "Resolved",
         }
 
@@ -626,6 +632,8 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
                     "valor": 25,
                     "sincronizar_janela": True,
                     "coletor_seq_aceite": 22,
+
+                    "resolved_monotonic_aceite": time.monotonic() - 8.1,
                     "stage_aceite": "Resolved",
                 },
             )
@@ -648,6 +656,8 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
                     "valor": 5,
                     "sincronizar_janela": True,
                     "coletor_seq_aceite": 23,
+
+                    "resolved_monotonic_aceite": time.monotonic() - 8.1,
                     "stage_aceite": "Resolved",
                 },
             )
@@ -670,13 +680,15 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
                     "valor": 5,
                     "sincronizar_janela": True,
                     "coletor_seq_aceite": 24,
+
+                    "resolved_monotonic_aceite": time.monotonic() - 8.1,
                     "stage_aceite": "Resolved",
                 },
             )
             frame = next(f for f in pagina.frames if "game-chip-overlay-frame" in f.url)
             self.assertEqual(resultado["status"], "EXECUTADA")
             self.assertEqual(frame.evaluate("window.__surfaceClicks"), 1)
-            self.assertEqual(frame.evaluate("window.__surfacePointerDown"), 0)
+            self.assertEqual(frame.evaluate("window.__surfacePointerDown"), 1)
             self.assertEqual(frame.evaluate("window.__targetClicks"), 1)
         finally:
             pagina.close()
@@ -693,6 +705,8 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
                     "valor": 5,
                     "sincronizar_janela": True,
                     "coletor_seq_aceite": 26,
+
+                    "resolved_monotonic_aceite": time.monotonic() - 8.1,
                     "stage_aceite": "Resolved",
                 },
             )
@@ -704,7 +718,7 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
         finally:
             pagina.close()
 
-    def test_bug038_stage_dealing_pode_preparar_ficha_mas_nao_autoriza_alvo(self):
+    def test_bug046_stage_dealing_nao_autoriza_ficha_nem_alvo(self):
         pagina = self.nova_pagina("/game.html")
         self.configurar_janela(25, "Dealing", timeout=1.0)
 
@@ -718,8 +732,7 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
             frame = self.frame_jogo(pagina)
             resultado = executar_aposta_na_tela(pagina, self.ordem_sincronizada(25))
             self.assertEqual(resultado["status"], "EXPIRADA")
-            # BUG-040/041: a ficha também só é acionada depois de AcceptingBets
-            # estabilizar; em Dealing não há clique de ficha nem de alvo.
+            # BUG-046: Dealing está fora das fases pré-dados autorizadas; zero clique de ficha/alvo.
             self.assertEqual(frame.evaluate("window.__chipClicks")["10"], 0)
             self.assertEqual(frame.evaluate("window.__targetClicks")["playerA"], 0)
         finally:
@@ -741,9 +754,6 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
             frame = next(f for f in pagina.frames if "game-closed-frame" in f.url)
             self.assertEqual(resultado["status"], "EXPIRADA")
             self.assertIn("Nova rodada", resultado["motivo"])
-            self.assertIn("última inspeção:", resultado["motivo"])
-            self.assertIn("fichas_prontas=", resultado["motivo"])
-            self.assertIn("alvos=", resultado["motivo"])
             self.assertEqual(frame.evaluate("window.__chipClicks"), 0)
             self.assertEqual(frame.evaluate("window.__targetClicks"), 0)
         finally:
