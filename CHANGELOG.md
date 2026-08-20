@@ -41,6 +41,9 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - O CI usa permissões `contents: read`, sem secrets, sem instalação de dependências e sem inicializar MySQL, Flask, Playwright ou rede do projeto.
 
 ### Fixed
+- BUG-035: falhas de envio Telegram deixam de ser reduzidas ao aviso genérico “nenhuma entrega”. O backend registra, sem expor token ou Chat ID completo, timeout, erro HTTP e descrição devolvida pela API para cada destino.
+- A edição do robô mantém o token oculto por segurança, exibe confirmação explícita de que ele está armazenado, permite editar o Chat ID principal e oferece teste sob demanda usando somente o token já salvo.
+- Mensagens de entrada, Gale, Green, empate protegido e Red recebem layout visual consistente com robô, estratégia, padrão, assertividade, entrada e resultado. Entrada e desfecho informam a sequência atual de Greens do próprio robô; o Green usa o contador persistido após o fechamento da rodada.
 - BUG-034: quando acionar a ficha desejada não altera o DOM porque ela já pode ser a denominação corrente, o executor realiza uma troca controlada para outra ficha visível e retorna ao valor solicitado. As duas transições precisam alterar a assinatura visual/semântica antes de liberar qualquer alvo financeiro.
 - A troca de prova usa somente superfícies do mesmo componente, não aposta e falha fechado se não houver ficha alternativa ou confirmação de ida e volta.
 - BUG-033: “Fontes de Sinal” do Auto-Trader passa a listar exclusivamente robôs ativos, persistindo `ROBO:<id>`. Origens deixam de aparecer e robôs deixam de ser rotulados genericamente como Auto IA.
