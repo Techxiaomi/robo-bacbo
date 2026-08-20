@@ -1,5 +1,6 @@
 from pathlib import Path
 
+# Workflow trigger: aplica apenas o alinhamento do contrato de teste Node ao BUG-039.
 path = Path(__file__).resolve().parents[1] / "robo-bacbo" / "support" / "pure-logic-suite.js"
 text = path.read_text(encoding="utf-8")
 old = '    assert.match(executorPythonSource, /alvo_elemento\\.click\\(timeout=750\\)/);\n'
