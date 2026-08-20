@@ -157,6 +157,14 @@ Qualquer interrupção estrutural reconhecida ou sinalizada pelo Python invalida
 
 Risco residual externo: o projeto não presume que `roundId` seja numérico/sequencial sem contrato oficial. Se a plataforma omitir uma rodada completa, continuar enviando outros `playerState` válidos e retornar antes do watchdog, uma única fonte não consegue provar matematicamente a ausência. A proteção prioriza falhar fechado em fechamento, silêncio e transições observáveis; reconciliação por uma segunda fonte oficial/roadmap continua sendo a única forma de elevar essa garantia contra omissão totalmente invisível da fonte primária.
 
+### BUG-031 — Prova curta de actionability da ficha bloqueava antes do clique financeiro
+
+Status: **mitigado em código; validação operacional no site real pendente**.
+
+O diagnóstico posterior mostrou a ficha exata presente e visível, sem marca de seleção, mas incapaz de concluir `click(trial=True)` em 250 ms; Banker e Tie estavam ambos acionáveis. Como a seleção da denominação não registra aposta, tratá-la com o mesmo gate do alvo financeiro criava um bloqueio sem benefício financeiro.
+
+Uma ficha exata e visível agora pode prosseguir para o clique normal Playwright, que aguarda estabilidade por até 2 s e continua sem `force=True`. Falha nessa etapa ocorre antes de qualquer clique de alvo. Depois da ficha, o executor revalida stage e `coletor_seq` antes de cada clique financeiro; se a janela fechar durante a espera, a ordem expira sem aposta. A mesma denominação não é reclicada entre pernas do mesmo plano composto.
+
 ### BUG-030 — Ficha já selecionada era tratada como não acionável
 
 Status: **mitigado em código; validação operacional no site real pendente**.
