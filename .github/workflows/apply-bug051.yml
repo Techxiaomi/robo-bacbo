@@ -30,16 +30,6 @@ jobs:
       - name: Apply BUG-051 to production targets
         run: |
           python scripts/prepare_bug051_patcher.py
-          python - <<'PY'
-          from pathlib import Path
-          p = Path('scripts/apply_bug051_autotrader_hardening.py')
-          s = p.read_text(encoding='utf-8')
-          old = "UI = Path('robo-bacbo/public/index.html')"
-          new = "UI = Path('robo-bacbo/public/dashboard-app.html')"
-          if old not in s:
-              raise SystemExit('BUG-051 applicator UI target anchor not found')
-          p.write_text(s.replace(old, new, 1), encoding='utf-8')
-          PY
           python scripts/apply_bug051_autotrader_hardening.py
           python scripts/apply_bug051_followup.py
           python - <<'PY'
