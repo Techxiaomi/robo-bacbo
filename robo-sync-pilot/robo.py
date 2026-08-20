@@ -20,7 +20,7 @@ load_env_file(os.path.join(PROJECT_ROOT, ".env"))
 # CONFIGURAÇÕES GERAIS E CONTROLE DE VERSÃO
 # ====================================================================
 VERSAO_ROBO = "v1.6.13"
-NOME_ATUALIZACAO = "BUG-046 Janela Real Resolved + 8s"
+NOME_ATUALIZACAO = "BUG-047 Fast Path Forcado Resolved + 8s"
 
 URL_CASSINO = os.getenv("CASINO_GAME_URL", "")
 ARQUIVO_SESSAO = os.getenv("SESSION_STATE_FILE", os.path.join(BASE_DIR, "sessao_salva.json"))
@@ -1013,6 +1013,22 @@ def elemento_apostavel(locator):
     return primeiro_elemento_apostavel(locator) is not None
 
 
+def primeiro_elemento_dom_visivel(locator, limite=32):
+    """Retorna o primeiro elemento DOM visivel sem executar actionability/trial do Playwright."""
+    try:
+        quantidade = min(max(0, int(locator.count())), max(1, int(limite)))
+    except Exception:
+        return None
+    for indice in range(quantidade):
+        try:
+            elemento = locator.nth(indice)
+            if elemento.is_visible():
+                return elemento
+        except Exception:
+            continue
+    return None
+
+
 def localizar_ficha_apostavel(frame, valor_ficha):
     try:
         candidatos = frame.locator("[data-role='chip'][data-value]")
@@ -1119,7 +1135,9 @@ def inspecionar_frame_apostavel(frame, planos):
             quantidade = 0
         if quantidade > 0:
             alvos_encontrados += 1
-        elemento = primeiro_elemento_apostavel(locator)
+        # BUG-047: nao usa click(trial=True) no fast path. Presenca + visibilidade
+        # bastam para localizar o alvo; o clique financeiro real usa force=True.
+        elemento = primeiro_elemento_dom_visivel(locator)
         if elemento is not None:
             elementos_alvos[alvo] = elemento
 
@@ -1196,16 +1214,16 @@ def localizar_frame_apostavel(page, planos):
 
 
 def clicar_superficie_ficha_playwright(page, elemento):
-    """Seleciona a ficha com o clique Playwright normal usado pelo executor simples original."""
+    """Seleciona a ficha imediatamente no fast path, ignorando actionability do Playwright."""
     try:
-        elemento.click(timeout=2000)
+        elemento.click(force=True, timeout=2000)
         page.wait_for_timeout(150)
-        return {"acionada": True, "relacao": "CLIQUE_PLAYWRIGHT_SIMPLES", "via": "PLAYWRIGHT_CLICK"}
+        return {"acionada": True, "relacao": "CLIQUE_PLAYWRIGHT_FORCE", "via": "PLAYWRIGHT_CLICK"}
     except Exception as erro:
         return {
             "acionada": False,
             "relacao": type(erro).__name__,
-            "motivo": f"falha no clique simples da ficha ({type(erro).__name__})",
+            "motivo": f"falha no clique forcado da ficha ({type(erro).__name__})",
         }
 
 
@@ -1356,25 +1374,29 @@ def aguardar_janela_aposta(page, aposta, planos):
             page.wait_for_timeout(min(50, max(1, int((alvo_temporal - agora) * 1000))))
             continue
 
-        # Após +8s, só prossegue enquanto a mesa ainda estiver numa fase pré-dados.
+        # BUG-047: +8s e fase pre-dados sao a autorizacao temporal. Faz uma unica
+        # leitura do DOM sem esperar actionability/trial dos alvos. Se os elementos
+        # ainda nem existem/nao estao visiveis, falha fechado em vez de chegar atrasado.
         if contexto["estado"] == "ABERTA":
             contexto_dom, ultimo_diagnostico = localizar_contexto_apostavel(page, planos)
-            if contexto_dom is not None:
-                decorrido_resolved_ms = (time.monotonic() - resolved_base) * 1000.0 if resolved_base > 0 else 0.0
-                if sincronizar:
-                    print(
-                        f"⚡ Ordem {aposta.get('order_id', 'n/a')}: janela real liberada em "
-                        f"{decorrido_resolved_ms:.0f}ms após Resolved; stage={contexto['stage'] or 'vazio'}; "
-                        "DOM pronto, iniciando clique simples."
-                    )
-                return contexto_dom, None
-            assinatura_dom = tuple(sorted(ultimo_diagnostico.items()))
-            if sincronizar and assinatura_dom != ultima_assinatura_dom:
+            decorrido_resolved_ms = (time.monotonic() - resolved_base) * 1000.0 if resolved_base > 0 else 0.0
+            if contexto_dom is None:
+                diagnostico_texto = formatar_diagnostico_janela(contexto, ultimo_diagnostico)
+                return None, {
+                    "status": "FALHOU",
+                    "motivo": (
+                        f"+8s atingido sem todos os elementos DOM visiveis; fast path nao aguardou actionability; "
+                        f"{diagnostico_texto}"
+                    ),
+                    "cliques_alvo": 0,
+                }
+            if sincronizar:
                 print(
-                    f"🔎 Ordem {aposta.get('order_id', 'n/a')}: +8s atingido; aguardando DOM acionável; "
-                    f"{formatar_diagnostico_janela(contexto, ultimo_diagnostico)}."
+                    f"⚡ Ordem {aposta.get('order_id', 'n/a')}: fast path liberado em "
+                    f"{decorrido_resolved_ms:.0f}ms após Resolved; stage={contexto['stage'] or 'vazio'}; "
+                    "DOM presente, clicando com force=True sem aguardar actionability."
                 )
-                ultima_assinatura_dom = assinatura_dom
+            return contexto_dom, None
 
         # FirstDie/SecondDie/.../Confirmation/Resolved nunca passam por estado ABERTA.
         if time.monotonic() >= prazo:
@@ -1389,16 +1411,16 @@ def aguardar_janela_aposta(page, aposta, planos):
 
 
 def clicar_alvo_financeiro_playwright(page, elemento):
-    """Executa o clique financeiro Playwright normal, sem force/evaluate/page.mouse."""
+    """Executa o clique financeiro imediato, sem actionability estrita do Playwright."""
     try:
-        elemento.click(timeout=2000)
+        elemento.click(force=True, timeout=2000)
         page.wait_for_timeout(120)
-        return {"acionada": True, "relacao": "CLIQUE_PLAYWRIGHT_SIMPLES"}
+        return {"acionada": True, "relacao": "CLIQUE_PLAYWRIGHT_FORCE"}
     except Exception as erro:
         return {
             "acionada": False,
             "relacao": type(erro).__name__,
-            "motivo": f"falha no clique simples do alvo ({type(erro).__name__})",
+            "motivo": f"falha no clique forcado do alvo ({type(erro).__name__})",
         }
 
 
@@ -1544,14 +1566,14 @@ def executar_aposta_na_tela(page, aposta):
         for plano in planos:
             alvo_elemento = contexto_dom["alvos"].get(plano["seletor_alvo"])
             if alvo_elemento is None:
-                alvo_elemento = primeiro_elemento_apostavel(
+                alvo_elemento = primeiro_elemento_dom_visivel(
                     frame_jogo.locator(f"[data-role='{plano['seletor_alvo']}']")
                 )
             if alvo_elemento is None:
                 status = "AMBIGUA" if cliques_alvo > 0 else "FALHOU"
                 return {
                     "status": status,
-                    "motivo": f"Alvo {plano['alvo']} deixou de estar acionável antes do clique",
+                    "motivo": f"Alvo {plano['alvo']} deixou de estar presente/visivel antes do clique",
                     "cliques_alvo": cliques_alvo
                 }
 
