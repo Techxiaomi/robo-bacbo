@@ -41,6 +41,8 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - O CI usa permissões `contents: read`, sem secrets, sem instalação de dependências e sem inicializar MySQL, Flask, Playwright ou rede do projeto.
 
 ### Fixed
+- BUG-032: quando uma camada interna do componente intercepta o ponteiro da ficha, o executor identifica a superfície central pertencente ao mesmo componente e pode acioná-la apenas para seleção da denominação. O fallback exige mudança confirmada no estado DOM antes de qualquer alvo financeiro.
+- Superfície externa, ausência de área, falta de mudança/seleção e qualquer erro encerram antes da aposta. Player/Banker/Tie nunca usam o fallback; stage e sequência continuam revalidados após a seleção.
 - BUG-031: a seleção não financeira da ficha deixa de exigir que `click(trial=True)` conclua em 250 ms. Uma ficha de valor exato e visível pode aguardar até 2 s por estabilidade no clique real; após isso o executor revalida `AcceptingBets` e a sequência antes de clicar em qualquer alvo financeiro.
 - Falha/timeout na ficha continua encerrando com zero cliques de alvo, sem `force=True`. Fichas repetidas em um plano composto não são reclicadas desnecessariamente.
 - BUG-030: uma ficha correspondente que esteja visível, porém não clicável por já estar selecionada, passa a ser aceita somente quando o DOM fornece marca explícita de seleção. Nesse caso o executor não tenta reclicar a ficha e mantém a prova de actionability do alvo antes da aposta.
