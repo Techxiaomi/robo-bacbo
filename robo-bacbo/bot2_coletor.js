@@ -2110,37 +2110,56 @@ function roboSintonizaEstrategia(robo, est) {
     return origens.includes(origem);
 }
 
-function fonteCanonicaAutoTrader(est) {
-    if (!est || typeof est !== 'object') return '';
-    if (est.is_dinamico) {
-        const roboDonoId = Number(est.robo_dono_id);
-        return Number.isInteger(roboDonoId) && roboDonoId > 0
-            ? `AUTO_PILOT_IA:${roboDonoId}`
-            : '';
-    }
-    return String(est.origem || '').trim();
-}
-
-function autoTraderAutorizaEstrategia(config, est, robos = []) {
+function idsRobosSelecionadosAutoTrader(config, robos = []) {
     const fontes = Array.isArray(config && config.fontes_sinal)
         ? config.fontes_sinal.map(fonte => String(fonte || '').trim()).filter(Boolean)
         : [];
-    const fonteCanonica = fonteCanonicaAutoTrader(est);
-    if (!fonteCanonica || fontes.length === 0) return false;
-    if (fontes.includes(fonteCanonica)) return true;
+    const listaRobos = Array.isArray(robos) ? robos : [];
+    const ids = new Set();
 
-    // Compatibilidade defensiva com configurações salvas antes do BUG-027.
-    // A autorização nova nunca depende do nome; o fallback existe apenas para
-    // não interromper traders legados enquanto eles ainda não forem recriados.
-    if (est && est.is_dinamico) {
-        const roboDono = (Array.isArray(robos) ? robos : []).find(
-            robo => Number(robo.id) === Number(est.robo_dono_id)
-        );
-        const nomeLegado = String(roboDono && roboDono.nome || '').trim();
-        return nomeLegado ? fontes.includes(`[AUTO] ${nomeLegado}`) : false;
+    for (const fonte of fontes) {
+        let match = /^ROBO:(\d+)$/i.exec(fonte);
+        if (match) {
+            ids.add(Number(match[1]));
+            continue;
+        }
+
+        // Migração defensiva de configurações anteriores ao BUG-033.
+        match = /^AUTO_PILOT_IA:(\d+)$/i.exec(fonte);
+        if (match) {
+            ids.add(Number(match[1]));
+            continue;
+        }
+        match = /^\[AUTO\]\s*(.+)$/i.exec(fonte);
+        if (match) {
+            const nome = String(match[1] || '').trim();
+            const roboLegado = listaRobos.find(robo => String(robo && robo.nome || '').trim() === nome);
+            if (roboLegado) ids.add(Number(roboLegado.id));
+        }
     }
 
-    return false;
+    return ids;
+}
+
+function robosAutoTraderAutorizadores(config, est, robos = []) {
+    const listaRobos = Array.isArray(robos) ? robos : [];
+    const idsSelecionados = idsRobosSelecionadosAutoTrader(config, listaRobos);
+    return listaRobos.filter(robo => {
+        const id = Number(robo && robo.id);
+        const ativo = !(robo && (robo.ativo === false || Number(robo.ativo) === 0));
+        return ativo && idsSelecionados.has(id) && roboSintonizaEstrategia(robo, est);
+    });
+}
+
+function autoTraderAutorizaEstrategia(config, est, robos = []) {
+    if (robosAutoTraderAutorizadores(config, est, robos).length > 0) return true;
+
+    const fontes = Array.isArray(config && config.fontes_sinal)
+        ? config.fontes_sinal.map(fonte => String(fonte || '').trim()).filter(Boolean)
+        : [];
+
+    // Último fallback para motores antigos que gravavam uma origem manual.
+    return !est.is_dinamico && fontes.includes(String(est.origem || '').trim());
 }
 
 function avaliarStopRedsRobo(robo, tipoResultado) {
@@ -3684,9 +3703,14 @@ app.post("/receber-sinal", async (req, res) => {
                                 let cf = trader.config;
                                 if (trader.ativo && trader.status_operacao === 'OPERANDO' && autoTraderAutorizaEstrategia(cf, est, ROBOS_MEMORIA)) {
 
+                                    const robosAutorizadores = robosAutoTraderAutorizadores(cf, est, ROBOS_MEMORIA);
+                                    const descricaoAutorizadores = robosAutorizadores.length > 0
+                                        ? robosAutorizadores.map(robo => `${robo.id}:${robo.nome}`).join(', ')
+                                        : `configuração legada:${String(est.origem || '').trim()}`;
+
                                     console.log(
                                         `🎯 Auto-Trader ${trader.id} (${trader.nome}) autorizado para o sinal `
-                                        + `${est.id} pela fonte ${fonteCanonicaAutoTrader(est)}.`
+                                        + `${est.id} pelo(s) robô(s) ativo(s) ${descricaoAutorizadores}.`
                                     );
 
                                     if (!traderDentroHorarioExecucao(cf)) {
