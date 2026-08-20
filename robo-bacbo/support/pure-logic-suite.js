@@ -355,33 +355,33 @@ test("BUG-033: painel lista somente robôs ativos e não renderiza origens", () 
     assert.match(source, /Auto-Trader \$\{trader\.id\} \(\$\{trader\.nome\}\) autorizado para o sinal/);
 });
 
-test("BUG-028: executor espera AcceptingBets estrutural e Node preserva o callback", () => {
+test("BUG-046: executor ancora a janela em Resolved + 8s e Node preserva o callback", () => {
     assert.match(executorPythonSource, /EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS = 180\.0/);
-    assert.match(executorPythonSource, /normalizado in \{"acceptingbets", "betting"\}/);
-    assert.match(executorPythonSource, /aguardando stage AcceptingBets \+ DOM acionável/);
+    assert.match(executorPythonSource, /normalizado in \{"waitingforbets", "closingbets", "acceptingbets", "betting"\}/);
+    assert.match(executorPythonSource, /ultimo_resolved_monotonic = 0\.0/);
+    assert.match(executorPythonSource, /resolved_monotonic_aceite/);
+    assert.match(executorPythonSource, /alvo_temporal = resolved_base \+ 8\.0/);
+    assert.match(executorPythonSource, /janela real alvo em \+8000ms/);
+    assert.match(executorPythonSource, /janela real liberada em/);
     assert.match(executorPythonSource, /if contexto\["estado"\] == "EXPIRADA":/);
-    assert.match(executorPythonSource, /Fusível operacional de .* atingido sem/);
     assert.match(executorPythonSource, /fichas_acionaveis/);
     assert.match(executorPythonSource, /alvos_acionaveis/);
     assert.match(executorPythonSource, /candidatos\.evaluate_all/);
-    assert.match(executorPythonSource, /última inspeção:/);
     assert.match(executorPythonSource, /JA_SELECIONADA/);
     assert.match(executorPythonSource, /CLICAR_AGUARDANDO_ESTABILIDADE/);
     assert.match(executorPythonSource, /selecionar_ficha_com_confirmacao/);
-    assert.match(executorPythonSource, /SUPERFICIE_/);
     assert.match(executorPythonSource, /SUPERFICIE_PLAYWRIGHT_/);
-    assert.match(executorPythonSource, /preselecionar_ficha_unica_antes_da_janela/);
     assert.match(executorPythonSource, /page\.wait_for_timeout\(25\)/);
-    assert.match(executorPythonSource, /page\.wait_for_timeout\(1500\)/);
     assert.match(executorPythonSource, /page\.wait_for_timeout\(2500\)/);
-    assert.equal((executorPythonSource.match(/elemento\.dispatch_event\("pointerdown"\)/g) || []).length, 2);
-    assert.equal((executorPythonSource.match(/elemento\.dispatch_event\("pointerup"\)/g) || []).length, 2);
-    assert.match(executorPythonSource, /page\.wait_for_timeout\(100\)/);
+    assert.equal((executorPythonSource.match(/elemento\.click\(timeout=2000\)/g) || []).length, 2);
+    assert.match(executorPythonSource, /page\.wait_for_timeout\(150\)/);
+    assert.match(executorPythonSource, /page\.wait_for_timeout\(120\)/);
+    assert.doesNotMatch(executorPythonSource, /aguardando 1500ms para estabilização visual das fichas/);
+    assert.doesNotMatch(executorPythonSource, /page\.mouse\.move/);
+    assert.doesNotMatch(executorPythonSource, /elemento\.dispatch_event\("pointerdown"\)/);
+    assert.doesNotMatch(executorPythonSource, /elemento\.dispatch_event\("pointerup"\)/);
     assert.doesNotMatch(executorPythonSource, /elemento\.evaluate\("el => el\.click\(\)"\)/);
-    assert.doesNotMatch(executorPythonSource, /position=\{"x": largura \/ 2\.0/);
-    assert.doesNotMatch(executorPythonSource, /alvo_elemento\.click\(timeout=750\)/);
     assert.doesNotMatch(executorPythonSource, /hit_elemento\.click/);
-    assert.doesNotMatch(executorPythonSource, /hit\.click\(\)/);
     assert.match(executorPythonSource, /aria-pressed/);
 
     const localizador = executorPythonSource.slice(
