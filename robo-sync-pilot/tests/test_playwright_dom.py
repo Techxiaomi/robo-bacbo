@@ -620,7 +620,7 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
         finally:
             pagina.close()
 
-    def test_bug028_stage_dealing_nao_autoriza_dom_visivel(self):
+    def test_bug038_stage_dealing_pode_preparar_ficha_mas_nao_autoriza_alvo(self):
         pagina = self.nova_pagina("/game.html")
         self.configurar_janela(25, "Dealing", timeout=1.0)
 
@@ -634,7 +634,9 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
             frame = self.frame_jogo(pagina)
             resultado = executar_aposta_na_tela(pagina, self.ordem_sincronizada(25))
             self.assertEqual(resultado["status"], "EXPIRADA")
-            self.assertEqual(frame.evaluate("window.__chipClicks")["10"], 0)
+            # BUG-038: selecionar a ficha e preparacao nao financeira; o alvo continua
+            # proibido enquanto Dealing/FirstDie e demais stages nao apostaveis estiverem ativos.
+            self.assertEqual(frame.evaluate("window.__chipClicks")["10"], 1)
             self.assertEqual(frame.evaluate("window.__targetClicks")["playerA"], 0)
         finally:
             timer.cancel()
