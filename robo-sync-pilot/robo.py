@@ -19,8 +19,8 @@ load_env_file(os.path.join(PROJECT_ROOT, ".env"))
 # ====================================================================
 # CONFIGURAÇÕES GERAIS E CONTROLE DE VERSÃO
 # ====================================================================
-VERSAO_ROBO = "v1.6.4"
-NOME_ATUALIZACAO = "Stage AcceptingBets Fail-Closed"
+VERSAO_ROBO = "v1.6.5"
+NOME_ATUALIZACAO = "DOM Batch Scan na Janela AcceptingBets"
 
 URL_CASSINO = os.getenv("CASINO_GAME_URL", "")
 ARQUIVO_SESSAO = os.getenv("SESSION_STATE_FILE", os.path.join(BASE_DIR, "sessao_salva.json"))
@@ -986,30 +986,31 @@ def elemento_apostavel(locator):
 def localizar_ficha_apostavel(frame, valor_ficha):
     try:
         candidatos = frame.locator("[data-role='chip'][data-value]")
-        quantidade = min(max(0, int(candidatos.count())), 64)
+        valores_brutos = candidatos.evaluate_all(
+            "elementos => elementos.slice(0, 64).map(el => el.getAttribute('data-value') || '')"
+        )
     except Exception:
         return None, 0
 
-    correspondentes = []
-    for indice in range(quantidade):
-        candidato = candidatos.nth(indice)
+    indices_correspondentes = []
+    for indice, valor_bruto in enumerate(valores_brutos or []):
         try:
-            valor_bruto = str(candidato.get_attribute("data-value", timeout=150) or "").strip()
-            valor_numerico = float(valor_bruto.replace(" ", "").replace(",", "."))
+            valor_numerico = float(str(valor_bruto).strip().replace(" ", "").replace(",", "."))
         except Exception:
             continue
         if abs(valor_numerico - float(valor_ficha)) < 0.001:
-            correspondentes.append(candidato)
+            indices_correspondentes.append(indice)
 
-    for candidato in correspondentes:
+    for indice in indices_correspondentes:
+        candidato = candidatos.nth(indice)
         try:
             if not candidato.is_visible():
                 continue
             candidato.click(trial=True, timeout=250)
-            return candidato, len(correspondentes)
+            return candidato, len(indices_correspondentes)
         except Exception:
             continue
-    return None, len(correspondentes)
+    return None, len(indices_correspondentes)
 
 
 def inspecionar_frame_apostavel(frame, planos):
@@ -1133,6 +1134,7 @@ def aguardar_janela_aposta(page, aposta, planos):
     ultimo_contexto = avaliar_contexto_janela_aposta(aposta)
     ultimo_diagnostico = {}
     ultima_assinatura = None
+    ultima_assinatura_dom = None
 
     if sincronizar:
         print(
@@ -1172,9 +1174,13 @@ def aguardar_janela_aposta(page, aposta, planos):
                 "cliques_alvo": 0
             }
         if contexto["estado"] == "EXPIRADA":
+            diagnostico_texto = formatar_diagnostico_janela(ultimo_contexto, ultimo_diagnostico)
             return None, {
                 "status": "EXPIRADA",
-                "motivo": "Nova rodada foi resolvida antes da execução; ordem descartada sem cliques",
+                "motivo": (
+                    "Nova rodada foi resolvida antes da execução; ordem descartada sem cliques; "
+                    f"última inspeção: {diagnostico_texto}"
+                ),
                 "cliques_alvo": 0
             }
 
@@ -1182,6 +1188,13 @@ def aguardar_janela_aposta(page, aposta, planos):
             contexto_dom, ultimo_diagnostico = localizar_contexto_apostavel(page, planos)
             if contexto_dom is not None:
                 return contexto_dom, None
+            assinatura_dom = tuple(sorted(ultimo_diagnostico.items()))
+            if sincronizar and assinatura_dom != ultima_assinatura_dom:
+                print(
+                    f"🔎 Ordem {aposta.get('order_id', 'n/a')}: AcceptingBets detectado, "
+                    f"aguardando DOM completo; {formatar_diagnostico_janela(contexto, ultimo_diagnostico)}."
+                )
+                ultima_assinatura_dom = assinatura_dom
 
         if time.monotonic() >= prazo:
             diagnostico_texto = formatar_diagnostico_janela(ultimo_contexto, ultimo_diagnostico)
