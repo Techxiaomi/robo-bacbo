@@ -41,6 +41,9 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - O CI usa permissões `contents: read`, sem secrets, sem instalação de dependências e sem inicializar MySQL, Flask, Playwright ou rede do projeto.
 
 ### Fixed
+- BUG-036: a superfície visual que intercepta a ficha passa a receber um clique real do Playwright (`pointerdown`/`pointerup`/`click`) no elemento efetivamente localizado por `elementFromPoint`. O fallback anterior usava `HTMLElement.click()`, que não reproduzia o ciclo de ponteiro exigido pela Evolution e podia não acionar o seletor interno da denominação.
+- A superfície só é aceita quando pertence à própria ficha, a um descendente/ancestral ou ao mesmo contêiner imediato, está visível e o clique Playwright termina sem `force=True`. A interação permanece não financeira e o stage/`coletor_seq` continuam sendo revalidados antes de Player/Banker/Tie.
+- O caminho agora equivale ao clique Playwright simples que já havia funcionado na execução manual, mas preserva autenticação, idempotência, pré-validação do plano composto e todos os gates fail-closed atuais.
 - BUG-035: falhas de envio Telegram deixam de ser reduzidas ao aviso genérico “nenhuma entrega”. O backend registra, sem expor token ou Chat ID completo, timeout, erro HTTP e descrição devolvida pela API para cada destino.
 - A edição do robô mantém o token oculto por segurança, exibe confirmação explícita de que ele está armazenado, permite editar o Chat ID principal e oferece teste sob demanda usando somente o token já salvo.
 - Mensagens de entrada, Gale, Green, empate protegido e Red recebem layout visual consistente com robô, estratégia, padrão, assertividade, entrada e resultado. Entrada e desfecho informam a sequência atual de Greens do próprio robô; o Green usa o contador persistido após o fechamento da rodada.
