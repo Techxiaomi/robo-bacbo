@@ -107,7 +107,20 @@ test("callback EXECUTADA pode chegar antes do ACK HTTP", async () => {
     const logic = carregarTransporte(async (_url, options) => {
         const payload = JSON.parse(options.body);
         assert.equal(payload.order_id, orderId);
-        assert.equal(registrar({ order_id: orderId, status: "EXECUTADA", motivo: "DOM ok" }), true);
+        assert.equal(registrar({
+            order_id: orderId,
+            status: "EXECUTADA",
+            motivo: "Aceite financeiro confirmado",
+            confirmacao: {
+                confirmada: true,
+                metodo: "SALDO_DEBITADO",
+                saldo_antes: 100,
+                saldo_depois: 90,
+                exposicao_esperada: 10,
+                debito_observado: 10,
+                confirmada_em: Date.now()
+            }
+        }), true);
         return {
             ok: true,
             status: 200,
@@ -145,7 +158,7 @@ test("callback FALHOU vira FALHA_EXECUCAO e callback EXPIRADA vira ORDEM_EXPIRAD
 test("DIRETO e GALE continuam persistindo PREPARANDO antes do POST ao executor", () => {
     const diretoIntent = source.indexOf("intencaoDireto = await criarIntencaoOrdem(dbPool");
     const diretoSend = source.indexOf(
-        "await enviarOrdemAoExecutor(alvoPython, valorArredondado, ordemExecutorIdDireto, planoDireto.apostas)",
+        "const confirmacaoExecutorDireto = await enviarOrdemAoExecutor(",
         diretoIntent
     );
     assert.ok(diretoIntent >= 0 && diretoSend > diretoIntent);
@@ -153,7 +166,7 @@ test("DIRETO e GALE continuam persistindo PREPARANDO antes do POST ao executor",
     const galeIntent = source.indexOf("intencaoGale = await criarIntencaoOrdem(conexaoGale");
     const galeCommit = source.indexOf("await conexaoGale.commit();", galeIntent);
     const galeSend = source.indexOf(
-        "await enviarOrdemAoExecutor(alvoPython, valorGale, ordemExecutorIdGale, planoGale.apostas)",
+        "const confirmacaoExecutorGale = await enviarOrdemAoExecutor(",
         galeIntent
     );
     assert.ok(galeIntent >= 0 && galeCommit > galeIntent && galeSend > galeCommit);
