@@ -292,6 +292,8 @@ test("BUG-028: executor espera AcceptingBets estrutural e Node preserva o callba
     assert.match(executorPythonSource, /Fusível operacional de .* atingido sem/);
     assert.match(executorPythonSource, /fichas_acionaveis/);
     assert.match(executorPythonSource, /alvos_acionaveis/);
+    assert.match(executorPythonSource, /candidatos\.evaluate_all/);
+    assert.match(executorPythonSource, /última inspeção:/);
 
     const localizador = executorPythonSource.slice(
         executorPythonSource.indexOf("def localizar_contexto_apostavel"),
