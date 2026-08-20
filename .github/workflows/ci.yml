@@ -16,8 +16,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  apply-bug046-node-contract:
-    name: Apply BUG-046 Node contract
+  apply-bug046-contracts:
+    name: Apply BUG-046 test contracts
     if: github.event_name == 'pull_request' && github.head_ref == 'agent/bug-023-websocket-reconnect-continuity'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -30,21 +30,24 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Align contract
-        run: python scripts/fix_bug046_node_contract.py
-      - name: Validate Node suite
-        run: npm test
-        working-directory: robo-bacbo
-      - name: Commit contract fix
+      - name: Align contracts
+        run: |
+          python scripts/fix_bug046_node_contract.py
+          python scripts/fix_bug046_python_contract.py
+      - name: Validate focused suites
+        run: |
+          python robo-sync-pilot/tests/test_pure_logic.py
+          cd robo-bacbo && npm test
+      - name: Commit contract fixes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add robo-bacbo/support/pure-logic-suite.js
+          git add robo-bacbo/support/pure-logic-suite.js robo-sync-pilot/tests/test_pure_logic.py
           if git diff --cached --quiet; then
-            echo "Node contract already aligned"
+            echo "BUG-046 contracts already aligned"
             exit 0
           fi
-          git commit -m "test: align executor contract with Resolved plus 8 seconds"
+          git commit -m "test: align BUG-046 Resolved plus 8 seconds contracts"
           git push origin HEAD:agent/bug-023-websocket-reconnect-continuity
 
   node-tests:
