@@ -36,12 +36,14 @@ class Bug038FastPathContract(unittest.TestCase):
         self.assertIn('[class*="close" i]', SOURCE)
         self.assertIn('fechar.click(force=True, timeout=1200)', SOURCE)
         self.assertIn('page.wait_for_timeout(1000)', SOURCE)
-        self.assertEqual(SOURCE.count('elemento.dispatch_event("pointerdown")'), 2)
-        self.assertEqual(SOURCE.count('elemento.dispatch_event("pointerup")'), 2)
-        self.assertIn("page.wait_for_timeout(100)", SOURCE)
+        self.assertEqual(SOURCE.count('elemento.click(force=True, timeout=1200)'), 2)
+        self.assertNotIn('elemento.dispatch_event("pointerdown")', SOURCE)
+        self.assertNotIn('elemento.dispatch_event("pointerup")', SOURCE)
         self.assertNotIn('elemento.evaluate("el => el.click()")', SOURCE)
-        self.assertNotIn('position={"x": largura / 2.0', SOURCE)
         self.assertNotIn("hit_elemento.click", SOURCE)
+        atraso = SOURCE.index("page.wait_for_timeout(2500)")
+        primeira_leitura = SOURCE.index("saldo_atual = ler_saldo_atual(page)", atraso)
+        self.assertLess(atraso, primeira_leitura)
 
     def test_loop_executor_polling_rapido(self):
         self.assertIn("page.wait_for_timeout(50)", SOURCE)

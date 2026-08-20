@@ -20,7 +20,7 @@ load_env_file(os.path.join(PROJECT_ROOT, ".env"))
 # CONFIGURAÇÕES GERAIS E CONTROLE DE VERSÃO
 # ====================================================================
 VERSAO_ROBO = "v1.6.13"
-NOME_ATUALIZACAO = "BUG-043 Limpeza Preventiva de Modal"
+NOME_ATUALIZACAO = "BUG-044 Clique Nativo apos Limpeza de Interface"
 
 URL_CASSINO = os.getenv("CASINO_GAME_URL", "")
 ARQUIVO_SESSAO = os.getenv("SESSION_STATE_FILE", os.path.join(BASE_DIR, "sessao_salva.json"))
@@ -1193,20 +1193,19 @@ def localizar_frame_apostavel(page, planos):
 
 
 def clicar_superficie_ficha_playwright(page, elemento):
-    """Dispara pointerdown/pointerup diretamente na ficha canonica, sem actionability de click()."""
+    """Executa clique nativo Playwright na ficha canonica apos limpeza preventiva da UI."""
     try:
-        # BUG-042: a Evolution pode manter overlays transparentes sobre a ficha.
-        # dispatch_event nao executa os actionability checks de locator.click(),
-        # mas entrega os eventos ao proprio no canonico identificado no preflight.
-        elemento.dispatch_event("pointerdown")
-        page.wait_for_timeout(100)
-        elemento.dispatch_event("pointerup")
-        return {"acionada": True, "relacao": "POINTER_EVENTS", "via": "DISPATCH_EVENT"}
+        # BUG-044: com o overlay preventivamente removido, volta ao clique nativo
+        # do Playwright para gerar a sequencia completa de eventos de ponteiro/mouse.
+        # force=True ignora somente os actionability checks residuais; o clique do
+        # Playwright continua sendo entregue no centro do proprio elemento canonico.
+        elemento.click(force=True, timeout=1200)
+        return {"acionada": True, "relacao": "CLIQUE_NATIVO_FORCE", "via": "PLAYWRIGHT_CLICK"}
     except Exception as erro:
         return {
             "acionada": False,
             "relacao": type(erro).__name__,
-            "motivo": f"falha no pointerdown/pointerup da ficha ({type(erro).__name__})",
+            "motivo": f"falha no clique nativo da ficha ({type(erro).__name__})",
         }
 
 
@@ -1414,19 +1413,17 @@ def aguardar_janela_aposta(page, aposta, planos):
 
 
 def clicar_alvo_financeiro_playwright(page, elemento):
-    """Dispara pointerdown/pointerup no alvo financeiro canonico, sem locator.click() ou force=True."""
+    """Executa clique nativo Playwright no alvo financeiro canonico apos limpeza da UI."""
     try:
-        # BUG-042: entrega a sequencia de ponteiro diretamente ao componente
-        # financeiro ja localizado e validado pelo preflight.
-        elemento.dispatch_event("pointerdown")
-        page.wait_for_timeout(100)
-        elemento.dispatch_event("pointerup")
-        return {"acionada": True, "relacao": "POINTER_EVENTS"}
+        # BUG-044: o clique nativo produz pointerdown/mousedown/pointerup/mouseup/click,
+        # evitando a limitacao dos dispatch_event sinteticos observada na mesa real.
+        elemento.click(force=True, timeout=1200)
+        return {"acionada": True, "relacao": "CLIQUE_NATIVO_FORCE"}
     except Exception as erro:
         return {
             "acionada": False,
             "relacao": type(erro).__name__,
-            "motivo": f"falha no pointerdown/pointerup do alvo ({type(erro).__name__})",
+            "motivo": f"falha no clique nativo do alvo ({type(erro).__name__})",
         }
 
 
@@ -1451,7 +1448,7 @@ def confirmar_aceite_financeiro_aposta(page, saldo_antes, exposicao_esperada):
 
     tolerancia = max(0.01, float(EXECUTOR_BET_ACCEPTANCE_TOLERANCE))
 
-    # BUG-042: depois do pointerup financeiro, a Evolution pode levar mais de 2 s para
+    # BUG-044: depois do clique financeiro nativo, a Evolution pode levar mais de 2 s para
     # refletir no HTML o débito já processado pelo servidor. Não lê o saldo antes
     # dessa janela mínima para evitar classificar atualização visual tardia como
     # "clique fantasma".
