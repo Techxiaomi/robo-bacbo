@@ -34,5 +34,13 @@ text = text.replace(
     1,
 )
 
+# O clique Playwright simples gera pointerdown real. A expectativa 0 pertencia ao antigo
+# fallback de superfície e não descreve mais o comportamento intencional do executor.
+text = text.replace(
+    '            self.assertEqual(frame.evaluate("window.__surfacePointerDown"), 0)\n',
+    '            self.assertEqual(frame.evaluate("window.__surfacePointerDown"), 1)\n',
+    1,
+)
+
 FILE.write_text(text, encoding="utf-8")
-print(f"Playwright BUG-046 alinhado: {count} ordem(ns) recebeu(ram) resolved_monotonic_aceite.")
+print(f"Playwright BUG-046 alinhado: {count} ordem(ns) recebeu(ram) resolved_monotonic_aceite; clique simples exige pointerdown real.")
