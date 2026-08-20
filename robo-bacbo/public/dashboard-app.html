@@ -1424,10 +1424,18 @@
 
                     <div style="background: #222; padding: 15px; border-radius: 8px; border: 1px solid #333; margin-bottom:15px;">
                         <h4 style="margin:0 0 10px 0; font-size:12px; color:#aaa; text-transform:uppercase;">📱 Configuração Telegram Bot</h4>
-                        <div class="form-group">
-                            <label>Token do Bot API</label>
-                            <input type="text" id="robo-token" placeholder="000000:AAHHh...">
+                        <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end;">
+                            <div class="form-group" style="flex:2; min-width:260px;">
+                                <label>Token do Bot API</label>
+                                <input type="password" id="robo-token" autocomplete="new-password" placeholder="000000:AAHHh...">
+                            </div>
+                            <div class="form-group" style="flex:1; min-width:210px;">
+                                <label>Chat ID principal</label>
+                                <input type="text" id="robo-chat-id" placeholder="Ex: 123456789 ou -100...">
+                            </div>
+                            <button type="button" id="btn-robo-testar-telegram" class="btn" style="background:#17a2b8; height:36px; padding:0 14px;" onclick="testarTelegramRobo()" disabled>🔔 Testar token salvo</button>
                         </div>
+                        <div id="robo-telegram-status" style="margin-top:9px; color:#888; font-size:11px;">Informe o token e ao menos um Chat ID. O token nunca será exibido novamente após ser salvo.</div>
                     </div>
 
                     <div style="background: #1a1a1a; padding: 15px; border-radius: 8px; border: 1px solid #333; margin-bottom:15px;">
@@ -1948,7 +1956,11 @@
             preencherCampoRobo('robo-tag', '');
             preencherCampoRobo('robo-cor', '#007bff');
             preencherCampoRobo('robo-token', '');
+            preencherCampoRobo('robo-chat-id', '');
             document.getElementById('robo-token').placeholder = '123456:ABC...';
+            document.getElementById('robo-telegram-status').innerText = 'Informe o token e ao menos um Chat ID. O token nunca será exibido novamente após ser salvo.';
+            document.getElementById('robo-telegram-status').style.color = '#888';
+            document.getElementById('btn-robo-testar-telegram').disabled = true;
             preencherCampoRobo('robo-min-assert', 0);
             preencherCampoRobo('robo-stop-red', 0);
             preencherCheckRobo('robo-ativo', true);
@@ -2018,9 +2030,15 @@
             preencherCampoRobo('robo-tag', robo.tag_visual || '');
             preencherCampoRobo('robo-cor', robo.cor_hex || '#007bff');
             preencherCampoRobo('robo-token', '');
+            preencherCampoRobo('robo-chat-id', robo.telegram_chat_id || '');
             document.getElementById('robo-token').placeholder = robo.telegram_configurado
                 ? 'Token já configurado — deixe em branco para manter'
                 : 'Informe o Token do Bot';
+            document.getElementById('robo-telegram-status').innerText = robo.telegram_configurado
+                ? '🔒 Token armazenado com segurança. Ele não é devolvido pela API; deixe o campo vazio para mantê-lo.'
+                : '⚠️ Nenhum token Telegram está configurado para este robô.';
+            document.getElementById('robo-telegram-status').style.color = robo.telegram_configurado ? '#28a745' : '#ffc107';
+            document.getElementById('btn-robo-testar-telegram').disabled = !robo.telegram_configurado;
             preencherCampoRobo('robo-min-assert', robo.min_assertividade ?? 0);
             preencherCampoRobo('robo-stop-red', robo.stop_reds_seguidos ?? 0);
             preencherCheckRobo('robo-ativo', boolRobo(robo.ativo));
@@ -2130,7 +2148,7 @@
                 tag: document.getElementById('robo-tag').value.trim(),
                 cor: document.getElementById('robo-cor').value || '#007bff',
                 telegram_token: document.getElementById('robo-token').value.trim(),
-                telegram_chat_id: roboBase?.telegram_chat_id || '',
+                telegram_chat_id: document.getElementById('robo-chat-id').value.trim(),
                 enviar_telegram: document.getElementById('robo-envia-tel').checked,
                 enviar_web: document.getElementById('robo-envia-web').checked,
                 min_assert: Math.min(100, Math.max(0, parseFloat(document.getElementById('robo-min-assert').value) || 0)),
@@ -2150,6 +2168,10 @@
             if (payload.enviar_telegram && !payload.telegram_token && !tokenJaConfigurado) {
                 return alert('Informe o Token do Bot ou desative "Enviar para Telegram".');
             }
+            const possuiDestinoTelegram = payload.telegram_chat_id !== '' || payload.destinatarios.length > 0;
+            if (payload.enviar_telegram && !possuiDestinoTelegram) {
+                return alert('Informe o Chat ID principal ou adicione ao menos um destinatário do Telegram.');
+            }
 
             try {
                 const url = roboEditandoId === null ? '/api/robo' : `/api/robo/${roboEditandoId}`;
@@ -2165,6 +2187,56 @@
                 await carregarRobos();
             } catch (e) {
                 alert('Erro de conexão ao salvar o robô.');
+            }
+        }
+
+        async function testarTelegramRobo() {
+            if (roboEditandoId === null) {
+                return alert('Salve o robô antes de testar a conexão com o Telegram.');
+            }
+
+            if (document.getElementById('robo-token').value.trim()) {
+                return alert('Existe um token novo ainda não salvo. Salve o robô e reabra a edição antes de executar o teste.');
+            }
+
+            const botao = document.getElementById('btn-robo-testar-telegram');
+            const status = document.getElementById('robo-telegram-status');
+            const textoAnterior = botao.innerText;
+            botao.disabled = true;
+            botao.innerText = '⏳ Testando...';
+            status.style.color = '#17a2b8';
+            status.innerText = 'Consultando a API do Telegram com o token armazenado...';
+
+            try {
+                const resposta = await fetch(`/api/robo/${roboEditandoId}/testar-telegram`, { method: 'POST' });
+                let dados = {};
+                try { dados = await resposta.json(); } catch (e) {}
+
+                const detalhes = Array.isArray(dados.detalhes) ? dados.detalhes : [];
+                const falhas = detalhes.filter(item => !item.sucesso);
+                if (resposta.ok && dados.sucesso) {
+                    status.style.color = '#28a745';
+                    status.innerText = `✅ Telegram confirmado em ${dados.entregues}/${dados.total} destino(s).`;
+                    alert('Teste enviado com sucesso. Confira a mensagem recebida no Telegram.');
+                    return;
+                }
+
+                const motivo = falhas.length
+                    ? falhas.map(item => `${item.destino}: ${item.erro || 'falha não detalhada'}`).join('\n')
+                    : ({
+                        telegram_token_ausente: 'O robô não possui token salvo.',
+                        telegram_destino_ausente: 'O robô não possui Chat ID configurado.'
+                    }[dados.erro] || 'A API do Telegram não confirmou a entrega.');
+                status.style.color = '#ff7777';
+                status.innerText = `❌ Falha no teste: ${motivo.replace(/\n/g, ' | ')}`;
+                alert(`Falha no teste do Telegram:\n${motivo}`);
+            } catch (e) {
+                status.style.color = '#ff7777';
+                status.innerText = '❌ Não foi possível consultar o backend para testar o Telegram.';
+                alert('Falha de comunicação com o backend durante o teste do Telegram.');
+            } finally {
+                botao.disabled = false;
+                botao.innerText = textoAnterior;
             }
         }
 
