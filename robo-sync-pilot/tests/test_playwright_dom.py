@@ -34,6 +34,7 @@ def carregar_funcoes_reais():
         "localizar_frame_apostavel",
         "clicar_superficie_ficha_playwright",
         "selecionar_ficha_com_confirmacao",
+        "preselecionar_ficha_unica_antes_da_janela",
         "formatar_diagnostico_janela",
         "aguardar_janela_aposta",
         "confirmar_aceite_financeiro_aposta",
