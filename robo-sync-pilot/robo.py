@@ -20,7 +20,7 @@ load_env_file(os.path.join(PROJECT_ROOT, ".env"))
 # CONFIGURAÇÕES GERAIS E CONTROLE DE VERSÃO
 # ====================================================================
 VERSAO_ROBO = "v1.6.13"
-NOME_ATUALIZACAO = "BUG-044 Clique Nativo apos Limpeza de Interface"
+NOME_ATUALIZACAO = "BUG-045 Clique Fisico via page.mouse"
 
 URL_CASSINO = os.getenv("CASINO_GAME_URL", "")
 ARQUIVO_SESSAO = os.getenv("SESSION_STATE_FILE", os.path.join(BASE_DIR, "sessao_salva.json"))
@@ -1192,21 +1192,53 @@ def localizar_frame_apostavel(page, planos):
     return contexto_dom["frame"] if contexto_dom is not None else None
 
 
-def clicar_superficie_ficha_playwright(page, elemento):
-    """Executa clique nativo Playwright na ficha canonica apos limpeza preventiva da UI."""
+def clique_fisico_humano(page, elemento):
+    """Move o ponteiro ate o centro do elemento e executa down/up reais via page.mouse."""
     try:
-        # BUG-044: com o overlay preventivamente removido, volta ao clique nativo
-        # do Playwright para gerar a sequencia completa de eventos de ponteiro/mouse.
-        # force=True ignora somente os actionability checks residuais; o clique do
-        # Playwright continua sendo entregue no centro do proprio elemento canonico.
-        elemento.click(force=True, timeout=1200)
-        return {"acionada": True, "relacao": "CLIQUE_NATIVO_FORCE", "via": "PLAYWRIGHT_CLICK"}
+        box = elemento.bounding_box()
+        if not box:
+            return {
+                "acionada": False,
+                "relacao": "SEM_BOUNDING_BOX",
+                "motivo": "Elemento fora da area visivel para calcular bounding_box",
+            }
+        largura = float(box.get("width") or 0.0)
+        altura = float(box.get("height") or 0.0)
+        if largura <= 0 or altura <= 0:
+            return {
+                "acionada": False,
+                "relacao": "BOUNDING_BOX_INVALIDO",
+                "motivo": "Bounding box sem dimensoes positivas",
+            }
+        x = float(box["x"]) + largura / 2.0
+        y = float(box["y"]) + altura / 2.0
+        page.mouse.move(x, y, steps=10)
+        page.wait_for_timeout(100)
+        page.mouse.down()
+        page.wait_for_timeout(150)
+        page.mouse.up()
+        page.wait_for_timeout(300)
+        return {
+            "acionada": True,
+            "relacao": "MOUSE_FISICO",
+            "via": "PLAYWRIGHT_PAGE_MOUSE",
+            "x": x,
+            "y": y,
+        }
     except Exception as erro:
         return {
             "acionada": False,
             "relacao": type(erro).__name__,
-            "motivo": f"falha no clique nativo da ficha ({type(erro).__name__})",
+            "motivo": f"falha no clique fisico ({type(erro).__name__})",
         }
+
+
+def clicar_superficie_ficha_playwright(page, elemento):
+    """Usa page.mouse para reproduzir a trajetoria fisica ate a ficha canonica."""
+    resultado = clique_fisico_humano(page, elemento)
+    if resultado.get("acionada") is True:
+        return {"acionada": True, "relacao": "MOUSE_FISICO", "via": "PLAYWRIGHT_PAGE_MOUSE"}
+    return resultado
 
 
 def selecionar_ficha_com_confirmacao(page, ficha_contexto, valor_ficha):
@@ -1413,18 +1445,11 @@ def aguardar_janela_aposta(page, aposta, planos):
 
 
 def clicar_alvo_financeiro_playwright(page, elemento):
-    """Executa clique nativo Playwright no alvo financeiro canonico apos limpeza da UI."""
-    try:
-        # BUG-044: o clique nativo produz pointerdown/mousedown/pointerup/mouseup/click,
-        # evitando a limitacao dos dispatch_event sinteticos observada na mesa real.
-        elemento.click(force=True, timeout=1200)
-        return {"acionada": True, "relacao": "CLIQUE_NATIVO_FORCE"}
-    except Exception as erro:
-        return {
-            "acionada": False,
-            "relacao": type(erro).__name__,
-            "motivo": f"falha no clique nativo do alvo ({type(erro).__name__})",
-        }
+    """Usa page.mouse no centro do alvo financeiro canonico."""
+    resultado = clique_fisico_humano(page, elemento)
+    if resultado.get("acionada") is True:
+        return {"acionada": True, "relacao": "MOUSE_FISICO"}
+    return resultado
 
 
 def confirmar_aceite_financeiro_aposta(page, saldo_antes, exposicao_esperada):
@@ -1448,7 +1473,7 @@ def confirmar_aceite_financeiro_aposta(page, saldo_antes, exposicao_esperada):
 
     tolerancia = max(0.01, float(EXECUTOR_BET_ACCEPTANCE_TOLERANCE))
 
-    # BUG-044: depois do clique financeiro nativo, a Evolution pode levar mais de 2 s para
+    # BUG-045: depois do mouse.up financeiro, a Evolution pode levar mais de 2 s para
     # refletir no HTML o débito já processado pelo servidor. Não lê o saldo antes
     # dessa janela mínima para evitar classificar atualização visual tardia como
     # "clique fantasma".
