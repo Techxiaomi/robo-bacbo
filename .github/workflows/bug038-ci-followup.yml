@@ -1,0 +1,38 @@
+name: BUG-038 CI follow-up
+
+on:
+  push:
+    branches:
+      - agent/bug-023-websocket-reconnect-continuity
+    paths:
+      - scripts/apply_bug038_ci_followup.py
+      - .github/workflows/bug038-ci-followup.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/bug-023-websocket-reconnect-continuity
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply follow-up
+        run: python scripts/apply_bug038_ci_followup.py
+      - name: Validate syntax and diff
+        run: |
+          python -m py_compile robo-sync-pilot/tests/test_playwright_dom.py
+          git diff --check
+      - name: Commit follow-up and remove applicator
+        run: |
+          rm -f scripts/apply_bug038_ci_followup.py .github/workflows/bug038-ci-followup.yml
+          git config user.name "Techxiaomi"
+          git config user.email "144563117+Techxiaomi@users.noreply.github.com"
+          git add -A
+          git commit -m "test: alinhar regressões ao fast path BUG-038"
+          git push origin HEAD:agent/bug-023-websocket-reconnect-continuity
