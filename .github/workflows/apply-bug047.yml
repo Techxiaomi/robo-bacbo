@@ -2,7 +2,7 @@ name: Apply BUG-047 fast path
 
 on:
   pull_request:
-    types: [ready_for_review]
+    types: [synchronize]
 
 permissions:
   contents: write
