@@ -20,7 +20,7 @@ load_env_file(os.path.join(PROJECT_ROOT, ".env"))
 # CONFIGURAÇÕES GERAIS E CONTROLE DE VERSÃO
 # ====================================================================
 VERSAO_ROBO = "v1.6.13"
-NOME_ATUALIZACAO = "BUG-042 Pointer Events e Confirmação 2500ms"
+NOME_ATUALIZACAO = "BUG-043 Limpeza Preventiva de Modal"
 
 URL_CASSINO = os.getenv("CASINO_GAME_URL", "")
 ARQUIVO_SESSAO = os.getenv("SESSION_STATE_FILE", os.path.join(BASE_DIR, "sessao_salva.json"))
@@ -1294,6 +1294,27 @@ def aguardar_janela_aposta(page, aposta, planos):
     ultima_assinatura = None
     ultima_assinatura_dom = None
     aberta_detectada_em = None
+
+    # BUG-043: alguns carregamentos da Evolution abrem um painel de ajuda/boas-vindas
+    # sobre a mesa. Esse overlay pode interceptar os eventos financeiros mesmo quando
+    # o DOM da ficha/alvo esta correto. A limpeza e oportunista e nao altera o fluxo
+    # quando nenhum modal estiver presente.
+    try:
+        seletor_fechar_modal = (
+            'button[aria-label="Close"], '
+            'button[aria-label="Fechar"], '
+            '[class*="close" i]'
+        )
+        candidatos_fechar = page.locator(seletor_fechar_modal)
+        for indice in range(min(candidatos_fechar.count(), 8)):
+            fechar = candidatos_fechar.nth(indice)
+            if fechar.is_visible():
+                fechar.click(force=True, timeout=1200)
+                page.wait_for_timeout(1000)
+                print("🧹 Interface limpa: modal/overlay preventivo fechado antes da espera financeira.")
+                break
+    except Exception:
+        pass
 
     if sincronizar:
         print(
