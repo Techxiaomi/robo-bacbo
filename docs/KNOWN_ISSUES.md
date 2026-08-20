@@ -157,6 +157,22 @@ Qualquer interrupção estrutural reconhecida ou sinalizada pelo Python invalida
 
 Risco residual externo: o projeto não presume que `roundId` seja numérico/sequencial sem contrato oficial. Se a plataforma omitir uma rodada completa, continuar enviando outros `playerState` válidos e retornar antes do watchdog, uma única fonte não consegue provar matematicamente a ausência. A proteção prioriza falhar fechado em fechamento, silêncio e transições observáveis; reconciliação por uma segunda fonte oficial/roadmap continua sendo a única forma de elevar essa garantia contra omissão totalmente invisível da fonte primária.
 
+### BUG-034 — Ficha corrente não produzia mudança após novo acionamento
+
+Status: **mitigado em código; validação operacional no site real pendente**.
+
+Na mesa real, a superfície da ficha R$5 foi acionada, porém o DOM permaneceu idêntico. Isso é ambíguo: R$5 poderia já estar corrente ou o evento poderia não ter selecionado nada. Aceitar sem prova arriscaria usar outra denominação.
+
+O executor agora tenta provar o estado sem exposição: escolhe outra ficha visível do mesmo componente e exige mudança na assinatura semântica/visual da ficha desejada; em seguida retorna a R$5 e exige a mudança inversa. Somente a ida e volta confirmadas liberam Player/Banker/Tie. Ausência de alternativa, superfície externa ou transição não observável continuam falhando fechado.
+
+### BUG-033 — Fontes do Auto-Trader confundiam robôs com origens/Auto IA
+
+Status: **mitigado em código; validação operacional no painel pendente**.
+
+A aba misturava todos os robôs como `[AUTO] ... (IA Dinâmica)` e acrescentava origens manuais como fontes independentes. Além de nomenclatura incorreta, escolher um robô manual não autorizava suas estratégias porque o matcher comparava diretamente a origem da estratégia.
+
+A unidade de seleção passa a ser exclusivamente o robô ativo, identificado por `ROBO:<id>`. O backend aplica a mesma regra de sintonização já usada pelos canais: padrão dinâmico pertence ao robô dono; padrão manual respeita origens, avulsos e exceções do robô selecionado. Robôs inativos e origens não aparecem. IDs/nome Auto antigos e origem manual antiga permanecem somente como fallback de leitura para evitar quebra abrupta de configurações persistidas.
+
 ### BUG-032 — Camada interna interceptava o ponteiro da ficha
 
 Status: **mitigado em código; validação operacional no site real pendente**.
