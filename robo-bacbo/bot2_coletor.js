@@ -594,13 +594,15 @@ function headersInternos() {
 
 const EXECUTOR_TIMEOUT_MS = 5000;
 const EXECUTOR_MAX_ATTEMPTS = 2;
-const executorExecutionTimeoutConfig = Number(process.env.EXECUTOR_EXECUTION_TIMEOUT_MS || 30000);
+const executorExecutionTimeoutConfig = Number(process.env.EXECUTOR_EXECUTION_TIMEOUT_MS || 210000);
 const EXECUTOR_EXECUTION_TIMEOUT_MS = (
     Number.isFinite(executorExecutionTimeoutConfig)
-    && executorExecutionTimeoutConfig >= 3000
-    && executorExecutionTimeoutConfig <= 120000
+    // O callback do Node precisa sobreviver ao fusível máximo de 180 s do
+    // executor Python; valores antigos de 30 s voltam ao default seguro.
+    && executorExecutionTimeoutConfig >= 195000
+    && executorExecutionTimeoutConfig <= 360000
         ? executorExecutionTimeoutConfig
-        : 30000
+        : 210000
 );
 const CONFIRMACOES_EXECUTOR_PENDENTES = new Map();
 const STATUS_EXECUTOR_VALIDOS = new Set(['EXECUTADA', 'FALHOU', 'EXPIRADA', 'AMBIGUA']);
