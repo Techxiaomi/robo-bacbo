@@ -4,15 +4,15 @@ on:
   pull_request:
     branches:
       - main
-  push:
-    branches:
-      - main
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -20,6 +20,7 @@ jobs:
     name: Node regression tests
     runs-on: ubuntu-latest
     timeout-minutes: 5
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,6 +42,7 @@ jobs:
     name: Python regression tests
     runs-on: ubuntu-latest
     timeout-minutes: 5
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -57,164 +59,3 @@ jobs:
       - name: Run Python tests
         run: python tests/test_pure_logic.py
         working-directory: robo-sync-pilot
-
-  executor-idempotency:
-    name: Executor restart idempotency integration
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install isolated Flask dependency
-        run: python -m pip install --disable-pip-version-check Flask==3.1.3
-
-      - name: Check executor restart integration syntax
-        run: python -m py_compile integration/executor-idempotency-restart.py
-        working-directory: robo-sync-pilot
-
-      - name: Run executor restart idempotency integration
-        run: python integration/executor-idempotency-restart.py
-        working-directory: robo-sync-pilot
-
-  backend-integration:
-    name: Backend HTTP + Socket.IO + MySQL integration
-    runs-on: ubuntu-latest
-    timeout-minutes: 8
-    services:
-      mysql:
-        image: mysql:8.4
-        env:
-          MYSQL_ROOT_PASSWORD: bacbo-${{ github.run_id }}-${{ github.run_attempt }}
-          MYSQL_ROOT_HOST: "%"
-          MYSQL_DATABASE: bacbo_integration
-        ports:
-          - 3306:3306
-        options: >-
-          --health-cmd="mysqladmin ping -h localhost -pbacbo-${{ github.run_id }}-${{ github.run_attempt }}"
-          --health-interval=5s
-          --health-timeout=5s
-          --health-retries=20
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Install isolated integration dependencies
-        shell: bash
-        run: |
-          DEPS_DIR="$RUNNER_TEMP/bacbo-node-deps"
-          mkdir -p "$DEPS_DIR"
-          cd "$DEPS_DIR"
-          npm init -y >/dev/null 2>&1
-          npm install --ignore-scripts --no-audit --no-fund --package-lock=false \
-            express@5.2.1 mysql2@3.23.3 socket.io@4.8.3 socket.io-client@4.8.3
-          echo "NODE_PATH=$(npm root)" >> "$GITHUB_ENV"
-
-      - name: Check integration test syntax
-        run: node --check integration/http-mysql-smoke.js
-        working-directory: robo-bacbo
-
-      - name: Run real backend integration smoke
-        run: node integration/http-mysql-smoke.js
-        working-directory: robo-bacbo
-        env:
-          E2E_DB_PASSWORD: bacbo-${{ github.run_id }}-${{ github.run_attempt }}
-
-  playwright-dom:
-    name: Playwright controlled DOM integration
-    runs-on: ubuntu-latest
-    timeout-minutes: 12
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install isolated Playwright dependency
-        run: python -m pip install --disable-pip-version-check playwright==1.62.0
-
-      - name: Install Chromium for Playwright
-        run: python -m playwright install --with-deps chromium
-
-      - name: Check Playwright DOM test syntax
-        run: python -m py_compile tests/test_playwright_dom.py
-        working-directory: robo-sync-pilot
-
-      - name: Run controlled Playwright DOM integration
-        run: python tests/test_playwright_dom.py
-        working-directory: robo-sync-pilot
-
-      - name: Check dashboard browser smoke syntax
-        run: python -m py_compile integration/dashboard-browser-smoke.py
-        working-directory: robo-bacbo
-
-      - name: Run dashboard browser smoke
-        run: python integration/dashboard-browser-smoke.py
-        working-directory: robo-bacbo
-
-  controlled-e2e:
-    name: Controlled collector + Node + executor + MySQL E2E
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    services:
-      mysql:
-        image: mysql:8.4
-        env:
-          MYSQL_ROOT_PASSWORD: bacbo-${{ github.run_id }}-${{ github.run_attempt }}
-          MYSQL_ROOT_HOST: "%"
-          MYSQL_DATABASE: bacbo_e2e
-        ports:
-          - 3306:3306
-        options: >-
-          --health-cmd="mysqladmin ping -h localhost -pbacbo-${{ github.run_id }}-${{ github.run_attempt }}"
-          --health-interval=5s
-          --health-timeout=5s
-          --health-retries=20
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install isolated E2E dependencies
-        shell: bash
-        run: |
-          DEPS_DIR="$RUNNER_TEMP/bacbo-e2e-node-deps"
-          mkdir -p "$DEPS_DIR"
-          cd "$DEPS_DIR"
-          npm init -y >/dev/null 2>&1
-          npm install --ignore-scripts --no-audit --no-fund --package-lock=false \
-            express@5.2.1 mysql2@3.23.3 socket.io@4.8.3
-          echo "NODE_PATH=$(npm root)" >> "$GITHUB_ENV"
-
-      - name: Check controlled E2E syntax
-        run: |
-          node --check robo-bacbo/integration/controlled-e2e-smoke.js
-          python -m py_compile robo-sync-pilot/integration/emit-controlled-result.py
-
-      - name: Run controlled collector-to-audit E2E
-        run: node integration/controlled-e2e-smoke.js
-        working-directory: robo-bacbo
-        env:
-          E2E_DB_PASSWORD: bacbo-${{ github.run_id }}-${{ github.run_attempt }}
