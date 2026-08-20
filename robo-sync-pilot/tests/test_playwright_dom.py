@@ -121,14 +121,14 @@ HTML = {
   window.__chipClicks = {"25a": 0, "25b": 0, "10": 0, "5": 0};
   window.__targetClicks = {"playerA": 0, "playerB": 0, "banker": 0, "tie": 0};
 </script>
-  <div data-role="chip" data-value="25" data-id="25a" onclick="window.__chipClicks['25a']++">25-A</div>
-  <div data-role="chip" data-value="25" data-id="25b" onclick="window.__chipClicks['25b']++">25-B</div>
-  <div data-role="chip" data-value="10" data-id="10" onclick="window.__chipClicks['10']++">10</div>
-  <div data-role="chip" data-value="5" data-id="5" onclick="window.__chipClicks['5']++">5</div>
-  <button data-role="bacbo-bet-spot-Player" data-id="playerA" onclick="window.__targetClicks['playerA']++">Player A</button>
-  <button data-role="bacbo-bet-spot-Player" data-id="playerB" onclick="window.__targetClicks['playerB']++">Player B</button>
-  <button data-role="bacbo-bet-spot-Banker" onclick="window.__targetClicks['banker']++">Banker</button>
-  <button data-role="bacbo-bet-spot-Tie" onclick="window.__targetClicks['tie']++">Tie</button>
+  <div data-role="chip" data-value="25" data-id="25a" onpointerup="window.__chipClicks['25a']++">25-A</div>
+  <div data-role="chip" data-value="25" data-id="25b" onpointerup="window.__chipClicks['25b']++">25-B</div>
+  <div data-role="chip" data-value="10" data-id="10" onpointerup="window.__chipClicks['10']++">10</div>
+  <div data-role="chip" data-value="5" data-id="5" onpointerup="window.__chipClicks['5']++">5</div>
+  <button data-role="bacbo-bet-spot-Player" data-id="playerA" onpointerup="window.__targetClicks['playerA']++">Player A</button>
+  <button data-role="bacbo-bet-spot-Player" data-id="playerB" onpointerup="window.__targetClicks['playerB']++">Player B</button>
+  <button data-role="bacbo-bet-spot-Banker" onpointerup="window.__targetClicks['banker']++">Banker</button>
+  <button data-role="bacbo-bet-spot-Tie" onpointerup="window.__targetClicks['tie']++">Tie</button>
 </body></html>""",
 }
 
@@ -139,7 +139,7 @@ HTML["/game-partial-frame.html"] = """<!doctype html>
 <script>window.__targetClicks = 0;</script>
 <div data-role="chip" data-value="10">10</div>
 <button data-role="bacbo-bet-spot-Player"
-  onclick="window.__targetClicks++; this.remove()">Player descartável</button>
+  onpointerup="window.__targetClicks++; this.remove()">Player descartável</button>
 </body></html>"""
 
 HTML["/game-delayed.html"] = """<!doctype html>
@@ -162,8 +162,8 @@ HTML["/game-delayed-frame.html"] = """<!doctype html>
     else window.__targetClicks++;
   }
 </script>
-<div id="chip10" style="display:none" data-role="chip" data-value="10" onclick="markClick('chip')">10</div>
-<button id="player" style="display:none" data-role="bacbo-bet-spot-Player" onclick="markClick('target')">Player</button>
+<div id="chip10" style="display:none" data-role="chip" data-value="10" onpointerup="markClick('chip')">10</div>
+<button id="player" style="display:none" data-role="bacbo-bet-spot-Player" onpointerup="markClick('target')">Player</button>
 </body></html>"""
 
 HTML["/game-closed.html"] = """<!doctype html>
@@ -171,8 +171,8 @@ HTML["/game-closed.html"] = """<!doctype html>
 HTML["/game-closed-frame.html"] = """<!doctype html>
 <html><body>
 <script>window.__chipClicks = 0; window.__targetClicks = 0;</script>
-<div style="display:none" data-role="chip" data-value="10" onclick="window.__chipClicks++">10</div>
-<button style="display:none" data-role="bacbo-bet-spot-Player" onclick="window.__targetClicks++">Player</button>
+<div style="display:none" data-role="chip" data-value="10" onpointerup="window.__chipClicks++">10</div>
+<button style="display:none" data-role="bacbo-bet-spot-Player" onpointerup="window.__targetClicks++">Player</button>
 </body></html>"""
 
 HTML["/game-selected.html"] = """<!doctype html>
@@ -181,9 +181,9 @@ HTML["/game-selected-frame.html"] = """<!doctype html>
 <html><body>
 <script>window.__chipClicks = 0; window.__targetClicks = 0;</script>
 <button disabled aria-pressed="true" data-role="chip" data-value="25"
-  onclick="window.__chipClicks++">25 selecionada</button>
+  onpointerup="window.__chipClicks++">25 selecionada</button>
 <button data-role="bacbo-bet-spot-Banker"
-  onclick="window.__targetClicks++">Banker</button>
+  onpointerup="window.__targetClicks++">Banker</button>
 </body></html>"""
 
 HTML["/game-chip-animating.html"] = """<!doctype html>
@@ -195,9 +195,9 @@ HTML["/game-chip-animating-frame.html"] = """<!doctype html>
 </style></head><body>
 <script>window.__chipClicks = 0; window.__targetClicks = 0;</script>
 <button id="chip5" data-role="chip" data-value="5"
-  onclick="window.__chipClicks++">5</button>
+  onpointerup="window.__chipClicks++">5</button>
 <button data-role="bacbo-bet-spot-Banker"
-  onclick="window.__targetClicks++">Banker</button>
+  onpointerup="window.__targetClicks++">Banker</button>
 </body></html>"""
 
 HTML["/game-chip-overlay.html"] = """<!doctype html>
@@ -210,7 +210,7 @@ HTML["/game-chip-overlay-frame.html"] = """<!doctype html>
 </style></head><body>
 <script>window.__surfaceClicks = 0; window.__surfacePointerDown = 0; window.__targetClicks = 0;</script>
 <div id="wrap">
-  <div id="chip5" data-role="chip" data-value="5" onclick="
+  <div id="chip5" data-role="chip" data-value="5" onpointerup="
     window.__surfaceClicks++;
     document.getElementById('chip5').classList.add('selected');
   ">5
@@ -218,7 +218,7 @@ HTML["/game-chip-overlay-frame.html"] = """<!doctype html>
   </div>
 </div>
 <button data-role="bacbo-bet-spot-Player"
-  onclick="window.__targetClicks++">Player</button>
+  onpointerup="window.__targetClicks++">Player</button>
 </body></html>"""
 
 HTML["/game-chip-roundtrip.html"] = """<!doctype html>
@@ -237,11 +237,11 @@ function escolher(valor) {
   document.getElementById('chip5').className = valor === 5 ? 'chip' : 'chip nao-atual';
 }
 </script>
-<div class="wrap"><div id="chip5" class="chip" data-role="chip" data-value="5" onclick="escolher(5)">5
+<div class="wrap"><div id="chip5" class="chip" data-role="chip" data-value="5" onpointerup="escolher(5)">5
   <span class="surface">overlay 5</span></div></div>
-<div class="wrap"><div class="chip" data-role="chip" data-value="10" onclick="escolher(10)">10
+<div class="wrap"><div class="chip" data-role="chip" data-value="10" onpointerup="escolher(10)">10
   <span class="surface">overlay 10</span></div></div>
-<button data-role="bacbo-bet-spot-Player" onclick="window.__targetClicks++">Player</button>
+<button data-role="bacbo-bet-spot-Player" onpointerup="window.__targetClicks++">Player</button>
 </body></html>"""
 
 HTML["/opaque-hidden.html"] = """<!doctype html>
@@ -253,13 +253,13 @@ HTML["/table-shell.html"] = """<!doctype html>
   window.__targetClicks = {hidden: 0, visible: 0};
 </script>
 <div style="display:none" data-role="chip" data-value="10.0"
-  onclick="window.__chipClicks.hidden++">10 oculto</div>
+  onpointerup="window.__chipClicks.hidden++">10 oculto</div>
 <button style="display:none" data-role="bacbo-bet-spot-Player"
-  onclick="window.__targetClicks.hidden++">Player oculto</button>
+  onpointerup="window.__targetClicks.hidden++">Player oculto</button>
 <div data-role="chip" data-value="10,00"
-  onclick="window.__chipClicks.visible++">10 visível</div>
+  onpointerup="window.__chipClicks.visible++">10 visível</div>
 <button data-role="bacbo-bet-spot-Player"
-  onclick="window.__targetClicks.visible++">Player visível</button>
+  onpointerup="window.__targetClicks.visible++">Player visível</button>
 </body></html>"""
 
 HTML["/game-balance-accepted.html"] = """<!doctype html>
@@ -270,7 +270,7 @@ HTML["/game-balance-accepted.html"] = """<!doctype html>
 HTML["/game-balance-accepted-frame.html"] = """<!doctype html>
 <html><body>
 <div data-role="chip" data-value="5">5</div>
-<button data-role="bacbo-bet-spot-Player" onclick="
+<button data-role="bacbo-bet-spot-Player" onpointerup="
   window.top.document.querySelector('.saldo-teste').textContent='R$ 995,00';
 ">Player</button>
 </body></html>"""
@@ -295,7 +295,7 @@ HTML["/game-target-overlay-accepted-frame.html"] = """<!doctype html>
 </style></head><body>
 <div data-role="chip" data-value="5" aria-pressed="true">5</div>
 <div id="wrap">
-  <button id="player" data-role="bacbo-bet-spot-Player" onclick="window.top.document.querySelector('.saldo-teste').textContent='R$ 995,00'; window.__surfaceClicks=(window.__surfaceClicks||0)+1">Player
+  <button id="player" data-role="bacbo-bet-spot-Player" onpointerup="window.top.document.querySelector('.saldo-teste').textContent='R$ 995,00'; window.__surfaceClicks=(window.__surfaceClicks||0)+1">Player
     <span id="surface">overlay</span>
   </button>
 </div>
@@ -310,8 +310,8 @@ HTML["/game-composite-first-rejected-frame.html"] = """<!doctype html>
 <html><body>
 <script>window.__playerClicks=0; window.__tieClicks=0;</script>
 <div data-role="chip" data-value="5" aria-pressed="true">5</div>
-<button data-role="bacbo-bet-spot-Player" onclick="window.__playerClicks++">Player</button>
-<button data-role="bacbo-bet-spot-Tie" onclick="window.__tieClicks++; window.top.document.querySelector('.saldo-teste').textContent='R$ 995,00'">Tie</button>
+<button data-role="bacbo-bet-spot-Player" onpointerup="window.__playerClicks++">Player</button>
+<button data-role="bacbo-bet-spot-Tie" onpointerup="window.__tieClicks++; window.top.document.querySelector('.saldo-teste').textContent='R$ 995,00'">Tie</button>
 </body></html>"""
 
 

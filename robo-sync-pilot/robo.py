@@ -20,7 +20,7 @@ load_env_file(os.path.join(PROJECT_ROOT, ".env"))
 # CONFIGURAÇÕES GERAIS E CONTROLE DE VERSÃO
 # ====================================================================
 VERSAO_ROBO = "v1.6.13"
-NOME_ATUALIZACAO = "BUG-041 Clique DOM Direto"
+NOME_ATUALIZACAO = "BUG-042 Pointer Events e Confirmação 2500ms"
 
 URL_CASSINO = os.getenv("CASINO_GAME_URL", "")
 ARQUIVO_SESSAO = os.getenv("SESSION_STATE_FILE", os.path.join(BASE_DIR, "sessao_salva.json"))
@@ -1192,20 +1192,21 @@ def localizar_frame_apostavel(page, planos):
     return contexto_dom["frame"] if contexto_dom is not None else None
 
 
-def clicar_superficie_ficha_playwright(elemento):
-    """Dispara click DOM diretamente na ficha canônica, sem actionability do Playwright."""
+def clicar_superficie_ficha_playwright(page, elemento):
+    """Dispara pointerdown/pointerup diretamente na ficha canonica, sem actionability de click()."""
     try:
-        # BUG-041: a Evolution mantém overlays/camadas que podem bloquear o
-        # actionability check mesmo depois da animação estabilizar. O elemento
-        # já foi identificado pelo data-role/data-value e validado como visível
-        # no preflight; aqui o clique é disparado no próprio nó canônico.
-        elemento.evaluate("el => el.click()")
-        return {"acionada": True, "relacao": "DOM_DIRETO", "via": "DOM_EVALUATE"}
+        # BUG-042: a Evolution pode manter overlays transparentes sobre a ficha.
+        # dispatch_event nao executa os actionability checks de locator.click(),
+        # mas entrega os eventos ao proprio no canonico identificado no preflight.
+        elemento.dispatch_event("pointerdown")
+        page.wait_for_timeout(100)
+        elemento.dispatch_event("pointerup")
+        return {"acionada": True, "relacao": "POINTER_EVENTS", "via": "DISPATCH_EVENT"}
     except Exception as erro:
         return {
             "acionada": False,
             "relacao": type(erro).__name__,
-            "motivo": f"falha no click DOM direto da ficha ({type(erro).__name__})",
+            "motivo": f"falha no pointerdown/pointerup da ficha ({type(erro).__name__})",
         }
 
 
@@ -1216,7 +1217,7 @@ def selecionar_ficha_com_confirmacao(page, ficha_contexto, valor_ficha):
     if ficha_contexto.get("modo") == "JA_SELECIONADA":
         return {"confirmada": True, "via": "JA_SELECIONADA"}
 
-    superficie = clicar_superficie_ficha_playwright(elemento)
+    superficie = clicar_superficie_ficha_playwright(page, elemento)
     if not isinstance(superficie, dict) or superficie.get("acionada") is not True:
         relacao = superficie.get("relacao", "n/a") if isinstance(superficie, dict) else "n/a"
         motivo = superficie.get("motivo", "superfície não acionada") if isinstance(superficie, dict) else "superfície não acionada"
@@ -1258,7 +1259,7 @@ def preselecionar_ficha_unica_antes_da_janela(page, planos):
         try:
             # Preparação não financeira e oportunista. Usa a mesma física central
             # do caminho principal, sem force=True e sem clicar wrappers.
-            superficie = clicar_superficie_ficha_playwright(elemento)
+            superficie = clicar_superficie_ficha_playwright(page, elemento)
             if superficie.get("acionada") is True:
                 return {"confirmada": True, "ficha": ficha, "via": "PRESELECAO_CENTRO"}
         except Exception:
@@ -1391,19 +1392,20 @@ def aguardar_janela_aposta(page, aposta, planos):
         page.wait_for_timeout(25)
 
 
-def clicar_alvo_financeiro_playwright(elemento):
-    """Dispara click DOM diretamente no alvo financeiro canônico, sem force=True."""
+def clicar_alvo_financeiro_playwright(page, elemento):
+    """Dispara pointerdown/pointerup no alvo financeiro canonico, sem locator.click() ou force=True."""
     try:
-        # BUG-041: não usa locator.click(), position ou force=True. O clique é
-        # disparado no próprio [data-role='bacbo-bet-spot-*'] já aprovado pelo
-        # preflight. A confirmação financeira por saldo continua obrigatória.
-        elemento.evaluate("el => el.click()")
-        return {"acionada": True, "relacao": "DOM_DIRETO"}
+        # BUG-042: entrega a sequencia de ponteiro diretamente ao componente
+        # financeiro ja localizado e validado pelo preflight.
+        elemento.dispatch_event("pointerdown")
+        page.wait_for_timeout(100)
+        elemento.dispatch_event("pointerup")
+        return {"acionada": True, "relacao": "POINTER_EVENTS"}
     except Exception as erro:
         return {
             "acionada": False,
             "relacao": type(erro).__name__,
-            "motivo": f"falha no click DOM direto do alvo ({type(erro).__name__})",
+            "motivo": f"falha no pointerdown/pointerup do alvo ({type(erro).__name__})",
         }
 
 
@@ -1428,11 +1430,11 @@ def confirmar_aceite_financeiro_aposta(page, saldo_antes, exposicao_esperada):
 
     tolerancia = max(0.01, float(EXECUTOR_BET_ACCEPTANCE_TOLERANCE))
 
-    # BUG-040: depois do clique financeiro, a Evolution pode levar 1–2 s para
+    # BUG-042: depois do pointerup financeiro, a Evolution pode levar mais de 2 s para
     # refletir no HTML o débito já processado pelo servidor. Não lê o saldo antes
     # dessa janela mínima para evitar classificar atualização visual tardia como
     # "clique fantasma".
-    page.wait_for_timeout(2000)
+    page.wait_for_timeout(2500)
     prazo = time.monotonic() + float(EXECUTOR_BET_ACCEPTANCE_TIMEOUT_SECONDS)
     ultimo_saldo = None
     ultimo_debito = None
@@ -1623,7 +1625,7 @@ def executar_aposta_na_tela(page, aposta):
                                     "cliques_alvo": cliques_alvo
                                 }
                         inicio_clique = time.monotonic()
-                        alvo_real = clicar_alvo_financeiro_playwright(alvo_elemento)
+                        alvo_real = clicar_alvo_financeiro_playwright(page, alvo_elemento)
                         if alvo_real.get("acionada") is not True:
                             status = "AMBIGUA" if cliques_alvo > 0 else "FALHOU"
                             return {

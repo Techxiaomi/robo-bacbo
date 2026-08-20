@@ -21,7 +21,7 @@ class Bug038FastPathContract(unittest.TestCase):
         corpo = SOURCE[inicio:fim]
         self.assertIn("contexto_atual = avaliar_contexto_janela_aposta(aposta)", corpo)
         self.assertIn('if contexto_atual["estado"] != "ABERTA"', corpo)
-        self.assertIn("clicar_alvo_financeiro_playwright(alvo_elemento)", corpo)
+        self.assertIn("clicar_alvo_financeiro_playwright(page, alvo_elemento)", corpo)
 
     def test_latencias_artificiais_criticas_foram_reduzidas(self):
         inicio = SOURCE.index("def selecionar_ficha_com_confirmacao")
@@ -30,8 +30,11 @@ class Bug038FastPathContract(unittest.TestCase):
         self.assertNotIn("page.wait_for_timeout(120)", trecho)
         self.assertIn("page.wait_for_timeout(25)", trecho)
         self.assertIn("page.wait_for_timeout(1500)", SOURCE)
-        self.assertIn("page.wait_for_timeout(2000)", SOURCE)
-        self.assertEqual(SOURCE.count('elemento.evaluate("el => el.click()")'), 2)
+        self.assertIn("page.wait_for_timeout(2500)", SOURCE)
+        self.assertEqual(SOURCE.count('elemento.dispatch_event("pointerdown")'), 2)
+        self.assertEqual(SOURCE.count('elemento.dispatch_event("pointerup")'), 2)
+        self.assertIn("page.wait_for_timeout(100)", SOURCE)
+        self.assertNotIn('elemento.evaluate("el => el.click()")', SOURCE)
         self.assertNotIn('position={"x": largura / 2.0', SOURCE)
         self.assertNotIn("hit_elemento.click", SOURCE)
 

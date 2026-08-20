@@ -373,8 +373,11 @@ test("BUG-028: executor espera AcceptingBets estrutural e Node preserva o callba
     assert.match(executorPythonSource, /preselecionar_ficha_unica_antes_da_janela/);
     assert.match(executorPythonSource, /page\.wait_for_timeout\(25\)/);
     assert.match(executorPythonSource, /page\.wait_for_timeout\(1500\)/);
-    assert.match(executorPythonSource, /page\.wait_for_timeout\(2000\)/);
-    assert.equal((executorPythonSource.match(/elemento\.evaluate\("el => el\.click\(\)"\)/g) || []).length, 2);
+    assert.match(executorPythonSource, /page\.wait_for_timeout\(2500\)/);
+    assert.equal((executorPythonSource.match(/elemento\.dispatch_event\("pointerdown"\)/g) || []).length, 2);
+    assert.equal((executorPythonSource.match(/elemento\.dispatch_event\("pointerup"\)/g) || []).length, 2);
+    assert.match(executorPythonSource, /page\.wait_for_timeout\(100\)/);
+    assert.doesNotMatch(executorPythonSource, /elemento\.evaluate\("el => el\.click\(\)"\)/);
     assert.doesNotMatch(executorPythonSource, /position=\{"x": largura \/ 2\.0/);
     assert.doesNotMatch(executorPythonSource, /alvo_elemento\.click\(timeout=750\)/);
     assert.doesNotMatch(executorPythonSource, /hit_elemento\.click/);
