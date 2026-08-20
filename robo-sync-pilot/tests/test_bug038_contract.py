@@ -31,7 +31,8 @@ class Bug038FastPathContract(unittest.TestCase):
         self.assertIn("page.wait_for_timeout(25)", trecho)
         self.assertIn("page.wait_for_timeout(1500)", SOURCE)
         self.assertIn("page.wait_for_timeout(2000)", SOURCE)
-        self.assertIn('position={"x": largura / 2.0, "y": altura / 2.0}', SOURCE)
+        self.assertEqual(SOURCE.count('elemento.evaluate("el => el.click()")'), 2)
+        self.assertNotIn('position={"x": largura / 2.0', SOURCE)
         self.assertNotIn("hit_elemento.click", SOURCE)
 
     def test_loop_executor_polling_rapido(self):

@@ -374,7 +374,8 @@ test("BUG-028: executor espera AcceptingBets estrutural e Node preserva o callba
     assert.match(executorPythonSource, /page\.wait_for_timeout\(25\)/);
     assert.match(executorPythonSource, /page\.wait_for_timeout\(1500\)/);
     assert.match(executorPythonSource, /page\.wait_for_timeout\(2000\)/);
-    assert.match(executorPythonSource, /position=\{"x": largura \/ 2\.0, "y": altura \/ 2\.0\\}/);
+    assert.equal((executorPythonSource.match(/elemento\.evaluate\("el => el\.click\(\)"\)/g) || []).length, 2);
+    assert.doesNotMatch(executorPythonSource, /position=\{"x": largura \/ 2\.0/);
     assert.doesNotMatch(executorPythonSource, /alvo_elemento\.click\(timeout=750\)/);
     assert.doesNotMatch(executorPythonSource, /hit_elemento\.click/);
     assert.doesNotMatch(executorPythonSource, /hit\.click\(\)/);

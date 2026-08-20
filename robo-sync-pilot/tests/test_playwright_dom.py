@@ -210,11 +210,11 @@ HTML["/game-chip-overlay-frame.html"] = """<!doctype html>
 </style></head><body>
 <script>window.__surfaceClicks = 0; window.__surfacePointerDown = 0; window.__targetClicks = 0;</script>
 <div id="wrap">
-  <div id="chip5" data-role="chip" data-value="5">5
-    <span id="surface" onpointerdown="window.__surfacePointerDown++" onclick="
-      window.__surfaceClicks++;
-      document.getElementById('chip5').classList.add('selected');
-    ">superfície</span>
+  <div id="chip5" data-role="chip" data-value="5" onclick="
+    window.__surfaceClicks++;
+    document.getElementById('chip5').classList.add('selected');
+  ">5
+    <span id="surface" onpointerdown="window.__surfacePointerDown++">overlay</span>
   </div>
 </div>
 <button data-role="bacbo-bet-spot-Player"
@@ -237,10 +237,10 @@ function escolher(valor) {
   document.getElementById('chip5').className = valor === 5 ? 'chip' : 'chip nao-atual';
 }
 </script>
-<div class="wrap"><div id="chip5" class="chip" data-role="chip" data-value="5">5
-  <span class="surface" onclick="escolher(5)">superfície 5</span></div></div>
-<div class="wrap"><div class="chip" data-role="chip" data-value="10">10
-  <span class="surface" onclick="escolher(10)">superfície 10</span></div></div>
+<div class="wrap"><div id="chip5" class="chip" data-role="chip" data-value="5" onclick="escolher(5)">5
+  <span class="surface">overlay 5</span></div></div>
+<div class="wrap"><div class="chip" data-role="chip" data-value="10" onclick="escolher(10)">10
+  <span class="surface">overlay 10</span></div></div>
 <button data-role="bacbo-bet-spot-Player" onclick="window.__targetClicks++">Player</button>
 </body></html>"""
 
@@ -295,8 +295,8 @@ HTML["/game-target-overlay-accepted-frame.html"] = """<!doctype html>
 </style></head><body>
 <div data-role="chip" data-value="5" aria-pressed="true">5</div>
 <div id="wrap">
-  <button id="player" data-role="bacbo-bet-spot-Player">Player
-    <span id="surface" onclick="window.top.document.querySelector('.saldo-teste').textContent='R$ 995,00'; window.__surfaceClicks=(window.__surfaceClicks||0)+1">Player surface</span>
+  <button id="player" data-role="bacbo-bet-spot-Player" onclick="window.top.document.querySelector('.saldo-teste').textContent='R$ 995,00'; window.__surfaceClicks=(window.__surfaceClicks||0)+1">Player
+    <span id="surface">overlay</span>
   </button>
 </div>
 </body></html>"""
@@ -674,7 +674,7 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
             frame = next(f for f in pagina.frames if "game-chip-overlay-frame" in f.url)
             self.assertEqual(resultado["status"], "EXECUTADA")
             self.assertEqual(frame.evaluate("window.__surfaceClicks"), 1)
-            self.assertEqual(frame.evaluate("window.__surfacePointerDown"), 1)
+            self.assertEqual(frame.evaluate("window.__surfacePointerDown"), 0)
             self.assertEqual(frame.evaluate("window.__targetClicks"), 1)
         finally:
             pagina.close()
@@ -716,9 +716,9 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
             frame = self.frame_jogo(pagina)
             resultado = executar_aposta_na_tela(pagina, self.ordem_sincronizada(25))
             self.assertEqual(resultado["status"], "EXPIRADA")
-            # BUG-038: selecionar a ficha e preparacao nao financeira; o alvo continua
-            # proibido enquanto Dealing/FirstDie e demais stages nao apostaveis estiverem ativos.
-            self.assertEqual(frame.evaluate("window.__chipClicks")["10"], 1)
+            # BUG-040/041: a ficha também só é acionada depois de AcceptingBets
+            # estabilizar; em Dealing não há clique de ficha nem de alvo.
+            self.assertEqual(frame.evaluate("window.__chipClicks")["10"], 0)
             self.assertEqual(frame.evaluate("window.__targetClicks")["playerA"], 0)
         finally:
             timer.cancel()

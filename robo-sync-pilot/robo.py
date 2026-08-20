@@ -20,7 +20,7 @@ load_env_file(os.path.join(PROJECT_ROOT, ".env"))
 # CONFIGURAÇÕES GERAIS E CONTROLE DE VERSÃO
 # ====================================================================
 VERSAO_ROBO = "v1.6.13"
-NOME_ATUALIZACAO = "BUG-040 Sincronia UI e Clique Central"
+NOME_ATUALIZACAO = "BUG-041 Clique DOM Direto"
 
 URL_CASSINO = os.getenv("CASINO_GAME_URL", "")
 ARQUIVO_SESSAO = os.getenv("SESSION_STATE_FILE", os.path.join(BASE_DIR, "sessao_salva.json"))
@@ -1193,36 +1193,19 @@ def localizar_frame_apostavel(page, planos):
 
 
 def clicar_superficie_ficha_playwright(elemento):
-    """Clica o centro geométrico da própria ficha, sem force=True e sem subir para wrappers."""
+    """Dispara click DOM diretamente na ficha canônica, sem actionability do Playwright."""
     try:
-        caixa = elemento.bounding_box()
-        if not isinstance(caixa, dict):
-            return {"acionada": False, "relacao": "SEM_AREA", "motivo": "ficha sem área visível"}
-        largura = float(caixa.get("width") or 0.0)
-        altura = float(caixa.get("height") or 0.0)
-        if largura <= 0 or altura <= 0:
-            return {"acionada": False, "relacao": "SEM_AREA", "motivo": "ficha sem área visível"}
-
-        # BUG-040: o clique pertence ao elemento da ficha localizado pelo
-        # data-role/data-value. O Playwright usa o centro exato da caixa e mantém
-        # as checagens normais de actionability; nenhum ancestral/irmão recebe
-        # clique substituto e force=True continua proibido.
-        elemento.click(
-            position={"x": largura / 2.0, "y": altura / 2.0},
-            timeout=900,
-        )
-        return {"acionada": True, "relacao": "CENTRO_ELEMENTO", "via": "PLAYWRIGHT_REAL"}
-    except PlaywrightTimeoutError:
-        return {
-            "acionada": False,
-            "relacao": "TIMEOUT",
-            "motivo": "centro da ficha não ficou acionável em 900ms",
-        }
+        # BUG-041: a Evolution mantém overlays/camadas que podem bloquear o
+        # actionability check mesmo depois da animação estabilizar. O elemento
+        # já foi identificado pelo data-role/data-value e validado como visível
+        # no preflight; aqui o clique é disparado no próprio nó canônico.
+        elemento.evaluate("el => el.click()")
+        return {"acionada": True, "relacao": "DOM_DIRETO", "via": "DOM_EVALUATE"}
     except Exception as erro:
         return {
             "acionada": False,
             "relacao": type(erro).__name__,
-            "motivo": f"falha ao clicar o centro da ficha ({type(erro).__name__})",
+            "motivo": f"falha no click DOM direto da ficha ({type(erro).__name__})",
         }
 
 
@@ -1409,35 +1392,18 @@ def aguardar_janela_aposta(page, aposta, planos):
 
 
 def clicar_alvo_financeiro_playwright(elemento):
-    """Clica o centro geométrico do próprio alvo financeiro, sem force=True ou wrappers."""
+    """Dispara click DOM diretamente no alvo financeiro canônico, sem force=True."""
     try:
-        caixa = elemento.bounding_box()
-        if not isinstance(caixa, dict):
-            return {"acionada": False, "relacao": "SEM_AREA", "motivo": "alvo sem área visível"}
-        largura = float(caixa.get("width") or 0.0)
-        altura = float(caixa.get("height") or 0.0)
-        if largura <= 0 or altura <= 0:
-            return {"acionada": False, "relacao": "SEM_AREA", "motivo": "alvo sem área visível"}
-
-        # BUG-040: o elemento [data-role='bacbo-bet-spot-*'] permanece dono do
-        # clique. O Playwright mira o centro e resolve apenas descendentes reais
-        # desse elemento; não há fallback para ancestral, irmão ou force=True.
-        elemento.click(
-            position={"x": largura / 2.0, "y": altura / 2.0},
-            timeout=900,
-        )
-        return {"acionada": True, "relacao": "CENTRO_ELEMENTO"}
-    except PlaywrightTimeoutError:
-        return {
-            "acionada": False,
-            "relacao": "TIMEOUT",
-            "motivo": "centro do alvo financeiro não ficou acionável em 900ms",
-        }
+        # BUG-041: não usa locator.click(), position ou force=True. O clique é
+        # disparado no próprio [data-role='bacbo-bet-spot-*'] já aprovado pelo
+        # preflight. A confirmação financeira por saldo continua obrigatória.
+        elemento.evaluate("el => el.click()")
+        return {"acionada": True, "relacao": "DOM_DIRETO"}
     except Exception as erro:
         return {
             "acionada": False,
             "relacao": type(erro).__name__,
-            "motivo": f"falha ao clicar o centro do alvo ({type(erro).__name__})",
+            "motivo": f"falha no click DOM direto do alvo ({type(erro).__name__})",
         }
 
 
