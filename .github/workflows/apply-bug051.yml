@@ -1,17 +1,16 @@
 name: Apply BUG-051 Auto-Trader hardening
 
 on:
-  push:
+  pull_request:
     branches:
-      - agent/bug-023-websocket-reconnect-continuity
-    paths:
-      - scripts/.bug051-trigger
+      - main
 
 permissions:
   contents: write
 
 jobs:
   apply:
+    if: github.head_ref == 'agent/bug-023-websocket-reconnect-continuity'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -24,20 +23,27 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Apply patch
-        run: python scripts/apply_bug051_autotrader_hardening.py
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
-      - name: Validate backend syntax
-        run: node --check bot2_coletor.js
-        working-directory: robo-bacbo
+      - name: Apply BUG-051
+        run: |
+          python scripts/apply_bug051_autotrader_hardening.py
+          python scripts/apply_bug051_followup.py
 
-      - name: Run existing pure logic contracts
-        run: node --test support/pure-logic-suite.js
-        working-directory: robo-bacbo
+      - name: Validate syntax
+        run: |
+          node --check robo-bacbo/bot2_coletor.js
+          python -m py_compile robo-sync-pilot/robo.py robo-sync-pilot/tests/test_pure_logic.py
 
-      - name: Run BUG-051 contracts
-        run: node --test test/bug051-contract.test.js
-        working-directory: robo-bacbo
+      - name: Run light contracts
+        run: |
+          cd robo-bacbo
+          node --test support/pure-logic-suite.js
+          node --test test/bug051-contract.test.js
+          cd ../robo-sync-pilot
+          python tests/test_pure_logic.py
 
       - name: Validate diff
         run: git diff --check
@@ -46,6 +52,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add robo-bacbo/bot2_coletor.js robo-bacbo/public/index.html robo-bacbo/test/bug051-contract.test.js
+          git add robo-bacbo/bot2_coletor.js robo-bacbo/public/index.html robo-bacbo/support/pure-logic-suite.js robo-bacbo/test/bug051-contract.test.js robo-sync-pilot/robo.py robo-sync-pilot/tests/test_pure_logic.py
           git commit -m "fix: harden auto-trader lifecycle and audit [skip ci]"
           git push origin HEAD:agent/bug-023-websocket-reconnect-continuity
