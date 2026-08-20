@@ -33,6 +33,7 @@ jobs:
       - name: Apply patch and focused validation
         run: |
           python scripts/apply_bug046_resolved_8s.py
+          python scripts/fix_bug046_contract.py
           python -m py_compile robo-sync-pilot/robo.py robo-sync-pilot/tests/test_bug038_contract.py
           python robo-sync-pilot/tests/test_bug038_contract.py
       - name: Commit functional change if needed
@@ -220,8 +221,6 @@ jobs:
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
-        with:
-          node-version: "20"
 
       - name: Setup Python
         uses: actions/setup-python@v5
