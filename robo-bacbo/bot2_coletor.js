@@ -1484,7 +1484,9 @@ app.post("/api/robo", async (req, res) => {
     try {
         const { nome, tag, cor, telegram_token, telegram_chat_id, enviar_telegram, enviar_web, min_assert, stop_reds, ativo, config, destinatarios } = req.body;
         const configJson = JSON.stringify(config || {});
-        const [result] = await dbPool.query(`INSERT INTO robos_canais (nome, tag_visual, cor_hex, telegram_token, telegram_chat_id, enviar_telegram, enviar_web, min_assertividade, stop_reds_seguidos, greens_consecutivos, ativo, config_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`, [nome, tag, cor, telegram_token, telegram_chat_id || '', enviar_telegram ? 1 : 0, enviar_web ? 1 : 0, min_assert, stop_reds, ativo ? 1 : 0, configJson]);
+        const tokenNormalizado = typeof telegram_token === 'string' ? telegram_token.trim() : '';
+        const chatPrincipal = typeof telegram_chat_id === 'string' ? telegram_chat_id.trim() : '';
+        const [result] = await dbPool.query(`INSERT INTO robos_canais (nome, tag_visual, cor_hex, telegram_token, telegram_chat_id, enviar_telegram, enviar_web, min_assertividade, stop_reds_seguidos, greens_consecutivos, ativo, config_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`, [nome, tag, cor, tokenNormalizado, chatPrincipal, enviar_telegram ? 1 : 0, enviar_web ? 1 : 0, min_assert, stop_reds, ativo ? 1 : 0, configJson]);
         let roboId = result.insertId;
         if (destinatarios && Array.isArray(destinatarios)) { for (let d of destinatarios) { if (d.chat_id && d.chat_id.trim() !== '') await dbPool.query('INSERT INTO destinatarios_robo (robo_id, nome_cliente, chat_id) VALUES (?, ?, ?)', [roboId, d.nome_cliente || 'Cliente', d.chat_id.trim()]); } }
         await carregarSistemasParaMemoria();
@@ -1510,6 +1512,7 @@ app.put("/api/robo/:id", async (req, res) => {
 
         const configJson = JSON.stringify(config || {});
         const tokenRecebido = typeof telegram_token === 'string' ? telegram_token.trim() : '';
+        const chatPrincipal = typeof telegram_chat_id === 'string' ? telegram_chat_id.trim() : '';
         const novoAtivo = ativo === true || ativo === 1;
         const stopNovo = Math.max(0, Math.trunc(Number(stop_reds) || 0));
 
@@ -1540,7 +1543,7 @@ app.put("/api/robo/:id", async (req, res) => {
                      config_json=?, reds_consecutivos=0
                  WHERE id=?`,
                 [
-                    nome, tag, cor, tokenRecebido, telegram_chat_id || '',
+                    nome, tag, cor, tokenRecebido, chatPrincipal,
                     enviar_telegram ? 1 : 0, enviar_web ? 1 : 0,
                     min_assert, stopNovo, novoAtivo ? 1 : 0,
                     configJson, id
@@ -1556,7 +1559,7 @@ app.put("/api/robo/:id", async (req, res) => {
                      config_json=?
                  WHERE id=?`,
                 [
-                    nome, tag, cor, tokenRecebido, telegram_chat_id || '',
+                    nome, tag, cor, tokenRecebido, chatPrincipal,
                     enviar_telegram ? 1 : 0, enviar_web ? 1 : 0,
                     min_assert, stopNovo, novoAtivo ? 1 : 0,
                     configJson, id
@@ -1591,6 +1594,77 @@ app.put("/api/robo/:id", async (req, res) => {
     } catch(e) {
         console.error(`❌ PUT /api/robo/${req.params.id} falhou:`, e.message);
         res.status(500).json({ sucesso: false });
+    }
+});
+
+app.post("/api/robo/:id/testar-telegram", async (req, res) => {
+    const roboId = Number(req.params.id);
+    if (!Number.isInteger(roboId) || roboId <= 0) {
+        return res.status(400).json({ sucesso: false, erro: 'robo_id_invalido' });
+    }
+
+    try {
+        const [robos] = await dbPool.query(
+            `SELECT id, nome, telegram_token, telegram_chat_id
+             FROM robos_canais WHERE id=? LIMIT 1`,
+            [roboId]
+        );
+        if (robos.length === 0) {
+            return res.status(404).json({ sucesso: false, erro: 'robo_nao_encontrado' });
+        }
+
+        const robo = robos[0];
+        const token = String(robo.telegram_token || '').trim();
+        if (!token) {
+            return res.status(422).json({ sucesso: false, erro: 'telegram_token_ausente' });
+        }
+
+        const [destinatarios] = await dbPool.query(
+            'SELECT nome_cliente, chat_id FROM destinatarios_robo WHERE robo_id=? ORDER BY id ASC',
+            [roboId]
+        );
+        const destinos = destinosTelegramRobo({ ...robo, destinatarios });
+        if (destinos.length === 0) {
+            return res.status(422).json({ sucesso: false, erro: 'telegram_destino_ausente' });
+        }
+
+        const mensagem = [
+            '━━━━━━━━━━━━━━━━━━━━',
+            '🔔 TESTE DE CONEXÃO',
+            '━━━━━━━━━━━━━━━━━━━━',
+            `🤖 Robô: ${String(robo.nome || `#${roboId}`).trim()}`,
+            '✅ O bot está conectado e apto a enviar sinais para este destino.',
+            '━━━━━━━━━━━━━━━━━━━━'
+        ].join('\n');
+
+        const resultados = await Promise.all(
+            destinos.map(chatId => enviarMensagemTelegram(token, chatId, mensagem))
+        );
+        const detalhes = resultados.map((resultado, indice) => ({
+            destino: mascararChatIdTelegram(destinos[indice]),
+            sucesso: resultadoTelegramOk(resultado),
+            erro: resultadoTelegramOk(resultado) ? null : resultado.descricao,
+            codigo: resultadoTelegramOk(resultado) ? null : resultado.error_code
+        }));
+        const entregues = detalhes.filter(item => item.sucesso).length;
+
+        detalhes.filter(item => !item.sucesso).forEach(item => {
+            console.warn(
+                `⚠️ Robô ${roboId}: teste Telegram falhou para chat ${item.destino} — ${item.erro}`
+                + `${item.codigo ? ` (código ${item.codigo})` : ''}.`
+            );
+        });
+        console.log(`📨 Robô ${roboId}: teste Telegram confirmado em ${entregues}/${destinos.length} destino(s).`);
+
+        return res.status(entregues > 0 ? 200 : 422).json({
+            sucesso: entregues === destinos.length,
+            entregues,
+            total: destinos.length,
+            detalhes
+        });
+    } catch (e) {
+        console.error(`❌ POST /api/robo/${roboId}/testar-telegram falhou:`, e.message);
+        return res.status(500).json({ sucesso: false, erro: 'falha_interna' });
     }
 });
 
@@ -2546,6 +2620,7 @@ async function selecionarRobosParaEstrategia(est) {
             ...snapshotPublicoRobo(robo),
             telegram_token: String(robo.telegram_token || '').trim(),
             chat_ids: destinosTelegramRobo(robo),
+            greens_consecutivos: Math.max(0, Number(robo.greens_consecutivos) || 0),
             config: JSON.parse(JSON.stringify(robo.config || {}))
         }));
 
@@ -2565,41 +2640,90 @@ function formatarPadraoTelegram(padrao) {
     }).join(' → ');
 }
 
+function rotuloEntradaTelegram(entrada) {
+    if (entrada === 'Player') return '🔵 PLAYER';
+    if (entrada === 'Banker') return '🔴 BANKER';
+    return '🟡 TIE';
+}
+
+function rotuloNivelTelegram(nivel) {
+    const valor = Math.max(0, Math.trunc(Number(nivel) || 0));
+    return valor === 0 ? 'DIRETO' : `GALE ${valor}`;
+}
+
+function linhaSequenciaGreenTelegram(valor) {
+    const sequencia = Math.max(0, Math.trunc(Number(valor) || 0));
+    return `🔥 Sequência atual: ${sequencia} ${sequencia === 1 ? 'Green' : 'Greens'}`;
+}
+
 function montarMensagemTelegram(tipo, est, estado, robo, extras = {}) {
     const config = robo.config || {};
     const linhas = [];
 
+    const titulos = {
+        ENTRADA: '🎯 NOVA ENTRADA',
+        GALE: `🔁 GALE ${Math.max(1, Number(extras.nivel) || 1)}`,
+        GREEN: extras.resultado === 'TIE' ? '🟡 EMPATE PROTEGIDO' : '✅ GREEN CONFIRMADO',
+        RED: '❌ RED CONFIRMADO'
+    };
+
     if (config.cabecalho) linhas.push(String(config.cabecalho).trim());
 
-    if (tipo === 'ENTRADA') linhas.push('🎯 ENTRADA');
-    else if (tipo === 'GALE') linhas.push(`🔁 GALE ${Number(extras.nivel) || 1}`);
-    else if (tipo === 'GREEN' && extras.resultado === 'TIE') linhas.push('🟡 EMPATE PROTEGIDO');
-    else if (tipo === 'GREEN') linhas.push('✅ GREEN');
-    else if (tipo === 'RED') linhas.push('❌ RED');
-    else linhas.push(String(tipo || 'SINAL'));
+    linhas.push('━━━━━━━━━━━━━━━━━━━━');
+    linhas.push(titulos[tipo] || String(tipo || 'SINAL'));
+    linhas.push('━━━━━━━━━━━━━━━━━━━━');
 
-    if (config.mostrar_nome !== false) linhas.push(`Estratégia: ${est.nome}`);
+    if (robo.nome) linhas.push(`🤖 Robô: ${robo.nome}`);
+    if (config.mostrar_nome !== false) linhas.push(`📊 Estratégia: ${est.nome}`);
 
     if (tipo === 'ENTRADA' && config.mostrar_padrao !== false) {
         const padrao = formatarPadraoTelegram(est.padrao);
-        if (padrao) linhas.push(`Padrão: ${padrao}`);
+        if (padrao) linhas.push(`🧩 Padrão: ${padrao}`);
     }
 
     if (config.mostrar_assertividade !== false && Number.isFinite(Number(estado.assertividadeSinal))) {
-        linhas.push(`Assertividade: ${Number(estado.assertividadeSinal).toFixed(1)}%`);
+        linhas.push(`📈 Assertividade: ${Number(estado.assertividadeSinal).toFixed(1)}%`);
     }
 
     if (tipo === 'ENTRADA' || tipo === 'GALE') {
-        linhas.push(`Entrada: ${est.entrada === 'Player' ? '🔵 PLAYER' : (est.entrada === 'Banker' ? '🔴 BANKER' : '🟡 TIE')}`);
+        linhas.push(`💰 Entrada: ${rotuloEntradaTelegram(est.entrada)}`);
     }
 
     if (tipo === 'GREEN' && extras.resultado === 'TIE' && config.detalhar_empates !== false && extras.multiplicador) {
-        linhas.push(`Multiplicador: ${extras.multiplicador}`);
+        linhas.push(`✨ Multiplicador: ${extras.multiplicador}`);
     }
 
-    if (config.rodape) linhas.push(String(config.rodape).trim());
+    if (tipo === 'GREEN') {
+        linhas.push(`🏁 Resultado: ${extras.resultado === 'TIE' ? 'PROTEÇÃO NO EMPATE' : rotuloNivelTelegram(estado.galeAtual)}`);
+    }
+
+    if (['ENTRADA', 'GREEN', 'RED'].includes(tipo)) {
+        linhas.push(linhaSequenciaGreenTelegram(extras.greens_consecutivos ?? robo.greens_consecutivos));
+    }
+
+    if (tipo === 'ENTRADA') linhas.push('⏳ Aguardando resultado da mesa...');
+    if (config.rodape) {
+        linhas.push('━━━━━━━━━━━━━━━━━━━━');
+        linhas.push(String(config.rodape).trim());
+    }
 
     return linhas.filter(Boolean).join('\n').slice(0, 4096);
+}
+
+function mascararChatIdTelegram(chatId) {
+    const valor = String(chatId || '').trim();
+    if (!valor) return '(vazio)';
+    const sufixo = valor.slice(-4);
+    return `${'*'.repeat(Math.max(3, valor.length - sufixo.length))}${sufixo}`;
+}
+
+function descricaoErroTelegram(valor) {
+    const texto = String(valor || '').replace(/[\r\n\t]+/g, ' ').trim();
+    return texto.slice(0, 240) || 'Falha sem descrição retornada pelo Telegram';
+}
+
+function resultadoTelegramOk(resultado) {
+    return resultado && resultado.ok === true;
 }
 
 async function enviarMensagemTelegram(token, chatId, texto, fetchImpl = fetch) {
@@ -2620,9 +2744,23 @@ async function enviarMensagemTelegram(token, chatId, texto, fetchImpl = fetch) {
         let corpo = null;
         try { corpo = await resposta.json(); } catch (e) {}
 
-        return resposta.ok && corpo && corpo.ok === true;
+        const ok = resposta.ok && corpo && corpo.ok === true;
+        return {
+            ok,
+            http_status: Number(resposta.status) || 0,
+            error_code: ok ? null : (Number(corpo?.error_code) || null),
+            descricao: ok ? '' : descricaoErroTelegram(corpo?.description || `HTTP ${resposta.status || 0}`)
+        };
     } catch (e) {
-        return false;
+        const timeout = e?.name === 'AbortError';
+        return {
+            ok: false,
+            http_status: 0,
+            error_code: null,
+            descricao: timeout
+                ? `Tempo limite de ${TELEGRAM_TIMEOUT_MS}ms ao acessar a API do Telegram`
+                : descricaoErroTelegram(e?.message || 'Falha de conexão com a API do Telegram')
+        };
     } finally {
         clearTimeout(timeoutId);
     }
@@ -2638,7 +2776,16 @@ async function inscreverRobosTelegramEntrada(est, estado, candidatos) {
                 robo.chat_ids.map(chatId => enviarMensagemTelegram(robo.telegram_token, chatId, texto))
             );
 
-            const chatIdsEntregues = robo.chat_ids.filter((chatId, indice) => resultados[indice] === true);
+            resultados.forEach((resultado, indice) => {
+                if (resultadoTelegramOk(resultado)) return;
+                console.warn(
+                    `⚠️ Robô ${robo.id}: Telegram ENTRADA falhou para chat `
+                    + `${mascararChatIdTelegram(robo.chat_ids[indice])} — ${resultado.descricao}`
+                    + `${resultado.error_code ? ` (código ${resultado.error_code})` : ''}.`
+                );
+            });
+
+            const chatIdsEntregues = robo.chat_ids.filter((chatId, indice) => resultadoTelegramOk(resultados[indice]));
             if (chatIdsEntregues.length === 0) {
                 console.warn(`⚠️ Robô ${robo.id}: nenhuma entrega Telegram confirmada na ENTRADA.`);
                 return null;
@@ -2674,12 +2821,26 @@ async function enviarTelegramParaInscritos(tipo, est, estado, extras = {}) {
     const inscritos = Array.isArray(estado.robosTelegramInscritos) ? estado.robosTelegramInscritos : [];
     await Promise.all(
         inscritos.map(async robo => {
-            const texto = montarMensagemTelegram(tipo, est, estado, robo, extras);
+            const roboAtual = ROBOS_MEMORIA.find(item => String(item.id) === String(robo.id));
+            const extrasRobo = {
+                ...extras,
+                greens_consecutivos: Math.max(0, Number(roboAtual?.greens_consecutivos ?? robo.greens_consecutivos) || 0)
+            };
+            const texto = montarMensagemTelegram(tipo, est, estado, robo, extrasRobo);
             const resultados = await Promise.all(
                 robo.chat_ids.map(chatId => enviarMensagemTelegram(robo.telegram_token, chatId, texto))
             );
 
-            const entregues = resultados.filter(Boolean).length;
+            resultados.forEach((resultado, indice) => {
+                if (resultadoTelegramOk(resultado)) return;
+                console.warn(
+                    `⚠️ Robô ${robo.id}: Telegram ${tipo} falhou para chat `
+                    + `${mascararChatIdTelegram(robo.chat_ids[indice])} — ${resultado.descricao}`
+                    + `${resultado.error_code ? ` (código ${resultado.error_code})` : ''}.`
+                );
+            });
+
+            const entregues = resultados.filter(resultadoTelegramOk).length;
             if (entregues !== robo.chat_ids.length) {
                 console.warn(`⚠️ Robô ${robo.id}: Telegram ${tipo} confirmado em ${entregues}/${robo.chat_ids.length} destino(s).`);
             }
