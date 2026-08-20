@@ -808,7 +808,7 @@ async function enviarOrdemAoExecutor(alvo, valor, orderId = crypto.randomUUID(),
         : Number(valor || 0);
     console.log(
         `📤 EXECUTOR | order_id=${orderId} | plano=${planoLog} | `
-        + `exposição=R$${Number(exposicaoLog || 0).toFixed(2)}`
+        + `exposição=R$${Number(exposicaoLog || 0).toFixed(2)} | aguardando execução física e prova de débito`
     );
 
     try {
@@ -905,7 +905,8 @@ async function enviarOrdemAoExecutor(alvo, valor, orderId = crypto.randomUUID(),
             `✅ EXECUTOR | order_id=${orderId} | plano=${planoLog} | método=${evidenciaLog.metodo || 'n/a'} | `
             + `saldo=${Number(evidenciaLog.saldo_antes).toFixed(2)}→${Number(evidenciaLog.saldo_depois).toFixed(2)} | `
             + `débito=R$${Number(evidenciaLog.debito_observado || 0).toFixed(2)} | `
-            + `esperado=R$${Number(evidenciaLog.exposicao_esperada || exposicaoLog || 0).toFixed(2)}`
+            + `esperado=R$${Number(evidenciaLog.exposicao_esperada || exposicaoLog || 0).toFixed(2)} | `
+            + `aceite financeiro confirmado`
         );
 
         const exposicaoEsperadaNode = Array.isArray(apostas) && apostas.length > 0

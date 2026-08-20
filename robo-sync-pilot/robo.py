@@ -1394,7 +1394,7 @@ def aguardar_janela_aposta(page, aposta, planos):
                 print(
                     f"⚡ Ordem {aposta.get('order_id', 'n/a')}: fast path liberado em "
                     f"{decorrido_resolved_ms:.0f}ms após Resolved; stage={contexto['stage'] or 'vazio'}; "
-                    "DOM presente, clicando com force=True sem aguardar actionability."
+                    "DOM presente; ficha em fast path com force=True e alvos financeiros com hit-test seguro."
                 )
             return contexto_dom, None
 
