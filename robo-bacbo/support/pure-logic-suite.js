@@ -91,7 +91,8 @@ function carregarLogicaPura() {
             nivelHistoricoResultado,
             contarTiesLegados,
             roboSintonizaEstrategia,
-            fonteCanonicaAutoTrader,
+            idsRobosSelecionadosAutoTrader,
+            robosAutoTraderAutorizadores,
             autoTraderAutorizaEstrategia,
             avaliarStopRedsRobo,
             formatarPadraoTelegram,
@@ -231,7 +232,7 @@ test("robo dinamico pertence exclusivamente ao robo_dono_id", () => {
     assert.equal(logic.roboSintonizaEstrategia({ id: 8, config: {} }, est), false);
 });
 
-test("BUG-027: Auto-Trader autoriza fonte IA por ID estável e isola robôs diferentes", () => {
+test("BUG-033: Auto-Trader autoriza o robô selecionado por ID estável", () => {
     const dinamica = {
         id: "ia-8-padrao",
         origem: "AUTO_PILOT_IA:8",
@@ -239,21 +240,33 @@ test("BUG-027: Auto-Trader autoriza fonte IA por ID estável e isola robôs dife
         robo_dono_id: 8
     };
 
-    assert.equal(logic.fonteCanonicaAutoTrader(dinamica), "AUTO_PILOT_IA:8");
     assert.equal(logic.autoTraderAutorizaEstrategia({
-        fontes_sinal: ["AUTO_PILOT_IA:8"]
-    }, dinamica, []), true);
+        fontes_sinal: ["ROBO:8"]
+    }, dinamica, [{ id: 8, nome: "Teste IA 2", ativo: 1, config: {} }]), true);
     assert.equal(logic.autoTraderAutorizaEstrategia({
-        fontes_sinal: ["AUTO_PILOT_IA:7"]
-    }, dinamica, []), false);
+        fontes_sinal: ["ROBO:7"]
+    }, dinamica, [{ id: 7, nome: "Outro", ativo: 1, config: {} }, { id: 8, nome: "Teste IA 2", ativo: 1, config: {} }]), false);
 
     // O nome é apenas visual: renomear o robô não altera a autorização canônica.
     assert.equal(logic.autoTraderAutorizaEstrategia({
-        fontes_sinal: ["AUTO_PILOT_IA:8"]
-    }, dinamica, [{ id: 8, nome: "Nome alterado" }]), true);
+        fontes_sinal: ["ROBO:8"]
+    }, dinamica, [{ id: 8, nome: "Nome alterado", ativo: 1, config: {} }]), true);
 });
 
-test("BUG-027: formato legado e origens manuais permanecem compatíveis", () => {
+test("BUG-033: robô manual selecionado autoriza apenas estratégias que ele sintoniza", () => {
+    const manual = { id: 41, origem: "Bacbo Club", is_dinamico: false };
+    const robos = [
+        { id: 7, nome: "Manual", ativo: 1, config: { origens: ["Bacbo Club"], avulsos: [], excecoes: [] } },
+        { id: 8, nome: "Outro", ativo: 1, config: { origens: ["Neurobet"], avulsos: [], excecoes: [] } },
+        { id: 9, nome: "Inativo", ativo: 0, config: { origens: ["Bacbo Club"], avulsos: [], excecoes: [] } }
+    ];
+
+    assert.equal(logic.autoTraderAutorizaEstrategia({ fontes_sinal: ["ROBO:7"] }, manual, robos), true);
+    assert.equal(logic.autoTraderAutorizaEstrategia({ fontes_sinal: ["ROBO:8"] }, manual, robos), false);
+    assert.equal(logic.autoTraderAutorizaEstrategia({ fontes_sinal: ["ROBO:9"] }, manual, robos), false);
+});
+
+test("BUG-033: formatos legados permanecem compatíveis sem voltar à UI", () => {
     const dinamica = {
         origem: "AUTO_PILOT_IA:8",
         is_dinamico: true,
@@ -263,7 +276,10 @@ test("BUG-027: formato legado e origens manuais permanecem compatíveis", () => 
 
     assert.equal(logic.autoTraderAutorizaEstrategia({
         fontes_sinal: ["[AUTO] Teste IA 2"]
-    }, dinamica, [{ id: 8, nome: "Teste IA 2" }]), true);
+    }, dinamica, [{ id: 8, nome: "Teste IA 2", ativo: 1, config: {} }]), true);
+    assert.equal(logic.autoTraderAutorizaEstrategia({
+        fontes_sinal: ["AUTO_PILOT_IA:8"]
+    }, dinamica, [{ id: 8, nome: "Teste IA 2", ativo: 1, config: {} }]), true);
     assert.equal(logic.autoTraderAutorizaEstrategia({
         fontes_sinal: ["Bacbo Club"]
     }, manual, []), true);
@@ -272,10 +288,17 @@ test("BUG-027: formato legado e origens manuais permanecem compatíveis", () => 
     }, manual, []), false);
 });
 
-test("BUG-027: painel persiste fonte IA canônica e backend usa o matcher central", () => {
-    assert.match(frontendSource, /const fonteCanonica = `AUTO_PILOT_IA:\$\{Number\(r\.id\)\}`/);
+test("BUG-033: painel lista somente robôs ativos e não renderiza origens", () => {
+    assert.match(frontendSource, /robosGlobais\.filter\(r => boolRobo\(r\.ativo\)\)/);
+    assert.match(frontendSource, /const fonteCanonica = `ROBO:\$\{id\}`/);
     assert.match(frontendSource, /class="chk-at-fonte" value="\$\{fonteCanonica\}"/);
     assert.match(frontendSource, /function rotuloFonteAutoTrader\(fonte\)/);
+    const renderFontes = frontendSource.slice(
+        frontendSource.indexOf("function renderizarCheckboxFontesAT"),
+        frontendSource.indexOf("function rotuloFonteAutoTrader")
+    );
+    assert.doesNotMatch(renderFontes, /origensGlobais/);
+    assert.doesNotMatch(renderFontes, /\(Manuais\)|IA Dinâmica/);
     assert.doesNotMatch(source, /fontes_sinal\.includes\(est\.origem\)/);
     assert.equal(
         (source.match(/autoTraderAutorizaEstrategia\(cf, est, ROBOS_MEMORIA\)/g) || []).length,
@@ -299,6 +322,8 @@ test("BUG-028: executor espera AcceptingBets estrutural e Node preserva o callba
     assert.match(executorPythonSource, /selecionar_ficha_com_confirmacao/);
     assert.match(executorPythonSource, /elementFromPoint/);
     assert.match(executorPythonSource, /SUPERFICIE_/);
+    assert.match(executorPythonSource, /SUPERFICIE_RECONFIRMADA/);
+    assert.match(executorPythonSource, /troca controlada de ficha/);
     assert.match(executorPythonSource, /aria-pressed/);
 
     const localizador = executorPythonSource.slice(
