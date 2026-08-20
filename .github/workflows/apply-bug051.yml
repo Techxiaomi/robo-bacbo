@@ -37,6 +37,8 @@ jobs:
 
           node_test = Path('robo-bacbo/support/pure-logic-suite.js')
           s = node_test.read_text(encoding='utf-8')
+          if 'resolved_base \\+ 8\\.0' in s:
+              s = s.replace('resolved_base \\+ 8\\.0', 'resolved_base \\+ 8\\.5', 1)
           if 'janela real alvo em \\+8000ms' in s:
               s = s.replace('janela real alvo em \\+8000ms', 'janela real alvo em \\+8500ms', 1)
           if 'resolved_base \\+ 8\\.5' not in s:
