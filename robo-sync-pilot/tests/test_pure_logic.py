@@ -646,13 +646,22 @@ class TestBug028JanelaApostavelEstrutural(unittest.TestCase):
             "round_id_aceite": "round-10",
         }
 
-    def test_somente_betting_fresco_abre_e_novo_resolved_expira(self):
+    def test_somente_stage_apostavel_fresco_abre_e_novo_resolved_expira(self):
         self.assertEqual(self.avaliar(self.ordem)["estado"], "AGUARDAR_STAGE")
 
+        for stage_fechado in (
+            "WaitingForBets", "ClosingBets", "FirstDie", "SecondDie",
+            "ThirdDie", "FourthDie", "Confirmation", "Resolved"
+        ):
+            with self.ns["estado_mesa_lock"]:
+                self.ns["estado_mesa"]["stage"] = stage_fechado
+                self.ns["estado_mesa"]["atualizado_em_ms"] = int(time.time() * 1000)
+            self.assertEqual(self.avaliar(self.ordem)["estado"], "AGUARDAR_STAGE")
+
         with self.ns["estado_mesa_lock"]:
-            self.ns["estado_mesa"]["stage"] = "Dealing"
+            self.ns["estado_mesa"]["stage"] = "AcceptingBets"
             self.ns["estado_mesa"]["atualizado_em_ms"] = int(time.time() * 1000)
-        self.assertEqual(self.avaliar(self.ordem)["estado"], "AGUARDAR_STAGE")
+        self.assertEqual(self.avaliar(self.ordem)["estado"], "ABERTA")
 
         with self.ns["estado_mesa_lock"]:
             self.ns["estado_mesa"]["stage"] = "Betting"
@@ -664,7 +673,7 @@ class TestBug028JanelaApostavelEstrutural(unittest.TestCase):
 
     def test_betting_stale_nao_autoriza_clique(self):
         with self.ns["estado_mesa_lock"]:
-            self.ns["estado_mesa"]["stage"] = "Betting"
+            self.ns["estado_mesa"]["stage"] = "AcceptingBets"
             self.ns["estado_mesa"]["atualizado_em_ms"] = int((time.time() - 21) * 1000)
         resultado = self.avaliar(self.ordem)
         self.assertEqual(resultado["estado"], "AGUARDAR_FRESCOR")
