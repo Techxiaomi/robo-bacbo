@@ -416,6 +416,9 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
             frame = next(f for f in pagina.frames if "game-closed-frame" in f.url)
             self.assertEqual(resultado["status"], "EXPIRADA")
             self.assertIn("Nova rodada", resultado["motivo"])
+            self.assertIn("última inspeção:", resultado["motivo"])
+            self.assertIn("fichas=", resultado["motivo"])
+            self.assertIn("alvos=", resultado["motivo"])
             self.assertEqual(frame.evaluate("window.__chipClicks"), 0)
             self.assertEqual(frame.evaluate("window.__targetClicks"), 0)
         finally:
