@@ -20,7 +20,7 @@ load_env_file(os.path.join(PROJECT_ROOT, ".env"))
 # CONFIGURAÇÕES GERAIS E CONTROLE DE VERSÃO
 # ====================================================================
 VERSAO_ROBO = "v1.6.13"
-NOME_ATUALIZACAO = "BUG-045 Clique Fisico via page.mouse"
+NOME_ATUALIZACAO = "BUG-046 Janela Real Resolved + 8s"
 
 URL_CASSINO = os.getenv("CASINO_GAME_URL", "")
 ARQUIVO_SESSAO = os.getenv("SESSION_STATE_FILE", os.path.join(BASE_DIR, "sessao_salva.json"))
@@ -262,6 +262,7 @@ def registrar_ordem_idempotente(dados, aceitar_nova=True):
     # mesmo coletor. Isso permite esperar a abertura da rodada seguinte sem risco
     # de executar a ordem depois que outra rodada já terminou.
     seq_contexto = max(0, int(globals().get("coletor_seq", 0) or 0))
+    resolved_monotonic_contexto = float(globals().get("ultimo_resolved_monotonic", 0.0) or 0.0)
     estado_contexto = globals().get("estado_mesa", {})
     lock_contexto = globals().get("estado_mesa_lock")
     if lock_contexto is not None:
@@ -281,6 +282,7 @@ def registrar_ordem_idempotente(dados, aceitar_nova=True):
         "apostas": apostas,
         "sincronizar_janela": True,
         "coletor_seq_aceite": seq_contexto,
+        "resolved_monotonic_aceite": resolved_monotonic_contexto,
         "stage_aceite": stage_contexto,
         "round_id_aceite": round_id_contexto,
         "round_resolvido_aceite": round_resolvido_contexto
@@ -444,6 +446,7 @@ def processar_ordem_executor(page, ordem):
 
 
 ultimo_tempo_rodada = 0
+ultimo_resolved_monotonic = 0.0
 COLETOR_SESSAO = str(uuid.uuid4())
 coletor_seq = 0
 ultimo_resultado_chave = None
@@ -935,9 +938,9 @@ def classificar_reconexao_player_state(estado_anterior, dados, decorrido_segundo
 
 
 def stage_evolution_apostavel(stage):
-    """Aceita somente a fase explícita em que a Evolution recebe apostas."""
+    """Permite somente fases pré-dados; o instante financeiro é governado por Resolved+8s."""
     normalizado = re.sub(r"[^a-z]", "", str(stage or "").strip().lower())
-    return normalizado in {"acceptingbets", "betting"}
+    return normalizado in {"waitingforbets", "closingbets", "acceptingbets", "betting"}
 
 
 def avaliar_contexto_janela_aposta(aposta):
@@ -1192,53 +1195,18 @@ def localizar_frame_apostavel(page, planos):
     return contexto_dom["frame"] if contexto_dom is not None else None
 
 
-def clique_fisico_humano(page, elemento):
-    """Move o ponteiro ate o centro do elemento e executa down/up reais via page.mouse."""
+def clicar_superficie_ficha_playwright(page, elemento):
+    """Seleciona a ficha com o clique Playwright normal usado pelo executor simples original."""
     try:
-        box = elemento.bounding_box()
-        if not box:
-            return {
-                "acionada": False,
-                "relacao": "SEM_BOUNDING_BOX",
-                "motivo": "Elemento fora da area visivel para calcular bounding_box",
-            }
-        largura = float(box.get("width") or 0.0)
-        altura = float(box.get("height") or 0.0)
-        if largura <= 0 or altura <= 0:
-            return {
-                "acionada": False,
-                "relacao": "BOUNDING_BOX_INVALIDO",
-                "motivo": "Bounding box sem dimensoes positivas",
-            }
-        x = float(box["x"]) + largura / 2.0
-        y = float(box["y"]) + altura / 2.0
-        page.mouse.move(x, y, steps=10)
-        page.wait_for_timeout(100)
-        page.mouse.down()
+        elemento.click(timeout=2000)
         page.wait_for_timeout(150)
-        page.mouse.up()
-        page.wait_for_timeout(300)
-        return {
-            "acionada": True,
-            "relacao": "MOUSE_FISICO",
-            "via": "PLAYWRIGHT_PAGE_MOUSE",
-            "x": x,
-            "y": y,
-        }
+        return {"acionada": True, "relacao": "CLIQUE_PLAYWRIGHT_SIMPLES", "via": "PLAYWRIGHT_CLICK"}
     except Exception as erro:
         return {
             "acionada": False,
             "relacao": type(erro).__name__,
-            "motivo": f"falha no clique fisico ({type(erro).__name__})",
+            "motivo": f"falha no clique simples da ficha ({type(erro).__name__})",
         }
-
-
-def clicar_superficie_ficha_playwright(page, elemento):
-    """Usa page.mouse para reproduzir a trajetoria fisica ate a ficha canonica."""
-    resultado = clique_fisico_humano(page, elemento)
-    if resultado.get("acionada") is True:
-        return {"acionada": True, "relacao": "MOUSE_FISICO", "via": "PLAYWRIGHT_PAGE_MOUSE"}
-    return resultado
 
 
 def selecionar_ficha_com_confirmacao(page, ficha_contexto, valor_ficha):
@@ -1320,16 +1288,14 @@ def aguardar_janela_aposta(page, aposta, planos):
     sincronizar = aposta.get("sincronizar_janela") is True
     inicio_espera = time.monotonic()
     prazo = inicio_espera + EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS
+    resolved_base = float(aposta.get("resolved_monotonic_aceite") or 0.0)
+    alvo_temporal = resolved_base + 8.0 if resolved_base > 0 else 0.0
     ultimo_contexto = avaliar_contexto_janela_aposta(aposta)
     ultimo_diagnostico = {}
     ultima_assinatura = None
     ultima_assinatura_dom = None
-    aberta_detectada_em = None
 
-    # BUG-043: alguns carregamentos da Evolution abrem um painel de ajuda/boas-vindas
-    # sobre a mesa. Esse overlay pode interceptar os eventos financeiros mesmo quando
-    # o DOM da ficha/alvo esta correto. A limpeza e oportunista e nao altera o fluxo
-    # quando nenhum modal estiver presente.
+    # Mantém somente a limpeza preventiva que já se provou necessária na mesa real.
     try:
         seletor_fechar_modal = (
             'button[aria-label="Close"], '
@@ -1348,10 +1314,16 @@ def aguardar_janela_aposta(page, aposta, planos):
         pass
 
     if sincronizar:
+        if alvo_temporal <= 0:
+            return None, {
+                "status": "FALHOU",
+                "motivo": "Ordem sem relógio monotônico do Resolved de origem; execução bloqueada",
+                "cliques_alvo": 0,
+            }
+        restante_ms = max(0.0, (alvo_temporal - time.monotonic()) * 1000.0)
         print(
-            f"⏳ Ordem {aposta.get('order_id', 'n/a')} aguardando stage AcceptingBets + DOM acionável "
-            f"da rodada após coletor_seq={aposta.get('coletor_seq_aceite', 0)}; "
-            f"fusível operacional={EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS:g}s."
+            f"⏱️ Ordem {aposta.get('order_id', 'n/a')} sincronizada pelo Resolved: "
+            f"janela real alvo em +8000ms; faltam {restante_ms:.0f}ms."
         )
 
     while True:
@@ -1359,7 +1331,7 @@ def aguardar_janela_aposta(page, aposta, planos):
             return None, {
                 "status": "FALHOU",
                 "motivo": "Executor ficou indisponível enquanto aguardava a janela de apostas",
-                "cliques_alvo": 0
+                "cliques_alvo": 0,
             }
 
         contexto = avaliar_contexto_janela_aposta(aposta)
@@ -1373,83 +1345,61 @@ def aguardar_janela_aposta(page, aposta, planos):
             ultima_assinatura = assinatura
 
         if contexto["estado"] == "SEM_CONTEXTO":
-            return None, {
-                "status": "FALHOU",
-                "motivo": "Ordem sem contexto de rodada do coletor; execução bloqueada",
-                "cliques_alvo": 0
-            }
+            return None, {"status": "FALHOU", "motivo": "Ordem sem contexto de rodada do coletor; execução bloqueada", "cliques_alvo": 0}
         if contexto["estado"] == "INCONSISTENTE":
-            return None, {
-                "status": "FALHOU",
-                "motivo": "Contexto de rodada inconsistente; execução bloqueada",
-                "cliques_alvo": 0
-            }
+            return None, {"status": "FALHOU", "motivo": "Contexto de rodada inconsistente; execução bloqueada", "cliques_alvo": 0}
         if contexto["estado"] == "EXPIRADA":
-            diagnostico_texto = formatar_diagnostico_janela(ultimo_contexto, ultimo_diagnostico)
-            return None, {
-                "status": "EXPIRADA",
-                "motivo": (
-                    "Nova rodada foi resolvida antes da execução; ordem descartada sem cliques; "
-                    f"última inspeção: {diagnostico_texto}"
-                ),
-                "cliques_alvo": 0
-            }
+            return None, {"status": "EXPIRADA", "motivo": "Nova rodada foi resolvida antes da execução; ordem descartada sem cliques", "cliques_alvo": 0}
 
+        agora = time.monotonic()
+        if alvo_temporal > 0 and agora < alvo_temporal:
+            page.wait_for_timeout(min(50, max(1, int((alvo_temporal - agora) * 1000))))
+            continue
+
+        # Após +8s, só prossegue enquanto a mesa ainda estiver numa fase pré-dados.
         if contexto["estado"] == "ABERTA":
-            if aberta_detectada_em is None:
-                aberta_detectada_em = time.monotonic()
-                if sincronizar:
-                    print(
-                        f"🎞️ Ordem {aposta.get('order_id', 'n/a')}: AcceptingBets detectado; "
-                        "aguardando 1500ms para estabilização visual das fichas."
-                    )
-                # BUG-040: a Evolution anima a subida/reposicionamento das fichas
-                # no começo de AcceptingBets. Aguarda a UI estabilizar antes de
-                # qualquer tentativa de seleção de ficha ou clique financeiro.
-                page.wait_for_timeout(1500)
-                contexto_pos_animacao = avaliar_contexto_janela_aposta(aposta)
-                ultimo_contexto = contexto_pos_animacao
-                if contexto_pos_animacao["estado"] != "ABERTA":
-                    aberta_detectada_em = None
-                    continue
             contexto_dom, ultimo_diagnostico = localizar_contexto_apostavel(page, planos)
             if contexto_dom is not None:
+                decorrido_resolved_ms = (time.monotonic() - resolved_base) * 1000.0 if resolved_base > 0 else 0.0
                 if sincronizar:
                     print(
-                        f"⚡ Ordem {aposta.get('order_id', 'n/a')}: DOM pronto em "
-                        f"{(time.monotonic() - inicio_espera) * 1000:.0f}ms total / "
-                        f"{(time.monotonic() - aberta_detectada_em) * 1000:.0f}ms desde AcceptingBets; "
-                        f"iniciando fast path financeiro."
+                        f"⚡ Ordem {aposta.get('order_id', 'n/a')}: janela real liberada em "
+                        f"{decorrido_resolved_ms:.0f}ms após Resolved; stage={contexto['stage'] or 'vazio'}; "
+                        "DOM pronto, iniciando clique simples."
                     )
                 return contexto_dom, None
             assinatura_dom = tuple(sorted(ultimo_diagnostico.items()))
             if sincronizar and assinatura_dom != ultima_assinatura_dom:
                 print(
-                    f"🔎 Ordem {aposta.get('order_id', 'n/a')}: AcceptingBets detectado, "
-                    f"aguardando DOM completo; {formatar_diagnostico_janela(contexto, ultimo_diagnostico)}."
+                    f"🔎 Ordem {aposta.get('order_id', 'n/a')}: +8s atingido; aguardando DOM acionável; "
+                    f"{formatar_diagnostico_janela(contexto, ultimo_diagnostico)}."
                 )
                 ultima_assinatura_dom = assinatura_dom
 
+        # FirstDie/SecondDie/.../Confirmation/Resolved nunca passam por estado ABERTA.
         if time.monotonic() >= prazo:
             diagnostico_texto = formatar_diagnostico_janela(ultimo_contexto, ultimo_diagnostico)
             return None, {
                 "status": "EXPIRADA",
-                "motivo": (
-                    f"Fusível operacional de {EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS:g}s atingido sem "
-                    f"janela segura; {diagnostico_texto}"
-                ),
-                "cliques_alvo": 0
+                "motivo": f"Fusível operacional atingido sem janela segura; {diagnostico_texto}",
+                "cliques_alvo": 0,
             }
 
         page.wait_for_timeout(25)
 
 
 def clicar_alvo_financeiro_playwright(page, elemento):
-    """Usa page.mouse no centro do alvo financeiro canonico."""
-    resultado = clique_fisico_humano(page, elemento)
-    if resultado.get("acionada") is True:
-        return {"acionada": True, "relacao": "MOUSE_FISICO"}
-    return resultado
+    """Executa o clique financeiro Playwright normal, sem force/evaluate/page.mouse."""
+    try:
+        elemento.click(timeout=2000)
+        page.wait_for_timeout(120)
+        return {"acionada": True, "relacao": "CLIQUE_PLAYWRIGHT_SIMPLES"}
+    except Exception as erro:
+        return {
+            "acionada": False,
+            "relacao": type(erro).__name__,
+            "motivo": f"falha no clique simples do alvo ({type(erro).__name__})",
+        }
 
 
 def confirmar_aceite_financeiro_aposta(page, saldo_antes, exposicao_esperada):
@@ -1473,7 +1423,7 @@ def confirmar_aceite_financeiro_aposta(page, saldo_antes, exposicao_esperada):
 
     tolerancia = max(0.01, float(EXECUTOR_BET_ACCEPTANCE_TOLERANCE))
 
-    # BUG-045: depois do mouse.up financeiro, a Evolution pode levar mais de 2 s para
+    # BUG-046: depois do clique financeiro simples, a Evolution pode levar mais de 2 s para
     # refletir no HTML o débito já processado pelo servidor. Não lê o saldo antes
     # dessa janela mínima para evitar classificar atualização visual tardia como
     # "clique fantasma".
@@ -1886,7 +1836,7 @@ def sincronizar_saldo_com_node(page, estado_saldo):
 
 
 def processar_resultado(dados):
-    global ultimo_tempo_rodada, coletor_seq
+    global ultimo_tempo_rodada, ultimo_resolved_monotonic, coletor_seq
     try:
         game_info = dados.get("args", {}).get("game", {})
         status_atual = game_info.get("stage")
@@ -1915,6 +1865,10 @@ def processar_resultado(dados):
                     10
                 )
                 return
+
+            # BUG-046: este instante é o relógio mestre da próxima janela financeira.
+            # A mesa real libera fichas/alvos aproximadamente 8 s após este Resolved.
+            ultimo_resolved_monotonic = time.monotonic()
 
             # Consome a sequência somente depois da deduplicação da rodada resolvida.
             # Se parsing ou POST falhar depois daqui, o próximo resultado real deixará
