@@ -429,6 +429,8 @@ class PlaywrightDomIntegrationTests(unittest.TestCase):
     def test_bug039_ordem_composta_para_apos_primeira_perna_sem_debito(self):
         pagina = self.nova_pagina("/game-composite-first-rejected.html")
         self.configurar_janela(40, "AcceptingBets", timeout=2.0)
+        FUNCOES["ler_saldo_atual"] = ler_saldo_atual_real
+        FUNCOES["confirmar_aceite_financeiro_aposta"] = confirmar_aceite_financeiro_aposta_real
         try:
             resultado = executar_aposta_na_tela(
                 pagina,
