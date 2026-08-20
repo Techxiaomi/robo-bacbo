@@ -157,6 +157,16 @@ Qualquer interrupção estrutural reconhecida ou sinalizada pelo Python invalida
 
 Risco residual externo: o projeto não presume que `roundId` seja numérico/sequencial sem contrato oficial. Se a plataforma omitir uma rodada completa, continuar enviando outros `playerState` válidos e retornar antes do watchdog, uma única fonte não consegue provar matematicamente a ausência. A proteção prioriza falhar fechado em fechamento, silêncio e transições observáveis; reconciliação por uma segunda fonte oficial/roadmap continua sendo a única forma de elevar essa garantia contra omissão totalmente invisível da fonte primária.
 
+### BUG-028 — Ordem expirava antes de a próxima janela Betting abrir
+
+Status: **mitigado em código; validação operacional no site real pendente**.
+
+O BUG-027 confirmou o roteamento integral Node→Python, mas a primeira ordem real terminou sem cliques porque o executor usava 15 segundos contados ainda no `Resolved`. Essa duração podia acabar durante animações/pagamento da rodada anterior. O mesmo gate aceitava qualquer stage diferente de `Resolved`, filtrava frames pelo texto da URL e testava apenas o primeiro elemento correspondente, combinando falso negativo de DOM com risco de stage permissivo.
+
+O executor agora aguarda exclusivamente `stage=Betting` com playerState fresco e mantém a ordem ligada ao `coletor_seq` do resultado que gerou o sinal. Novo resultado, inconsistência de sequência, perda de prontidão ou interrupção continuam cancelando antes de qualquer clique. O tempo virou somente um fusível final de 180 s; o waiter do Node usa 210 s para nunca abandonar uma ordem que o Python ainda possa executar.
+
+A mesa é identificada pelo conjunto completo de fichas e alvos necessários, independentemente da URL do iframe. Duplicatas ocultas são ignoradas, valores equivalentes de `data-value` são normalizados e o mesmo Locator acionável pré-validado é usado no clique. O diagnóstico de expiração informa apenas stage/seq/frescor e contagens de elementos, sem conteúdo ou URL sensível.
+
 ### BUG-019 — Proteção no empate existia no sinal, mas não na execução financeira
 
 Status: **mitigado**.
@@ -168,7 +178,7 @@ O Auto-Trader segue `proteger_empate` da estratégia: sinal sem proteção envia
 
 Status: **mitigado**.
 
-O sinal pode nascer assim que o coletor recebe `stage=Resolved`, enquanto a mesa só libera fichas/alvos alguns segundos depois. O executor agora vincula cada ordem ao `coletor_seq` vigente no aceite, aguarda a saída de `Resolved` e exige que todas as fichas necessárias e o alvo passem por `click(trial=True)` antes de qualquer clique real. Se outra rodada resolver antes do primeiro clique, se a janela não ficar acionável dentro de `EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS` ou se o executor perder prontidão, a ordem termina sem clique. O TTL de 8 s continua limitando somente o tempo de fila; o timeout Node de callback foi ampliado para 30 s para comportar a espera legítima da janela.
+O sinal pode nascer assim que o coletor recebe `stage=Resolved`, enquanto a mesa só libera fichas/alvos alguns segundos depois. O executor vincula cada ordem ao `coletor_seq` vigente no aceite e exige pré-validação por `click(trial=True)` antes de qualquer clique real. O BUG-028 endureceu esse contrato: somente `stage=Betting` fresco autoriza o DOM, a expiração principal é estrutural e o antigo limite de 15 s foi substituído por um fusível de 180 s com waiter Node de 210 s. O TTL de 8 s continua limitando somente o tempo anterior à retirada da fila.
 
 ### SEC-002 — Comunicação interna Node ↔ Python sem autenticação
 
