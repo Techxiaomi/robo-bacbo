@@ -800,6 +800,16 @@ async function enviarOrdemAoExecutor(alvo, valor, orderId = crypto.randomUUID(),
     const esperaExecucao = criarEsperaResultadoExecutor(orderId);
     let ultimoErro = null;
     let confirmacaoAceite = null;
+    const planoLog = Array.isArray(apostas) && apostas.length > 0
+        ? apostas.map(perna => `${perna.alvo}=R$${Number(perna.valor || 0).toFixed(2)}`).join(' + ')
+        : `${alvo}=R$${Number(valor || 0).toFixed(2)}`;
+    const exposicaoLog = Array.isArray(apostas) && apostas.length > 0
+        ? apostas.reduce((total, perna) => total + (Number(perna.valor) || 0), 0)
+        : Number(valor || 0);
+    console.log(
+        `📤 EXECUTOR | order_id=${orderId} | plano=${planoLog} | `
+        + `exposição=R$${Number(exposicaoLog || 0).toFixed(2)}`
+    );
 
     try {
         for (let tentativa = 1; tentativa <= EXECUTOR_MAX_ATTEMPTS; tentativa++) {
@@ -883,8 +893,20 @@ async function enviarOrdemAoExecutor(alvo, valor, orderId = crypto.randomUUID(),
 
         const resultadoExecucao = resultadoAntecipado || await esperaExecucao.promessa;
         if (resultadoExecucao.status !== 'EXECUTADA') {
+            console.error(
+                `❌ EXECUTOR | order_id=${orderId} | status=${resultadoExecucao.status} | `
+                + `plano=${planoLog} | motivo=${String(resultadoExecucao.motivo || 'sem motivo')}`
+            );
             throw erroResultadoExecucaoExecutor(resultadoExecucao);
         }
+
+        const evidenciaLog = resultadoExecucao.confirmacao || {};
+        console.log(
+            `✅ EXECUTOR | order_id=${orderId} | plano=${planoLog} | método=${evidenciaLog.metodo || 'n/a'} | `
+            + `saldo=${Number(evidenciaLog.saldo_antes).toFixed(2)}→${Number(evidenciaLog.saldo_depois).toFixed(2)} | `
+            + `débito=R$${Number(evidenciaLog.debito_observado || 0).toFixed(2)} | `
+            + `esperado=R$${Number(evidenciaLog.exposicao_esperada || exposicaoLog || 0).toFixed(2)}`
+        );
 
         const exposicaoEsperadaNode = Array.isArray(apostas) && apostas.length > 0
             ? apostas.reduce((total, perna) => total + (Number(perna.valor) || 0), 0)
@@ -2685,22 +2707,50 @@ function unirRobosInscritos(...listas) {
     return [...unicos.values()];
 }
 
+function ciclosAtivosPorRobo() {
+    const ciclos = new Map();
+    for (const [estrategiaId, estado] of Object.entries(estadoApostas || {})) {
+        if (!estado || estado.aguardandoResultado !== true) continue;
+        const robosCiclo = Array.isArray(estado.robosCiclo) && estado.robosCiclo.length > 0
+            ? estado.robosCiclo
+            : (Array.isArray(estado.robosInscritos) ? estado.robosInscritos : []);
+        for (const robo of robosCiclo) {
+            if (!robo || robo.id === undefined || robo.id === null) continue;
+            ciclos.set(String(robo.id), {
+                estrategia_id: String(estrategiaId),
+                gale_atual: Math.max(0, Number(estado.galeAtual) || 0)
+            });
+        }
+    }
+    return ciclos;
+}
+
 async function selecionarRobosParaEstrategia(est) {
     if (est.quarentena_restante > 0) {
-        return { web: [], telegram: [], assertividade: 0 };
+        return { todos: [], web: [], telegram: [], bloqueados: [], assertividade: 0 };
     }
 
     const assertividade = await calcularAssertividadePersistidaEstrategia(est);
+    const ciclosAtivos = ciclosAtivosPorRobo();
+    const bloqueados = [];
     const elegiveis = ROBOS_MEMORIA.filter(robo => {
         const ativo = robo.ativo === true || robo.ativo === 1;
         const minAssert = Math.max(0, Number(robo.min_assertividade) || 0);
 
-        return ativo
+        const sintoniza = ativo
             && !roboEmStandby(robo)
             && assertividade >= minAssert
             && roboSintonizaEstrategia(robo, est);
+        if (!sintoniza) return false;
+        const ciclo = ciclosAtivos.get(String(robo.id));
+        if (ciclo) {
+            bloqueados.push({ ...snapshotPublicoRobo(robo), ...ciclo });
+            return false;
+        }
+        return true;
     });
 
+    const todos = elegiveis.map(snapshotPublicoRobo);
     const web = elegiveis
         .filter(robo => robo.enviar_web === true || robo.enviar_web === 1)
         .map(snapshotPublicoRobo);
@@ -2721,8 +2771,10 @@ async function selecionarRobosParaEstrategia(est) {
         }));
 
     return {
+        todos,
         web,
         telegram,
+        bloqueados,
         assertividade: Number(assertividade.toFixed(1))
     };
 }
@@ -2897,7 +2949,7 @@ async function inscreverRobosTelegramEntrada(est, estado, candidatos) {
 
     const inscritos = resultadosRobos.filter(Boolean);
     estado.robosTelegramInscritos = inscritos;
-    estado.robosInscritos = unirRobosInscritos(estado.robosWebInscritos, inscritos);
+    estado.robosInscritos = unirRobosInscritos(estado.robosCiclo, estado.robosWebInscritos, inscritos);
     return inscritos;
 }
 
@@ -3377,7 +3429,7 @@ async function carregarSistemasParaMemoria() {
                 stats: { greenDireto: db.green_direto, gale1: db.gale1, gale2: db.gale2, red: db.red, ties: tiesParsed }
             };
             ESTRATEGIAS_MEMORIA.push(est);
-            novoEstado[est.id] = estadoApostas[est.id] || { aguardandoResultado: false, galeAtual: 0, robosInscritos: [], mensagensEntrada: [], mensagensGale: [] };
+            novoEstado[est.id] = estadoApostas[est.id] || { aguardandoResultado: false, galeAtual: 0, robosCiclo: [], robosInscritos: [], mensagensEntrada: [], mensagensGale: [] };
         });
         estadoApostas = novoEstado;
 
@@ -3969,12 +4021,24 @@ app.post("/receber-sinal", async (req, res) => {
                             console.error(`Falha ao selecionar robos para estrategia ${est.id}:`, e.message);
                         }
 
+                        if (!Array.isArray(selecaoRobos.todos) || selecaoRobos.todos.length === 0) {
+                            const bloqueios = (Array.isArray(selecaoRobos.bloqueados) ? selecaoRobos.bloqueados : [])
+                                .map(item => `${item.id}:${item.nome} em ${item.estrategia_id} (${item.gale_atual > 0 ? `GALE ${item.gale_atual}` : 'DIRETO'})`)
+                                .join(', ');
+                            console.log(
+                                `🔒 Sinal ${est.id} suprimido: nenhum robô livre para novo ciclo.`
+                                + `${bloqueios ? ` Ocupados: ${bloqueios}.` : ''}`
+                            );
+                            continue;
+                        }
+
                         estadoApostas[est.id] = {
                             aguardandoResultado: true,
                             galeAtual: 0,
+                            robosCiclo: unirRobosInscritos(selecaoRobos.todos),
                             robosWebInscritos: selecaoRobos.web,
                             robosTelegramInscritos: [],
-                            robosInscritos: unirRobosInscritos(selecaoRobos.web),
+                            robosInscritos: unirRobosInscritos(selecaoRobos.todos),
                             assertividadeSinal: selecaoRobos.assertividade,
                             mensagensEntrada: [],
                             mensagensGale: []

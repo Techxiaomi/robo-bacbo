@@ -20,7 +20,7 @@ load_env_file(os.path.join(PROJECT_ROOT, ".env"))
 # CONFIGURAÇÕES GERAIS E CONTROLE DE VERSÃO
 # ====================================================================
 VERSAO_ROBO = "v1.6.13"
-NOME_ATUALIZACAO = "BUG-049 Composto Estavel em 8.5s"
+NOME_ATUALIZACAO = "BUG-050 Alvo Seguro + Ciclo Exclusivo"
 
 URL_CASSINO = os.getenv("CASINO_GAME_URL", "")
 ARQUIVO_SESSAO = os.getenv("SESSION_STATE_FILE", os.path.join(BASE_DIR, "sessao_salva.json"))
@@ -1410,17 +1410,83 @@ def aguardar_janela_aposta(page, aposta, planos):
         page.wait_for_timeout(25)
 
 
-def clicar_alvo_financeiro_playwright(page, elemento):
-    """Executa o clique financeiro imediato, sem actionability estrita do Playwright."""
+def resolver_ponto_seguro_alvo(elemento):
+    """Encontra um ponto interno cujo hit-test pertence ao alvo financeiro real."""
     try:
-        elemento.click(force=True, timeout=2000)
+        return elemento.evaluate(
+            """el => {
+                const r = el.getBoundingClientRect();
+                if (!r || r.width <= 2 || r.height <= 2) {
+                    return {ok:false, motivo:'BOUNDING_BOX_INVALIDO'};
+                }
+                const pontos = [
+                    [0.50,0.50], [0.50,0.35], [0.50,0.65],
+                    [0.35,0.50], [0.65,0.50],
+                    [0.30,0.30], [0.70,0.30], [0.30,0.70], [0.70,0.70],
+                    [0.50,0.22], [0.50,0.78], [0.22,0.50], [0.78,0.50]
+                ];
+                const resumo = hit => ({
+                    tag: hit ? String(hit.tagName || '') : '',
+                    role: hit ? String(hit.getAttribute('data-role') || '') : '',
+                    cls: hit ? String(hit.className || '').slice(0,120) : ''
+                });
+                for (const [fx, fy] of pontos) {
+                    const vx = r.left + (r.width * fx);
+                    const vy = r.top + (r.height * fy);
+                    const hit = document.elementFromPoint(vx, vy);
+                    if (hit && (hit === el || el.contains(hit))) {
+                        return {
+                            ok:true,
+                            x:r.width * fx,
+                            y:r.height * fy,
+                            fx, fy,
+                            alvo_role:String(el.getAttribute('data-role') || ''),
+                            hit:resumo(hit)
+                        };
+                    }
+                }
+                const centro = document.elementFromPoint(r.left + r.width/2, r.top + r.height/2);
+                return {
+                    ok:false,
+                    motivo:'ALVO_COBERTO_NO_HIT_TEST',
+                    alvo_role:String(el.getAttribute('data-role') || ''),
+                    hit_centro:resumo(centro)
+                };
+            }"""
+        )
+    except Exception as erro:
+        return {"ok": False, "motivo": f"HIT_TEST_{type(erro).__name__}"}
+
+
+def clicar_alvo_financeiro_playwright(page, elemento):
+    """Clica somente em ponto comprovadamente pertencente ao alvo financeiro."""
+    ponto = resolver_ponto_seguro_alvo(elemento)
+    if not isinstance(ponto, dict) or ponto.get("ok") is not True:
+        return {
+            "acionada": False,
+            "relacao": "PONTO_SEGURO_INDISPONIVEL",
+            "motivo": str((ponto or {}).get("motivo") or "hit-test nao confirmou o alvo"),
+            "diagnostico": ponto if isinstance(ponto, dict) else {},
+        }
+    try:
+        # Sem force=True: o ponto ja foi validado por elementFromPoint como pertencente
+        # ao alvo. Assim Playwright nao pode transformar um Tie em segundo Player/Banker.
+        elemento.click(
+            position={"x": float(ponto["x"]), "y": float(ponto["y"])},
+            timeout=1200
+        )
         page.wait_for_timeout(120)
-        return {"acionada": True, "relacao": "CLIQUE_PLAYWRIGHT_FORCE"}
+        return {
+            "acionada": True,
+            "relacao": "CLIQUE_PLAYWRIGHT_ALVO_SEGURO",
+            "diagnostico": ponto,
+        }
     except Exception as erro:
         return {
             "acionada": False,
             "relacao": type(erro).__name__,
-            "motivo": f"falha no clique forcado do alvo ({type(erro).__name__})",
+            "motivo": f"ponto seguro confirmado, mas clique falhou ({type(erro).__name__})",
+            "diagnostico": ponto,
         }
 
 
@@ -1605,7 +1671,10 @@ def executar_aposta_na_tela(page, aposta):
                             "cliques_alvo": cliques_alvo,
                         }
 
-                    precisa_selecionar = ficha_contexto.get("modo") != "JA_SELECIONADA"
+                    # A mesma denominacao continua selecionada entre Player/Banker e Tie.
+                    # Nao reclica a ficha R$5 entre pernas iguais: o reclick era ruido
+                    # desnecessario no intervalo financeiro composto.
+                    precisa_selecionar = ficha_corrente != int(ficha)
                     if precisa_selecionar:
                         selecao = selecionar_ficha_com_confirmacao(page, ficha_contexto, ficha)
                         if selecao.get("confirmada") is not True:
@@ -1649,9 +1718,12 @@ def executar_aposta_na_tela(page, aposta):
                             "ficha": int(ficha),
                             "superficie": alvo_real.get("relacao"),
                         })
+                        diag_alvo = alvo_real.get("diagnostico") if isinstance(alvo_real, dict) else {}
+                        hit_alvo = diag_alvo.get("hit", {}) if isinstance(diag_alvo, dict) else {}
                         print(
                             f"⚡ COMPOSTO: clique {cliques_alvo} enviado para "
-                            f"R$ {int(ficha)} {plano['alvo']} via {alvo_real.get('relacao', 'n/a')}."
+                            f"R$ {int(ficha)} {plano['alvo']} via {alvo_real.get('relacao', 'n/a')}; "
+                            f"role={diag_alvo.get('alvo_role', 'n/a')}, hit_role={hit_alvo.get('role', '') or 'descendente'}."
                         )
 
                 if indice_plano < len(planos) - 1:
