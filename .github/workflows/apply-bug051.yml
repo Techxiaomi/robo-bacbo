@@ -37,18 +37,11 @@ jobs:
 
           node_test = Path('robo-bacbo/support/pure-logic-suite.js')
           s = node_test.read_text(encoding='utf-8')
-          replacements = [
-              ('BUG-046: executor ancora a janela em Resolved + 8s e Node preserva o callback',
-               'BUG-046/049: executor ancora a janela em Resolved + 8.5s e Node preserva o callback'),
-              (r'/alvo_temporal = resolved_base \\+ 8\\.0/', r'/alvo_temporal = resolved_base \\+ 8\\.5/'),
-              (r'/janela real alvo em \\+8000ms/', r'/janela real alvo em \\+8500ms/'),
-          ]
-          for old, new in replacements:
-              if old in s:
-                  s = s.replace(old, new, 1)
-          if r'/alvo_temporal = resolved_base \\+ 8\\.5/' not in s:
-              raise SystemExit('Resolved +8.5 contract not present after patch')
-          if r'/janela real alvo em \\+8500ms/' not in s:
+          if 'janela real alvo em \\+8000ms' in s:
+              s = s.replace('janela real alvo em \\+8000ms', 'janela real alvo em \\+8500ms', 1)
+          if 'resolved_base \\+ 8\\.5' not in s:
+              raise SystemExit('Resolved +8.5 contract not present after follow-up')
+          if 'janela real alvo em \\+8500ms' not in s:
               raise SystemExit('+8500ms log contract not present after patch')
           node_test.write_text(s, encoding='utf-8')
 
