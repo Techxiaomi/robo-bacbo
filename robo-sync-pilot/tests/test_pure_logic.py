@@ -155,6 +155,8 @@ class TestRegistrarOrdemIdempotente(unittest.TestCase):
         self.assertGreater(enfileirada["aceita_em_ms"], 0)
         self.assertTrue(enfileirada["sincronizar_janela"])
         self.assertEqual(enfileirada["coletor_seq_aceite"], 0)
+        self.assertEqual(enfileirada["round_id_aceite"], "")
+        self.assertFalse(enfileirada["round_resolvido_aceite"])
         self.assertTrue(os.path.isfile(self.journal))
 
     def test_repeticao_identica_nao_duplica_fila(self):
@@ -615,6 +617,57 @@ class TestContratoWebSocketFailClosed(unittest.TestCase):
         self.assertIn("COLLECTOR_PLAYER_STATE_STALE_SECONDS", SOURCE)
         self.assertIn('marcar_interrupcao_fluxo("PLAYER_STATE_STALE")', SOURCE)
         self.assertIn('notificar_interrupcao_node("PLAYER_STATE_STALE")', SOURCE)
+
+
+class TestBug028JanelaApostavelEstrutural(unittest.TestCase):
+    def setUp(self):
+        self.ns = {
+            "time": time,
+            "threading": threading,
+            "estado_mesa_lock": threading.Lock(),
+            "estado_mesa": {
+                "stage": "Resolved",
+                "atualizado_em_ms": int(time.time() * 1000),
+                "round_id": "round-10",
+                "round_resolvido": True,
+            },
+            "coletor_seq": 10,
+            "COLLECTOR_PLAYER_STATE_STALE_SECONDS": 20.0,
+        }
+        carregar_funcoes([
+            "stage_evolution_apostavel",
+            "avaliar_contexto_janela_aposta",
+        ], self.ns)
+        self.avaliar = self.ns["avaliar_contexto_janela_aposta"]
+        self.ordem = {
+            "sincronizar_janela": True,
+            "coletor_seq_aceite": 10,
+            "stage_aceite": "Resolved",
+            "round_id_aceite": "round-10",
+        }
+
+    def test_somente_betting_fresco_abre_e_novo_resolved_expira(self):
+        self.assertEqual(self.avaliar(self.ordem)["estado"], "AGUARDAR_STAGE")
+
+        with self.ns["estado_mesa_lock"]:
+            self.ns["estado_mesa"]["stage"] = "Dealing"
+            self.ns["estado_mesa"]["atualizado_em_ms"] = int(time.time() * 1000)
+        self.assertEqual(self.avaliar(self.ordem)["estado"], "AGUARDAR_STAGE")
+
+        with self.ns["estado_mesa_lock"]:
+            self.ns["estado_mesa"]["stage"] = "Betting"
+            self.ns["estado_mesa"]["atualizado_em_ms"] = int(time.time() * 1000)
+        self.assertEqual(self.avaliar(self.ordem)["estado"], "ABERTA")
+
+        self.ns["coletor_seq"] = 11
+        self.assertEqual(self.avaliar(self.ordem)["estado"], "EXPIRADA")
+
+    def test_betting_stale_nao_autoriza_clique(self):
+        with self.ns["estado_mesa_lock"]:
+            self.ns["estado_mesa"]["stage"] = "Betting"
+            self.ns["estado_mesa"]["atualizado_em_ms"] = int((time.time() - 21) * 1000)
+        resultado = self.avaliar(self.ordem)
+        self.assertEqual(resultado["estado"], "AGUARDAR_FRESCOR")
 
 
 class TestReconciliacaoRoadmap(unittest.TestCase):
