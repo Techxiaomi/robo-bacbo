@@ -210,11 +210,12 @@ HTML["/game-chip-overlay-frame.html"] = """<!doctype html>
 </style></head><body>
 <script>window.__surfaceClicks = 0; window.__surfacePointerDown = 0; window.__targetClicks = 0;</script>
 <div id="wrap">
-  <div id="chip5" data-role="chip" data-value="5">5</div>
-  <div id="surface" onpointerdown="window.__surfacePointerDown++" onclick="
-    window.__surfaceClicks++;
-    document.getElementById('chip5').classList.add('selected');
-  ">superfície</div>
+  <div id="chip5" data-role="chip" data-value="5">5
+    <span id="surface" onpointerdown="window.__surfacePointerDown++" onclick="
+      window.__surfaceClicks++;
+      document.getElementById('chip5').classList.add('selected');
+    ">superfície</span>
+  </div>
 </div>
 <button data-role="bacbo-bet-spot-Player"
   onclick="window.__targetClicks++">Player</button>
@@ -236,10 +237,10 @@ function escolher(valor) {
   document.getElementById('chip5').className = valor === 5 ? 'chip' : 'chip nao-atual';
 }
 </script>
-<div class="wrap"><div id="chip5" class="chip" data-role="chip" data-value="5">5</div>
-  <div class="surface" onclick="escolher(5)">superfície 5</div></div>
-<div class="wrap"><div class="chip" data-role="chip" data-value="10">10</div>
-  <div class="surface" onclick="escolher(10)">superfície 10</div></div>
+<div class="wrap"><div id="chip5" class="chip" data-role="chip" data-value="5">5
+  <span class="surface" onclick="escolher(5)">superfície 5</span></div></div>
+<div class="wrap"><div class="chip" data-role="chip" data-value="10">10
+  <span class="surface" onclick="escolher(10)">superfície 10</span></div></div>
 <button data-role="bacbo-bet-spot-Player" onclick="window.__targetClicks++">Player</button>
 </body></html>"""
 
@@ -294,8 +295,9 @@ HTML["/game-target-overlay-accepted-frame.html"] = """<!doctype html>
 </style></head><body>
 <div data-role="chip" data-value="5" aria-pressed="true">5</div>
 <div id="wrap">
-  <button id="player" data-role="bacbo-bet-spot-Player">Player</button>
-  <div id="surface" onclick="window.top.document.querySelector('.saldo-teste').textContent='R$ 995,00'; window.__surfaceClicks=(window.__surfaceClicks||0)+1">Player surface</div>
+  <button id="player" data-role="bacbo-bet-spot-Player">Player
+    <span id="surface" onclick="window.top.document.querySelector('.saldo-teste').textContent='R$ 995,00'; window.__surfaceClicks=(window.__surfaceClicks||0)+1">Player surface</span>
+  </button>
 </div>
 </body></html>"""
 

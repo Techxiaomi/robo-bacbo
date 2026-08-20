@@ -20,7 +20,7 @@ load_env_file(os.path.join(PROJECT_ROOT, ".env"))
 # CONFIGURAÇÕES GERAIS E CONTROLE DE VERSÃO
 # ====================================================================
 VERSAO_ROBO = "v1.6.13"
-NOME_ATUALIZACAO = "BUG-039 Confirmação Financeira por Perna"
+NOME_ATUALIZACAO = "BUG-040 Sincronia UI e Clique Central"
 
 URL_CASSINO = os.getenv("CASINO_GAME_URL", "")
 ARQUIVO_SESSAO = os.getenv("SESSION_STATE_FILE", os.path.join(BASE_DIR, "sessao_salva.json"))
@@ -1193,76 +1193,37 @@ def localizar_frame_apostavel(page, planos):
 
 
 def clicar_superficie_ficha_playwright(elemento):
-    """Clica a superfície visível real da ficha usando input nativo do Playwright."""
-    resultado_handle = None
-    hit_handle = None
+    """Clica o centro geométrico da própria ficha, sem force=True e sem subir para wrappers."""
     try:
-        resultado_handle = elemento.evaluate_handle("""el => {
-            const rect = el.getBoundingClientRect();
-            if (rect.width <= 0 || rect.height <= 0) {
-                return { hit: null, relacao: 'SEM_AREA' };
-            }
+        caixa = elemento.bounding_box()
+        if not isinstance(caixa, dict):
+            return {"acionada": False, "relacao": "SEM_AREA", "motivo": "ficha sem área visível"}
+        largura = float(caixa.get("width") or 0.0)
+        altura = float(caixa.get("height") or 0.0)
+        if largura <= 0 or altura <= 0:
+            return {"acionada": False, "relacao": "SEM_AREA", "motivo": "ficha sem área visível"}
 
-            const hit = el.ownerDocument.elementFromPoint(
-                rect.left + rect.width / 2,
-                rect.top + rect.height / 2
-            );
-            if (!hit) return { hit: null, relacao: 'SEM_SUPERFICIE' };
-
-            let relacao = 'EXTERNA';
-            if (hit === el) relacao = 'PROPRIA';
-            else if (el.contains(hit)) relacao = 'DESCENDENTE';
-            else if (hit.contains(el)) relacao = 'ANCESTRAL';
-            else if (el.parentElement && hit.parentElement === el.parentElement) relacao = 'MESMO_CONTAINER';
-
-            const rectHit = hit.getBoundingClientRect();
-            const estilo = getComputedStyle(hit);
-            const visivel = rectHit.width > 0 && rectHit.height > 0
-                && estilo.display !== 'none'
-                && estilo.visibility !== 'hidden'
-                && estilo.pointerEvents !== 'none';
-
-            if (relacao === 'EXTERNA' || !visivel) {
-                return { hit: null, relacao: relacao === 'EXTERNA' ? relacao : 'NAO_VISIVEL' };
-            }
-            return { hit, relacao };
-        }""")
-        relacao_handle = resultado_handle.get_property("relacao")
-        try:
-            relacao = str(relacao_handle.json_value() or "DESCONHECIDA")
-        finally:
-            relacao_handle.dispose()
-
-        hit_handle = resultado_handle.get_property("hit")
-        hit_elemento = hit_handle.as_element()
-        if hit_elemento is None:
-            return {"acionada": False, "relacao": relacao, "motivo": "superfície segura ausente"}
-
-        # Diferente de HTMLElement.click(), ElementHandle.click() produz o ciclo
-        # real de mouse/pointer do Playwright. Isso preserva handlers de
-        # pointerdown/up usados pela Evolution e mantém as checagens de
-        # visibilidade, estabilidade e interceptação, sem force=True.
-        hit_elemento.click(timeout=700)
-        return {"acionada": True, "relacao": relacao, "via": "PLAYWRIGHT_REAL"}
+        # BUG-040: o clique pertence ao elemento da ficha localizado pelo
+        # data-role/data-value. O Playwright usa o centro exato da caixa e mantém
+        # as checagens normais de actionability; nenhum ancestral/irmão recebe
+        # clique substituto e force=True continua proibido.
+        elemento.click(
+            position={"x": largura / 2.0, "y": altura / 2.0},
+            timeout=900,
+        )
+        return {"acionada": True, "relacao": "CENTRO_ELEMENTO", "via": "PLAYWRIGHT_REAL"}
     except PlaywrightTimeoutError:
-        return {"acionada": False, "relacao": "TIMEOUT", "motivo": "superfície não ficou acionável em 700ms"}
+        return {
+            "acionada": False,
+            "relacao": "TIMEOUT",
+            "motivo": "centro da ficha não ficou acionável em 900ms",
+        }
     except Exception as erro:
         return {
             "acionada": False,
             "relacao": type(erro).__name__,
-            "motivo": f"falha ao acionar superfície real ({type(erro).__name__})",
+            "motivo": f"falha ao clicar o centro da ficha ({type(erro).__name__})",
         }
-    finally:
-        if hit_handle is not None:
-            try:
-                hit_handle.dispose()
-            except Exception:
-                pass
-        if resultado_handle is not None:
-            try:
-                resultado_handle.dispose()
-            except Exception:
-                pass
 
 
 def selecionar_ficha_com_confirmacao(page, ficha_contexto, valor_ficha):
@@ -1271,17 +1232,6 @@ def selecionar_ficha_com_confirmacao(page, ficha_contexto, valor_ficha):
         return {"confirmada": False, "motivo": "elemento da ficha ausente"}
     if ficha_contexto.get("modo") == "JA_SELECIONADA":
         return {"confirmada": True, "via": "JA_SELECIONADA"}
-
-    try:
-        elemento.click(timeout=700)
-        return {"confirmada": True, "via": "PLAYWRIGHT"}
-    except PlaywrightTimeoutError:
-        pass
-    except Exception as erro:
-        return {
-            "confirmada": False,
-            "motivo": f"falha Playwright na ficha ({type(erro).__name__})",
-        }
 
     superficie = clicar_superficie_ficha_playwright(elemento)
     if not isinstance(superficie, dict) or superficie.get("acionada") is not True:
@@ -1323,12 +1273,14 @@ def preselecionar_ficha_unica_antes_da_janela(page, planos):
         if elemento is None:
             continue
         try:
-            # Preparação não financeira e oportunista. Falha aqui não invalida a
-            # ordem; o caminho normal ainda pode selecionar a ficha em AcceptingBets.
-            elemento.click(timeout=300)
-            return {"confirmada": True, "ficha": ficha, "via": "PRESELECAO_PLAYWRIGHT"}
+            # Preparação não financeira e oportunista. Usa a mesma física central
+            # do caminho principal, sem force=True e sem clicar wrappers.
+            superficie = clicar_superficie_ficha_playwright(elemento)
+            if superficie.get("acionada") is True:
+                return {"confirmada": True, "ficha": ficha, "via": "PRESELECAO_CENTRO"}
         except Exception:
-            continue
+            pass
+        continue
 
     return {"confirmada": False, "ficha": ficha, "motivo": "PRESELECAO_INDISPONIVEL"}
 
@@ -1410,6 +1362,20 @@ def aguardar_janela_aposta(page, aposta, planos):
         if contexto["estado"] == "ABERTA":
             if aberta_detectada_em is None:
                 aberta_detectada_em = time.monotonic()
+                if sincronizar:
+                    print(
+                        f"🎞️ Ordem {aposta.get('order_id', 'n/a')}: AcceptingBets detectado; "
+                        "aguardando 1500ms para estabilização visual das fichas."
+                    )
+                # BUG-040: a Evolution anima a subida/reposicionamento das fichas
+                # no começo de AcceptingBets. Aguarda a UI estabilizar antes de
+                # qualquer tentativa de seleção de ficha ou clique financeiro.
+                page.wait_for_timeout(1500)
+                contexto_pos_animacao = avaliar_contexto_janela_aposta(aposta)
+                ultimo_contexto = contexto_pos_animacao
+                if contexto_pos_animacao["estado"] != "ABERTA":
+                    aberta_detectada_em = None
+                    continue
             contexto_dom, ultimo_diagnostico = localizar_contexto_apostavel(page, planos)
             if contexto_dom is not None:
                 if sincronizar:
@@ -1443,78 +1409,36 @@ def aguardar_janela_aposta(page, aposta, planos):
 
 
 def clicar_alvo_financeiro_playwright(elemento):
-    """Aciona a superfície real do alvo sem force=True e sem sair do componente financeiro."""
-    resultado_handle = None
-    hit_handle = None
+    """Clica o centro geométrico do próprio alvo financeiro, sem force=True ou wrappers."""
     try:
-        resultado_handle = elemento.evaluate_handle("""el => {
-            const rect = el.getBoundingClientRect();
-            if (rect.width <= 0 || rect.height <= 0) return { hit: null, relacao: 'SEM_AREA' };
-            const x = rect.left + rect.width / 2;
-            const y = rect.top + rect.height / 2;
-            const hit = el.ownerDocument.elementFromPoint(x, y);
-            if (!hit) return { hit: null, relacao: 'SEM_SUPERFICIE' };
+        caixa = elemento.bounding_box()
+        if not isinstance(caixa, dict):
+            return {"acionada": False, "relacao": "SEM_AREA", "motivo": "alvo sem área visível"}
+        largura = float(caixa.get("width") or 0.0)
+        altura = float(caixa.get("height") or 0.0)
+        if largura <= 0 or altura <= 0:
+            return {"acionada": False, "relacao": "SEM_AREA", "motivo": "alvo sem área visível"}
 
-            const rectHit = hit.getBoundingClientRect();
-            const estilo = getComputedStyle(hit);
-            const visivel = rectHit.width > 0 && rectHit.height > 0
-                && estilo.display !== 'none'
-                && estilo.visibility !== 'hidden'
-                && estilo.pointerEvents !== 'none';
-            if (!visivel) return { hit: null, relacao: 'NAO_VISIVEL' };
-
-            let relacao = 'EXTERNA';
-            if (hit === el) relacao = 'PROPRIA';
-            else if (el.contains(hit)) relacao = 'DESCENDENTE';
-            else if (hit.contains(el)) relacao = 'ANCESTRAL';
-            else if (el.parentElement && hit.parentElement === el.parentElement) relacao = 'MESMO_CONTAINER';
-
-            if (relacao === 'PROPRIA' || relacao === 'DESCENDENTE') return { hit, relacao };
-
-            // Para ancestral/irmão, exige sobreposição quase integral e que o mesmo
-            // pequeno container possua exatamente um alvo financeiro. Isso evita
-            // clicar em wrappers genéricos da mesa.
-            if (relacao === 'ANCESTRAL' || relacao === 'MESMO_CONTAINER') {
-                const pai = el.parentElement;
-                const escopo = relacao === 'ANCESTRAL' ? hit : pai;
-                if (!escopo) return { hit: null, relacao: 'EXTERNA' };
-                const alvos = escopo.querySelectorAll("[data-role^='bacbo-bet-spot-']");
-                const areaEl = Math.max(1, rect.width * rect.height);
-                const areaHit = Math.max(1, rectHit.width * rectHit.height);
-                const ix = Math.max(0, Math.min(rect.right, rectHit.right) - Math.max(rect.left, rectHit.left));
-                const iy = Math.max(0, Math.min(rect.bottom, rectHit.bottom) - Math.max(rect.top, rectHit.top));
-                const sobreposicao = (ix * iy) / areaEl;
-                const razaoArea = areaHit / areaEl;
-                if (alvos.length === 1 && sobreposicao >= 0.80 && razaoArea <= 1.60) {
-                    return { hit, relacao };
-                }
-            }
-            return { hit: null, relacao: 'EXTERNA' };
-        }""")
-        relacao_handle = resultado_handle.get_property("relacao")
-        try:
-            relacao = str(relacao_handle.json_value() or "DESCONHECIDA")
-        finally:
-            relacao_handle.dispose()
-        hit_handle = resultado_handle.get_property("hit")
-        hit_elemento = hit_handle.as_element()
-        if hit_elemento is None:
-            return {"acionada": False, "relacao": relacao, "motivo": "superfície financeira não autorizada"}
-        hit_elemento.click(timeout=650)
-        return {"acionada": True, "relacao": relacao}
+        # BUG-040: o elemento [data-role='bacbo-bet-spot-*'] permanece dono do
+        # clique. O Playwright mira o centro e resolve apenas descendentes reais
+        # desse elemento; não há fallback para ancestral, irmão ou force=True.
+        elemento.click(
+            position={"x": largura / 2.0, "y": altura / 2.0},
+            timeout=900,
+        )
+        return {"acionada": True, "relacao": "CENTRO_ELEMENTO"}
+    except PlaywrightTimeoutError:
+        return {
+            "acionada": False,
+            "relacao": "TIMEOUT",
+            "motivo": "centro do alvo financeiro não ficou acionável em 900ms",
+        }
     except Exception as erro:
-        return {"acionada": False, "relacao": type(erro).__name__, "motivo": f"falha ao acionar alvo ({type(erro).__name__})"}
-    finally:
-        if hit_handle is not None:
-            try:
-                hit_handle.dispose()
-            except Exception:
-                pass
-        if resultado_handle is not None:
-            try:
-                resultado_handle.dispose()
-            except Exception:
-                pass
+        return {
+            "acionada": False,
+            "relacao": type(erro).__name__,
+            "motivo": f"falha ao clicar o centro do alvo ({type(erro).__name__})",
+        }
 
 
 def confirmar_aceite_financeiro_aposta(page, saldo_antes, exposicao_esperada):
@@ -1537,6 +1461,12 @@ def confirmar_aceite_financeiro_aposta(page, saldo_antes, exposicao_esperada):
         }
 
     tolerancia = max(0.01, float(EXECUTOR_BET_ACCEPTANCE_TOLERANCE))
+
+    # BUG-040: depois do clique financeiro, a Evolution pode levar 1–2 s para
+    # refletir no HTML o débito já processado pelo servidor. Não lê o saldo antes
+    # dessa janela mínima para evitar classificar atualização visual tardia como
+    # "clique fantasma".
+    page.wait_for_timeout(2000)
     prazo = time.monotonic() + float(EXECUTOR_BET_ACCEPTANCE_TIMEOUT_SECONDS)
     ultimo_saldo = None
     ultimo_debito = None

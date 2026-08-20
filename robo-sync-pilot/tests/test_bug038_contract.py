@@ -20,7 +20,7 @@ class Bug038FastPathContract(unittest.TestCase):
         corpo = SOURCE[inicio:fim]
         self.assertIn("contexto_atual = avaliar_contexto_janela_aposta(aposta)", corpo)
         self.assertIn('if contexto_atual["estado"] != "ABERTA"', corpo)
-        self.assertIn("alvo_elemento.click(timeout=750)", corpo)
+        self.assertIn("clicar_alvo_financeiro_playwright(alvo_elemento)", corpo)
 
     def test_latencias_artificiais_criticas_foram_reduzidas(self):
         inicio = SOURCE.index("def selecionar_ficha_com_confirmacao")
@@ -28,7 +28,10 @@ class Bug038FastPathContract(unittest.TestCase):
         trecho = SOURCE[inicio:fim]
         self.assertNotIn("page.wait_for_timeout(120)", trecho)
         self.assertIn("page.wait_for_timeout(25)", trecho)
-        self.assertIn("hit_elemento.click(timeout=700)", SOURCE)
+        self.assertIn("page.wait_for_timeout(1500)", SOURCE)
+        self.assertIn("page.wait_for_timeout(2000)", SOURCE)
+        self.assertIn('position={"x": largura / 2.0, "y": altura / 2.0}', SOURCE)
+        self.assertNotIn("hit_elemento.click", SOURCE)
 
     def test_loop_executor_polling_rapido(self):
         self.assertIn("page.wait_for_timeout(50)", SOURCE)
