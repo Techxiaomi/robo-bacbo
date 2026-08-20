@@ -51,16 +51,12 @@ new_chip = '''def clicar_superficie_ficha_playwright(page, elemento):
 def selecionar_ficha_com_confirmacao'''
 text, count = pattern_chip.subn(new_chip, text, count=1)
 if count != 1:
-    raise SystemExit(f"helper ficha BUG-042: esperado 1 bloco, encontrado {count}")
-text = replace_once(
-    text,
-    '    superficie = clicar_superficie_ficha_playwright(elemento)\n',
-    '    superficie = clicar_superficie_ficha_playwright(page, elemento)\n',
-    "chamada helper ficha",
-)
+    if 'def clicar_superficie_ficha_playwright(page, elemento):' not in text:
+        raise SystemExit(f"helper ficha BUG-042: esperado 1 bloco, encontrado {count}")
+
 text = text.replace(
-    'superficie = clicar_superficie_ficha_playwright(elemento)',
-    'superficie = clicar_superficie_ficha_playwright(page, elemento)',
+    'clicar_superficie_ficha_playwright(elemento)',
+    'clicar_superficie_ficha_playwright(page, elemento)',
 )
 
 pattern_target = re.compile(
@@ -87,7 +83,8 @@ new_target = '''def clicar_alvo_financeiro_playwright(page, elemento):
 def confirmar_aceite_financeiro_aposta'''
 text, count = pattern_target.subn(new_target, text, count=1)
 if count != 1:
-    raise SystemExit(f"helper alvo BUG-042: esperado 1 bloco, encontrado {count}")
+    if 'def clicar_alvo_financeiro_playwright(page, elemento):' not in text:
+        raise SystemExit(f"helper alvo BUG-042: esperado 1 bloco, encontrado {count}")
 text = replace_once(
     text,
     'alvo_real = clicar_alvo_financeiro_playwright(alvo_elemento)',
@@ -103,10 +100,6 @@ text = replace_once(
 text = text.replace(
     '# BUG-040: depois do clique financeiro, a Evolution pode levar 1–2 s para',
     '# BUG-042: depois do pointerup financeiro, a Evolution pode levar mais de 2 s para',
-)
-text = text.replace(
-    '# refletir no HTML o débito já processado pelo servidor. Não lê o saldo antes',
-    '# refletir no HTML o débito já processado pelo servidor. Não lê o saldo antes',
 )
 ROBO.write_text(text, encoding="utf-8")
 
