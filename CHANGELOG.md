@@ -41,6 +41,10 @@ Nenhuma correção de lógica de apostas foi aplicada nesta versão.
 - O CI usa permissões `contents: read`, sem secrets, sem instalação de dependências e sem inicializar MySQL, Flask, Playwright ou rede do projeto.
 
 ### Fixed
+- BUG-034: quando acionar a ficha desejada não altera o DOM porque ela já pode ser a denominação corrente, o executor realiza uma troca controlada para outra ficha visível e retorna ao valor solicitado. As duas transições precisam alterar a assinatura visual/semântica antes de liberar qualquer alvo financeiro.
+- A troca de prova usa somente superfícies do mesmo componente, não aposta e falha fechado se não houver ficha alternativa ou confirmação de ida e volta.
+- BUG-033: “Fontes de Sinal” do Auto-Trader passa a listar exclusivamente robôs ativos, persistindo `ROBO:<id>`. Origens deixam de aparecer e robôs deixam de ser rotulados genericamente como Auto IA.
+- Selecionar um robô autoriza exatamente as estratégias que ele sintoniza: padrões dinâmicos pelo `robo_dono_id` e padrões manuais por origens/avulsos/exceções da configuração do robô. Formatos anteriores permanecem apenas como compatibilidade de leitura.
 - BUG-032: quando uma camada interna do componente intercepta o ponteiro da ficha, o executor identifica a superfície central pertencente ao mesmo componente e pode acioná-la apenas para seleção da denominação. O fallback exige mudança confirmada no estado DOM antes de qualquer alvo financeiro.
 - Superfície externa, ausência de área, falta de mudança/seleção e qualquer erro encerram antes da aposta. Player/Banker/Tie nunca usam o fallback; stage e sequência continuam revalidados após a seleção.
 - BUG-031: a seleção não financeira da ficha deixa de exigir que `click(trial=True)` conclua em 250 ms. Uma ficha de valor exato e visível pode aguardar até 2 s por estabilidade no clique real; após isso o executor revalida `AcceptingBets` e a sequência antes de clicar em qualquer alvo financeiro.
