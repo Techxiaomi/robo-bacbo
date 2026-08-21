@@ -9,6 +9,8 @@ const {
 } = require("./tie_protection");
 const { Server } = require("socket.io");
 const { criarAutoPilotService } = require("./auto_pilot_ia");
+const { criarControleDiarioAutoTrader } = require("./bug051b_daily_counter");
+const { criarIntegracaoContadorDiario } = require("./bug051b_integration");
 require("./env_loader").loadEnvFile(path.join(__dirname, "..", ".env"));
 
 // Erros globais realmente não tratados são fatais: continuar pode deixar estado financeiro incoerente.
@@ -34,6 +36,11 @@ const dbPool = mysql.createPool({
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0
+});
+
+const controleDiarioAutoTrader = criarControleDiarioAutoTrader({
+    dbPool,
+    timezone: process.env.AUTO_TRADER_TIMEZONE || process.env.TZ || 'America/Sao_Paulo'
 });
 
 async function limparPadroesDinamicosOrfaos() {
@@ -227,6 +234,7 @@ async function prepararBancoDeDados() {
                 status_operacao VARCHAR(50) DEFAULT 'STANDBY',
                 entradas_feitas INT DEFAULT 0,
                 pulos_restantes INT DEFAULT 0,
+                data_contador_entradas VARCHAR(10) DEFAULT NULL,
                 reds_consecutivos INT DEFAULT 0,
                 stop_reds_pausado_ate BIGINT DEFAULT 0,
                 trailing_pico_lucro DECIMAL(12,2) DEFAULT 0,
@@ -301,6 +309,8 @@ async function prepararBancoDeDados() {
         await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN reds_consecutivos INT DEFAULT 0");
         await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN stop_reds_pausado_ate BIGINT DEFAULT 0");
         await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN trailing_pico_lucro DECIMAL(12,2) DEFAULT 0");
+        await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN data_contador_entradas VARCHAR(10) DEFAULT NULL");
+        await integracaoContadorDiario.inicializarDatasLegadas();
 
         // Corrige estados legados impossíveis: um trader desligado manualmente não pode permanecer OPERANDO/STANDBY.
         // Estados de parada explícita (STOP_WIN/STOP_LOSS/STOP_REDS/TRAILING_STOP) são preservados.
@@ -1052,6 +1062,13 @@ const ioServer = new Server(server, {
             backendPronto && hostPermitido && origemPermitida && authAdminPermitida
         );
     }
+});
+
+const integracaoContadorDiario = criarIntegracaoContadorDiario({
+    controleDiarioAutoTrader,
+    dbPool,
+    ioServer,
+    traders: () => AUTO_TRADERS_MEMORIA
 });
 
 const autoPilotIA = criarAutoPilotService({
@@ -1894,6 +1911,7 @@ app.get("/api/auto-traders", async (req, res) => {
                 status_operacao: at.status_operacao,
                 entradas_feitas: at.entradas_feitas,
                 pulos_restantes: at.pulos_restantes,
+                data_contador_entradas: String(at.data_contador_entradas || ''),
                 reds_consecutivos: Math.max(0, Number(at.reds_consecutivos) || 0),
                 stop_reds_pausado_ate: Math.max(0, Number(at.stop_reds_pausado_ate) || 0),
                 trailing_pico_lucro: Math.max(0, Number(at.trailing_pico_lucro) || 0)
@@ -1926,10 +1944,11 @@ app.post("/api/auto-trader", async (req, res) => {
 
         const saldoBaseline = novoAtivo ? saldoFresco : 0;
         const statusInicial = novoAtivo ? 'STANDBY' : 'DESLIGADO';
+        const dataContadorEntradas = controleDiarioAutoTrader.dataOperacional();
         await dbPool.query(
-            `INSERT INTO auto_traders (nome, ativo, config_json, saldo_inicial, saldo_atual, status_operacao, entradas_feitas, pulos_restantes)
-             VALUES (?, ?, ?, ?, ?, ?, 0, 0)`,
-            [nome, novoAtivo ? 1 : 0, configJson, saldoBaseline, saldoBaseline, statusInicial]
+            `INSERT INTO auto_traders (nome, ativo, config_json, saldo_inicial, saldo_atual, status_operacao, entradas_feitas, pulos_restantes, data_contador_entradas)
+             VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?)`,
+            [nome, novoAtivo ? 1 : 0, configJson, saldoBaseline, saldoBaseline, statusInicial, dataContadorEntradas]
         );
         await carregarSistemasParaMemoria();
         res.json({ sucesso: true, saldo_inicial: saldoBaseline });
@@ -1988,7 +2007,7 @@ app.put("/api/auto-trader/:id", async (req, res) => {
             await dbPool.query(
                 `UPDATE auto_traders
                  SET nome=?, ativo=true, config_json=?, saldo_inicial=?, saldo_atual=?,
-                     status_operacao='STANDBY', entradas_feitas=0, pulos_restantes=0,
+                     status_operacao='STANDBY',
                      reds_consecutivos=0, stop_reds_pausado_ate=0, trailing_pico_lucro=0
                  WHERE id=?`,
                 [nome, configJson, saldoFresco, saldoFresco, id]
@@ -3414,6 +3433,10 @@ async function confirmarSaldosPosLiquidacao(saldo, sincronizadoEm = Date.now()) 
 }
 
 async function autorizarNovaEntradaFinanceiraTrader(trader) {
+    if (!(await integracaoContadorDiario.garantirAntesDaEntrada(trader))) {
+        return false;
+    }
+
     if (await traderPossuiLiquidacaoPendente(trader.id)) {
         console.warn(
             `⛔ BUG-051A Trader ${trader.id}: nova entrada bloqueada; `
@@ -3541,6 +3564,7 @@ async function carregarSistemasParaMemoria() {
                 id: at.id, nome: at.nome, ativo: at.ativo === 1, config: cfg,
                 saldo_inicial: parseFloat(at.saldo_inicial), saldo_atual: parseFloat(at.saldo_atual),
                 status_operacao: at.status_operacao, entradas_feitas: at.entradas_feitas, pulos_restantes: at.pulos_restantes,
+                data_contador_entradas: String(at.data_contador_entradas || ''),
                 reds_consecutivos: Math.max(0, Number(at.reds_consecutivos) || 0),
                 stop_reds_pausado_ate: Math.max(0, Number(at.stop_reds_pausado_ate) || 0),
                 trailing_pico_lucro: Math.max(0, Number(at.trailing_pico_lucro) || 0)
@@ -3742,6 +3766,12 @@ app.post("/receber-sinal", async (req, res) => {
             await rearmarAutoTradersStopRedsPausados();
         } catch (e) {
             console.error("Falha ao rearmar Auto-Trader apos pausa de Stop Reds:", e.message);
+        }
+
+        try {
+            await integracaoContadorDiario.processarViradaDiaria();
+        } catch (e) {
+            console.error("BUG-051B: falha ao processar a virada diaria dos Auto-Traders:", e.message);
         }
 
         try {
