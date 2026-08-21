@@ -892,47 +892,64 @@ def frame_evolution_relevante(frame):
 
 
 def interagir_keepalive_evolution(page):
-    """Gera movimento real do ponteiro sobre uma superfície neutra/visual da mesa."""
-    seletores_neutros = (
-        "canvas",
-        "[data-roadmap]",
-        "[data-history]",
-        "[data-results]",
-        "[class*='roadmap' i]",
-        "[class*='bead' i]",
-        "[class*='history' i]",
-        "[class*='road' i]",
-        "body",
-    )
-
+    """Envia teclado + clique físico no canvas para resetar o idle timer da Evolution."""
     for frame in list(getattr(page, "frames", []) or []):
         if not frame_evolution_relevante(frame):
             continue
-        for seletor in seletores_neutros:
+
+        tecla_enviada = False
+        try:
+            body = frame.locator("body")
+            if body.count() > 0 and body.first.is_visible(timeout=100):
+                body.first.press("Shift", timeout=300)
+                tecla_enviada = True
+        except Exception:
+            tecla_enviada = False
+
+        melhor_canvas = None
+        melhor_caixa = None
+        melhor_area = 0.0
+        try:
+            canvases = frame.locator("canvas")
+            quantidade = min(max(0, int(canvases.count())), 8)
+        except Exception:
+            quantidade = 0
+
+        for indice in range(quantidade):
             try:
-                candidatos = frame.locator(seletor)
-                quantidade = min(max(0, int(candidatos.count())), 6)
+                canvas = canvases.nth(indice)
+                if not canvas.is_visible(timeout=100):
+                    continue
+                caixa = canvas.bounding_box(timeout=200)
+                if not caixa:
+                    continue
+                largura = float(caixa.get("width") or 0.0)
+                altura = float(caixa.get("height") or 0.0)
+                if largura < 24.0 or altura < 24.0:
+                    continue
+                area = largura * altura
+                if area > melhor_area:
+                    melhor_canvas = canvas
+                    melhor_caixa = caixa
+                    melhor_area = area
             except Exception:
                 continue
 
-            for indice in range(quantidade):
-                try:
-                    elemento = candidatos.nth(indice)
-                    if not elemento.is_visible(timeout=100):
-                        continue
-                    caixa = elemento.bounding_box(timeout=200)
-                    if not caixa or caixa.get("width", 0) < 8 or caixa.get("height", 0) < 8:
-                        continue
-                    largura = float(caixa["width"])
-                    altura = float(caixa["height"])
-                    x = max(3.0, min(largura - 3.0, largura * random.uniform(0.35, 0.65)))
-                    y = max(3.0, min(altura - 3.0, altura * random.uniform(0.35, 0.65)))
-                    # Locator.hover usa o dispositivo de ponteiro do Playwright e produz
-                    # pointer/mouse events reais no elemento, ao contrário de dispatchEvent.
-                    elemento.hover(position={"x": x, "y": y}, force=True, timeout=400)
-                    return True
-                except Exception:
-                    continue
+        if melhor_canvas is None or melhor_caixa is None:
+            continue
+
+        try:
+            # bounding_box() de um elemento em iframe usa coordenadas relativas ao viewport
+            # principal; por isso page.mouse produz um evento físico no canvas real.
+            x = float(melhor_caixa["x"]) + 10.0
+            y = float(melhor_caixa["y"]) + 10.0
+            page.mouse.move(x, y, steps=3)
+            page.mouse.click(x, y, delay=35)
+            if tecla_enviada:
+                return True
+        except Exception:
+            continue
+
     return False
 
 
@@ -973,17 +990,34 @@ def fechar_popups(page):
         "button[aria-label*='Fechar' i], "
         "[role='button'][aria-label*='Close' i], "
         "[role='button'][aria-label*='Fechar' i], "
-        "button[class*='close' i], "
-        "[role='button'][class*='close' i], "
-        "[class*='close' i][role='button']"
+        "[data-role*='close' i], "
+        "[class*='close' i], "
+        "svg[class*='close' i], "
+        "[aria-label*='close' i], "
+        "[aria-label*='fechar' i], "
+        "[title*='close' i], "
+        "[title*='fechar' i], "
+        "[aria-label='×'], [aria-label='✕'], [aria-label='✖'], "
+        "[title='×'], [title='✕'], [title='✖']"
     )
+    regex_x = re.compile(r"^\s*(?:x|×|✕|✖)\s*$", re.IGNORECASE)
+
     for frame in list(getattr(page, "frames", []) or []):
         if not frame_evolution_relevante(frame):
             continue
         try:
-            clicar_primeiro_visivel(frame.locator(seletor_fechar_evolution), limite=12)
+            clicar_primeiro_visivel(frame.locator(seletor_fechar_evolution), limite=24)
         except Exception:
-            continue
+            pass
+
+        # Alguns painéis Evolution desenham o X como texto/ícone dentro de um wrapper
+        # sem data-role ou aria-label. Restringe a busca a elementos com semântica de
+        # controle para não clicar em conteúdo comum da mesa.
+        try:
+            candidatos_x = frame.locator("button, [role='button'], [tabindex], svg").filter(has_text=regex_x)
+            clicar_primeiro_visivel(candidatos_x, limite=16)
+        except Exception:
+            pass
 
 def renovar_sessao_automaticamente(page, context):
     print("\n🔄 Iniciando protocolo de Auto-Login invisível...")
@@ -2533,7 +2567,7 @@ def iniciar_robo_blindado():
                 executor_pronto.set()
                 print("✅ Acesso validado! Executor liberado para novas ordens.")
                 ultima_interacao_keepalive = time.time()
-                intervalo_keepalive = random.uniform(30.0, 45.0)
+                intervalo_keepalive = random.uniform(25.0, 35.0)
                 
                 # Mantém a sessão saudável indefinidamente. A navegação é reiniciada
                 # somente por evidência operacional (WebSocket/stale/login/Playwright),
@@ -2547,7 +2581,7 @@ def iniciar_robo_blindado():
                             ordem = fila_apostas.get()
                             processar_ordem_executor(page, ordem)
                             ultima_interacao_keepalive = time.time()
-                            intervalo_keepalive = random.uniform(30.0, 45.0)
+                            intervalo_keepalive = random.uniform(25.0, 35.0)
                         # 500ms de polling consumiam uma fração grande da janela
                         # real de aposta. Mantém o event loop responsivo sem busy-wait.
                         page.wait_for_timeout(50)
@@ -2584,15 +2618,15 @@ def iniciar_robo_blindado():
                         if agora_keepalive - ultima_interacao_keepalive >= intervalo_keepalive:
                             if interagir_keepalive_evolution(page):
                                 ultima_interacao_keepalive = agora_keepalive
-                                intervalo_keepalive = random.uniform(30.0, 45.0)
+                                intervalo_keepalive = random.uniform(25.0, 35.0)
                             else:
-                                # Não mascara falha do keep-alive por mais 30-45 s.
+                                # Não mascara falha do keep-alive por mais 25-35 s.
                                 # Tenta novamente em breve sem transformar o loop em busy-wait.
                                 ultima_interacao_keepalive = agora_keepalive
                                 intervalo_keepalive = 5.0
                                 registrar_erro_limitado(
                                     "keepalive_evolution_indisponivel",
-                                    "⚠️ Keep-Alive Evolution não encontrou superfície neutra visível; nova tentativa em 5s.",
+                                    "⚠️ Keep-Alive Evolution não conseguiu enviar teclado + clique no canvas; nova tentativa em 5s.",
                                     30,
                                 )
 
@@ -2609,7 +2643,7 @@ def iniciar_robo_blindado():
                                 if btn.count() > 0 and btn.first.is_visible(timeout=100):
                                     btn.first.click(force=True, timeout=300)
                                     ultima_interacao_keepalive = time.time()
-                                    intervalo_keepalive = random.uniform(30.0, 45.0)
+                                    intervalo_keepalive = random.uniform(25.0, 35.0)
                             except Exception:
                                 pass
                     
