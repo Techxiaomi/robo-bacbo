@@ -58,14 +58,6 @@
             }
 
             await window.inicializarSistema();
-
-            const backtest = document.getElementById('aba-backtest');
-            if (
-                backtest?.classList.contains('visivel')
-                && typeof window.carregarHistoricoMemoria === 'function'
-            ) {
-                await window.carregarHistoricoMemoria(false);
-            }
         }
 
         async function atualizarSomenteRobos() {

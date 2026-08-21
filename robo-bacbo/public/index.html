@@ -12,6 +12,7 @@
     <script src="/realtime-ui-scheduler.js"></script>
     <script src="/dashboard-ui.js"></script>
     <script src="/dom-ui2-transform.js"></script>
+    <script src="/backtest-ui3-transform.js"></script>
 
     <style>
         html, body {
@@ -46,6 +47,9 @@
                 if (window.__domUi2Ready !== true || typeof window.otimizarScriptPrincipalUI2 !== 'function') {
                     throw new Error('Transformador DOM UI-2 não carregado');
                 }
+                if (window.__backtestUi3Ready !== true || typeof window.otimizarScriptPrincipalUI3 !== 'function') {
+                    throw new Error('Transformador Backtest UI-3 não carregado');
+                }
 
                 const response = await fetch('/dashboard-app.html?_t=' + Date.now(), {
                     cache: 'no-store',
@@ -67,7 +71,8 @@
                 if (!scriptPrincipal) {
                     throw new Error('JavaScript principal do painel não encontrado');
                 }
-                const scriptPrincipalOtimizado = window.otimizarScriptPrincipalUI2(scriptPrincipal);
+                const scriptPrincipalUi2 = window.otimizarScriptPrincipalUI2(scriptPrincipal);
+                const scriptPrincipalOtimizado = window.otimizarScriptPrincipalUI3(scriptPrincipalUi2);
 
                 // As dependências externas já foram carregadas acima em ordem fixa.
                 // Removemos todos os scripts do documento-base para impedir execução duplicada.
