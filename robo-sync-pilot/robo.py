@@ -882,8 +882,62 @@ def aplicar_stealth(page):
         page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         page.add_init_script("window.navigator.chrome = { runtime: {} };")
 
+
+def frame_evolution_relevante(frame):
+    try:
+        url = str(frame.url or "").lower()
+    except Exception:
+        return False
+    return "evolution" in url or "evocdn" in url or "game" in url
+
+
+def interagir_keepalive_evolution(page):
+    """Gera movimento real do ponteiro sobre uma superfície neutra/visual da mesa."""
+    seletores_neutros = (
+        "canvas",
+        "[data-roadmap]",
+        "[data-history]",
+        "[data-results]",
+        "[class*='roadmap' i]",
+        "[class*='bead' i]",
+        "[class*='history' i]",
+        "[class*='road' i]",
+        "body",
+    )
+
+    for frame in list(getattr(page, "frames", []) or []):
+        if not frame_evolution_relevante(frame):
+            continue
+        for seletor in seletores_neutros:
+            try:
+                candidatos = frame.locator(seletor)
+                quantidade = min(max(0, int(candidatos.count())), 6)
+            except Exception:
+                continue
+
+            for indice in range(quantidade):
+                try:
+                    elemento = candidatos.nth(indice)
+                    if not elemento.is_visible(timeout=100):
+                        continue
+                    caixa = elemento.bounding_box(timeout=200)
+                    if not caixa or caixa.get("width", 0) < 8 or caixa.get("height", 0) < 8:
+                        continue
+                    largura = float(caixa["width"])
+                    altura = float(caixa["height"])
+                    x = max(3.0, min(largura - 3.0, largura * random.uniform(0.35, 0.65)))
+                    y = max(3.0, min(altura - 3.0, altura * random.uniform(0.35, 0.65)))
+                    # Locator.hover usa o dispositivo de ponteiro do Playwright e produz
+                    # pointer/mouse events reais no elemento, ao contrário de dispatchEvent.
+                    elemento.hover(position={"x": x, "y": y}, force=True, timeout=400)
+                    return True
+                except Exception:
+                    continue
+    return False
+
+
 def fechar_popups(page):
-    print("🧹 Limpando pop-ups da tela (Cookies e Maioridade)...")
+    print("🧹 Limpando pop-ups da tela (Cookies, Maioridade e Modais Evolution)...")
 
     def clicar_primeiro_visivel(locator, limite=8):
         try:
@@ -913,6 +967,23 @@ def fechar_popups(page):
         clicar_primeiro_visivel(btn_sim)
     except Exception:
         pass
+
+    seletor_fechar_evolution = (
+        "button[aria-label*='Close' i], "
+        "button[aria-label*='Fechar' i], "
+        "[role='button'][aria-label*='Close' i], "
+        "[role='button'][aria-label*='Fechar' i], "
+        "button[class*='close' i], "
+        "[role='button'][class*='close' i], "
+        "[class*='close' i][role='button']"
+    )
+    for frame in list(getattr(page, "frames", []) or []):
+        if not frame_evolution_relevante(frame):
+            continue
+        try:
+            clicar_primeiro_visivel(frame.locator(seletor_fechar_evolution), limite=12)
+        except Exception:
+            continue
 
 def renovar_sessao_automaticamente(page, context):
     print("\n🔄 Iniciando protocolo de Auto-Login invisível...")
@@ -2456,6 +2527,9 @@ def iniciar_robo_blindado():
                         page.wait_for_timeout(60000)
                         continue
 
+                # A mesa/iframe já está carregada neste ponto; repete a varredura rápida
+                # para capturar avisos nativos que surgem depois do DOMContentLoaded.
+                fechar_popups(page)
                 executor_pronto.set()
                 print("✅ Acesso validado! Executor liberado para novas ordens.")
                 ultima_interacao_keepalive = time.time()
@@ -2508,29 +2582,26 @@ def iniciar_robo_blindado():
 
                         agora_keepalive = time.time()
                         if agora_keepalive - ultima_interacao_keepalive >= intervalo_keepalive:
-                            for frame in page.frames:
-                                if "evolution" not in frame.url.lower() and "evocdn" not in frame.url.lower() and "game" not in frame.url.lower():
-                                    continue
-                                try:
-                                    body = frame.locator("body")
-                                    if body.count() > 0 and body.first.is_visible(timeout=100):
-                                        body.first.click(
-                                            position={"x": 5, "y": 5},
-                                            force=True,
-                                            timeout=300,
-                                        )
-                                        break
-                                except Exception:
-                                    continue
-                            ultima_interacao_keepalive = agora_keepalive
-                            intervalo_keepalive = random.uniform(30.0, 45.0)
+                            if interagir_keepalive_evolution(page):
+                                ultima_interacao_keepalive = agora_keepalive
+                                intervalo_keepalive = random.uniform(30.0, 45.0)
+                            else:
+                                # Não mascara falha do keep-alive por mais 30-45 s.
+                                # Tenta novamente em breve sem transformar o loop em busy-wait.
+                                ultima_interacao_keepalive = agora_keepalive
+                                intervalo_keepalive = 5.0
+                                registrar_erro_limitado(
+                                    "keepalive_evolution_indisponivel",
+                                    "⚠️ Keep-Alive Evolution não encontrou superfície neutra visível; nova tentativa em 5s.",
+                                    30,
+                                )
 
                     if not status_conexao["ativa"]:
                         break
                     
                     # Fecha qualquer overlay de pausa/inatividade conhecido caso a prevenção não seja suficiente.
                     for frame in page.frames:
-                        if "evolution" in frame.url.lower() or "evocdn" in frame.url.lower() or "game" in frame.url.lower():
+                        if frame_evolution_relevante(frame):
                             try:
                                 btn = frame.get_by_text(
                                     re.compile(r"continuar|continue|inativ|inactiv|pausado|paused", re.IGNORECASE)
