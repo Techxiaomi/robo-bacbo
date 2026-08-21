@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const { AsyncLocalStorage } = require('async_hooks');
 const express = require('express');
 const { criarBarreiraSaldoFrescoStops } = require('./bug051c_balance_barrier');
@@ -10,6 +11,53 @@ const GUARDA_CONFIG_INSTALADA = Symbol.for('robo-bacbo.bug051d.guarda-config');
 const CONTEXTO_LEDGER_REQUEST = new AsyncLocalStorage();
 const EXPRESS_JSON_LEDGER_INSTALADO = Symbol.for('robo-bacbo.arch-road-02.express-json-ledger');
 
+function tokenInternoValidoCollectorRoad(req) {
+    const recebido = Buffer.from(String(req?.get?.('X-Internal-Token') || ''), 'utf8');
+    const esperado = Buffer.from(String(process.env.INTERNAL_API_TOKEN || '').trim(), 'utf8');
+    return esperado.length > 0
+        && recebido.length === esperado.length
+        && crypto.timingSafeEqual(recebido, esperado);
+}
+
+function responderCollectorRoadShadow(req, res) {
+    if (req.method !== 'POST' || req.path !== '/collector-road') return false;
+
+    if (!tokenInternoValidoCollectorRoad(req)) {
+        res.status(401).json({ erro: 'Nao autorizado' });
+        return true;
+    }
+
+    const dados = req.body && typeof req.body === 'object' ? req.body : {};
+    const history = Array.isArray(dados.history) ? dados.history : null;
+    const sessao = String(dados.coletor_sessao || '').trim();
+    const timestamp = Number(dados.timestamp_coleta);
+
+    if (!history || history.length === 0 || history.length > 1000 || !sessao) {
+        res.status(400).json({ erro: 'snapshot road invalido' });
+        return true;
+    }
+
+    const itensValidos = history.every(item => (
+        item
+        && typeof item === 'object'
+        && typeof item.winner === 'string'
+        && Number.isFinite(Number(item.playerScore))
+        && Number.isFinite(Number(item.bankerScore))
+    ));
+
+    if (!itensValidos || !Number.isFinite(timestamp) || timestamp <= 0) {
+        res.status(400).json({ erro: 'snapshot road invalido' });
+        return true;
+    }
+
+    console.log(
+        `🛣️ SHADOW ROAD | snapshot histórico recebido | `
+        + `rodadas=${history.length} | sessão=${sessao} | timestamp=${Math.trunc(timestamp)}`
+    );
+    res.status(200).json({ recebido: true, shadow: true, quantidade: history.length });
+    return true;
+}
+
 function instalarContextoLedgerExpress() {
     if (express[EXPRESS_JSON_LEDGER_INSTALADO]) return;
 
@@ -19,6 +67,7 @@ function instalarContextoLedgerExpress() {
         return function middlewareComContextoLedger(req, res, next) {
             middleware(req, res, erro => {
                 if (erro) return next(erro);
+                if (responderCollectorRoadShadow(req, res)) return;
                 const payload = req && req.body && typeof req.body === 'object' ? req.body : {};
                 return CONTEXTO_LEDGER_REQUEST.run(payload, next);
             });
