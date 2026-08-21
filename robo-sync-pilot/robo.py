@@ -2284,6 +2284,7 @@ def iniciar_robo_blindado():
             "ws_conectado": False,
             "ws_oficial": None,
             "ultimo_player_state_monotonic": 0.0,
+            "reconexao_preparando": False,
             "reconexao_pendente": None,
         }
         estado_saldo = {
@@ -2297,6 +2298,61 @@ def iniciar_robo_blindado():
         if not CASINO_BALANCE_SELECTOR:
             print("ℹ️ Sincronização de saldo desativada: configure CASINO_BALANCE_SELECTOR no .env.")
 
+        def preparar_reconexao_apos_limpeza(origem):
+            """Executa a limpeza do modal antes de iniciar o relógio de reconexão."""
+            if status_conexao.get("reconexao_pendente") is not None:
+                return False
+            if status_conexao.get("reconexao_preparando"):
+                return False
+
+            executor_pronto.clear()
+            estado_anterior = snapshot_estado_mesa()
+            status_conexao.update({
+                "ws_conectado": False,
+                "ws_oficial": None,
+                "reconexao_preparando": True,
+            })
+
+            modal_clicado = False
+            try:
+                padrao_continuar = re.compile(r"^\s*(continuar|continue)\s*$", re.IGNORECASE)
+                for frame in list(getattr(page, "frames", []) or []):
+                    url_frame = str(getattr(frame, "url", "") or "").lower()
+                    if not ("evolution" in url_frame or "evocdn" in url_frame or "game" in url_frame):
+                        continue
+                    try:
+                        botoes = frame.get_by_role("button", name=padrao_continuar)
+                        quantidade = min(max(0, int(botoes.count())), 8)
+                    except Exception:
+                        continue
+                    for indice in range(quantidade):
+                        try:
+                            botao = botoes.nth(indice)
+                            if not botao.is_visible(timeout=100):
+                                continue
+                            botao.click(force=True, timeout=1000)
+                            modal_clicado = True
+                            print("▶️ ANTI-IDLE | botão Continuar do modal Evolution acionado antes da reconexão.")
+                            break
+                        except Exception:
+                            continue
+                    if modal_clicado:
+                        break
+            finally:
+                status_conexao["reconexao_preparando"] = False
+
+            status_conexao["reconexao_pendente"] = {
+                "iniciada_monotonic": time.monotonic(),
+                "estado_anterior": estado_anterior,
+                "origem": str(origem or "WEBSOCKET_CLOSE"),
+                "modal_continuar_clicado": modal_clicado,
+            }
+            print(
+                f"🔄 {origem}: limpeza DOM concluída (Continuar={'sim' if modal_clicado else 'não encontrado'}); "
+                f"agora a continuidade será verificada por até {WEBSOCKET_RECONNECT_GRACE_SECONDS:g}s."
+            )
+            return True
+
         def on_web_socket(ws):
             if "evolution" in ws.url.lower() or "evocdn" in ws.url.lower() or "game" in ws.url.lower():
                 ws.on("framereceived", lambda texto: capturar_frame(ws, texto))
@@ -2304,21 +2360,7 @@ def iniciar_robo_blindado():
                 def websocket_fechado(_ws):
                     if status_conexao.get("ws_oficial") is not ws:
                         return
-                    executor_pronto.clear()
-                    if status_conexao.get("reconexao_pendente") is not None:
-                        return
-                    status_conexao.update({
-                        "ws_conectado": False,
-                        "ws_oficial": None,
-                        "reconexao_pendente": {
-                            "iniciada_monotonic": time.monotonic(),
-                            "estado_anterior": snapshot_estado_mesa(),
-                        },
-                    })
-                    print(
-                        "🔄 WebSocket oficial da mesa foi fechado; novas apostas estão bloqueadas enquanto "
-                        f"a continuidade é verificada por até {WEBSOCKET_RECONNECT_GRACE_SECONDS:g}s."
-                    )
+                    preparar_reconexao_apos_limpeza("WEBSOCKET_CLOSE")
 
                 ws.on("close", websocket_fechado)
 
@@ -2330,6 +2372,8 @@ def iniciar_robo_blindado():
                 if not texto_limpo:
                     return
                 dados = json.loads(texto_limpo)
+                if status_conexao.get("reconexao_preparando") and dados.get("type") in {"bacbo.road", "bacbo.playerState"}:
+                    return
                 if dados.get("type") == "bacbo.road":
                     ws_oficial = status_conexao.get("ws_oficial")
                     if ws_oficial is not None and ws_oficial is not ws:
@@ -2427,6 +2471,7 @@ def iniciar_robo_blindado():
                 status_conexao["ws_conectado"] = False
                 status_conexao["ws_oficial"] = None
                 status_conexao["ultimo_player_state_monotonic"] = 0.0
+                status_conexao["reconexao_preparando"] = False
                 status_conexao["reconexao_pendente"] = None
                 page.goto(URL_CASSINO, wait_until="domcontentloaded", timeout=60000)
                 fechar_popups(page)
@@ -2466,13 +2511,13 @@ def iniciar_robo_blindado():
                         reconexao = status_conexao.get("reconexao_pendente")
                         if isinstance(reconexao, dict):
                             decorrido_reconexao = time.monotonic() - float(reconexao.get("iniciada_monotonic") or 0.0)
-                            if decorrido_reconexao > WEBSOCKET_RECONNECT_GRACE_SECONDS:
+                            if decorrido_reconexao >= WEBSOCKET_RECONNECT_GRACE_SECONDS:
                                 status_conexao["reconexao_pendente"] = None
                                 status_conexao["ativa"] = False
                                 motivo = "WEBSOCKET_RECONEXAO_TIMEOUT"
                                 if marcar_interrupcao_fluxo(motivo):
                                     print(
-                                        "🚨 WebSocket oficial não foi restabelecido com evidência segura; "
+                                        "🚨 WebSocket oficial não foi restabelecido com evidência segura após a limpeza do modal; "
                                         "sinais pendentes serão invalidados."
                                     )
                                     notificar_interrupcao_node(motivo)
@@ -2481,26 +2526,24 @@ def iniciar_robo_blindado():
 
                         ultimo_player_state = float(status_conexao.get("ultimo_player_state_monotonic") or 0.0)
                         if ultimo_player_state > 0 and time.monotonic() - ultimo_player_state > COLLECTOR_PLAYER_STATE_STALE_SECONDS:
-                            executor_pronto.clear()
-                            status_conexao["ativa"] = False
-                            if marcar_interrupcao_fluxo("PLAYER_STATE_STALE"):
-                                print(
-                                    "🚨 Fluxo playerState ficou silencioso por mais de "
-                                    f"{COLLECTOR_PLAYER_STATE_STALE_SECONDS:g}s; reiniciando sessão em modo seguro."
-                                )
-                                notificar_interrupcao_node("PLAYER_STATE_STALE")
-                            break
+                            preparar_reconexao_apos_limpeza("PLAYER_STATE_STALE")
+                            continue
 
                     if not status_conexao["ativa"]:
                         break
                     
-                    # Clica no botão 'Continuar' caso a mesa fique inativa para você
+                    # Detecção estritamente reativa: apenas clica se o botão real do modal estiver visível.
+                    padrao_continuar = re.compile(r"^\s*(continuar|continue)\s*$", re.IGNORECASE)
                     for frame in page.frames:
-                        if "evolution" in frame.url.lower() or "evocdn" in frame.url.lower() or "game" in frame.url.lower():
+                        url_frame = str(getattr(frame, "url", "") or "").lower()
+                        if "evolution" in url_frame or "evocdn" in url_frame or "game" in url_frame:
                             try:
-                                btn = frame.get_by_text(re.compile(r"continuar|continue", re.IGNORECASE))
-                                if btn.count() > 0 and btn.first.is_visible(): btn.first.click(force=True)
-                            except: pass
+                                btn = frame.get_by_role("button", name=padrao_continuar)
+                                if btn.count() > 0 and btn.first.is_visible(timeout=100):
+                                    btn.first.click(force=True, timeout=1000)
+                                    break
+                            except Exception:
+                                pass
                     
                 executor_pronto.clear()
                 
