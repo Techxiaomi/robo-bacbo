@@ -9,6 +9,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
     <script src="/socket.io/socket.io.js"></script>
+    <script src="/realtime-ui-scheduler.js"></script>
     <script src="/dashboard-ui.js"></script>
 
     <style>
@@ -34,6 +35,9 @@
             try {
                 if (typeof window.io !== 'function') {
                     throw new Error('Cliente Socket.IO não carregado');
+                }
+                if (window.__realtimeUiSchedulerReady !== true) {
+                    throw new Error('Scheduler realtime da interface não carregado');
                 }
                 if (typeof window.atualizarDashboardValores !== 'function') {
                     throw new Error('Controlador do dashboard não carregado');
