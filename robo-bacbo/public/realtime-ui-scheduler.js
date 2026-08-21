@@ -135,7 +135,6 @@
         return criarSchedulerParaSocket(ioOriginal(...args));
     }
 
-    Object.assign(ioCoalescido, ioOriginal);
     window.io = ioCoalescido;
     window.__realtimeUiSchedulerReady = true;
 })();
