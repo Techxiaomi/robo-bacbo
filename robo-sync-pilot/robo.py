@@ -3,6 +3,7 @@ from flask import Flask, request, jsonify
 import threading
 import queue
 import time
+import random
 import re
 import json
 import requests
@@ -883,25 +884,35 @@ def aplicar_stealth(page):
 
 def fechar_popups(page):
     print("🧹 Limpando pop-ups da tela (Cookies e Maioridade)...")
-    page.wait_for_timeout(2000) 
+
+    def clicar_primeiro_visivel(locator, limite=8):
+        try:
+            quantidade = min(max(0, int(locator.count())), max(1, int(limite)))
+        except Exception:
+            return False
+        for indice in range(quantidade):
+            try:
+                candidato = locator.nth(indice)
+                if candidato.is_visible(timeout=100):
+                    candidato.click(force=True, timeout=300)
+                    return True
+            except Exception:
+                continue
+        return False
+
     try:
         btn_cookie = page.locator("button", has_text=re.compile(r"Aceitar todos", re.IGNORECASE))
-        for i in range(btn_cookie.count()):
-            if btn_cookie.nth(i).is_visible():
-                btn_cookie.nth(i).click(force=True)
-                page.wait_for_timeout(1000)
-                break
-    except: pass
+        clicar_primeiro_visivel(btn_cookie)
+    except Exception:
+        pass
+
     try:
         btn_sim = page.locator("button", has_text=re.compile(r"^Sim$", re.IGNORECASE))
-        if btn_sim.count() == 0: 
+        if btn_sim.count() == 0:
             btn_sim = page.locator("button", has_text=re.compile(r"Sim", re.IGNORECASE))
-        for i in range(btn_sim.count()):
-            if btn_sim.nth(i).is_visible():
-                btn_sim.nth(i).click(force=True)
-                page.wait_for_timeout(1000)
-                break
-    except: pass
+        clicar_primeiro_visivel(btn_sim)
+    except Exception:
+        pass
 
 def renovar_sessao_automaticamente(page, context):
     print("\n🔄 Iniciando protocolo de Auto-Login invisível...")
@@ -2447,6 +2458,8 @@ def iniciar_robo_blindado():
 
                 executor_pronto.set()
                 print("✅ Acesso validado! Executor liberado para novas ordens.")
+                ultima_interacao_keepalive = time.time()
+                intervalo_keepalive = random.uniform(30.0, 45.0)
                 
                 # Mantém a sessão saudável indefinidamente. A navegação é reiniciada
                 # somente por evidência operacional (WebSocket/stale/login/Playwright),
@@ -2459,6 +2472,8 @@ def iniciar_robo_blindado():
                         if not fila_apostas.empty():
                             ordem = fila_apostas.get()
                             processar_ordem_executor(page, ordem)
+                            ultima_interacao_keepalive = time.time()
+                            intervalo_keepalive = random.uniform(30.0, 45.0)
                         # 500ms de polling consumiam uma fração grande da janela
                         # real de aposta. Mantém o event loop responsivo sem busy-wait.
                         page.wait_for_timeout(50)
@@ -2491,16 +2506,41 @@ def iniciar_robo_blindado():
                                 notificar_interrupcao_node("PLAYER_STATE_STALE")
                             break
 
+                        agora_keepalive = time.time()
+                        if agora_keepalive - ultima_interacao_keepalive >= intervalo_keepalive:
+                            for frame in page.frames:
+                                if "evolution" not in frame.url.lower() and "evocdn" not in frame.url.lower() and "game" not in frame.url.lower():
+                                    continue
+                                try:
+                                    body = frame.locator("body")
+                                    if body.count() > 0 and body.first.is_visible(timeout=100):
+                                        body.first.click(
+                                            position={"x": 5, "y": 5},
+                                            force=True,
+                                            timeout=300,
+                                        )
+                                        break
+                                except Exception:
+                                    continue
+                            ultima_interacao_keepalive = agora_keepalive
+                            intervalo_keepalive = random.uniform(30.0, 45.0)
+
                     if not status_conexao["ativa"]:
                         break
                     
-                    # Clica no botão 'Continuar' caso a mesa fique inativa para você
+                    # Fecha qualquer overlay de pausa/inatividade conhecido caso a prevenção não seja suficiente.
                     for frame in page.frames:
                         if "evolution" in frame.url.lower() or "evocdn" in frame.url.lower() or "game" in frame.url.lower():
                             try:
-                                btn = frame.get_by_text(re.compile(r"continuar|continue", re.IGNORECASE))
-                                if btn.count() > 0 and btn.first.is_visible(): btn.first.click(force=True)
-                            except: pass
+                                btn = frame.get_by_text(
+                                    re.compile(r"continuar|continue|inativ|inactiv|pausado|paused", re.IGNORECASE)
+                                )
+                                if btn.count() > 0 and btn.first.is_visible(timeout=100):
+                                    btn.first.click(force=True, timeout=300)
+                                    ultima_interacao_keepalive = time.time()
+                                    intervalo_keepalive = random.uniform(30.0, 45.0)
+                            except Exception:
+                                pass
                     
                 executor_pronto.clear()
                 
