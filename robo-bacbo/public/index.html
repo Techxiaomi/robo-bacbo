@@ -5,11 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Inteligência Bac Bo</title>
 
-    <!-- Dependências críticas carregadas de forma determinística antes da aplicação -->
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    <!-- Somente dependências críticas entram no bootstrap. Assets pesados são lazy-loaded pela UI-4. -->
     <script src="/socket.io/socket.io.js"></script>
+    <script src="/realtime-ui-scheduler.js"></script>
     <script src="/dashboard-ui.js"></script>
+    <script src="/dom-ui2-transform.js"></script>
+    <script src="/backtest-ui3-transform.js"></script>
+    <script src="/resources-ui4.js"></script>
 
     <style>
         html, body {
@@ -35,8 +37,20 @@
                 if (typeof window.io !== 'function') {
                     throw new Error('Cliente Socket.IO não carregado');
                 }
+                if (window.__realtimeUiSchedulerReady !== true) {
+                    throw new Error('Scheduler realtime da interface não carregado');
+                }
                 if (typeof window.atualizarDashboardValores !== 'function') {
                     throw new Error('Controlador do dashboard não carregado');
+                }
+                if (window.__domUi2Ready !== true || typeof window.otimizarScriptPrincipalUI2 !== 'function') {
+                    throw new Error('Transformador DOM UI-2 não carregado');
+                }
+                if (window.__backtestUi3Ready !== true || typeof window.otimizarScriptPrincipalUI3 !== 'function') {
+                    throw new Error('Transformador Backtest UI-3 não carregado');
+                }
+                if (window.__resourceUi4Ready !== true || typeof window.otimizarScriptPrincipalUI4 !== 'function') {
+                    throw new Error('Otimizações de recursos UI-4 não carregadas');
                 }
 
                 const response = await fetch('/dashboard-app.html?_t=' + Date.now(), {
@@ -59,9 +73,11 @@
                 if (!scriptPrincipal) {
                     throw new Error('JavaScript principal do painel não encontrado');
                 }
+                const scriptPrincipalUi2 = window.otimizarScriptPrincipalUI2(scriptPrincipal);
+                const scriptPrincipalUi3 = window.otimizarScriptPrincipalUI3(scriptPrincipalUi2);
+                const scriptPrincipalOtimizado = window.otimizarScriptPrincipalUI4(scriptPrincipalUi3);
 
-                // As dependências externas já foram carregadas acima em ordem fixa.
-                // Removemos todos os scripts do documento-base para impedir execução duplicada.
+                // O documento-base ainda pode citar assets históricos; nenhum script dele é executado.
                 parsed.querySelectorAll('script').forEach(script => script.remove());
 
                 document.documentElement.lang = parsed.documentElement.lang || 'pt-BR';
@@ -73,7 +89,7 @@
                 );
 
                 const script = document.createElement('script');
-                script.textContent = scriptPrincipal;
+                script.textContent = scriptPrincipalOtimizado;
                 document.body.appendChild(script);
 
                 const finalizarInicializacao = () => {

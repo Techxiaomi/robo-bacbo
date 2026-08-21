@@ -32,6 +32,10 @@ COLLECTOR_HEALTH_URL = (
     os.getenv("NODE_COLLECTOR_HEALTH_URL", "http://127.0.0.1:3000/collector-health").strip()
     or "http://127.0.0.1:3000/collector-health"
 )
+COLLECTOR_ROAD_URL = (
+    os.getenv("NODE_COLLECTOR_ROAD_URL", "http://127.0.0.1:3000/collector-road").strip()
+    or "http://127.0.0.1:3000/collector-road"
+)
 EXECUTOR_STATUS_URL = (
     os.getenv("NODE_EXECUTOR_STATUS_URL", "http://127.0.0.1:3000/executor-status").strip()
     or "http://127.0.0.1:3000/executor-status"
@@ -108,11 +112,11 @@ except ValueError:
 
 try:
     WEBSOCKET_RECONNECT_GRACE_SECONDS = max(
-        2.0,
-        min(30.0, float(os.getenv("WEBSOCKET_RECONNECT_GRACE_SECONDS", "10")))
+        25.0,
+        min(30.0, float(os.getenv("WEBSOCKET_RECONNECT_GRACE_SECONDS", "25")))
     )
 except ValueError:
-    WEBSOCKET_RECONNECT_GRACE_SECONDS = 10.0
+    WEBSOCKET_RECONNECT_GRACE_SECONDS = 25.0
 
 try:
     ROADMAP_RECONCILIATION_MIN_RESULTS = max(
@@ -534,6 +538,81 @@ def notificar_interrupcao_node(motivo, timestamp_ms=None):
         return False
 
 
+def normalizar_snapshot_road(dados):
+    args = dados.get("args", {}) if isinstance(dados, dict) else {}
+    history = args.get("history") if isinstance(args, dict) else None
+    if not isinstance(history, list) or not history:
+        return None
+
+    mapa_vencedor = {
+        "player": "Player",
+        "banker": "Banker",
+        "tie": "Tie",
+    }
+    normalizados = []
+    for item in history:
+        if not isinstance(item, dict):
+            return None
+
+        vencedor = mapa_vencedor.get(str(item.get("winner") or "").strip().lower())
+        if not vencedor:
+            return None
+
+        player_score = item.get("playerScore")
+        banker_score = item.get("bankerScore")
+        if isinstance(player_score, bool) or isinstance(banker_score, bool):
+            return None
+        try:
+            player_score = int(player_score)
+            banker_score = int(banker_score)
+        except (TypeError, ValueError):
+            return None
+        if not 0 <= player_score <= 12 or not 0 <= banker_score <= 12:
+            return None
+
+        normalizados.append({
+            "winner": vencedor,
+            "playerScore": player_score,
+            "bankerScore": banker_score,
+        })
+
+    return normalizados
+
+
+def enviar_snapshot_road_node(dados):
+    history = normalizar_snapshot_road(dados)
+    if not history:
+        registrar_erro_limitado(
+            "road_snapshot_invalido",
+            "⚠️ bacbo.road recebido sem args.history válido; snapshot shadow ignorado.",
+            30,
+        )
+        return False
+
+    payload = {
+        "evento": "ROAD_SNAPSHOT",
+        "coletor_sessao": COLETOR_SESSAO,
+        "timestamp_coleta": int(time.time() * 1000),
+        "history": history,
+    }
+    try:
+        resposta = requests.post(
+            COLLECTOR_ROAD_URL,
+            json=payload,
+            headers={"X-Internal-Token": INTERNAL_API_TOKEN},
+            timeout=2,
+        )
+        resposta.raise_for_status()
+        return True
+    except Exception as e:
+        registrar_erro_limitado(
+            "collector_road_node",
+            f"⚠️ Falha ao enviar snapshot bacbo.road ao Node em Shadow Mode: {type(e).__name__}: {e}",
+            30,
+        )
+        return False
+
+
 def validar_resultado_resolvido(game_info):
     if not isinstance(game_info, dict):
         raise ValueError("game ausente ou inválido")
@@ -751,6 +830,8 @@ def reconciliar_reconexao_por_roadmap(page, dados):
     if not stage:
         return {"confirmada": False, "motivo": "PLAYER_STATE_SEM_STAGE", "diagnostico": {}}
 
+    # ARCH-ROAD-01: cookies/overlays não podem cegar o fallback visual.
+    fechar_popups(page)
     extraido = extrair_trilhas_roadmap_dom(page)
     resultado = reconciliar_trilhas_roadmap(
         snapshot_resultados_confirmados(),
@@ -2249,6 +2330,16 @@ def iniciar_robo_blindado():
                 if not texto_limpo:
                     return
                 dados = json.loads(texto_limpo)
+                if dados.get("type") == "bacbo.road":
+                    ws_oficial = status_conexao.get("ws_oficial")
+                    if ws_oficial is not None and ws_oficial is not ws:
+                        return
+                    threading.Thread(
+                        target=enviar_snapshot_road_node,
+                        args=(dados,),
+                        daemon=True,
+                    ).start()
+                    return
                 if dados.get("type") == "bacbo.playerState":
                     ws_oficial = status_conexao.get("ws_oficial")
                     if ws_oficial is not None and ws_oficial is not ws:

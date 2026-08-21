@@ -339,7 +339,6 @@ async function prepararBancoDeDados() {
 let ESTRATEGIAS_MEMORIA = [];
 let ROBOS_MEMORIA = [];
 let AUTO_TRADERS_MEMORIA = [];
-let historicoRecente = [];
 let historicoGirosAnalitico = [];
 let estadoApostas = {};
 let estadoStandbyRobos = {};
@@ -2250,60 +2249,26 @@ function contarTiesLegados(tiesJson) {
     }
 }
 
-async function calcularAssertividadePersistidaEstrategia(est) {
-    // Estratégias IA são avaliadas pela mesma janela bruta usada pelo robô proprietário.
-    // Isso evita iniciar em 0% e também evita duplicar a amostra minerada nos contadores live.
-    if (est && est.is_dinamico) {
-        const roboDono = ROBOS_MEMORIA.find(
-            robo => Number(robo.id) === Number(est.robo_dono_id)
-        );
-        const rangeConfig = Number(roboDono?.config?.auto_tuning?.range);
-        const rangeDinamico = Number.isFinite(rangeConfig)
-            ? Math.max(100, Math.min(10000, Math.trunc(rangeConfig)))
-            : 1000;
-        const dadosDinamicos = historicoGirosAnalitico.slice(-rangeDinamico);
-        const detalhes = calcularDetalhesPadraoNoHistorico(
-            est,
-            dadosDinamicos,
-            Date.now()
-        ).geral;
-        const greens = (Number(detalhes.green_direto) || 0)
-            + (Number(detalhes.gale1) || 0)
-            + (Number(detalhes.gale2) || 0)
-            + contarTiesLegados(detalhes.ties);
-        const reds = Number(detalhes.red) || 0;
-        const total = greens + reds;
-        return total > 0 ? (greens / total) * 100 : 0;
-    }
+function calcularAssertividadeLiveCanonica(est, historicoLiveCanonico) {
+    const dadosCanonicos = (Array.isArray(historicoLiveCanonico) ? historicoLiveCanonico : [])
+        .map(giro => ({
+            resultado: String(giro?.resultado || ''),
+            multiplicador: String(giro?.multiplicador || ''),
+            id_sessao: String(giro?.id_sessao || 'EVOLUTION_CANONICA'),
+            timestamp_ms: Number(giro?.timestamp_ms) || 0
+        }));
 
-    const [baselineRows] = await dbPool.query(
-        'SELECT green_direto, gale1, gale2, red, ties_json FROM estrategias WHERE id=? LIMIT 1',
-        [est.id]
-    );
-
-    if (baselineRows.length === 0) return 0;
-
-    const base = baselineRows[0];
-    let greens = (Number(base.green_direto) || 0)
-        + (Number(base.gale1) || 0)
-        + (Number(base.gale2) || 0)
-        + contarTiesLegados(base.ties_json);
-    let reds = Number(base.red) || 0;
-
-    const [historicoRows] = await dbPool.query(
-        `SELECT tipo_resultado, COUNT(*) AS qtd
-         FROM historico_resultados
-         WHERE estrategia_id=?
-         GROUP BY tipo_resultado`,
-        [est.id]
-    );
-
-    for (const row of historicoRows) {
-        const qtd = Number(row.qtd) || 0;
-        if (row.tipo_resultado === 'GREEN' || row.tipo_resultado === 'TIE') greens += qtd;
-        else if (row.tipo_resultado === 'RED') reds += qtd;
-    }
-
+    if (!est || dadosCanonicos.length === 0) return 0;
+    const detalhes = calcularDetalhesPadraoNoHistorico(
+        est,
+        dadosCanonicos,
+        Date.now()
+    ).geral;
+    const greens = (Number(detalhes.green_direto) || 0)
+        + (Number(detalhes.gale1) || 0)
+        + (Number(detalhes.gale2) || 0)
+        + contarTiesLegados(detalhes.ties);
+    const reds = Number(detalhes.red) || 0;
     const total = greens + reds;
     return total > 0 ? (greens / total) * 100 : 0;
 }
@@ -2749,12 +2714,12 @@ function ciclosAtivosPorRobo() {
     return ciclos;
 }
 
-async function selecionarRobosParaEstrategia(est) {
+async function selecionarRobosParaEstrategia(est, historicoLiveCanonico) {
     if (est.quarentena_restante > 0) {
         return { todos: [], web: [], telegram: [], bloqueados: [], assertividade: 0 };
     }
 
-    const assertividade = await calcularAssertividadePersistidaEstrategia(est);
+    const assertividade = calcularAssertividadeLiveCanonica(est, historicoLiveCanonico);
     const ciclosAtivos = ciclosAtivosPorRobo();
     const bloqueados = [];
     const elegiveis = ROBOS_MEMORIA.filter(robo => {
@@ -3817,9 +3782,6 @@ app.post("/receber-sinal", async (req, res) => {
             console.error('❌ Falha ao persistir giro recente:', e.message);
         }
 
-        historicoRecente.push({ resultado: vencedor, placarStr: `[P:${p1+p2} B:${b1+b2}]`, id_sessao: idSessaoContinua });
-        if (historicoRecente.length > 30) historicoRecente.shift();
-
         if (giroPersistidoParaIA && giroIdPersistidoParaIA > 0) {
             try {
                 await autoPilotIA.registrarNovoGiro({ giro_id: giroIdPersistidoParaIA });
@@ -4142,19 +4104,30 @@ app.post("/receber-sinal", async (req, res) => {
 
         if (sinalFinalizadoAgora) return;
 
+        const maiorPadraoLive = ESTRATEGIAS_MEMORIA.reduce((maior, est) => {
+            const tamanho = Array.isArray(est?.padrao) ? est.padrao.length : 0;
+            return Math.max(maior, tamanho);
+        }, 0);
+        const estadoLiveCanonico = integracaoContadorDiario.obterHistoricoCanonicoLive(
+            Math.max(1, maiorPadraoLive)
+        );
+        if (estadoLiveCanonico.pronto !== true) {
+            return;
+        }
+        const historicoLiveCanonico = estadoLiveCanonico.history;
+
         let ocupado = Object.values(estadoApostas).some(e => e.aguardandoResultado);
         if (!ocupado) {
             for (let est of ESTRATEGIAS_MEMORIA) {
                 if (!est.ativo) continue;
-                if (historicoRecente.length >= est.padrao.length) {
-                    let ult = historicoRecente.slice(-est.padrao.length);
-                    let mesmaSessao = ult.every(val => val.id_sessao === ult[0].id_sessao);
+                if (historicoLiveCanonico.length >= est.padrao.length) {
+                    let ult = historicoLiveCanonico.slice(-est.padrao.length);
                     let matchCores = ult.every((val, i) => val.resultado === est.padrao[i]);
 
-                    if (mesmaSessao && matchCores) {
+                    if (matchCores) {
                         let selecaoRobos = { web: [], telegram: [], assertividade: 0 };
                         try {
-                            selecaoRobos = await selecionarRobosParaEstrategia(est);
+                            selecaoRobos = await selecionarRobosParaEstrategia(est, historicoLiveCanonico);
                         } catch (e) {
                             console.error(`Falha ao selecionar robos para estrategia ${est.id}:`, e.message);
                         }

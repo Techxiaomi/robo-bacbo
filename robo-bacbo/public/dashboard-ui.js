@@ -4,6 +4,7 @@
     const PERIODOS_DASHBOARD = new Set(['24h', 'hoje', 'semana', 'mes', 'geral']);
     let dashboardPeriodoAtual = '24h';
     let dashboardAtualizacaoSeq = 0;
+    let dashboardAbortController = null;
 
     function periodoDashboardSeguro(periodo) {
         return PERIODOS_DASHBOARD.has(periodo) ? periodo : '24h';
@@ -14,6 +15,11 @@
         return Number.isFinite(numero) && numero >= 0 ? Math.floor(numero) : 0;
     }
 
+    function definirTexto(id, valor) {
+        const el = document.getElementById(id);
+        if (el) el.innerText = valor;
+    }
+
     function atualizarBotoesPeriodoDashboard() {
         dashboardPeriodoAtual = periodoDashboardSeguro(dashboardPeriodoAtual);
         document.querySelectorAll('.btn-dash').forEach(btn => {
@@ -22,11 +28,6 @@
             btn.style.color = ativo ? '#fff' : '#888';
             btn.setAttribute('aria-pressed', ativo ? 'true' : 'false');
         });
-    }
-
-    function definirTexto(id, valor) {
-        const el = document.getElementById(id);
-        if (el) el.innerText = valor;
     }
 
     function renderizarDashboardIndisponivel() {
@@ -42,9 +43,7 @@
         if (labelAssert) labelAssert.style.color = '#888';
     }
 
-    async function atualizarDashboardValores() {
-        atualizarBotoesPeriodoDashboard();
-
+    function montarParametrosDashboard() {
         const roboId = document.getElementById('select-robo-dash')?.value || 'TODOS';
         const origem = document.getElementById('select-origem-dash')?.value || 'TODAS';
         const periodo = periodoDashboardSeguro(dashboardPeriodoAtual);
@@ -55,10 +54,26 @@
         params.set('periodo', periodo);
         params.set('origem', origem);
         params.set('_t', String(Date.now()));
+        return params;
+    }
 
+    async function atualizarDashboardValores() {
+        atualizarBotoesPeriodoDashboard();
+
+        const params = montarParametrosDashboard();
         const requestSeq = ++dashboardAtualizacaoSeq;
+
+        if (dashboardAbortController) {
+            dashboardAbortController.abort();
+        }
+        const abortController = new AbortController();
+        dashboardAbortController = abortController;
+
         try {
-            const res = await fetch(`/api/dashboard-stats?${params.toString()}`);
+            const res = await fetch(`/api/dashboard-stats?${params.toString()}`, {
+                signal: abortController.signal,
+                cache: 'no-store'
+            });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
             const data = await res.json();
@@ -94,14 +109,22 @@
             if (boxAssert) boxAssert.style.borderColor = corAssert;
             if (labelAssert) labelAssert.style.color = corAssert;
         } catch (erro) {
+            if (erro?.name === 'AbortError') return;
             if (requestSeq !== dashboardAtualizacaoSeq) return;
-            console.error('Falha ao atualizar Resumo Executivo:', erro);
+            console.error('❌ UI Dashboard | falha ao atualizar Resumo Executivo:', erro);
             renderizarDashboardIndisponivel();
+        } finally {
+            if (dashboardAbortController === abortController) {
+                dashboardAbortController = null;
+            }
         }
     }
 
     async function mudarDashGeral(periodo) {
-        if (!PERIODOS_DASHBOARD.has(periodo)) return;
+        if (!PERIODOS_DASHBOARD.has(periodo)) {
+            console.warn(`⚠️ UI Dashboard | período inválido ignorado: ${String(periodo)}`);
+            return;
+        }
         dashboardPeriodoAtual = periodo;
         atualizarBotoesPeriodoDashboard();
         await atualizarDashboardValores();
