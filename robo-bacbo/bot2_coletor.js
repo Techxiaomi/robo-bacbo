@@ -140,7 +140,6 @@ async function prepararBancoDeDados() {
             )
         `);
 
-
         await dbPool.query(`
             CREATE TABLE IF NOT EXISTS historico_shadow_ia (
                 id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -255,7 +254,9 @@ async function prepararBancoDeDados() {
                 status_ordem VARCHAR(20) DEFAULT 'PENDENTE',
                 placar_mesa VARCHAR(50) DEFAULT '',
                 lucro_prejuizo DECIMAL(12,2) DEFAULT 0,
-                saldo_pos DECIMAL(12,2) DEFAULT 0,
+                saldo_pos DECIMAL(12,2) DEFAULT NULL,
+                resultado_confirmado_em BIGINT DEFAULT NULL,
+                saldo_pos_confirmado_em BIGINT DEFAULT NULL,
                 data_hora DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (trader_id) REFERENCES auto_traders(id) ON DELETE CASCADE
             )
@@ -294,6 +295,9 @@ async function prepararBancoDeDados() {
         await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN executor_saldo_depois DECIMAL(12,2) DEFAULT NULL");
         await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN executor_debito_observado DECIMAL(12,2) DEFAULT NULL");
         await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN execucao_confirmada_em BIGINT DEFAULT NULL");
+        await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN resultado_confirmado_em BIGINT DEFAULT NULL");
+        await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN saldo_pos_confirmado_em BIGINT DEFAULT NULL");
+        await dbPool.query("ALTER TABLE auditoria_ordens MODIFY COLUMN saldo_pos DECIMAL(12,2) DEFAULT NULL");
         await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN reds_consecutivos INT DEFAULT 0");
         await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN stop_reds_pausado_ate BIGINT DEFAULT 0");
         await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN trailing_pico_lucro DECIMAL(12,2) DEFAULT 0");
@@ -3345,7 +3349,79 @@ function avaliarLimitesFinanceirosTrader(trader, snapshotSaldo) {
     return { permitido: true, motivo: null, ...baseResultado };
 }
 
+async function traderPossuiLiquidacaoPendente(traderId) {
+    const [linhas] = await dbPool.query(
+        `SELECT id
+         FROM auditoria_ordens
+         WHERE trader_id=?
+           AND status_ordem IN ('WIN','LOSS','TIE')
+           AND resultado_confirmado_em IS NOT NULL
+           AND saldo_pos_confirmado_em IS NULL
+         ORDER BY id DESC
+         LIMIT 1`,
+        [traderId]
+    );
+    return linhas.length > 0;
+}
+
+async function confirmarSaldosPosLiquidacao(saldo, sincronizadoEm = Date.now()) {
+    const saldoNumero = Number(saldo);
+    const syncMs = Number(sincronizadoEm);
+    if (
+        !Number.isFinite(saldoNumero)
+        || saldoNumero < 0
+        || !Number.isFinite(syncMs)
+        || syncMs <= 0
+    ) {
+        return 0;
+    }
+
+    const syncConfirmadoEm = Math.trunc(syncMs);
+    const [linhas] = await dbPool.query(
+        `SELECT id
+         FROM auditoria_ordens
+         WHERE status_ordem IN ('WIN','LOSS','TIE')
+           AND resultado_confirmado_em IS NOT NULL
+           AND resultado_confirmado_em < ?
+           AND saldo_pos_confirmado_em IS NULL
+         ORDER BY id ASC`,
+        [syncConfirmadoEm]
+    );
+
+    const ids = linhas
+        .map(row => Number(row.id))
+        .filter(Number.isInteger);
+    if (ids.length === 0) return 0;
+
+    const placeholders = ids.map(() => '?').join(',');
+    const [resultado] = await dbPool.query(
+        `UPDATE auditoria_ordens
+         SET saldo_pos=?, saldo_pos_confirmado_em=?
+         WHERE id IN (${placeholders})
+           AND saldo_pos_confirmado_em IS NULL
+           AND resultado_confirmado_em < ?`,
+        [saldoNumero, syncConfirmadoEm, ...ids, syncConfirmadoEm]
+    );
+
+    const confirmadas = Math.max(0, Number(resultado.affectedRows) || 0);
+    if (confirmadas > 0) {
+        console.log(
+            `✅ BUG-051A: ${confirmadas} liquidação(ões) confirmada(s) `
+            + `com saldo sincronizado posterior ao resultado.`
+        );
+    }
+    return confirmadas;
+}
+
 async function autorizarNovaEntradaFinanceiraTrader(trader) {
+    if (await traderPossuiLiquidacaoPendente(trader.id)) {
+        console.warn(
+            `⛔ BUG-051A Trader ${trader.id}: nova entrada bloqueada; `
+            + `saldo real após liquidação ainda NÃO CONFIRMADO.`
+        );
+        return false;
+    }
+
     const avaliacao = avaliarLimitesFinanceirosTrader(trader, snapshotSaldoGlobal());
 
     if (avaliacao.motivo === 'SALDO_INDISPONIVEL') {
@@ -3610,6 +3686,10 @@ app.post("/receber-sinal", async (req, res) => {
 
                     saldoGlobalCorretora = saldoRecebido;
                     saldoGlobalAtualizadoEm = Date.now();
+                    await confirmarSaldosPosLiquidacao(
+                        saldoRecebido,
+                        saldoGlobalAtualizadoEm
+                    );
                     for (let trader of AUTO_TRADERS_MEMORIA) {
                         if (trader.ativo) trader.saldo_atual = saldoRecebido;
                     }
@@ -3779,7 +3859,21 @@ app.post("/receber-sinal", async (req, res) => {
                                         multiplicadorEmpate: mult
                                     });
                                     try {
-                                        await dbPool.query(`UPDATE auditoria_ordens SET status_ordem = ?, lucro_prejuizo = ?, saldo_pos = ?, placar_mesa = ? WHERE id = ?`, [isTie ? 'TIE' : 'WIN', vLucro, trader.saldo_atual, `[P:${p1+p2} B:${b1+b2}]`, pendentes[0].id]);
+                                        const resultadoConfirmadoEm = Date.now();
+                                        await dbPool.query(
+                                            `UPDATE auditoria_ordens
+                                             SET status_ordem = ?, lucro_prejuizo = ?, saldo_pos = NULL,
+                                                 resultado_confirmado_em = ?, saldo_pos_confirmado_em = NULL,
+                                                 placar_mesa = ?
+                                             WHERE id = ?`,
+                                            [
+                                                isTie ? 'TIE' : 'WIN',
+                                                vLucro,
+                                                resultadoConfirmadoEm,
+                                                `[P:${p1+p2} B:${b1+b2}]`,
+                                                pendentes[0].id
+                                            ]
+                                        );
                                         await processarResultadoStopRedsAutoTrader(
                                             trader,
                                             isTie ? 'TIE' : 'GREEN',
@@ -3969,7 +4063,20 @@ app.post("/receber-sinal", async (req, res) => {
                                             multiplicadorEmpate: mult
                                         });
                                         try {
-                                            await dbPool.query(`UPDATE auditoria_ordens SET status_ordem = 'LOSS', lucro_prejuizo = ?, saldo_pos = ?, placar_mesa = ? WHERE id = ?`, [prejuizo, trader.saldo_atual, `[P:${p1+p2} B:${b1+b2}]`, pendentes[0].id]);
+                                            const resultadoConfirmadoEm = Date.now();
+                                            await dbPool.query(
+                                                `UPDATE auditoria_ordens
+                                                 SET status_ordem = 'LOSS', lucro_prejuizo = ?, saldo_pos = NULL,
+                                                     resultado_confirmado_em = ?, saldo_pos_confirmado_em = NULL,
+                                                     placar_mesa = ?
+                                                 WHERE id = ?`,
+                                                [
+                                                    prejuizo,
+                                                    resultadoConfirmadoEm,
+                                                    `[P:${p1+p2} B:${b1+b2}]`,
+                                                    pendentes[0].id
+                                                ]
+                                            );
                                             await processarResultadoStopRedsAutoTrader(
                                                 trader,
                                                 'RED',
@@ -4068,7 +4175,6 @@ app.post("/receber-sinal", async (req, res) => {
                                         console.log(`Trader ${trader.id} fora da janela de execucao (${cf.hora_inicio || '00:00'}-${cf.hora_fim || '23:59'}). Nova entrada ignorada.`);
                                         continue;
                                     }
-
 
                                     if (!(await autorizarNovaEntradaFinanceiraTrader(trader))) {
                                         continue;
