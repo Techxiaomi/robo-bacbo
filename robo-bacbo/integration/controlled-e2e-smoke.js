@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const http = require("node:http");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
@@ -10,8 +11,14 @@ const HOST = "127.0.0.1";
 const NODE_PORT = Number(process.env.E2E_NODE_PORT || 3127);
 const EXECUTOR_PORT = Number(process.env.E2E_EXECUTOR_PORT || 5127);
 const BASE_URL = `http://${HOST}:${NODE_PORT}`;
-const TOKEN = "obs003h-internal-token-123456789";
+const TOKEN = String(process.env.E2E_INTERNAL_API_TOKEN ||
+    `e2e-${crypto.randomUUID()}-${crypto.randomBytes(16).toString("hex")}`);
+const DB_PASSWORD = String(process.env.E2E_DB_PASSWORD || "");
 const SESSION = "obs003h-controlled-collector";
+
+if (!DB_PASSWORD) {
+    throw new Error("E2E_DB_PASSWORD é obrigatório para o teste controlado.");
+}
 
 const backendPath = path.join(__dirname, "..", "bot2_coletor.js");
 const emitterPath = path.join(
@@ -108,7 +115,16 @@ function startFakeExecutor(getDb) {
                     body: JSON.stringify({
                         order_id: payload.order_id,
                         status: "EXECUTADA",
-                        motivo: "DOM controlado concluído"
+                        motivo: "Aceite financeiro controlado confirmado",
+                        confirmacao: {
+                            confirmada: true,
+                            metodo: "SALDO_DEBITADO",
+                            saldo_antes: 1000,
+                            saldo_depois: 1000 - apostas.reduce((soma, perna) => soma + Number(perna.valor), 0),
+                            exposicao_esperada: apostas.reduce((soma, perna) => soma + Number(perna.valor), 0),
+                            debito_observado: apostas.reduce((soma, perna) => soma + Number(perna.valor), 0),
+                            confirmada_em: Date.now()
+                        }
                     })
                 });
                 const callbackData = await callbackResponse.json();
@@ -219,7 +235,7 @@ async function main() {
             DB_HOST: "127.0.0.1",
             DB_PORT: "3306",
             DB_USER: "root",
-            DB_PASSWORD: "root",
+            DB_PASSWORD,
             DB_NAME: "bacbo_e2e",
             NODE_HOST: HOST,
             NODE_PORT: String(NODE_PORT),
@@ -261,7 +277,7 @@ async function main() {
             host: "127.0.0.1",
             port: 3306,
             user: "root",
-            password: "root",
+            password: DB_PASSWORD,
             database: "bacbo_e2e"
         });
 
@@ -368,7 +384,9 @@ async function main() {
         const finalized = await waitUntil("auditoria WIN apos rodadas sobrepostas", async () => {
             const [[row]] = await db.query(
                 `SELECT id, estrategia_nome, fonte_sinal, alvo, nivel, risco_total,
-                        valor_entrada, valor_empate, executor_order_id, status_ordem, lucro_prejuizo, placar_mesa
+                        valor_entrada, valor_empate, executor_order_id, executor_confirmacao_metodo,
+                        executor_saldo_antes, executor_saldo_depois, executor_debito_observado,
+                        execucao_confirmada_em, status_ordem, lucro_prejuizo, placar_mesa
                  FROM auditoria_ordens
                  WHERE trader_id=?
                  ORDER BY id DESC LIMIT 1`,
@@ -385,6 +403,11 @@ async function main() {
         assert.equal(Number(finalized.valor_entrada), 10);
         assert.equal(Number(finalized.valor_empate), 5);
         assert.equal(finalized.executor_order_id, order.payload.order_id);
+        assert.equal(finalized.executor_confirmacao_metodo, "SALDO_DEBITADO");
+        assert.equal(Number(finalized.executor_saldo_antes), 1000);
+        assert.equal(Number(finalized.executor_saldo_depois), 985);
+        assert.equal(Number(finalized.executor_debito_observado), 15);
+        assert.ok(Number(finalized.execucao_confirmada_em) > 0);
         assert.equal(Number(finalized.lucro_prejuizo), 5);
         assert.equal(finalized.placar_mesa, "[P:3 B:7]");
 

@@ -9,6 +9,8 @@ const {
 } = require("./tie_protection");
 const { Server } = require("socket.io");
 const { criarAutoPilotService } = require("./auto_pilot_ia");
+const { criarControleDiarioAutoTrader } = require("./bug051b_daily_counter");
+const { criarIntegracaoContadorDiario } = require("./bug051b_integration");
 require("./env_loader").loadEnvFile(path.join(__dirname, "..", ".env"));
 
 // Erros globais realmente não tratados são fatais: continuar pode deixar estado financeiro incoerente.
@@ -34,6 +36,11 @@ const dbPool = mysql.createPool({
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0
+});
+
+const controleDiarioAutoTrader = criarControleDiarioAutoTrader({
+    dbPool,
+    timezone: process.env.AUTO_TRADER_TIMEZONE || process.env.TZ || 'America/Sao_Paulo'
 });
 
 async function limparPadroesDinamicosOrfaos() {
@@ -140,7 +147,6 @@ async function prepararBancoDeDados() {
             )
         `);
 
-
         await dbPool.query(`
             CREATE TABLE IF NOT EXISTS historico_shadow_ia (
                 id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -228,6 +234,7 @@ async function prepararBancoDeDados() {
                 status_operacao VARCHAR(50) DEFAULT 'STANDBY',
                 entradas_feitas INT DEFAULT 0,
                 pulos_restantes INT DEFAULT 0,
+                data_contador_entradas VARCHAR(10) DEFAULT NULL,
                 reds_consecutivos INT DEFAULT 0,
                 stop_reds_pausado_ate BIGINT DEFAULT 0,
                 trailing_pico_lucro DECIMAL(12,2) DEFAULT 0,
@@ -247,10 +254,17 @@ async function prepararBancoDeDados() {
                 valor_entrada DECIMAL(12,2),
                 valor_empate DECIMAL(12,2) DEFAULT 0,
                 executor_order_id VARCHAR(64) DEFAULT NULL,
+                executor_confirmacao_metodo VARCHAR(40) DEFAULT NULL,
+                executor_saldo_antes DECIMAL(12,2) DEFAULT NULL,
+                executor_saldo_depois DECIMAL(12,2) DEFAULT NULL,
+                executor_debito_observado DECIMAL(12,2) DEFAULT NULL,
+                execucao_confirmada_em BIGINT DEFAULT NULL,
                 status_ordem VARCHAR(20) DEFAULT 'PENDENTE',
                 placar_mesa VARCHAR(50) DEFAULT '',
                 lucro_prejuizo DECIMAL(12,2) DEFAULT 0,
-                saldo_pos DECIMAL(12,2) DEFAULT 0,
+                saldo_pos DECIMAL(12,2) DEFAULT NULL,
+                resultado_confirmado_em BIGINT DEFAULT NULL,
+                saldo_pos_confirmado_em BIGINT DEFAULT NULL,
                 data_hora DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (trader_id) REFERENCES auto_traders(id) ON DELETE CASCADE
             )
@@ -284,9 +298,19 @@ async function prepararBancoDeDados() {
         await adicionarColuna("ALTER TABLE historico_disparos_robos ADD COLUMN estrategia_origem VARCHAR(100) DEFAULT ''");
         await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN executor_order_id VARCHAR(64) DEFAULT NULL");
         await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN valor_empate DECIMAL(12,2) DEFAULT 0");
+        await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN executor_confirmacao_metodo VARCHAR(40) DEFAULT NULL");
+        await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN executor_saldo_antes DECIMAL(12,2) DEFAULT NULL");
+        await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN executor_saldo_depois DECIMAL(12,2) DEFAULT NULL");
+        await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN executor_debito_observado DECIMAL(12,2) DEFAULT NULL");
+        await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN execucao_confirmada_em BIGINT DEFAULT NULL");
+        await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN resultado_confirmado_em BIGINT DEFAULT NULL");
+        await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN saldo_pos_confirmado_em BIGINT DEFAULT NULL");
+        await dbPool.query("ALTER TABLE auditoria_ordens MODIFY COLUMN saldo_pos DECIMAL(12,2) DEFAULT NULL");
         await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN reds_consecutivos INT DEFAULT 0");
         await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN stop_reds_pausado_ate BIGINT DEFAULT 0");
         await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN trailing_pico_lucro DECIMAL(12,2) DEFAULT 0");
+        await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN data_contador_entradas VARCHAR(10) DEFAULT NULL");
+        await integracaoContadorDiario.inicializarDatasLegadas();
 
         // Corrige estados legados impossíveis: um trader desligado manualmente não pode permanecer OPERANDO/STANDBY.
         // Estados de parada explícita (STOP_WIN/STOP_LOSS/STOP_REDS/TRAILING_STOP) são preservados.
@@ -594,16 +618,20 @@ function headersInternos() {
 
 const EXECUTOR_TIMEOUT_MS = 5000;
 const EXECUTOR_MAX_ATTEMPTS = 2;
-const executorExecutionTimeoutConfig = Number(process.env.EXECUTOR_EXECUTION_TIMEOUT_MS || 30000);
+const executorExecutionTimeoutConfig = Number(process.env.EXECUTOR_EXECUTION_TIMEOUT_MS || 210000);
 const EXECUTOR_EXECUTION_TIMEOUT_MS = (
     Number.isFinite(executorExecutionTimeoutConfig)
-    && executorExecutionTimeoutConfig >= 3000
-    && executorExecutionTimeoutConfig <= 120000
+    // O callback do Node precisa sobreviver ao fusível máximo de 180 s do
+    // executor Python; valores antigos de 30 s voltam ao default seguro.
+    && executorExecutionTimeoutConfig >= 195000
+    && executorExecutionTimeoutConfig <= 360000
         ? executorExecutionTimeoutConfig
-        : 30000
+        : 210000
 );
 const CONFIRMACOES_EXECUTOR_PENDENTES = new Map();
 const STATUS_EXECUTOR_VALIDOS = new Set(['EXECUTADA', 'FALHOU', 'EXPIRADA', 'AMBIGUA']);
+const INTERRUPCOES_COLETOR_PROCESSADAS = new Map();
+const LIMITE_INTERRUPCOES_COLETOR_MEMORIA = 1000;
 const TELEGRAM_TIMEOUT_MS = 3000;
 const balanceSyncMaxAgeSecondsConfig = Number(process.env.BALANCE_SYNC_MAX_AGE_SECONDS || 90);
 const BALANCE_SYNC_MAX_AGE_MS = (
@@ -631,6 +659,90 @@ function snapshotSaldoGlobal(agora = Date.now()) {
 function obterSaldoGlobalFresco(agora = Date.now()) {
     const snapshot = snapshotSaldoGlobal(agora);
     return snapshot.fresco ? snapshot.saldo_atual : null;
+}
+
+function normalizarInterrupcaoColetorId(dados) {
+    const id = String(dados?.interrupcao_id || '').trim();
+    if (!id || id.length > 256 || !/^[A-Za-z0-9:_-]+$/.test(id)) return '';
+    return id;
+}
+
+function reservarInterrupcaoColetor(dados, agora = Date.now()) {
+    const id = normalizarInterrupcaoColetorId(dados);
+    if (!id) return { id: '', repetida: false, legado: true };
+    const existente = INTERRUPCOES_COLETOR_PROCESSADAS.get(id);
+    if (existente) return { id, repetida: true, legado: false, estado: existente.estado };
+
+    INTERRUPCOES_COLETOR_PROCESSADAS.set(id, { estado: 'PROCESSANDO', atualizado_em: agora });
+    while (INTERRUPCOES_COLETOR_PROCESSADAS.size > LIMITE_INTERRUPCOES_COLETOR_MEMORIA) {
+        const maisAntigo = INTERRUPCOES_COLETOR_PROCESSADAS.keys().next().value;
+        INTERRUPCOES_COLETOR_PROCESSADAS.delete(maisAntigo);
+    }
+    return { id, repetida: false, legado: false, estado: 'PROCESSANDO' };
+}
+
+function concluirInterrupcaoColetor(id, sucesso, agora = Date.now()) {
+    const normalizado = String(id || '').trim();
+    if (!normalizado) return false;
+    if (!sucesso) return INTERRUPCOES_COLETOR_PROCESSADAS.delete(normalizado);
+    INTERRUPCOES_COLETOR_PROCESSADAS.set(normalizado, { estado: 'APLICADA', atualizado_em: agora });
+    return true;
+}
+
+function interrupcaoColetorJaAplicada(dados) {
+    const id = normalizarInterrupcaoColetorId(dados);
+    if (!id) return false;
+    const registro = INTERRUPCOES_COLETOR_PROCESSADAS.get(id);
+    return registro?.estado === 'APLICADA';
+}
+
+function normalizarConfirmacaoExecucao(statusRecebido, confirmacaoRecebida) {
+    const status = String(statusRecebido || '').trim().toUpperCase();
+    if (status !== 'EXECUTADA') {
+        return { status, confirmacao: null, motivo: null };
+    }
+
+    const confirmacao = confirmacaoRecebida && typeof confirmacaoRecebida === 'object'
+        ? confirmacaoRecebida
+        : {};
+    const metodo = String(confirmacao.metodo || '').trim().toUpperCase();
+    const saldoAntes = Number(confirmacao.saldo_antes);
+    const saldoDepois = Number(confirmacao.saldo_depois);
+    const exposicaoEsperada = Number(confirmacao.exposicao_esperada);
+    const debitoObservado = Number(confirmacao.debito_observado);
+    const confirmadaEm = Number(confirmacao.confirmada_em);
+    const debitoCalculado = saldoAntes - saldoDepois;
+    const tolerancia = 0.11;
+    const valida = confirmacao.confirmada === true
+        && metodo === 'SALDO_DEBITADO'
+        && Number.isFinite(saldoAntes) && saldoAntes >= 0
+        && Number.isFinite(saldoDepois) && saldoDepois >= 0
+        && Number.isFinite(exposicaoEsperada) && exposicaoEsperada > 0
+        && Number.isFinite(debitoObservado) && debitoObservado > 0
+        && Number.isFinite(confirmadaEm) && confirmadaEm > 0
+        && Math.abs(debitoCalculado - debitoObservado) <= tolerancia
+        && Math.abs(debitoObservado - exposicaoEsperada) <= tolerancia;
+
+    if (!valida) {
+        return {
+            status: 'AMBIGUA',
+            confirmacao: null,
+            motivo: 'Callback EXECUTADA recusado: aceite financeiro da Evolution ausente ou inconsistente'
+        };
+    }
+
+    return {
+        status: 'EXECUTADA',
+        motivo: null,
+        confirmacao: {
+            metodo,
+            saldo_antes: Number(saldoAntes.toFixed(2)),
+            saldo_depois: Number(saldoDepois.toFixed(2)),
+            exposicao_esperada: Number(exposicaoEsperada.toFixed(2)),
+            debito_observado: Number(debitoObservado.toFixed(2)),
+            confirmada_em: Math.trunc(confirmadaEm)
+        }
+    };
 }
 
 function criarEsperaResultadoExecutor(orderId) {
@@ -684,7 +796,8 @@ function registrarResultadoExecucaoExecutor(dados) {
     return pendente.finalizar({
         order_id: id,
         status: String(dados.status || '').trim().toUpperCase(),
-        motivo: String(dados.motivo || '').slice(0, 300)
+        motivo: String(dados.motivo || '').slice(0, 300),
+        confirmacao: dados.confirmacao || null
     });
 }
 
@@ -701,6 +814,16 @@ async function enviarOrdemAoExecutor(alvo, valor, orderId = crypto.randomUUID(),
     const esperaExecucao = criarEsperaResultadoExecutor(orderId);
     let ultimoErro = null;
     let confirmacaoAceite = null;
+    const planoLog = Array.isArray(apostas) && apostas.length > 0
+        ? apostas.map(perna => `${perna.alvo}=R$${Number(perna.valor || 0).toFixed(2)}`).join(' + ')
+        : `${alvo}=R$${Number(valor || 0).toFixed(2)}`;
+    const exposicaoLog = Array.isArray(apostas) && apostas.length > 0
+        ? apostas.reduce((total, perna) => total + (Number(perna.valor) || 0), 0)
+        : Number(valor || 0);
+    console.log(
+        `📤 EXECUTOR | order_id=${orderId} | plano=${planoLog} | `
+        + `exposição=R$${Number(exposicaoLog || 0).toFixed(2)} | aguardando execução física e prova de débito`
+    );
 
     try {
         for (let tentativa = 1; tentativa <= EXECUTOR_MAX_ATTEMPTS; tentativa++) {
@@ -784,7 +907,36 @@ async function enviarOrdemAoExecutor(alvo, valor, orderId = crypto.randomUUID(),
 
         const resultadoExecucao = resultadoAntecipado || await esperaExecucao.promessa;
         if (resultadoExecucao.status !== 'EXECUTADA') {
+            console.error(
+                `❌ EXECUTOR | order_id=${orderId} | status=${resultadoExecucao.status} | `
+                + `plano=${planoLog} | motivo=${String(resultadoExecucao.motivo || 'sem motivo')}`
+            );
             throw erroResultadoExecucaoExecutor(resultadoExecucao);
+        }
+
+        const evidenciaLog = resultadoExecucao.confirmacao || {};
+        console.log(
+            `✅ EXECUTOR | order_id=${orderId} | plano=${planoLog} | método=${evidenciaLog.metodo || 'n/a'} | `
+            + `saldo=${Number(evidenciaLog.saldo_antes).toFixed(2)}→${Number(evidenciaLog.saldo_depois).toFixed(2)} | `
+            + `débito=R$${Number(evidenciaLog.debito_observado || 0).toFixed(2)} | `
+            + `esperado=R$${Number(evidenciaLog.exposicao_esperada || exposicaoLog || 0).toFixed(2)} | `
+            + `aceite financeiro confirmado`
+        );
+
+        const exposicaoEsperadaNode = Array.isArray(apostas) && apostas.length > 0
+            ? apostas.reduce((total, perna) => total + (Number(perna.valor) || 0), 0)
+            : Number(valor);
+        const exposicaoConfirmadaExecutor = Number(resultadoExecucao.confirmacao?.exposicao_esperada);
+        if (
+            !Number.isFinite(exposicaoEsperadaNode)
+            || exposicaoEsperadaNode <= 0
+            || !Number.isFinite(exposicaoConfirmadaExecutor)
+            || Math.abs(exposicaoConfirmadaExecutor - exposicaoEsperadaNode) > 0.11
+        ) {
+            throw erroResultadoExecucaoExecutor({
+                status: 'AMBIGUA',
+                motivo: 'Exposição confirmada pelo executor diverge do plano financeiro emitido pelo Node'
+            });
         }
 
         if (!confirmacaoAceite && ultimoErro) {
@@ -863,6 +1015,26 @@ async function marcarIntencaoAposFalhaEnvio(auditoriaId, erro, contexto) {
     return status;
 }
 
+async function bloquearTraderAposExecucaoAmbigua(trader, statusFalha, contexto) {
+    if (statusFalha !== 'ENVIO_AMBIGUO' || !trader) return false;
+    trader.ativo = false;
+    trader.status_operacao = 'BLOQUEADO_AMBIGUIDADE';
+    try {
+        await dbPool.query(
+            `UPDATE auto_traders SET ativo=false, status_operacao='BLOQUEADO_AMBIGUIDADE' WHERE id=?`,
+            [trader.id]
+        );
+        console.error(
+            `🚨 Auto-Trader ${trader.id} bloqueado por execução financeira ambígua (${contexto}). `
+            + `Revise a conta da Evolution antes de reativar.`
+        );
+        return true;
+    } catch (erro) {
+        console.error(`🚨 Falha ao persistir bloqueio de segurança do Auto-Trader ${trader.id}:`, erro.message);
+        return false;
+    }
+}
+
 if (!hostNodeEhLoopback(NODE_HOST)) {
     console.warn(
         `SEC-003B: NODE_HOST=${NODE_HOST} fora do loopback com autenticacao administrativa ativa. `
@@ -890,6 +1062,13 @@ const ioServer = new Server(server, {
             backendPronto && hostPermitido && origemPermitida && authAdminPermitida
         );
     }
+});
+
+const integracaoContadorDiario = criarIntegracaoContadorDiario({
+    controleDiarioAutoTrader,
+    dbPool,
+    ioServer,
+    traders: () => AUTO_TRADERS_MEMORIA
 });
 
 const autoPilotIA = criarAutoPilotService({
@@ -1445,7 +1624,9 @@ app.post("/api/robo", async (req, res) => {
     try {
         const { nome, tag, cor, telegram_token, telegram_chat_id, enviar_telegram, enviar_web, min_assert, stop_reds, ativo, config, destinatarios } = req.body;
         const configJson = JSON.stringify(config || {});
-        const [result] = await dbPool.query(`INSERT INTO robos_canais (nome, tag_visual, cor_hex, telegram_token, telegram_chat_id, enviar_telegram, enviar_web, min_assertividade, stop_reds_seguidos, greens_consecutivos, ativo, config_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`, [nome, tag, cor, telegram_token, telegram_chat_id || '', enviar_telegram ? 1 : 0, enviar_web ? 1 : 0, min_assert, stop_reds, ativo ? 1 : 0, configJson]);
+        const tokenNormalizado = typeof telegram_token === 'string' ? telegram_token.trim() : '';
+        const chatPrincipal = typeof telegram_chat_id === 'string' ? telegram_chat_id.trim() : '';
+        const [result] = await dbPool.query(`INSERT INTO robos_canais (nome, tag_visual, cor_hex, telegram_token, telegram_chat_id, enviar_telegram, enviar_web, min_assertividade, stop_reds_seguidos, greens_consecutivos, ativo, config_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`, [nome, tag, cor, tokenNormalizado, chatPrincipal, enviar_telegram ? 1 : 0, enviar_web ? 1 : 0, min_assert, stop_reds, ativo ? 1 : 0, configJson]);
         let roboId = result.insertId;
         if (destinatarios && Array.isArray(destinatarios)) { for (let d of destinatarios) { if (d.chat_id && d.chat_id.trim() !== '') await dbPool.query('INSERT INTO destinatarios_robo (robo_id, nome_cliente, chat_id) VALUES (?, ?, ?)', [roboId, d.nome_cliente || 'Cliente', d.chat_id.trim()]); } }
         await carregarSistemasParaMemoria();
@@ -1471,6 +1652,7 @@ app.put("/api/robo/:id", async (req, res) => {
 
         const configJson = JSON.stringify(config || {});
         const tokenRecebido = typeof telegram_token === 'string' ? telegram_token.trim() : '';
+        const chatPrincipal = typeof telegram_chat_id === 'string' ? telegram_chat_id.trim() : '';
         const novoAtivo = ativo === true || ativo === 1;
         const stopNovo = Math.max(0, Math.trunc(Number(stop_reds) || 0));
 
@@ -1501,7 +1683,7 @@ app.put("/api/robo/:id", async (req, res) => {
                      config_json=?, reds_consecutivos=0
                  WHERE id=?`,
                 [
-                    nome, tag, cor, tokenRecebido, telegram_chat_id || '',
+                    nome, tag, cor, tokenRecebido, chatPrincipal,
                     enviar_telegram ? 1 : 0, enviar_web ? 1 : 0,
                     min_assert, stopNovo, novoAtivo ? 1 : 0,
                     configJson, id
@@ -1517,7 +1699,7 @@ app.put("/api/robo/:id", async (req, res) => {
                      config_json=?
                  WHERE id=?`,
                 [
-                    nome, tag, cor, tokenRecebido, telegram_chat_id || '',
+                    nome, tag, cor, tokenRecebido, chatPrincipal,
                     enviar_telegram ? 1 : 0, enviar_web ? 1 : 0,
                     min_assert, stopNovo, novoAtivo ? 1 : 0,
                     configJson, id
@@ -1552,6 +1734,77 @@ app.put("/api/robo/:id", async (req, res) => {
     } catch(e) {
         console.error(`❌ PUT /api/robo/${req.params.id} falhou:`, e.message);
         res.status(500).json({ sucesso: false });
+    }
+});
+
+app.post("/api/robo/:id/testar-telegram", async (req, res) => {
+    const roboId = Number(req.params.id);
+    if (!Number.isInteger(roboId) || roboId <= 0) {
+        return res.status(400).json({ sucesso: false, erro: 'robo_id_invalido' });
+    }
+
+    try {
+        const [robos] = await dbPool.query(
+            `SELECT id, nome, telegram_token, telegram_chat_id
+             FROM robos_canais WHERE id=? LIMIT 1`,
+            [roboId]
+        );
+        if (robos.length === 0) {
+            return res.status(404).json({ sucesso: false, erro: 'robo_nao_encontrado' });
+        }
+
+        const robo = robos[0];
+        const token = String(robo.telegram_token || '').trim();
+        if (!token) {
+            return res.status(422).json({ sucesso: false, erro: 'telegram_token_ausente' });
+        }
+
+        const [destinatarios] = await dbPool.query(
+            'SELECT nome_cliente, chat_id FROM destinatarios_robo WHERE robo_id=? ORDER BY id ASC',
+            [roboId]
+        );
+        const destinos = destinosTelegramRobo({ ...robo, destinatarios });
+        if (destinos.length === 0) {
+            return res.status(422).json({ sucesso: false, erro: 'telegram_destino_ausente' });
+        }
+
+        const mensagem = [
+            '━━━━━━━━━━━━━━━━━━━━',
+            '🔔 TESTE DE CONEXÃO',
+            '━━━━━━━━━━━━━━━━━━━━',
+            `🤖 Robô: ${String(robo.nome || `#${roboId}`).trim()}`,
+            '✅ O bot está conectado e apto a enviar sinais para este destino.',
+            '━━━━━━━━━━━━━━━━━━━━'
+        ].join('\n');
+
+        const resultados = await Promise.all(
+            destinos.map(chatId => enviarMensagemTelegram(token, chatId, mensagem))
+        );
+        const detalhes = resultados.map((resultado, indice) => ({
+            destino: mascararChatIdTelegram(destinos[indice]),
+            sucesso: resultadoTelegramOk(resultado),
+            erro: resultadoTelegramOk(resultado) ? null : resultado.descricao,
+            codigo: resultadoTelegramOk(resultado) ? null : resultado.error_code
+        }));
+        const entregues = detalhes.filter(item => item.sucesso).length;
+
+        detalhes.filter(item => !item.sucesso).forEach(item => {
+            console.warn(
+                `⚠️ Robô ${roboId}: teste Telegram falhou para chat ${item.destino} — ${item.erro}`
+                + `${item.codigo ? ` (código ${item.codigo})` : ''}.`
+            );
+        });
+        console.log(`📨 Robô ${roboId}: teste Telegram confirmado em ${entregues}/${destinos.length} destino(s).`);
+
+        return res.status(entregues > 0 ? 200 : 422).json({
+            sucesso: entregues === destinos.length,
+            entregues,
+            total: destinos.length,
+            detalhes
+        });
+    } catch (e) {
+        console.error(`❌ POST /api/robo/${roboId}/testar-telegram falhou:`, e.message);
+        return res.status(500).json({ sucesso: false, erro: 'falha_interna' });
     }
 });
 
@@ -1658,6 +1911,7 @@ app.get("/api/auto-traders", async (req, res) => {
                 status_operacao: at.status_operacao,
                 entradas_feitas: at.entradas_feitas,
                 pulos_restantes: at.pulos_restantes,
+                data_contador_entradas: String(at.data_contador_entradas || ''),
                 reds_consecutivos: Math.max(0, Number(at.reds_consecutivos) || 0),
                 stop_reds_pausado_ate: Math.max(0, Number(at.stop_reds_pausado_ate) || 0),
                 trailing_pico_lucro: Math.max(0, Number(at.trailing_pico_lucro) || 0)
@@ -1690,10 +1944,11 @@ app.post("/api/auto-trader", async (req, res) => {
 
         const saldoBaseline = novoAtivo ? saldoFresco : 0;
         const statusInicial = novoAtivo ? 'STANDBY' : 'DESLIGADO';
+        const dataContadorEntradas = controleDiarioAutoTrader.dataOperacional();
         await dbPool.query(
-            `INSERT INTO auto_traders (nome, ativo, config_json, saldo_inicial, saldo_atual, status_operacao, entradas_feitas, pulos_restantes)
-             VALUES (?, ?, ?, ?, ?, ?, 0, 0)`,
-            [nome, novoAtivo ? 1 : 0, configJson, saldoBaseline, saldoBaseline, statusInicial]
+            `INSERT INTO auto_traders (nome, ativo, config_json, saldo_inicial, saldo_atual, status_operacao, entradas_feitas, pulos_restantes, data_contador_entradas)
+             VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?)`,
+            [nome, novoAtivo ? 1 : 0, configJson, saldoBaseline, saldoBaseline, statusInicial, dataContadorEntradas]
         );
         await carregarSistemasParaMemoria();
         res.json({ sucesso: true, saldo_inicial: saldoBaseline });
@@ -1752,7 +2007,7 @@ app.put("/api/auto-trader/:id", async (req, res) => {
             await dbPool.query(
                 `UPDATE auto_traders
                  SET nome=?, ativo=true, config_json=?, saldo_inicial=?, saldo_atual=?,
-                     status_operacao='STANDBY', entradas_feitas=0, pulos_restantes=0,
+                     status_operacao='STANDBY',
                      reds_consecutivos=0, stop_reds_pausado_ate=0, trailing_pico_lucro=0
                  WHERE id=?`,
                 [nome, configJson, saldoFresco, saldoFresco, id]
@@ -2069,6 +2324,58 @@ function roboSintonizaEstrategia(robo, est) {
     if (excecoes.includes(estrategiaId)) return false;
     if (avulsos.includes(estrategiaId)) return true;
     return origens.includes(origem);
+}
+
+function idsRobosSelecionadosAutoTrader(config, robos = []) {
+    const fontes = Array.isArray(config && config.fontes_sinal)
+        ? config.fontes_sinal.map(fonte => String(fonte || '').trim()).filter(Boolean)
+        : [];
+    const listaRobos = Array.isArray(robos) ? robos : [];
+    const ids = new Set();
+
+    for (const fonte of fontes) {
+        let match = /^ROBO:(\d+)$/i.exec(fonte);
+        if (match) {
+            ids.add(Number(match[1]));
+            continue;
+        }
+
+        // Migração defensiva de configurações anteriores ao BUG-033.
+        match = /^AUTO_PILOT_IA:(\d+)$/i.exec(fonte);
+        if (match) {
+            ids.add(Number(match[1]));
+            continue;
+        }
+        match = /^\[AUTO\]\s*(.+)$/i.exec(fonte);
+        if (match) {
+            const nome = String(match[1] || '').trim();
+            const roboLegado = listaRobos.find(robo => String(robo && robo.nome || '').trim() === nome);
+            if (roboLegado) ids.add(Number(roboLegado.id));
+        }
+    }
+
+    return ids;
+}
+
+function robosAutoTraderAutorizadores(config, est, robos = []) {
+    const listaRobos = Array.isArray(robos) ? robos : [];
+    const idsSelecionados = idsRobosSelecionadosAutoTrader(config, listaRobos);
+    return listaRobos.filter(robo => {
+        const id = Number(robo && robo.id);
+        const ativo = !(robo && (robo.ativo === false || Number(robo.ativo) === 0));
+        return ativo && idsSelecionados.has(id) && roboSintonizaEstrategia(robo, est);
+    });
+}
+
+function autoTraderAutorizaEstrategia(config, est, robos = []) {
+    if (robosAutoTraderAutorizadores(config, est, robos).length > 0) return true;
+
+    const fontes = Array.isArray(config && config.fontes_sinal)
+        ? config.fontes_sinal.map(fonte => String(fonte || '').trim()).filter(Boolean)
+        : [];
+
+    // Último fallback para motores antigos que gravavam uma origem manual.
+    return !est.is_dinamico && fontes.includes(String(est.origem || '').trim());
 }
 
 function avaliarStopRedsRobo(robo, tipoResultado) {
@@ -2424,22 +2731,50 @@ function unirRobosInscritos(...listas) {
     return [...unicos.values()];
 }
 
+function ciclosAtivosPorRobo() {
+    const ciclos = new Map();
+    for (const [estrategiaId, estado] of Object.entries(estadoApostas || {})) {
+        if (!estado || estado.aguardandoResultado !== true) continue;
+        const robosCiclo = Array.isArray(estado.robosCiclo) && estado.robosCiclo.length > 0
+            ? estado.robosCiclo
+            : (Array.isArray(estado.robosInscritos) ? estado.robosInscritos : []);
+        for (const robo of robosCiclo) {
+            if (!robo || robo.id === undefined || robo.id === null) continue;
+            ciclos.set(String(robo.id), {
+                estrategia_id: String(estrategiaId),
+                gale_atual: Math.max(0, Number(estado.galeAtual) || 0)
+            });
+        }
+    }
+    return ciclos;
+}
+
 async function selecionarRobosParaEstrategia(est) {
     if (est.quarentena_restante > 0) {
-        return { web: [], telegram: [], assertividade: 0 };
+        return { todos: [], web: [], telegram: [], bloqueados: [], assertividade: 0 };
     }
 
     const assertividade = await calcularAssertividadePersistidaEstrategia(est);
+    const ciclosAtivos = ciclosAtivosPorRobo();
+    const bloqueados = [];
     const elegiveis = ROBOS_MEMORIA.filter(robo => {
         const ativo = robo.ativo === true || robo.ativo === 1;
         const minAssert = Math.max(0, Number(robo.min_assertividade) || 0);
 
-        return ativo
+        const sintoniza = ativo
             && !roboEmStandby(robo)
             && assertividade >= minAssert
             && roboSintonizaEstrategia(robo, est);
+        if (!sintoniza) return false;
+        const ciclo = ciclosAtivos.get(String(robo.id));
+        if (ciclo) {
+            bloqueados.push({ ...snapshotPublicoRobo(robo), ...ciclo });
+            return false;
+        }
+        return true;
     });
 
+    const todos = elegiveis.map(snapshotPublicoRobo);
     const web = elegiveis
         .filter(robo => robo.enviar_web === true || robo.enviar_web === 1)
         .map(snapshotPublicoRobo);
@@ -2455,12 +2790,15 @@ async function selecionarRobosParaEstrategia(est) {
             ...snapshotPublicoRobo(robo),
             telegram_token: String(robo.telegram_token || '').trim(),
             chat_ids: destinosTelegramRobo(robo),
+            greens_consecutivos: Math.max(0, Number(robo.greens_consecutivos) || 0),
             config: JSON.parse(JSON.stringify(robo.config || {}))
         }));
 
     return {
+        todos,
         web,
         telegram,
+        bloqueados,
         assertividade: Number(assertividade.toFixed(1))
     };
 }
@@ -2474,41 +2812,90 @@ function formatarPadraoTelegram(padrao) {
     }).join(' → ');
 }
 
+function rotuloEntradaTelegram(entrada) {
+    if (entrada === 'Player') return '🔵 PLAYER';
+    if (entrada === 'Banker') return '🔴 BANKER';
+    return '🟡 TIE';
+}
+
+function rotuloNivelTelegram(nivel) {
+    const valor = Math.max(0, Math.trunc(Number(nivel) || 0));
+    return valor === 0 ? 'DIRETO' : `GALE ${valor}`;
+}
+
+function linhaSequenciaGreenTelegram(valor) {
+    const sequencia = Math.max(0, Math.trunc(Number(valor) || 0));
+    return `🔥 Sequência atual: ${sequencia} ${sequencia === 1 ? 'Green' : 'Greens'}`;
+}
+
 function montarMensagemTelegram(tipo, est, estado, robo, extras = {}) {
     const config = robo.config || {};
     const linhas = [];
 
+    const titulos = {
+        ENTRADA: '🎯 NOVA ENTRADA',
+        GALE: `🔁 GALE ${Math.max(1, Number(extras.nivel) || 1)}`,
+        GREEN: extras.resultado === 'TIE' ? '🟡 EMPATE PROTEGIDO' : '✅ GREEN CONFIRMADO',
+        RED: '❌ RED CONFIRMADO'
+    };
+
     if (config.cabecalho) linhas.push(String(config.cabecalho).trim());
 
-    if (tipo === 'ENTRADA') linhas.push('🎯 ENTRADA');
-    else if (tipo === 'GALE') linhas.push(`🔁 GALE ${Number(extras.nivel) || 1}`);
-    else if (tipo === 'GREEN' && extras.resultado === 'TIE') linhas.push('🟡 EMPATE PROTEGIDO');
-    else if (tipo === 'GREEN') linhas.push('✅ GREEN');
-    else if (tipo === 'RED') linhas.push('❌ RED');
-    else linhas.push(String(tipo || 'SINAL'));
+    linhas.push('━━━━━━━━━━━━━━━━━━━━');
+    linhas.push(titulos[tipo] || String(tipo || 'SINAL'));
+    linhas.push('━━━━━━━━━━━━━━━━━━━━');
 
-    if (config.mostrar_nome !== false) linhas.push(`Estratégia: ${est.nome}`);
+    if (robo.nome) linhas.push(`🤖 Robô: ${robo.nome}`);
+    if (config.mostrar_nome !== false) linhas.push(`📊 Estratégia: ${est.nome}`);
 
     if (tipo === 'ENTRADA' && config.mostrar_padrao !== false) {
         const padrao = formatarPadraoTelegram(est.padrao);
-        if (padrao) linhas.push(`Padrão: ${padrao}`);
+        if (padrao) linhas.push(`🧩 Padrão: ${padrao}`);
     }
 
     if (config.mostrar_assertividade !== false && Number.isFinite(Number(estado.assertividadeSinal))) {
-        linhas.push(`Assertividade: ${Number(estado.assertividadeSinal).toFixed(1)}%`);
+        linhas.push(`📈 Assertividade: ${Number(estado.assertividadeSinal).toFixed(1)}%`);
     }
 
     if (tipo === 'ENTRADA' || tipo === 'GALE') {
-        linhas.push(`Entrada: ${est.entrada === 'Player' ? '🔵 PLAYER' : (est.entrada === 'Banker' ? '🔴 BANKER' : '🟡 TIE')}`);
+        linhas.push(`💰 Entrada: ${rotuloEntradaTelegram(est.entrada)}`);
     }
 
     if (tipo === 'GREEN' && extras.resultado === 'TIE' && config.detalhar_empates !== false && extras.multiplicador) {
-        linhas.push(`Multiplicador: ${extras.multiplicador}`);
+        linhas.push(`✨ Multiplicador: ${extras.multiplicador}`);
     }
 
-    if (config.rodape) linhas.push(String(config.rodape).trim());
+    if (tipo === 'GREEN') {
+        linhas.push(`🏁 Resultado: ${extras.resultado === 'TIE' ? 'PROTEÇÃO NO EMPATE' : rotuloNivelTelegram(estado.galeAtual)}`);
+    }
+
+    if (['ENTRADA', 'GREEN', 'RED'].includes(tipo)) {
+        linhas.push(linhaSequenciaGreenTelegram(extras.greens_consecutivos ?? robo.greens_consecutivos));
+    }
+
+    if (tipo === 'ENTRADA') linhas.push('⏳ Aguardando resultado da mesa...');
+    if (config.rodape) {
+        linhas.push('━━━━━━━━━━━━━━━━━━━━');
+        linhas.push(String(config.rodape).trim());
+    }
 
     return linhas.filter(Boolean).join('\n').slice(0, 4096);
+}
+
+function mascararChatIdTelegram(chatId) {
+    const valor = String(chatId || '').trim();
+    if (!valor) return '(vazio)';
+    const sufixo = valor.slice(-4);
+    return `${'*'.repeat(Math.max(3, valor.length - sufixo.length))}${sufixo}`;
+}
+
+function descricaoErroTelegram(valor) {
+    const texto = String(valor || '').replace(/[\r\n\t]+/g, ' ').trim();
+    return texto.slice(0, 240) || 'Falha sem descrição retornada pelo Telegram';
+}
+
+function resultadoTelegramOk(resultado) {
+    return resultado && resultado.ok === true;
 }
 
 async function enviarMensagemTelegram(token, chatId, texto, fetchImpl = fetch) {
@@ -2529,9 +2916,23 @@ async function enviarMensagemTelegram(token, chatId, texto, fetchImpl = fetch) {
         let corpo = null;
         try { corpo = await resposta.json(); } catch (e) {}
 
-        return resposta.ok && corpo && corpo.ok === true;
+        const ok = resposta.ok && corpo && corpo.ok === true;
+        return {
+            ok,
+            http_status: Number(resposta.status) || 0,
+            error_code: ok ? null : (Number(corpo?.error_code) || null),
+            descricao: ok ? '' : descricaoErroTelegram(corpo?.description || `HTTP ${resposta.status || 0}`)
+        };
     } catch (e) {
-        return false;
+        const timeout = e?.name === 'AbortError';
+        return {
+            ok: false,
+            http_status: 0,
+            error_code: null,
+            descricao: timeout
+                ? `Tempo limite de ${TELEGRAM_TIMEOUT_MS}ms ao acessar a API do Telegram`
+                : descricaoErroTelegram(e?.message || 'Falha de conexão com a API do Telegram')
+        };
     } finally {
         clearTimeout(timeoutId);
     }
@@ -2547,7 +2948,16 @@ async function inscreverRobosTelegramEntrada(est, estado, candidatos) {
                 robo.chat_ids.map(chatId => enviarMensagemTelegram(robo.telegram_token, chatId, texto))
             );
 
-            const chatIdsEntregues = robo.chat_ids.filter((chatId, indice) => resultados[indice] === true);
+            resultados.forEach((resultado, indice) => {
+                if (resultadoTelegramOk(resultado)) return;
+                console.warn(
+                    `⚠️ Robô ${robo.id}: Telegram ENTRADA falhou para chat `
+                    + `${mascararChatIdTelegram(robo.chat_ids[indice])} — ${resultado.descricao}`
+                    + `${resultado.error_code ? ` (código ${resultado.error_code})` : ''}.`
+                );
+            });
+
+            const chatIdsEntregues = robo.chat_ids.filter((chatId, indice) => resultadoTelegramOk(resultados[indice]));
             if (chatIdsEntregues.length === 0) {
                 console.warn(`⚠️ Robô ${robo.id}: nenhuma entrega Telegram confirmada na ENTRADA.`);
                 return null;
@@ -2563,7 +2973,7 @@ async function inscreverRobosTelegramEntrada(est, estado, candidatos) {
 
     const inscritos = resultadosRobos.filter(Boolean);
     estado.robosTelegramInscritos = inscritos;
-    estado.robosInscritos = unirRobosInscritos(estado.robosWebInscritos, inscritos);
+    estado.robosInscritos = unirRobosInscritos(estado.robosCiclo, estado.robosWebInscritos, inscritos);
     return inscritos;
 }
 
@@ -2583,12 +2993,26 @@ async function enviarTelegramParaInscritos(tipo, est, estado, extras = {}) {
     const inscritos = Array.isArray(estado.robosTelegramInscritos) ? estado.robosTelegramInscritos : [];
     await Promise.all(
         inscritos.map(async robo => {
-            const texto = montarMensagemTelegram(tipo, est, estado, robo, extras);
+            const roboAtual = ROBOS_MEMORIA.find(item => String(item.id) === String(robo.id));
+            const extrasRobo = {
+                ...extras,
+                greens_consecutivos: Math.max(0, Number(roboAtual?.greens_consecutivos ?? robo.greens_consecutivos) || 0)
+            };
+            const texto = montarMensagemTelegram(tipo, est, estado, robo, extrasRobo);
             const resultados = await Promise.all(
                 robo.chat_ids.map(chatId => enviarMensagemTelegram(robo.telegram_token, chatId, texto))
             );
 
-            const entregues = resultados.filter(Boolean).length;
+            resultados.forEach((resultado, indice) => {
+                if (resultadoTelegramOk(resultado)) return;
+                console.warn(
+                    `⚠️ Robô ${robo.id}: Telegram ${tipo} falhou para chat `
+                    + `${mascararChatIdTelegram(robo.chat_ids[indice])} — ${resultado.descricao}`
+                    + `${resultado.error_code ? ` (código ${resultado.error_code})` : ''}.`
+                );
+            });
+
+            const entregues = resultados.filter(resultadoTelegramOk).length;
             if (entregues !== robo.chat_ids.length) {
                 console.warn(`⚠️ Robô ${robo.id}: Telegram ${tipo} confirmado em ${entregues}/${robo.chat_ids.length} destino(s).`);
             }
@@ -2944,7 +3368,83 @@ function avaliarLimitesFinanceirosTrader(trader, snapshotSaldo) {
     return { permitido: true, motivo: null, ...baseResultado };
 }
 
+async function traderPossuiLiquidacaoPendente(traderId) {
+    const [linhas] = await dbPool.query(
+        `SELECT id
+         FROM auditoria_ordens
+         WHERE trader_id=?
+           AND status_ordem IN ('WIN','LOSS','TIE')
+           AND resultado_confirmado_em IS NOT NULL
+           AND saldo_pos_confirmado_em IS NULL
+         ORDER BY id DESC
+         LIMIT 1`,
+        [traderId]
+    );
+    return linhas.length > 0;
+}
+
+async function confirmarSaldosPosLiquidacao(saldo, sincronizadoEm = Date.now()) {
+    const saldoNumero = Number(saldo);
+    const syncMs = Number(sincronizadoEm);
+    if (
+        !Number.isFinite(saldoNumero)
+        || saldoNumero < 0
+        || !Number.isFinite(syncMs)
+        || syncMs <= 0
+    ) {
+        return 0;
+    }
+
+    const syncConfirmadoEm = Math.trunc(syncMs);
+    const [linhas] = await dbPool.query(
+        `SELECT id
+         FROM auditoria_ordens
+         WHERE status_ordem IN ('WIN','LOSS','TIE')
+           AND resultado_confirmado_em IS NOT NULL
+           AND resultado_confirmado_em < ?
+           AND saldo_pos_confirmado_em IS NULL
+         ORDER BY id ASC`,
+        [syncConfirmadoEm]
+    );
+
+    const ids = linhas
+        .map(row => Number(row.id))
+        .filter(Number.isInteger);
+    if (ids.length === 0) return 0;
+
+    const placeholders = ids.map(() => '?').join(',');
+    const [resultado] = await dbPool.query(
+        `UPDATE auditoria_ordens
+         SET saldo_pos=?, saldo_pos_confirmado_em=?
+         WHERE id IN (${placeholders})
+           AND saldo_pos_confirmado_em IS NULL
+           AND resultado_confirmado_em < ?`,
+        [saldoNumero, syncConfirmadoEm, ...ids, syncConfirmadoEm]
+    );
+
+    const confirmadas = Math.max(0, Number(resultado.affectedRows) || 0);
+    if (confirmadas > 0) {
+        console.log(
+            `✅ BUG-051A: ${confirmadas} liquidação(ões) confirmada(s) `
+            + `com saldo sincronizado posterior ao resultado.`
+        );
+    }
+    return confirmadas;
+}
+
 async function autorizarNovaEntradaFinanceiraTrader(trader) {
+    if (!(await integracaoContadorDiario.garantirAntesDaEntrada(trader))) {
+        return false;
+    }
+
+    if (await traderPossuiLiquidacaoPendente(trader.id)) {
+        console.warn(
+            `⛔ BUG-051A Trader ${trader.id}: nova entrada bloqueada; `
+            + `saldo real após liquidação ainda NÃO CONFIRMADO.`
+        );
+        return false;
+    }
+
     const avaliacao = avaliarLimitesFinanceirosTrader(trader, snapshotSaldoGlobal());
 
     if (avaliacao.motivo === 'SALDO_INDISPONIVEL') {
@@ -3029,7 +3529,7 @@ async function carregarSistemasParaMemoria() {
                 stats: { greenDireto: db.green_direto, gale1: db.gale1, gale2: db.gale2, red: db.red, ties: tiesParsed }
             };
             ESTRATEGIAS_MEMORIA.push(est);
-            novoEstado[est.id] = estadoApostas[est.id] || { aguardandoResultado: false, galeAtual: 0, robosInscritos: [], mensagensEntrada: [], mensagensGale: [] };
+            novoEstado[est.id] = estadoApostas[est.id] || { aguardandoResultado: false, galeAtual: 0, robosCiclo: [], robosInscritos: [], mensagensEntrada: [], mensagensGale: [] };
         });
         estadoApostas = novoEstado;
 
@@ -3064,6 +3564,7 @@ async function carregarSistemasParaMemoria() {
                 id: at.id, nome: at.nome, ativo: at.ativo === 1, config: cfg,
                 saldo_inicial: parseFloat(at.saldo_inicial), saldo_atual: parseFloat(at.saldo_atual),
                 status_operacao: at.status_operacao, entradas_feitas: at.entradas_feitas, pulos_restantes: at.pulos_restantes,
+                data_contador_entradas: String(at.data_contador_entradas || ''),
                 reds_consecutivos: Math.max(0, Number(at.reds_consecutivos) || 0),
                 stop_reds_pausado_ate: Math.max(0, Number(at.stop_reds_pausado_ate) || 0),
                 trailing_pico_lucro: Math.max(0, Number(at.trailing_pico_lucro) || 0)
@@ -3088,19 +3589,27 @@ app.post("/executor-status", (req, res) => {
 
     const dados = req.body || {};
     const orderId = String(dados.order_id || '').trim().toLowerCase();
-    const status = String(dados.status || '').trim().toUpperCase();
+    const statusRecebido = String(dados.status || '').trim().toUpperCase();
 
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(orderId)) {
         return res.status(400).json({ erro: 'order_id invalido' });
     }
-    if (!STATUS_EXECUTOR_VALIDOS.has(status)) {
+    if (!STATUS_EXECUTOR_VALIDOS.has(statusRecebido)) {
         return res.status(400).json({ erro: 'status_executor_invalido' });
+    }
+
+    const validacao = normalizarConfirmacaoExecucao(statusRecebido, dados.confirmacao);
+    const status = validacao.status;
+    const motivo = validacao.motivo || dados.motivo;
+    if (statusRecebido === 'EXECUTADA' && status !== 'EXECUTADA') {
+        console.error(`🚨 Callback EXECUTADA de ${orderId} rebaixado para AMBIGUA: ${validacao.motivo}.`);
     }
 
     const entregue = registrarResultadoExecucaoExecutor({
         order_id: orderId,
         status,
-        motivo: dados.motivo
+        motivo,
+        confirmacao: validacao.confirmacao
     });
 
     if (!entregue) {
@@ -3123,9 +3632,40 @@ app.post("/collector-health", async (req, res) => {
         }
 
         const motivo = String(dados.motivo || 'INTERRUPCAO_COLETOR').trim().slice(0, 120) || 'INTERRUPCAO_COLETOR';
+        const reservaInterrupcao = reservarInterrupcaoColetor(dados);
+        if (reservaInterrupcao.repetida) {
+            if (reservaInterrupcao.estado === 'PROCESSANDO') {
+                return res.status(503).json({
+                    recebido: false,
+                    continuidade: 'INVALIDACAO_EM_ANDAMENTO',
+                    idempotente: true,
+                    interrupcao_id: reservaInterrupcao.id
+                });
+            }
+            return res.json({
+                recebido: true,
+                continuidade: 'INVALIDADA_ANTERIORMENTE',
+                idempotente: true,
+                interrupcao_id: reservaInterrupcao.id,
+                sinais_invalidados: 0,
+                traders_bloqueados: 0
+            });
+        }
         liberarTurnoResultado = await aguardarTurnoProcessamentoResultado();
-        const resumo = await invalidarSequenciasAposBuracoDados(motivo);
-        return res.json({ recebido: true, continuidade: 'INVALIDADA', ...resumo });
+        try {
+            const resumo = await invalidarSequenciasAposBuracoDados(motivo);
+            concluirInterrupcaoColetor(reservaInterrupcao.id, true);
+            return res.json({
+                recebido: true,
+                continuidade: 'INVALIDADA',
+                idempotente: false,
+                interrupcao_id: reservaInterrupcao.id || null,
+                ...resumo
+            });
+        } catch (e) {
+            concluirInterrupcaoColetor(reservaInterrupcao.id, false);
+            throw e;
+        }
     } catch (e) {
         console.error("❌ Falha ao tratar interrupção imediata do coletor:", e.message);
         if (!res.headersSent) return res.status(500).json({ erro: "falha ao invalidar continuidade" });
@@ -3170,6 +3710,10 @@ app.post("/receber-sinal", async (req, res) => {
 
                     saldoGlobalCorretora = saldoRecebido;
                     saldoGlobalAtualizadoEm = Date.now();
+                    await confirmarSaldosPosLiquidacao(
+                        saldoRecebido,
+                        saldoGlobalAtualizadoEm
+                    );
                     for (let trader of AUTO_TRADERS_MEMORIA) {
                         if (trader.ativo) trader.saldo_atual = saldoRecebido;
                     }
@@ -3193,9 +3737,26 @@ app.post("/receber-sinal", async (req, res) => {
         liberarTurnoResultado = await aguardarTurnoProcessamentoResultado();
 
         if (continuidade.interrupcao) {
-            const dadosInterrupcao = { ...dados, interrupcao_fluxo: true, motivo_interrupcao: continuidade.motivo };
+            const motivoInterrupcao = String(
+                dados.motivo_interrupcao || continuidade.motivo || 'INTERRUPCAO_PYTHON'
+            ).trim().slice(0, 120) || 'INTERRUPCAO_PYTHON';
+            const dadosInterrupcao = { ...dados, interrupcao_fluxo: true, motivo_interrupcao: motivoInterrupcao };
             rotacionarSessaoAposInterrupcao(dadosInterrupcao);
-            await invalidarSequenciasAposBuracoDados(continuidade.motivo);
+            if (interrupcaoColetorJaAplicada(dados)) {
+                console.log(
+                    `♻️ Interrupção ${normalizarInterrupcaoColetorId(dados)} já aplicada via collector-health; `
+                    + 'o primeiro resultado apenas estabelece a nova fronteira estatística.'
+                );
+            } else {
+                const reservaInterrupcao = reservarInterrupcaoColetor(dados);
+                try {
+                    await invalidarSequenciasAposBuracoDados(motivoInterrupcao);
+                    concluirInterrupcaoColetor(reservaInterrupcao.id, true);
+                } catch (e) {
+                    concluirInterrupcaoColetor(reservaInterrupcao.id, false);
+                    throw e;
+                }
+            }
         }
 
         // Só avança a continuidade depois que qualquer interrupção foi tratada em modo fail-closed.
@@ -3205,6 +3766,12 @@ app.post("/receber-sinal", async (req, res) => {
             await rearmarAutoTradersStopRedsPausados();
         } catch (e) {
             console.error("Falha ao rearmar Auto-Trader apos pausa de Stop Reds:", e.message);
+        }
+
+        try {
+            await integracaoContadorDiario.processarViradaDiaria();
+        } catch (e) {
+            console.error("BUG-051B: falha ao processar a virada diaria dos Auto-Traders:", e.message);
         }
 
         try {
@@ -3309,7 +3876,7 @@ app.post("/receber-sinal", async (req, res) => {
                     if (est.quarentena_restante <= 0) {
                         for (let trader of AUTO_TRADERS_MEMORIA) {
                             let cf = trader.config;
-                            if (trader.ativo && (trader.status_operacao === 'OPERANDO' || trader.status_operacao === 'STANDBY') && cf.fontes_sinal && cf.fontes_sinal.includes(est.origem)) {
+                            if (trader.ativo && (trader.status_operacao === 'OPERANDO' || trader.status_operacao === 'STANDBY') && autoTraderAutorizaEstrategia(cf, est, ROBOS_MEMORIA)) {
                                 const [pendentes] = await dbPool.query(`SELECT id, valor_entrada, valor_empate FROM auditoria_ordens WHERE trader_id = ? AND status_ordem = 'PENDENTE' LIMIT 1`, [trader.id]);
                                 if (pendentes.length > 0) {
                                     let vEntrada = parseFloat(pendentes[0].valor_entrada);
@@ -3322,7 +3889,21 @@ app.post("/receber-sinal", async (req, res) => {
                                         multiplicadorEmpate: mult
                                     });
                                     try {
-                                        await dbPool.query(`UPDATE auditoria_ordens SET status_ordem = ?, lucro_prejuizo = ?, saldo_pos = ?, placar_mesa = ? WHERE id = ?`, [isTie ? 'TIE' : 'WIN', vLucro, trader.saldo_atual, `[P:${p1+p2} B:${b1+b2}]`, pendentes[0].id]);
+                                        const resultadoConfirmadoEm = Date.now();
+                                        await dbPool.query(
+                                            `UPDATE auditoria_ordens
+                                             SET status_ordem = ?, lucro_prejuizo = ?, saldo_pos = NULL,
+                                                 resultado_confirmado_em = ?, saldo_pos_confirmado_em = NULL,
+                                                 placar_mesa = ?
+                                             WHERE id = ?`,
+                                            [
+                                                isTie ? 'TIE' : 'WIN',
+                                                vLucro,
+                                                resultadoConfirmadoEm,
+                                                `[P:${p1+p2} B:${b1+b2}]`,
+                                                pendentes[0].id
+                                            ]
+                                        );
                                         await processarResultadoStopRedsAutoTrader(
                                             trader,
                                             isTie ? 'TIE' : 'GREEN',
@@ -3347,7 +3928,7 @@ app.post("/receber-sinal", async (req, res) => {
                         if (est.quarentena_restante <= 0) {
                             for (let trader of AUTO_TRADERS_MEMORIA) {
                                 let cf = trader.config;
-                                if (trader.ativo && trader.status_operacao === 'OPERANDO' && cf.fontes_sinal && cf.fontes_sinal.includes(est.origem)) {
+                                if (trader.ativo && trader.status_operacao === 'OPERANDO' && autoTraderAutorizaEstrategia(cf, est, ROBOS_MEMORIA)) {
                                     const [pendentes] = await dbPool.query(`SELECT id, risco_total, valor_entrada, valor_empate FROM auditoria_ordens WHERE trader_id = ? AND status_ordem = 'PENDENTE' LIMIT 1`, [trader.id]);
                                     if (pendentes.length > 0) {
                                         let riscoAntigo = parseFloat(pendentes[0].risco_total);
@@ -3409,13 +3990,29 @@ app.post("/receber-sinal", async (req, res) => {
 
                                         let executorConfirmouGale = false;
                                         try {
-                                            await enviarOrdemAoExecutor(alvoPython, valorGale, ordemExecutorIdGale, planoGale.apostas);
+                                            const confirmacaoExecutorGale = await enviarOrdemAoExecutor(
+                                                alvoPython,
+                                                valorGale,
+                                                ordemExecutorIdGale,
+                                                planoGale.apostas
+                                            );
                                             executorConfirmouGale = true;
+                                            const evidenciaGale = confirmacaoExecutorGale.execucao.confirmacao;
                                             const [auditoriaAtualizada] = await dbPool.query(
                                                 `UPDATE auditoria_ordens
-                                                 SET status_ordem='PENDENTE'
+                                                 SET status_ordem='PENDENTE', executor_confirmacao_metodo=?,
+                                                     executor_saldo_antes=?, executor_saldo_depois=?,
+                                                     executor_debito_observado=?, execucao_confirmada_em=?
                                                  WHERE id=? AND executor_order_id=? AND status_ordem='PREPARANDO'`,
-                                                [intencaoGale.auditoria_id, ordemExecutorIdGale]
+                                                [
+                                                    evidenciaGale.metodo,
+                                                    evidenciaGale.saldo_antes,
+                                                    evidenciaGale.saldo_depois,
+                                                    evidenciaGale.debito_observado,
+                                                    evidenciaGale.confirmada_em,
+                                                    intencaoGale.auditoria_id,
+                                                    ordemExecutorIdGale
+                                                ]
                                             );
                                             if (Number(auditoriaAtualizada.affectedRows) !== 1) {
                                                 throw new Error('Intenção PREPARANDO do GALE não encontrada após ACK do executor');
@@ -3433,6 +4030,11 @@ app.post("/receber-sinal", async (req, res) => {
                                                     intencaoGale.auditoria_id,
                                                     e,
                                                     `GALE ${st.galeAtual} do trader ${trader.id}`
+                                                );
+                                                await bloquearTraderAposExecucaoAmbigua(
+                                                    trader,
+                                                    statusFalha,
+                                                    `GALE ${st.galeAtual}`
                                                 );
                                                 console.error(
                                                     `❌ GALE ${st.galeAtual} não confirmado para o trader ${trader.id}; `
@@ -3480,7 +4082,7 @@ app.post("/receber-sinal", async (req, res) => {
                         if (est.quarentena_restante <= 0) {
                             for (let trader of AUTO_TRADERS_MEMORIA) {
                                 let cf = trader.config;
-                                if (trader.ativo && (trader.status_operacao === 'OPERANDO' || trader.status_operacao === 'STANDBY') && cf.fontes_sinal && cf.fontes_sinal.includes(est.origem)) {
+                                if (trader.ativo && (trader.status_operacao === 'OPERANDO' || trader.status_operacao === 'STANDBY') && autoTraderAutorizaEstrategia(cf, est, ROBOS_MEMORIA)) {
                                     const [pendentes] = await dbPool.query(`SELECT id, valor_entrada, valor_empate FROM auditoria_ordens WHERE trader_id = ? AND status_ordem = 'PENDENTE' LIMIT 1`, [trader.id]);
                                     if (pendentes.length > 0) {
                                         let prejuizo = calcularPnLEtapa({
@@ -3491,7 +4093,20 @@ app.post("/receber-sinal", async (req, res) => {
                                             multiplicadorEmpate: mult
                                         });
                                         try {
-                                            await dbPool.query(`UPDATE auditoria_ordens SET status_ordem = 'LOSS', lucro_prejuizo = ?, saldo_pos = ?, placar_mesa = ? WHERE id = ?`, [prejuizo, trader.saldo_atual, `[P:${p1+p2} B:${b1+b2}]`, pendentes[0].id]);
+                                            const resultadoConfirmadoEm = Date.now();
+                                            await dbPool.query(
+                                                `UPDATE auditoria_ordens
+                                                 SET status_ordem = 'LOSS', lucro_prejuizo = ?, saldo_pos = NULL,
+                                                     resultado_confirmado_em = ?, saldo_pos_confirmado_em = NULL,
+                                                     placar_mesa = ?
+                                                 WHERE id = ?`,
+                                                [
+                                                    prejuizo,
+                                                    resultadoConfirmadoEm,
+                                                    `[P:${p1+p2} B:${b1+b2}]`,
+                                                    pendentes[0].id
+                                                ]
+                                            );
                                             await processarResultadoStopRedsAutoTrader(
                                                 trader,
                                                 'RED',
@@ -3544,12 +4159,24 @@ app.post("/receber-sinal", async (req, res) => {
                             console.error(`Falha ao selecionar robos para estrategia ${est.id}:`, e.message);
                         }
 
+                        if (!Array.isArray(selecaoRobos.todos) || selecaoRobos.todos.length === 0) {
+                            const bloqueios = (Array.isArray(selecaoRobos.bloqueados) ? selecaoRobos.bloqueados : [])
+                                .map(item => `${item.id}:${item.nome} em ${item.estrategia_id} (${item.gale_atual > 0 ? `GALE ${item.gale_atual}` : 'DIRETO'})`)
+                                .join(', ');
+                            console.log(
+                                `🔒 Sinal ${est.id} suprimido: nenhum robô livre para novo ciclo.`
+                                + `${bloqueios ? ` Ocupados: ${bloqueios}.` : ''}`
+                            );
+                            continue;
+                        }
+
                         estadoApostas[est.id] = {
                             aguardandoResultado: true,
                             galeAtual: 0,
+                            robosCiclo: unirRobosInscritos(selecaoRobos.todos),
                             robosWebInscritos: selecaoRobos.web,
                             robosTelegramInscritos: [],
-                            robosInscritos: unirRobosInscritos(selecaoRobos.web),
+                            robosInscritos: unirRobosInscritos(selecaoRobos.todos),
                             assertividadeSinal: selecaoRobos.assertividade,
                             mensagensEntrada: [],
                             mensagensGale: []
@@ -3562,13 +4189,22 @@ app.post("/receber-sinal", async (req, res) => {
                         if (est.quarentena_restante <= 0) {
                             for (let trader of AUTO_TRADERS_MEMORIA) {
                                 let cf = trader.config;
-                                if (trader.ativo && trader.status_operacao === 'OPERANDO' && cf.fontes_sinal && cf.fontes_sinal.includes(est.origem)) {
+                                if (trader.ativo && trader.status_operacao === 'OPERANDO' && autoTraderAutorizaEstrategia(cf, est, ROBOS_MEMORIA)) {
+
+                                    const robosAutorizadores = robosAutoTraderAutorizadores(cf, est, ROBOS_MEMORIA);
+                                    const descricaoAutorizadores = robosAutorizadores.length > 0
+                                        ? robosAutorizadores.map(robo => `${robo.id}:${robo.nome}`).join(', ')
+                                        : `configuração legada:${String(est.origem || '').trim()}`;
+
+                                    console.log(
+                                        `🎯 Auto-Trader ${trader.id} (${trader.nome}) autorizado para o sinal `
+                                        + `${est.id} pelo(s) robô(s) ativo(s) ${descricaoAutorizadores}.`
+                                    );
 
                                     if (!traderDentroHorarioExecucao(cf)) {
                                         console.log(`Trader ${trader.id} fora da janela de execucao (${cf.hora_inicio || '00:00'}-${cf.hora_fim || '23:59'}). Nova entrada ignorada.`);
                                         continue;
                                     }
-
 
                                     if (!(await autorizarNovaEntradaFinanceiraTrader(trader))) {
                                         continue;
@@ -3631,8 +4267,14 @@ app.post("/receber-sinal", async (req, res) => {
 
                                     let executorConfirmouDireto = false;
                                     try {
-                                        await enviarOrdemAoExecutor(alvoPython, valorArredondado, ordemExecutorIdDireto, planoDireto.apostas);
+                                        const confirmacaoExecutorDireto = await enviarOrdemAoExecutor(
+                                            alvoPython,
+                                            valorArredondado,
+                                            ordemExecutorIdDireto,
+                                            planoDireto.apostas
+                                        );
                                         executorConfirmouDireto = true;
+                                        const evidenciaDireto = confirmacaoExecutorDireto.execucao.confirmacao;
 
                                         const conexao = await dbPool.getConnection();
                                         try {
@@ -3641,9 +4283,19 @@ app.post("/receber-sinal", async (req, res) => {
                                             await conexao.query('UPDATE auto_traders SET entradas_feitas=? WHERE id=?', [novasEntradas, trader.id]);
                                             const [auditoriaAtualizada] = await conexao.query(
                                                 `UPDATE auditoria_ordens
-                                                 SET status_ordem='PENDENTE'
+                                                 SET status_ordem='PENDENTE', executor_confirmacao_metodo=?,
+                                                     executor_saldo_antes=?, executor_saldo_depois=?,
+                                                     executor_debito_observado=?, execucao_confirmada_em=?
                                                  WHERE id=? AND executor_order_id=? AND status_ordem='PREPARANDO'`,
-                                                [intencaoDireto.auditoria_id, ordemExecutorIdDireto]
+                                                [
+                                                    evidenciaDireto.metodo,
+                                                    evidenciaDireto.saldo_antes,
+                                                    evidenciaDireto.saldo_depois,
+                                                    evidenciaDireto.debito_observado,
+                                                    evidenciaDireto.confirmada_em,
+                                                    intencaoDireto.auditoria_id,
+                                                    ordemExecutorIdDireto
+                                                ]
                                             );
                                             if (Number(auditoriaAtualizada.affectedRows) !== 1) {
                                                 throw new Error('Intenção PREPARANDO DIRETO não encontrada após ACK do executor');
@@ -3669,6 +4321,11 @@ app.post("/receber-sinal", async (req, res) => {
                                                 intencaoDireto.auditoria_id,
                                                 e,
                                                 `DIRETO do trader ${trader.id}`
+                                            );
+                                            await bloquearTraderAposExecucaoAmbigua(
+                                                trader,
+                                                statusFalha,
+                                                'DIRETO'
                                             );
                                             console.error(
                                                 `❌ Ordem DIRETO não confirmada para o trader ${trader.id}; `

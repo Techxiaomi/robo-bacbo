@@ -8,8 +8,14 @@ const vm = require("node:vm");
 
 const backendPath = path.join(__dirname, "..", "bot2_coletor.js");
 const frontendPath = path.join(__dirname, "..", "public", "index.html");
+const executorPythonPath = path.join(__dirname, "..", "..", "robo-sync-pilot", "robo.py");
 const source = fs.readFileSync(backendPath, "utf8").replace(/\r\n/g, "\n");
 const frontendSource = fs.readFileSync(frontendPath, "utf8").replace(/\r\n/g, "\n");
+const dashboardAppSource = fs.readFileSync(
+    path.join(__dirname, "..", "public", "dashboard-app.html"),
+    "utf8"
+).replace(/\r\n/g, "\n");
+const executorPythonSource = fs.readFileSync(executorPythonPath, "utf8").replace(/\r\n/g, "\n");
 
 function trechoEntre(inicio, fim) {
     const posInicio = source.indexOf(inicio);
@@ -34,6 +40,10 @@ function carregarLogicaPura() {
         trechoEntre(
             "function avaliarContinuidadeResultado",
             "function rotacionarSessaoAposInterrupcao"
+        ),
+        trechoEntre(
+            "function normalizarInterrupcaoColetorId",
+            "function criarEsperaResultadoExecutor"
         ),
         trechoEntre(
             "function nivelHistoricoResultado",
@@ -69,6 +79,8 @@ function carregarLogicaPura() {
         Object,
         JSON
     };
+    contexto.INTERRUPCOES_COLETOR_PROCESSADAS = new Map();
+    contexto.LIMITE_INTERRUPCOES_COLETOR_MEMORIA = 1000;
     vm.createContext(contexto);
 
     vm.runInContext(
@@ -76,9 +88,17 @@ function carregarLogicaPura() {
             calcularFichaSegura,
             calcularDetalhesPadraoNoHistorico,
             avaliarContinuidadeResultado,
+            normalizarInterrupcaoColetorId,
+            reservarInterrupcaoColetor,
+            concluirInterrupcaoColetor,
+            interrupcaoColetorJaAplicada,
+            normalizarConfirmacaoExecucao,
             nivelHistoricoResultado,
             contarTiesLegados,
             roboSintonizaEstrategia,
+            idsRobosSelecionadosAutoTrader,
+            robosAutoTraderAutorizadores,
+            autoTraderAutorizaEstrategia,
             avaliarStopRedsRobo,
             formatarPadraoTelegram,
             montarMensagemTelegram,
@@ -146,6 +166,49 @@ test("calcularFichaSegura arredonda para fichas de 5 e rejeita valores invalidos
     assert.equal(logic.calcularFichaSegura(7.4), 5);
     assert.equal(logic.calcularFichaSegura(7.5), 10);
     assert.equal(logic.calcularFichaSegura(12.5), 15);
+});
+
+test("BUG-037: callback EXECUTADA exige débito financeiro íntegro", () => {
+    const valido = logic.normalizarConfirmacaoExecucao("EXECUTADA", {
+        confirmada: true,
+        metodo: "SALDO_DEBITADO",
+        saldo_antes: 1600,
+        saldo_depois: 1595,
+        exposicao_esperada: 5,
+        debito_observado: 5,
+        confirmada_em: 1787190000000
+    });
+    assert.equal(valido.status, "EXECUTADA");
+    assert.equal(valido.confirmacao.debito_observado, 5);
+
+    const semEvidencia = logic.normalizarConfirmacaoExecucao("EXECUTADA", null);
+    assert.equal(semEvidencia.status, "AMBIGUA");
+    assert.equal(semEvidencia.confirmacao, null);
+
+    const inconsistente = logic.normalizarConfirmacaoExecucao("EXECUTADA", {
+        confirmada: true,
+        metodo: "SALDO_DEBITADO",
+        saldo_antes: 1600,
+        saldo_depois: 1600,
+        exposicao_esperada: 5,
+        debito_observado: 5,
+        confirmada_em: 1787190000000
+    });
+    assert.equal(inconsistente.status, "AMBIGUA");
+});
+
+test("BUG-037: PDF separa aceite comprovado de registros legados e usa A4 paisagem", () => {
+    assert.match(dashboardAppSource, /function ordemPossuiAceiteComprovado/);
+    assert.match(dashboardAppSource, /SALDO_DEBITADO/);
+    assert.match(dashboardAppSource, /SEM PROVA EXTERNA/);
+    assert.match(dashboardAppSource, /Excluído dos totais/);
+    assert.match(dashboardAppSource, /BLOQUEADO - ACEITE AMBÍGUO/);
+    assert.match(dashboardAppSource, /orientation: 'landscape'/);
+    assert.match(dashboardAppSource, /table-layout: fixed/);
+    assert.doesNotMatch(dashboardAppSource, /Lucro Líquido Real/);
+    assert.doesNotMatch(dashboardAppSource, /Hash de Autenticidade/);
+    assert.match(source, /exposicaoConfirmadaExecutor - exposicaoEsperadaNode/);
+    assert.match(source, /SET ativo=false, status_operacao='BLOQUEADO_AMBIGUIDADE'/);
 });
 
 test("nivelHistoricoResultado preserva DIRETO/GALE1/GALE2", () => {
@@ -217,6 +280,119 @@ test("robo dinamico pertence exclusivamente ao robo_dono_id", () => {
     assert.equal(logic.roboSintonizaEstrategia({ id: 8, config: {} }, est), false);
 });
 
+test("BUG-033: Auto-Trader autoriza o robô selecionado por ID estável", () => {
+    const dinamica = {
+        id: "ia-8-padrao",
+        origem: "AUTO_PILOT_IA:8",
+        is_dinamico: true,
+        robo_dono_id: 8
+    };
+
+    assert.equal(logic.autoTraderAutorizaEstrategia({
+        fontes_sinal: ["ROBO:8"]
+    }, dinamica, [{ id: 8, nome: "Teste IA 2", ativo: 1, config: {} }]), true);
+    assert.equal(logic.autoTraderAutorizaEstrategia({
+        fontes_sinal: ["ROBO:7"]
+    }, dinamica, [{ id: 7, nome: "Outro", ativo: 1, config: {} }, { id: 8, nome: "Teste IA 2", ativo: 1, config: {} }]), false);
+
+    // O nome é apenas visual: renomear o robô não altera a autorização canônica.
+    assert.equal(logic.autoTraderAutorizaEstrategia({
+        fontes_sinal: ["ROBO:8"]
+    }, dinamica, [{ id: 8, nome: "Nome alterado", ativo: 1, config: {} }]), true);
+});
+
+test("BUG-033: robô manual selecionado autoriza apenas estratégias que ele sintoniza", () => {
+    const manual = { id: 41, origem: "Bacbo Club", is_dinamico: false };
+    const robos = [
+        { id: 7, nome: "Manual", ativo: 1, config: { origens: ["Bacbo Club"], avulsos: [], excecoes: [] } },
+        { id: 8, nome: "Outro", ativo: 1, config: { origens: ["Neurobet"], avulsos: [], excecoes: [] } },
+        { id: 9, nome: "Inativo", ativo: 0, config: { origens: ["Bacbo Club"], avulsos: [], excecoes: [] } }
+    ];
+
+    assert.equal(logic.autoTraderAutorizaEstrategia({ fontes_sinal: ["ROBO:7"] }, manual, robos), true);
+    assert.equal(logic.autoTraderAutorizaEstrategia({ fontes_sinal: ["ROBO:8"] }, manual, robos), false);
+    assert.equal(logic.autoTraderAutorizaEstrategia({ fontes_sinal: ["ROBO:9"] }, manual, robos), false);
+});
+
+test("BUG-033: formatos legados permanecem compatíveis sem voltar à UI", () => {
+    const dinamica = {
+        origem: "AUTO_PILOT_IA:8",
+        is_dinamico: true,
+        robo_dono_id: 8
+    };
+    const manual = { origem: "Bacbo Club", is_dinamico: false };
+
+    assert.equal(logic.autoTraderAutorizaEstrategia({
+        fontes_sinal: ["[AUTO] Teste IA 2"]
+    }, dinamica, [{ id: 8, nome: "Teste IA 2", ativo: 1, config: {} }]), true);
+    assert.equal(logic.autoTraderAutorizaEstrategia({
+        fontes_sinal: ["AUTO_PILOT_IA:8"]
+    }, dinamica, [{ id: 8, nome: "Teste IA 2", ativo: 1, config: {} }]), true);
+    assert.equal(logic.autoTraderAutorizaEstrategia({
+        fontes_sinal: ["Bacbo Club"]
+    }, manual, []), true);
+    assert.equal(logic.autoTraderAutorizaEstrategia({
+        fontes_sinal: ["Neurobet"]
+    }, manual, []), false);
+});
+
+test("BUG-033: painel lista somente robôs ativos e não renderiza origens", () => {
+    assert.match(frontendSource, /robosGlobais\.filter\(r => boolRobo\(r\.ativo\)\)/);
+    assert.match(frontendSource, /const fonteCanonica = `ROBO:\$\{id\}`/);
+    assert.match(frontendSource, /class="chk-at-fonte" value="\$\{fonteCanonica\}"/);
+    assert.match(frontendSource, /function rotuloFonteAutoTrader\(fonte\)/);
+    const renderFontes = frontendSource.slice(
+        frontendSource.indexOf("function renderizarCheckboxFontesAT"),
+        frontendSource.indexOf("function rotuloFonteAutoTrader")
+    );
+    assert.doesNotMatch(renderFontes, /origensGlobais/);
+    assert.doesNotMatch(renderFontes, /\(Manuais\)|IA Dinâmica/);
+    assert.doesNotMatch(source, /fontes_sinal\.includes\(est\.origem\)/);
+    assert.equal(
+        (source.match(/autoTraderAutorizaEstrategia\(cf, est, ROBOS_MEMORIA\)/g) || []).length,
+        4
+    );
+    assert.match(source, /Auto-Trader \$\{trader\.id\} \(\$\{trader\.nome\}\) autorizado para o sinal/);
+});
+
+test("BUG-046: executor ancora a janela em Resolved + 8.5s e Node preserva o callback", () => {
+    assert.match(executorPythonSource, /EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS = 180\.0/);
+    assert.match(executorPythonSource, /normalizado in \{"waitingforbets", "closingbets", "acceptingbets", "betting"\}/);
+    assert.match(executorPythonSource, /ultimo_resolved_monotonic = 0\.0/);
+    assert.match(executorPythonSource, /resolved_monotonic_aceite/);
+    assert.match(executorPythonSource, /alvo_temporal = resolved_base \+ 8\.5/);
+    assert.match(executorPythonSource, /janela real alvo em \+8500ms/);
+    assert.match(executorPythonSource, /janela real liberada em/);
+    assert.match(executorPythonSource, /if contexto\["estado"\] == "EXPIRADA":/);
+    assert.match(executorPythonSource, /fichas_acionaveis/);
+    assert.match(executorPythonSource, /alvos_acionaveis/);
+    assert.match(executorPythonSource, /candidatos\.evaluate_all/);
+    assert.match(executorPythonSource, /JA_SELECIONADA/);
+    assert.match(executorPythonSource, /CLICAR_AGUARDANDO_ESTABILIDADE/);
+    assert.match(executorPythonSource, /selecionar_ficha_com_confirmacao/);
+    assert.match(executorPythonSource, /SUPERFICIE_PLAYWRIGHT_/);
+    assert.match(executorPythonSource, /page\.wait_for_timeout\(25\)/);
+    assert.match(executorPythonSource, /page\.wait_for_timeout\(2500\)/);
+    assert.equal((executorPythonSource.match(/elemento\.click\(timeout=2000\)/g) || []).length, 2);
+    assert.match(executorPythonSource, /page\.wait_for_timeout\(150\)/);
+    assert.match(executorPythonSource, /page\.wait_for_timeout\(120\)/);
+    assert.doesNotMatch(executorPythonSource, /aguardando 1500ms para estabilização visual das fichas/);
+    assert.doesNotMatch(executorPythonSource, /page\.mouse\.move/);
+    assert.doesNotMatch(executorPythonSource, /elemento\.dispatch_event\("pointerdown"\)/);
+    assert.doesNotMatch(executorPythonSource, /elemento\.dispatch_event\("pointerup"\)/);
+    assert.doesNotMatch(executorPythonSource, /elemento\.evaluate\("el => el\.click\(\)"\)/);
+    assert.doesNotMatch(executorPythonSource, /hit_elemento\.click/);
+    assert.match(executorPythonSource, /aria-pressed/);
+
+    const localizador = executorPythonSource.slice(
+        executorPythonSource.indexOf("def localizar_contexto_apostavel"),
+        executorPythonSource.indexOf("def localizar_frame_apostavel")
+    );
+    assert.doesNotMatch(localizador, /evolution|evocdn|game/);
+    assert.match(source, /process\.env\.EXECUTOR_EXECUTION_TIMEOUT_MS \|\| 210000/);
+    assert.match(source, /executorExecutionTimeoutConfig >= 195000/);
+});
+
 test("formatarPadraoTelegram preserva a representacao visual do sinal", () => {
     assert.equal(
         logic.formatarPadraoTelegram(["Player", "Banker", "Tie", "X"]),
@@ -225,7 +401,7 @@ test("formatarPadraoTelegram preserva a representacao visual do sinal", () => {
     assert.equal(logic.formatarPadraoTelegram(null), "");
 });
 
-test("montarMensagemTelegram respeita flags e limita texto a 4096 caracteres", () => {
+test("montarMensagemTelegram usa layout profissional, respeita flags e limita texto", () => {
     const est = {
         nome: "Padrao Teste",
         entrada: "Player",
@@ -238,6 +414,8 @@ test("montarMensagemTelegram respeita flags e limita texto a 4096 caracteres", (
         est,
         estado,
         {
+            nome: "Robo Premium",
+            greens_consecutivos: 3,
             config: {
                 cabecalho: "SALA A",
                 rodape: "FIM",
@@ -248,11 +426,14 @@ test("montarMensagemTelegram respeita flags e limita texto a 4096 caracteres", (
         }
     );
 
-    assert.match(mensagem, /🎯 ENTRADA/);
-    assert.match(mensagem, /Estratégia: Padrao Teste/);
-    assert.match(mensagem, /Padrão: 🔵 P → 🔴 B/);
-    assert.match(mensagem, /Assertividade: 87\.3%/);
-    assert.match(mensagem, /Entrada: 🔵 PLAYER/);
+    assert.match(mensagem, /🎯 NOVA ENTRADA/);
+    assert.match(mensagem, /🤖 Robô: Robo Premium/);
+    assert.match(mensagem, /📊 Estratégia: Padrao Teste/);
+    assert.match(mensagem, /🧩 Padrão: 🔵 P → 🔴 B/);
+    assert.match(mensagem, /📈 Assertividade: 87\.3%/);
+    assert.match(mensagem, /💰 Entrada: 🔵 PLAYER/);
+    assert.match(mensagem, /🔥 Sequência atual: 3 Greens/);
+    assert.match(mensagem, /⏳ Aguardando resultado da mesa/);
 
     const enorme = logic.montarMensagemTelegram(
         "RED",
@@ -261,6 +442,35 @@ test("montarMensagemTelegram respeita flags e limita texto a 4096 caracteres", (
         { config: { cabecalho: "X".repeat(5000) } }
     );
     assert.equal(enorme.length, 4096);
+});
+
+test("mensagem GREEN informa nível e sequência atualizada do robô", () => {
+    const mensagem = logic.montarMensagemTelegram(
+        "GREEN",
+        { nome: "Padrao Live", entrada: "Banker", padrao: [] },
+        { assertividadeSinal: 96.4, galeAtual: 1 },
+        { nome: "Robo Live", greens_consecutivos: 2, config: {} },
+        { resultado: "GREEN", greens_consecutivos: 5 }
+    );
+
+    assert.match(mensagem, /✅ GREEN CONFIRMADO/);
+    assert.match(mensagem, /🏁 Resultado: GALE 1/);
+    assert.match(mensagem, /🔥 Sequência atual: 5 Greens/);
+});
+
+test("BUG-035: token Telegram não retorna ao painel e teste expõe erro sem segredo", () => {
+    assert.match(source, /const \{ telegram_token: telegramTokenPrivado, \.\.\.roboPublico \} = r/);
+    assert.match(source, /telegram_configurado: Boolean\(String\(telegramTokenPrivado \|\| ''\)\.trim\(\)\)/);
+    assert.match(source, /telegram_token=COALESCE\(NULLIF\(\?, ''\), telegram_token\)/);
+    assert.match(source, /app\.post\("\/api\/robo\/:id\/testar-telegram"/);
+    assert.match(source, /mascararChatIdTelegram\(destinos\[indice\]\)/);
+    assert.match(source, /descricaoErroTelegram\(corpo\?\.description/);
+
+    assert.match(dashboardAppSource, /type="password" id="robo-token" autocomplete="new-password"/);
+    assert.match(dashboardAppSource, /id="robo-chat-id"/);
+    assert.match(dashboardAppSource, /Token armazenado com segurança/);
+    assert.match(dashboardAppSource, /async function testarTelegramRobo\(\)/);
+    assert.doesNotMatch(source, /res\.json\([^\n]*telegram_token/);
 });
 
 test("horarioParaMinutos valida formato HH:MM estrito", () => {
@@ -743,7 +953,7 @@ test("intervalo longo preserva continuidade e evidencias estruturais invalidam p
     assert.equal(r.buraco_confirmado, true);
     assert.equal(r.motivo, "METADADOS_COLETOR_AUSENTES");
 
-    assert.match(source, /if \(continuidade\.interrupcao\) \{[\s\S]*?await invalidarSequenciasAposBuracoDados\(continuidade\.motivo\);/);
+    assert.match(source, /if \(continuidade\.interrupcao\) \{[\s\S]*?interrupcaoColetorJaAplicada\(dados\)[\s\S]*?await invalidarSequenciasAposBuracoDados\(motivoInterrupcao\);/);
     assert.doesNotMatch(source, /if \(continuidade\.buraco_confirmado\) \{\s*await invalidarSequenciasAposBuracoDados/);
     assert.doesNotMatch(source, /INTERVALO_NODE/);
     assert.match(source, /app\.post\("\/collector-health"[\s\S]*?await invalidarSequenciasAposBuracoDados\(motivo\)/);
@@ -753,6 +963,27 @@ test("intervalo longo preserva continuidade e evidencias estruturais invalidam p
     assert.match(frontendSource, /sessaoAtual !== sessaoAnterior/);
     assert.match(frontendSource, /dadosArr\[i \+ p\]\.id_sessao !== sessaoBase/);
     assert.match(frontendSource, /dadosCorte\[i\+p\]\.id_sessao !== sessaoBase/);
+});
+
+test("interrupção do coletor é idempotente entre collector-health e próximo resultado", () => {
+    const evento = { interrupcao_id: "sessao-a:7" };
+    const primeira = logic.reservarInterrupcaoColetor(evento, 1000);
+    assert.equal(primeira.repetida, false);
+    assert.equal(logic.interrupcaoColetorJaAplicada(evento), false);
+
+    assert.equal(logic.concluirInterrupcaoColetor(primeira.id, true, 1100), true);
+    assert.equal(logic.interrupcaoColetorJaAplicada(evento), true);
+
+    const repetida = logic.reservarInterrupcaoColetor(evento, 1200);
+    assert.equal(repetida.repetida, true);
+    assert.equal(repetida.estado, "APLICADA");
+
+    const legado = logic.reservarInterrupcaoColetor({}, 1300);
+    assert.equal(legado.legado, true);
+    assert.equal(legado.repetida, false);
+
+    assert.equal(logic.normalizarInterrupcaoColetorId({ interrupcao_id: "../invalida" }), "");
+    assert.match(source, /interrupcaoColetorJaAplicada\(dados\)[\s\S]*?primeiro resultado apenas estabelece a nova fronteira estatística/);
 });
 
 test("exclusao de robo remove padroes IA filhos e historicos na mesma transacao", () => {

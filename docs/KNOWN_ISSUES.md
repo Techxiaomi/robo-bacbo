@@ -91,6 +91,72 @@ Risco residual externo:
 
 ## Itens mitigados
 
+### BUG-037 — cliques locais eram registrados como apostas reais sem aceite da casa
+
+Status: **mitigado em código; validação operacional com uma aposta mínima pendente**.
+
+O executor considerava `EXECUTADA` assim que terminava os cliques de ficha e alvo sem exceção Playwright. Essa condição prova apenas interação local: não prova que a Evolution aceitou a aposta. O Node promovia a intenção a `PENDENTE`, incrementava o volume e posteriormente calculava WIN/LOSS, produzindo auditoria financeira fictícia quando saldo e histórico da casa permaneciam inalterados.
+
+O contrato agora é fail-closed nos dois processos. O Python lê o saldo imediatamente antes do primeiro clique financeiro e, após o plano, aguarda a redução correspondente à exposição total. O callback inclui método e valores observados; o Node recalcula a coerência antes de aceitar `EXECUTADA`. Ausência de seletor/saldo bloqueia antes da aposta. Cliques sem débito geram `AMBIGUA`, não entram em P&L/volume e bloqueiam o Auto-Trader para impedir repetição de uma exposição cujo estado externo é desconhecido.
+
+Registros anteriores sem `executor_confirmacao_metodo=SALDO_DEBITADO` não são apagados nem reinterpretados automaticamente. O PDF os identifica como legados sem prova externa e os exclui dos totais comprovados. O relatório usa A4 paisagem, tabela de largura fixa e evidencia separadamente ordem solicitada, aceite externo, resultado calculado e saldo do modelo.
+
+Risco residual: a confirmação usa o saldo disponível exposto pela interface e depende de `CASINO_BALANCE_SELECTOR` correto. Créditos/débitos concorrentes na mesma conta durante a janela podem tornar a variação ambígua; nesse caso o comportamento intencional é bloquear, nunca presumir sucesso. A próxima validação deve usar stake mínima e conferir simultaneamente log `APOSTA ACEITA PELA EVOLUTION`, débito do saldo e histórico de apostas da casa.
+
+### BUG-036 — clique programático na superfície da ficha não reproduzia input real
+
+Status: **mitigado em código; validação com a superfície real da Evolution pendente**.
+
+O seletor encontrava corretamente a ficha de R$ 5 e o alvo financeiro, mas o elemento da ficha era coberto pela própria superfície visual do componente. O clique normal no contêiner expirava por interceptação. O fallback então chamava `HTMLElement.click()` no elemento superior e exigia uma mudança de classe/atributo no contêiner; na mesa real, a Evolution pode tratar a denominação em estado interno e depender de eventos de ponteiro, sem refletir a seleção nos atributos inspecionados.
+
+O executor agora obtém o elemento superior seguro via `elementFromPoint` e executa nele um clique real do Playwright, com actionability e sem `force=True`. Isso produz o mesmo ciclo de ponteiro do caminho simples que já havia funcionado manualmente, mas continua restrito à janela `AcceptingBets`, à mesma sequência do coletor e à pré-validação de todas as pernas. A ficha continua sendo uma interação não financeira; antes do primeiro clique em Player/Banker/Tie, stage e sequência são novamente verificados.
+
+Risco residual: o DOM e os handlers internos da Evolution são externos. Desde o BUG-037, o ciclo local de cliques não basta para `EXECUTADA`; a ordem só avança com débito financeiro coerente. A validação operacional ainda deve confirmar o bilhete/histórico da plataforma porque o saldo é a evidência externa disponível, não uma API transacional oficial da Evolution.
+
+### BUG-035 — Telegram ocultava a causa da falha e tinha mensagens pouco operacionais
+
+Status: **mitigado em código; validação com token e Chat ID reais pendente**.
+
+O token já era removido corretamente de `GET /api/robos` e preservado no banco quando a edição enviava o campo vazio. A interface, porém, não explicava claramente esse contrato, não expunha o Chat ID principal e não oferecia teste da credencial salva. Além disso, qualquer rejeição da API do Telegram era convertida em `false`, eliminando a informação necessária para distinguir token inválido, chat inexistente, bot bloqueado, timeout ou indisponibilidade HTTP.
+
+O painel agora identifica o token como armazenado sem devolvê-lo ao navegador, permite editar o Chat ID principal e fornece um teste explícito após salvar. O backend devolve e registra diagnóstico por destino mascarado, sem registrar o token. O formato das mensagens foi reorganizado e a sequência Green exibida vem do contador do robô atualizado após o resultado, não de uma contagem global ou antecipada.
+
+Risco residual: a entrega depende do token, do Chat ID, de o usuário ter iniciado conversa com o bot ou de o bot possuir acesso ao grupo/canal. O teste operacional do painel passa a apresentar a rejeição concreta recebida da API para orientar essa correção externa.
+
+### BUG-027 — Auto-Trader não reconhecia fontes dinâmicas selecionadas no painel
+
+Status: **mitigado em código; validação operacional com ordem real pendente**.
+
+O formulário persistia a seleção de um Robô IA como `[AUTO] Nome`, mas cada estratégia dinâmica era identificada no backend por `AUTO_PILOT_IA:<robo_dono_id>`. Como entrada, Gale e fechamento usavam igualdade literal entre esses valores, o Auto-Trader era silenciosamente ignorado antes de criar a intenção `PREPARANDO` ou chamar o executor Python. O estado `OPERANDO` comprovava apenas sincronização com a mesa, não a validade da associação da fonte.
+
+O painel agora grava `AUTO_PILOT_IA:<id>` como identidade estável e continua exibindo `[AUTO] Nome` apenas como rótulo. O backend centraliza a autorização: estratégias IA são associadas pelo proprietário real, origens manuais continuam pelo nome e robôs diferentes permanecem isolados. Um fallback nominal preserva configurações legadas, mas novas configurações não dependem de nome nem são quebradas por renomeação do robô. O log registra quando um Auto-Trader é efetivamente autorizado para um sinal antes das demais barreiras operacionais.
+
+### BUG-026 — Handover legítimo sem `roundId` ainda podia expirar sem evidência alternativa
+
+Status: **mitigado em código; validação operacional da semântica da roadmap pendente**.
+
+Na mesa real observada, a reconexão pode retornar `bacbo.playerState` com `stage`, mas sem uma identidade de rodada que possa ser comparada ao socket anterior. Esperar mais tempo não prova continuidade e, por isso, o timeout do BUG-025 ainda produzia uma interrupção mesmo quando a sequência visível na mesa estava correta.
+
+Durante a quarentena, o coletor agora extrai somente marcadores semânticos P/B/T de contêineres de roadmap/histórico/resultados no DOM, inclusive dentro de iframes. A retomada sem `roundId` é aceita apenas quando os últimos `ROADMAP_RECONCILIATION_MIN_RESULTS` resultados da roadmap (6 por padrão) coincidem exatamente, em ordem direta ou inversa, com a cauda dos resultados que o Python já entregou com sucesso ao Node. Não há leitura de texto bruto, cookies ou payload de jogo; os diagnósticos registram somente quantidades de frames, raízes e trilhas.
+
+Risco residual: o HTML/semântica visual da Evolution é externo e pode mudar. Se a roadmap não for reconhecida, se houver menos de seis resultados locais ou se a cauda divergir, o timeout permanece propositalmente fail-closed e a continuidade é invalidada. A validação em mesa real deve conferir os diagnósticos `frames`, `raízes` e `trilhas`; uma reconciliação bem-sucedida registra `ROADMAP_DOM_CAUSA_COMPATIVEL`.
+
+### BUG-025 — Frame parcial na reconexão encerrava a quarentena antes da evidência estrutural
+
+Status: **mitigado em código; validação operacional pendente**.
+
+Alguns handovers da Evolution podem entregar inicialmente um `bacbo.playerState` sem `roundId`. O BUG-023 tratava esse primeiro frame como uma ambiguidade definitiva e criava nova sessão, embora ainda existisse tempo na janela de reconexão para receber o estado completo.
+
+Durante a quarentena, frames sem `stage` ou sem identidade de rodada agora são apenas ignorados, mantendo o executor bloqueado. A decisão é tomada somente ao chegar um `playerState` completo, ou quando expira `WEBSOCKET_RECONNECT_GRACE_SECONDS`. A ausência de identidade até o timeout, uma troca incompatível ou outra evidência estrutural continuam invalidando em modo fail-closed.
+
+### BUG-024 — Reload preventivo criava uma janela periódica sem observabilidade
+
+Status: **mitigado em código; validação operacional prolongada pendente**.
+
+O executor encerrava aproximadamente a cada duas horas o loop de uma sessão saudável e navegava novamente para a mesa. Antes do `page.goto()`, o contexto do WebSocket oficial era apagado, de modo que o fechamento provocado pela própria navegação não passava pela quarentena estrutural do BUG-023. Uma rodada resolvida durante essa troca poderia ficar invisível ao coletor.
+
+O limite temporal foi removido. Enquanto página, WebSocket oficial e `playerState` permanecerem saudáveis, a sessão continua indefinidamente. A navegação e a recuperação permanecem orientadas por falhas observáveis: reconexão não confirmada, silêncio do `playerState`, ausência de WebSocket após navegação, necessidade de Auto-Login, timeout ou exceção do Playwright. O botão `Continuar` continua sendo tratado sem reiniciar a sessão.
+
 ### BUG-022 — Pausa legítima da mesa era tratada como interrupção
 
 Status: **mitigado**.
@@ -101,17 +167,85 @@ O intervalo temporal agora é apenas diagnóstico: o Python registra aviso de pa
 
 Risco residual: o watchdog de `playerState` continua deliberadamente fail-closed. Se a Evolution deixar de transmitir estados por tempo superior ao configurado, mesmo durante uma pausa operacional, o evento será tratado como perda de observabilidade e exigirá nova sessão. A validação no site real deve confirmar se a fonte mantém `playerState` durante trocas de crupiê e manutenção da mesa.
 
+### BUG-023 — Handover transitório do WebSocket invalidava continuidade íntegra
+
+Status: **mitigado em código; validação operacional no site real pendente**.
+
+O fechamento do socket que havia entregue `bacbo.playerState` era tratado imediatamente como prova de perda de rodada. A Evolution pode, porém, substituir essa conexão durante uma sequência correta. Isso invalidava sinais em andamento e o mesmo evento ainda reaparecia no primeiro resultado por meio do lacre do Python.
+
+O coletor agora bloqueia o executor e abre uma quarentena curta após o fechamento. A continuidade é preservada somente quando o novo `playerState` comprova a mesma `roundId`, ou uma nova rodada após o estado anterior ter sido observado como `Resolved`, dentro de `WEBSOCKET_RECONNECT_GRACE_SECONDS`. Reconexão tardia, identidade ausente, troca durante rodada não resolvida e demais ambiguidades continuam falhando fechado.
+
+Interrupções confirmadas recebem um `interrupcao_id` derivado da sessão e geração do lacre. `/collector-health` e o resultado de retomada usam esse mesmo identificador, e o Node invalida pendências apenas uma vez. A comprovação determinística está coberta por testes; frequência e formato dos handovers reais da Evolution ainda devem ser acompanhados operacionalmente.
+
 ### BUG-021 — Rodada invisível ao Python podia concluir o sinal no resultado seguinte
 
 Status: **mitigado em modo fail-closed, com dependência externa residual**.
 
 O `coletor_seq` anterior provava somente a ordem dos resultados que o Python havia observado. Se uma rodada desaparecesse antes de `processar_resultado()`, o próximo resultado recebia uma sequência local contígua e podia concluir um sinal pendente. Além disso, interrupções temporais apenas separavam o histórico; a invalidação financeira ocorria somente em salto/restart/metadados ausentes.
 
-O coletor agora elege como oficial apenas o WebSocket que efetivamente entrega `bacbo.playerState`, monitora o tempo desde o último estado e mantém um lacre de interrupção até o Node confirmar um resultado posterior. Fechamento do socket oficial, `playerState` silencioso, payload `Resolved` inválido e falha no POST rompem a continuidade. A rota interna autenticada `/collector-health` antecipa a invalidação sem esperar a próxima rodada; o Node a coloca na mesma FIFO dos resultados e só confirma após limpar sinais pendentes e bloquear Auto-Traders com ordem `PENDENTE` como `DADOS_INCOMPLETOS`.
+O coletor agora elege como oficial apenas o WebSocket que efetivamente entrega `bacbo.playerState`, monitora o tempo desde o último estado e mantém um lacre de interrupção até o Node confirmar um resultado posterior. `playerState` silencioso, payload `Resolved` inválido e falha no POST rompem a continuidade; desde o BUG-023, um fechamento transitório passa primeiro pela quarentena estrutural de reconexão. A rota interna autenticada `/collector-health` antecipa interrupções confirmadas sem esperar a próxima rodada; o Node as coloca na mesma FIFO dos resultados e só confirma após limpar sinais pendentes e bloquear Auto-Traders com ordem `PENDENTE` como `DADOS_INCOMPLETOS`.
 
 Qualquer interrupção estrutural reconhecida ou sinalizada pelo Python invalida pendências antes de processar o giro de retomada. O resultado de retomada abre uma nova `id_sessao`, podendo servir como nova âncora histórica, mas nunca como desfecho do sinal anterior. Desde o BUG-022, o simples intervalo entre resultados não é uma interrupção. `Resolved` também exige vencedor conhecido, quatro dados únicos no intervalo 1..6 e coerência matemática entre os dados e o vencedor. Quando o payload fornece `roundId`/variante, uma troca de rodada antes de observar `Resolved` rompe a continuidade.
 
 Risco residual externo: o projeto não presume que `roundId` seja numérico/sequencial sem contrato oficial. Se a plataforma omitir uma rodada completa, continuar enviando outros `playerState` válidos e retornar antes do watchdog, uma única fonte não consegue provar matematicamente a ausência. A proteção prioriza falhar fechado em fechamento, silêncio e transições observáveis; reconciliação por uma segunda fonte oficial/roadmap continua sendo a única forma de elevar essa garantia contra omissão totalmente invisível da fonte primária.
+
+### BUG-034 — Ficha corrente não produzia mudança após novo acionamento
+
+Status: **mitigado em código; validação operacional no site real pendente**.
+
+Na mesa real, a superfície da ficha R$5 foi acionada, porém o DOM permaneceu idêntico. Isso é ambíguo: R$5 poderia já estar corrente ou o evento poderia não ter selecionado nada. Aceitar sem prova arriscaria usar outra denominação.
+
+O executor agora tenta provar o estado sem exposição: escolhe outra ficha visível do mesmo componente e exige mudança na assinatura semântica/visual da ficha desejada; em seguida retorna a R$5 e exige a mudança inversa. Somente a ida e volta confirmadas liberam Player/Banker/Tie. Ausência de alternativa, superfície externa ou transição não observável continuam falhando fechado.
+
+### BUG-033 — Fontes do Auto-Trader confundiam robôs com origens/Auto IA
+
+Status: **mitigado em código; validação operacional no painel pendente**.
+
+A aba misturava todos os robôs como `[AUTO] ... (IA Dinâmica)` e acrescentava origens manuais como fontes independentes. Além de nomenclatura incorreta, escolher um robô manual não autorizava suas estratégias porque o matcher comparava diretamente a origem da estratégia.
+
+A unidade de seleção passa a ser exclusivamente o robô ativo, identificado por `ROBO:<id>`. O backend aplica a mesma regra de sintonização já usada pelos canais: padrão dinâmico pertence ao robô dono; padrão manual respeita origens, avulsos e exceções do robô selecionado. Robôs inativos e origens não aparecem. IDs/nome Auto antigos e origem manual antiga permanecem somente como fallback de leitura para evitar quebra abrupta de configurações persistidas.
+
+### BUG-032 — Camada interna interceptava o ponteiro da ficha
+
+Status: **mitigado em código; validação operacional no site real pendente**.
+
+O log Playwright comprovou que a ficha estava visível, habilitada e estável, mas outro `div` do componente interceptava os eventos de ponteiro. Repetir o timeout não resolveria, e usar `force=True` eliminaria uma proteção importante.
+
+Após o clique Playwright normal falhar, o executor pode identificar com `elementFromPoint` a superfície central da ficha. O acionamento só é permitido se essa superfície for o próprio elemento, descendente, ancestral ou membro do mesmo container. Como essa etapa apenas escolhe a denominação, ela não cria exposição; ainda assim, o executor exige que a assinatura/seleção DOM mude após o evento. Sem confirmação, termina com zero cliques de alvo. Player/Banker/Tie nunca passam por esse caminho e continuam protegidos pela actionability padrão, stage e sequência.
+
+### BUG-031 — Prova curta de actionability da ficha bloqueava antes do clique financeiro
+
+Status: **mitigado em código; validação operacional no site real pendente**.
+
+O diagnóstico posterior mostrou a ficha exata presente e visível, sem marca de seleção, mas incapaz de concluir `click(trial=True)` em 250 ms; Banker e Tie estavam ambos acionáveis. Como a seleção da denominação não registra aposta, tratá-la com o mesmo gate do alvo financeiro criava um bloqueio sem benefício financeiro.
+
+Uma ficha exata e visível agora pode prosseguir para o clique normal Playwright, que aguarda estabilidade por até 2 s e continua sem `force=True`. Falha nessa etapa ocorre antes de qualquer clique de alvo. Depois da ficha, o executor revalida stage e `coletor_seq` antes de cada clique financeiro; se a janela fechar durante a espera, a ordem expira sem aposta. A mesma denominação não é reclicada entre pernas do mesmo plano composto.
+
+### BUG-030 — Ficha já selecionada era tratada como não acionável
+
+Status: **mitigado em código; validação operacional no site real pendente**.
+
+O diagnóstico do teste seguinte comprovou `fichas=0/1 (DOM 1)` e `alvos=1/1 (DOM 1)`: a ficha R$25 existia, mas não aceitava novo clique, enquanto Banker estava acionável. Isso é compatível com uma ficha corrente que o frontend mantém selecionada e desabilita contra reclick.
+
+O executor agora reconhece uma ficha já selecionada somente quando o elemento correspondente está visível e possui evidência semântica explícita (`aria-pressed`, `aria-selected`, `data-selected`, `data-is-selected`, `data-active`, `data-state` ou token de classe selecionado/ativo). Nesse caso ele preserva a ficha corrente e prova o alvo com `trial=True`. Ausência dessa evidência continua fail-closed; não há `force=True` nem aceitação baseada apenas em presença no DOM.
+
+### BUG-029 — Varredura DOM consumia a janela curta de AcceptingBets
+
+Status: **mitigado em código; validação operacional no site real pendente**.
+
+O primeiro teste com o stage real mostrou `ABERTA` em `AcceptingBets`, mas nenhum clique antes de `FirstDie`. A pré-validação fazia até 64 leituras Playwright individuais de `data-value` em cada frame; em uma fase curta, a própria varredura podia consumir a janela antes de concluir ficha + alvo.
+
+Os valores das fichas agora são extraídos em uma única avaliação DOM por frame. Apenas os índices numericamente correspondentes passam pela prova de actionability, mantendo a exigência do conjunto integral e o bloqueio de todas as fases não apostáveis. Se a próxima rodada resolver sem execução, o motivo inclui a última inspeção agregada de frames/fichas/alvos para separar seletor ausente, elemento não acionável e renderização tardia sem expor o DOM.
+
+### BUG-028 — Ordem expirava antes de a próxima janela Betting abrir
+
+Status: **mitigado em código; validação operacional no site real pendente**.
+
+O BUG-027 confirmou o roteamento integral Node→Python, mas a primeira ordem real terminou sem cliques porque o executor usava 15 segundos contados ainda no `Resolved`. Essa duração podia acabar durante animações/pagamento da rodada anterior. O mesmo gate aceitava qualquer stage diferente de `Resolved`, filtrava frames pelo texto da URL e testava apenas o primeiro elemento correspondente, combinando falso negativo de DOM com risco de stage permissivo.
+
+O executor agora aguarda exclusivamente o stage real `AcceptingBets` com playerState fresco (`Betting` é mantido apenas como variante compatível) e mantém a ordem ligada ao `coletor_seq` do resultado que gerou o sinal. `WaitingForBets`, `ClosingBets`, as quatro fases dos dados, `Confirmation` e `Resolved` não autorizam cliques. Novo resultado, inconsistência de sequência, perda de prontidão ou interrupção continuam cancelando antes de qualquer clique. O tempo virou somente um fusível final de 180 s; o waiter do Node usa 210 s para nunca abandonar uma ordem que o Python ainda possa executar.
+
+A mesa é identificada pelo conjunto completo de fichas e alvos necessários, independentemente da URL do iframe. Duplicatas ocultas são ignoradas, valores equivalentes de `data-value` são normalizados e o mesmo Locator acionável pré-validado é usado no clique. O diagnóstico de expiração informa apenas stage/seq/frescor e contagens de elementos, sem conteúdo ou URL sensível.
 
 ### BUG-019 — Proteção no empate existia no sinal, mas não na execução financeira
 
@@ -124,7 +258,7 @@ O Auto-Trader segue `proteger_empate` da estratégia: sinal sem proteção envia
 
 Status: **mitigado**.
 
-O sinal pode nascer assim que o coletor recebe `stage=Resolved`, enquanto a mesa só libera fichas/alvos alguns segundos depois. O executor agora vincula cada ordem ao `coletor_seq` vigente no aceite, aguarda a saída de `Resolved` e exige que todas as fichas necessárias e o alvo passem por `click(trial=True)` antes de qualquer clique real. Se outra rodada resolver antes do primeiro clique, se a janela não ficar acionável dentro de `EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS` ou se o executor perder prontidão, a ordem termina sem clique. O TTL de 8 s continua limitando somente o tempo de fila; o timeout Node de callback foi ampliado para 30 s para comportar a espera legítima da janela.
+O sinal pode nascer assim que o coletor recebe `stage=Resolved`, enquanto a mesa só libera fichas/alvos alguns segundos depois. O executor vincula cada ordem ao `coletor_seq` vigente no aceite e exige pré-validação por `click(trial=True)` antes de qualquer clique real. O BUG-028 endureceu esse contrato: somente `stage=AcceptingBets` fresco (`Betting` compatível) autoriza o DOM, a expiração principal é estrutural e o antigo limite de 15 s foi substituído por um fusível de 180 s com waiter Node de 210 s. O TTL de 8 s continua limitando somente o tempo anterior à retirada da fila.
 
 ### SEC-002 — Comunicação interna Node ↔ Python sem autenticação
 

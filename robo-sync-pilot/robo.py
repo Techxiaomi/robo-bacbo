@@ -19,8 +19,8 @@ load_env_file(os.path.join(PROJECT_ROOT, ".env"))
 # ====================================================================
 # CONFIGURAÇÕES GERAIS E CONTROLE DE VERSÃO
 # ====================================================================
-VERSAO_ROBO = "v1.6.1"
-NOME_ATUALIZACAO = "Continuidade Estrutural Fail-Closed"
+VERSAO_ROBO = "v1.6.13"
+NOME_ATUALIZACAO = "BUG-050 Alvo Seguro + Ciclo Exclusivo"
 
 URL_CASSINO = os.getenv("CASINO_GAME_URL", "")
 ARQUIVO_SESSAO = os.getenv("SESSION_STATE_FILE", os.path.join(BASE_DIR, "sessao_salva.json"))
@@ -52,9 +52,17 @@ except ValueError:
     EXECUTOR_ORDER_TTL_SECONDS = 8.0
 
 try:
-    EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS = max(3.0, min(30.0, float(os.getenv("EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS", "15"))))
+    _betting_window_timeout_config = float(os.getenv("EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS", "180"))
+    # Valores antigos (15/30 s) encerravam a ordem durante a transição normal
+    # pós-Resolved. A expiração primária é estrutural (novo Resolved, perda de
+    # continuidade ou indisponibilidade); este prazo é apenas um fusível final.
+    EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS = (
+        _betting_window_timeout_config
+        if 60.0 <= _betting_window_timeout_config <= 180.0
+        else 180.0
+    )
 except ValueError:
-    EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS = 15.0
+    EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS = 180.0
 
 try:
     RESULT_DEDUP_WINDOW_SECONDS = max(0.5, min(10.0, float(os.getenv("RESULT_DEDUP_WINDOW_SECONDS", "3"))))
@@ -82,6 +90,38 @@ try:
 except ValueError:
     BALANCE_SYNC_HEARTBEAT_SECONDS = 60.0
 
+try:
+    EXECUTOR_BET_ACCEPTANCE_TIMEOUT_SECONDS = max(
+        2.0,
+        min(20.0, float(os.getenv("EXECUTOR_BET_ACCEPTANCE_TIMEOUT_SECONDS", "8")))
+    )
+except ValueError:
+    EXECUTOR_BET_ACCEPTANCE_TIMEOUT_SECONDS = 8.0
+
+try:
+    EXECUTOR_BET_ACCEPTANCE_TOLERANCE = max(
+        0.01,
+        min(1.0, float(os.getenv("EXECUTOR_BET_ACCEPTANCE_TOLERANCE", "0.10")))
+    )
+except ValueError:
+    EXECUTOR_BET_ACCEPTANCE_TOLERANCE = 0.10
+
+try:
+    WEBSOCKET_RECONNECT_GRACE_SECONDS = max(
+        2.0,
+        min(30.0, float(os.getenv("WEBSOCKET_RECONNECT_GRACE_SECONDS", "10")))
+    )
+except ValueError:
+    WEBSOCKET_RECONNECT_GRACE_SECONDS = 10.0
+
+try:
+    ROADMAP_RECONCILIATION_MIN_RESULTS = max(
+        4,
+        min(12, int(os.getenv("ROADMAP_RECONCILIATION_MIN_RESULTS", "6")))
+    )
+except ValueError:
+    ROADMAP_RECONCILIATION_MIN_RESULTS = 6
+
 if not INTERNAL_API_TOKEN:
     raise RuntimeError("INTERNAL_API_TOKEN nao configurado. Defina o segredo compartilhado no .env antes de iniciar o executor.")
 
@@ -99,6 +139,9 @@ estado_mesa = {
     "round_id": "",
     "round_resolvido": False,
 }
+historico_resultados_confirmados_lock = threading.Lock()
+historico_resultados_confirmados = []
+HISTORICO_RESULTADOS_CONFIRMADOS_LIMITE = 12
 ORDEM_ID_LIMITE_MEMORIA = 5000
 app = Flask(__name__)
 log = logging.getLogger('werkzeug')
@@ -219,13 +262,18 @@ def registrar_ordem_idempotente(dados, aceitar_nova=True):
     # mesmo coletor. Isso permite esperar a abertura da rodada seguinte sem risco
     # de executar a ordem depois que outra rodada já terminou.
     seq_contexto = max(0, int(globals().get("coletor_seq", 0) or 0))
+    resolved_monotonic_contexto = float(globals().get("ultimo_resolved_monotonic", 0.0) or 0.0)
     estado_contexto = globals().get("estado_mesa", {})
     lock_contexto = globals().get("estado_mesa_lock")
     if lock_contexto is not None:
         with lock_contexto:
             stage_contexto = str(estado_contexto.get("stage") or "")
+            round_id_contexto = str(estado_contexto.get("round_id") or "")
+            round_resolvido_contexto = bool(estado_contexto.get("round_resolvido"))
     else:
         stage_contexto = str(estado_contexto.get("stage") or "") if isinstance(estado_contexto, dict) else ""
+        round_id_contexto = str(estado_contexto.get("round_id") or "") if isinstance(estado_contexto, dict) else ""
+        round_resolvido_contexto = bool(estado_contexto.get("round_resolvido")) if isinstance(estado_contexto, dict) else False
 
     ordem_normalizada = {
         "order_id": order_id,
@@ -234,7 +282,10 @@ def registrar_ordem_idempotente(dados, aceitar_nova=True):
         "apostas": apostas,
         "sincronizar_janela": True,
         "coletor_seq_aceite": seq_contexto,
-        "stage_aceite": stage_contexto
+        "resolved_monotonic_aceite": resolved_monotonic_contexto,
+        "stage_aceite": stage_contexto,
+        "round_id_aceite": round_id_contexto,
+        "round_resolvido_aceite": round_resolvido_contexto
     }
 
     with ordens_executor_lock:
@@ -334,6 +385,17 @@ def reportar_status_execucao_node(ordem, resultado):
         status = "AMBIGUA"
     motivo = str((resultado or {}).get("motivo") or "").strip()[:300]
     payload = {"order_id": order_id, "status": status, "motivo": motivo}
+    confirmacao = (resultado or {}).get("confirmacao")
+    if isinstance(confirmacao, dict):
+        payload["confirmacao"] = {
+            "confirmada": confirmacao.get("confirmada") is True,
+            "metodo": str(confirmacao.get("metodo") or "")[:40],
+            "saldo_antes": confirmacao.get("saldo_antes"),
+            "saldo_depois": confirmacao.get("saldo_depois"),
+            "exposicao_esperada": confirmacao.get("exposicao_esperada"),
+            "debito_observado": confirmacao.get("debito_observado"),
+            "confirmada_em": confirmacao.get("confirmada_em"),
+        }
 
     ultimo_erro = None
     for _ in range(2):
@@ -384,6 +446,7 @@ def processar_ordem_executor(page, ordem):
 
 
 ultimo_tempo_rodada = 0
+ultimo_resolved_monotonic = 0.0
 COLETOR_SESSAO = str(uuid.uuid4())
 coletor_seq = 0
 ultimo_resultado_chave = None
@@ -423,6 +486,14 @@ def snapshot_interrupcao_fluxo():
         }
 
 
+def id_interrupcao_fluxo(snapshot=None):
+    estado = snapshot if isinstance(snapshot, dict) else snapshot_interrupcao_fluxo()
+    geracao = max(0, int(estado.get("geracao") or 0))
+    if geracao <= 0:
+        return ""
+    return f"{COLETOR_SESSAO}:{geracao}"
+
+
 def confirmar_interrupcao_reportada(geracao):
     with continuidade_fluxo_lock:
         if not continuidade_fluxo["interrompida"]:
@@ -435,11 +506,14 @@ def confirmar_interrupcao_reportada(geracao):
 
 
 def notificar_interrupcao_node(motivo, timestamp_ms=None):
+    interrupcao = snapshot_interrupcao_fluxo()
     payload = {
         "evento": "INTERRUPCAO",
         "motivo": str(motivo or "CONTINUIDADE_INDETERMINADA")[:120],
         "coletor_sessao": COLETOR_SESSAO,
         "coletor_seq": coletor_seq,
+        "interrupcao_id": id_interrupcao_fluxo(interrupcao),
+        "interrupcao_geracao": interrupcao["geracao"],
         "timestamp_coleta": int(timestamp_ms or time.time() * 1000),
     }
     try:
@@ -547,6 +621,144 @@ def identidade_rodada_evolution(game_info):
         if valor is not None and str(valor).strip():
             return str(valor).strip()
     return ""
+
+
+def marcador_resultado(resultado):
+    return {
+        "PlayerWon": "P",
+        "BankerWon": "B",
+        "Tie": "T",
+        "TieWon": "T",
+    }.get(str(resultado or "").strip(), "")
+
+
+def registrar_resultado_confirmado(resultado):
+    marcador = marcador_resultado(resultado)
+    if not marcador:
+        return []
+
+    with historico_resultados_confirmados_lock:
+        historico_resultados_confirmados.append(marcador)
+        del historico_resultados_confirmados[:-HISTORICO_RESULTADOS_CONFIRMADOS_LIMITE]
+        return list(historico_resultados_confirmados)
+
+
+def snapshot_resultados_confirmados():
+    with historico_resultados_confirmados_lock:
+        return list(historico_resultados_confirmados)
+
+
+def normalizar_marcador_roadmap(valor):
+    texto = str(valor or "").lower()
+    texto = re.sub(r"[^a-z0-9]+", " ", texto).strip()
+    if re.search(r"(?:^| )(?:playerwon|player|jogador|blue)(?: |$)", texto):
+        return "P"
+    if re.search(r"(?:^| )(?:bankerwon|banker|banca|red)(?: |$)", texto):
+        return "B"
+    if re.search(r"(?:^| )(?:tie|tiewon|empate|draw|green|yellow)(?: |$)", texto):
+        return "T"
+    return ""
+
+
+def reconciliar_trilhas_roadmap(historico_confirmado, trilhas, minimo_resultados):
+    minimo = max(4, int(minimo_resultados or 0))
+    historico = [m for m in (historico_confirmado or []) if m in {"P", "B", "T"}]
+    if len(historico) < minimo:
+        return {
+            "confirmada": False,
+            "motivo": "HISTORICO_LOCAL_INSUFICIENTE",
+            "amostra": len(historico),
+        }
+
+    cauda = historico[-minimo:]
+    for trilha in trilhas or []:
+        normalizada = [m for m in trilha if m in {"P", "B", "T"}]
+        if len(normalizada) < minimo:
+            continue
+        for orientacao, ordenada in (("DIRETA", normalizada), ("INVERSA", list(reversed(normalizada)))):
+            if ordenada[-minimo:] == cauda:
+                return {
+                    "confirmada": True,
+                    "motivo": "ROADMAP_DOM_CAUSA_COMPATIVEL",
+                    "orientacao": orientacao,
+                    "amostra": minimo,
+                }
+
+    return {
+        "confirmada": False,
+        "motivo": "ROADMAP_DOM_SEM_CAUSA_COMPATIVEL",
+        "amostra": minimo,
+    }
+
+
+def extrair_trilhas_roadmap_dom(page):
+    """Extrai somente marcadores P/B/T de contêineres semânticos da roadmap."""
+    diagnostico = {"frames": 0, "raizes": 0, "trilhas": 0}
+    trilhas = []
+    script = """() => {
+        const seletorRaizes = [
+            '[data-roadmap]', '[data-history]', '[data-results]',
+            '[class*="road" i]', '[class*="bead" i]', '[class*="history" i]', '[class*="result" i]'
+        ].join(',');
+        const seletorItens = '[data-result],[data-outcome],[data-winner],[data-role],[aria-label],[title],[class]';
+        const bruto = Array.from(document.querySelectorAll(seletorRaizes));
+        const raizes = bruto.filter(raiz => !bruto.some(outra => outra !== raiz && outra.contains(raiz)));
+        const marcador = (elemento) => {
+            const partes = [
+                elemento.getAttribute('data-result'), elemento.getAttribute('data-outcome'),
+                elemento.getAttribute('data-winner'), elemento.getAttribute('data-role'),
+                elemento.getAttribute('aria-label'), elemento.getAttribute('title'), elemento.getAttribute('class')
+            ].filter(Boolean).join(' ').toLowerCase();
+            if (/(^|[^a-z])(playerwon|player|jogador|blue)(?=$|[^a-z])/.test(partes)) return 'P';
+            if (/(^|[^a-z])(bankerwon|banker|banca|red)(?=$|[^a-z])/.test(partes)) return 'B';
+            if (/(^|[^a-z])(tie|tiewon|empate|draw|green|yellow)(?=$|[^a-z])/.test(partes)) return 'T';
+            return '';
+        };
+        const trilhas = [];
+        for (const raiz of raizes) {
+            const candidatos = Array.from(raiz.querySelectorAll(seletorItens))
+                .map(elemento => ({ elemento, marcador: marcador(elemento) }))
+                .filter(item => item.marcador);
+            const folhas = candidatos.filter(item => !candidatos.some(outra => (
+                outra.elemento !== item.elemento
+                && item.elemento.contains(outra.elemento)
+                && outra.marcador === item.marcador
+            )));
+            const sequencia = folhas.map(item => item.marcador);
+            if (sequencia.length >= 4) trilhas.push(sequencia);
+        }
+        return { raizes: raizes.length, trilhas };
+    }"""
+
+    for frame in getattr(page, "frames", []):
+        try:
+            resposta = frame.evaluate(script)
+            diagnostico["frames"] += 1
+            diagnostico["raizes"] += max(0, int(resposta.get("raizes") or 0))
+            for trilha in resposta.get("trilhas") or []:
+                if isinstance(trilha, list):
+                    trilhas.append([str(m) for m in trilha])
+        except Exception:
+            continue
+
+    diagnostico["trilhas"] = len(trilhas)
+    return {"trilhas": trilhas, "diagnostico": diagnostico}
+
+
+def reconciliar_reconexao_por_roadmap(page, dados):
+    game_info = dados.get("args", {}).get("game", {}) if isinstance(dados, dict) else {}
+    stage = str(game_info.get("stage") or "").strip()
+    if not stage:
+        return {"confirmada": False, "motivo": "PLAYER_STATE_SEM_STAGE", "diagnostico": {}}
+
+    extraido = extrair_trilhas_roadmap_dom(page)
+    resultado = reconciliar_trilhas_roadmap(
+        snapshot_resultados_confirmados(),
+        extraido["trilhas"],
+        ROADMAP_RECONCILIATION_MIN_RESULTS,
+    )
+    resultado["diagnostico"] = extraido["diagnostico"]
+    return resultado
 
 
 def resultado_resolvido_duplicado(game_info, agora=None):
@@ -686,70 +898,450 @@ def atualizar_estado_mesa_player(dados):
     return motivo_interrupcao
 
 
+def snapshot_estado_mesa():
+    with estado_mesa_lock:
+        return {
+            "round_id": str(estado_mesa.get("round_id") or ""),
+            "round_resolvido": bool(estado_mesa.get("round_resolvido")),
+            "stage": str(estado_mesa.get("stage") or ""),
+            "atualizado_em_ms": int(estado_mesa.get("atualizado_em_ms") or 0),
+        }
+
+
+def player_state_reconexao_elegivel(dados):
+    """Exige identidade mínima antes de decidir uma reconexão em quarentena."""
+    game_info = dados.get("args", {}).get("game", {}) if isinstance(dados, dict) else {}
+    stage = str(game_info.get("stage") or "").strip()
+    return bool(stage and identidade_rodada_evolution(game_info))
+
+
+def classificar_reconexao_player_state(estado_anterior, dados, decorrido_segundos, limite_segundos):
+    anterior = estado_anterior if isinstance(estado_anterior, dict) else {}
+    game_info = dados.get("args", {}).get("game", {}) if isinstance(dados, dict) else {}
+    round_anterior = str(anterior.get("round_id") or "").strip()
+    round_atual = identidade_rodada_evolution(game_info)
+    stage_atual = str(game_info.get("stage") or "").strip()
+    decorrido = max(0.0, float(decorrido_segundos or 0.0))
+    limite = max(0.0, float(limite_segundos or 0.0))
+
+    if not stage_atual:
+        return {"segura": False, "motivo": "RECONEXAO_PLAYER_STATE_SEM_STAGE", "tipo": "AMBIGUA"}
+    if not round_anterior or not round_atual:
+        return {"segura": False, "motivo": "RECONEXAO_SEM_ROUND_ID", "tipo": "AMBIGUA"}
+    if decorrido > limite:
+        return {"segura": False, "motivo": "RECONEXAO_FORA_DA_JANELA", "tipo": "AMBIGUA"}
+    if round_atual == round_anterior:
+        return {"segura": True, "motivo": "MESMA_RODADA", "tipo": "MESMA_RODADA"}
+    if bool(anterior.get("round_resolvido")) and stage_atual.lower() != "resolved":
+        return {"segura": True, "motivo": "PROXIMA_RODADA_APOS_RESOLVED", "tipo": "PROXIMA_RODADA"}
+    return {"segura": False, "motivo": "TROCA_RODADA_DURANTE_RECONEXAO", "tipo": "BURACO_ESTRUTURAL"}
+
+
+def stage_evolution_apostavel(stage):
+    """Permite somente fases pré-dados; o instante financeiro é governado por Resolved+8s."""
+    normalizado = re.sub(r"[^a-z]", "", str(stage or "").strip().lower())
+    return normalizado in {"waitingforbets", "closingbets", "acceptingbets", "betting"}
+
+
 def avaliar_contexto_janela_aposta(aposta):
     if not aposta.get("sincronizar_janela"):
-        return {"estado": "ABERTA", "stage": "", "seq_atual": None, "seq_ordem": None}
+        return {
+            "estado": "ABERTA", "stage": "", "seq_atual": None, "seq_ordem": None,
+            "round_id": "", "round_id_aceite": "", "idade_stage_ms": 0
+        }
 
     seq_ordem = max(0, int(aposta.get("coletor_seq_aceite") or 0))
     seq_atual = max(0, int(globals().get("coletor_seq", 0) or 0))
     with estado_mesa_lock:
         stage = str(estado_mesa.get("stage") or "").strip()
+        round_id = str(estado_mesa.get("round_id") or "").strip()
+        atualizado_em_ms = max(0, int(estado_mesa.get("atualizado_em_ms") or 0))
+
+    agora_ms = int(time.time() * 1000)
+    idade_stage_ms = max(0, agora_ms - atualizado_em_ms) if atualizado_em_ms > 0 else None
+    contexto = {
+        "estado": "AGUARDAR_STAGE",
+        "stage": stage,
+        "seq_atual": seq_atual,
+        "seq_ordem": seq_ordem,
+        "round_id": round_id,
+        "round_id_aceite": str(aposta.get("round_id_aceite") or "").strip(),
+        "idade_stage_ms": idade_stage_ms,
+    }
 
     if seq_ordem <= 0:
-        return {"estado": "SEM_CONTEXTO", "stage": stage, "seq_atual": seq_atual, "seq_ordem": seq_ordem}
+        contexto["estado"] = "SEM_CONTEXTO"
+        return contexto
     if seq_atual > seq_ordem:
-        return {"estado": "EXPIRADA", "stage": stage, "seq_atual": seq_atual, "seq_ordem": seq_ordem}
+        contexto["estado"] = "EXPIRADA"
+        return contexto
     if seq_atual < seq_ordem:
-        return {"estado": "INCONSISTENTE", "stage": stage, "seq_atual": seq_atual, "seq_ordem": seq_ordem}
-    if not stage or stage.lower() == "resolved":
-        return {"estado": "AGUARDAR", "stage": stage, "seq_atual": seq_atual, "seq_ordem": seq_ordem}
-    return {"estado": "ABERTA", "stage": stage, "seq_atual": seq_atual, "seq_ordem": seq_ordem}
+        contexto["estado"] = "INCONSISTENTE"
+        return contexto
+    if not stage_evolution_apostavel(stage):
+        return contexto
+
+    limite_frescor_ms = int(max(1.0, float(globals().get("COLLECTOR_PLAYER_STATE_STALE_SECONDS", 20.0))) * 1000)
+    if idade_stage_ms is None or idade_stage_ms > limite_frescor_ms:
+        contexto["estado"] = "AGUARDAR_FRESCOR"
+        return contexto
+
+    contexto["estado"] = "ABERTA"
+    return contexto
+
+
+def primeiro_elemento_apostavel(locator, limite=32):
+    try:
+        quantidade = min(max(0, int(locator.count())), max(1, int(limite)))
+    except Exception:
+        return None
+
+    for indice in range(quantidade):
+        try:
+            elemento = locator.nth(indice)
+            if not elemento.is_visible():
+                continue
+            # trial=True executa actionability sem produzir clique financeiro.
+            elemento.click(trial=True, timeout=250)
+            return elemento
+        except Exception:
+            continue
+    return None
 
 
 def elemento_apostavel(locator):
+    return primeiro_elemento_apostavel(locator) is not None
+
+
+def primeiro_elemento_dom_visivel(locator, limite=32):
+    """Retorna o primeiro elemento DOM visivel sem executar actionability/trial do Playwright."""
     try:
-        if locator.count() <= 0:
-            return False
-        elemento = locator.first
-        if not elemento.is_visible():
-            return False
-        # trial=True executa as verificações de actionability do Playwright sem
-        # efetuar clique financeiro. É o gate DOM antes de qualquer interação real.
-        elemento.click(trial=True, timeout=250)
-        return True
+        quantidade = min(max(0, int(locator.count())), max(1, int(limite)))
     except Exception:
-        return False
+        return None
+    for indice in range(quantidade):
+        try:
+            elemento = locator.nth(indice)
+            if elemento.is_visible():
+                return elemento
+        except Exception:
+            continue
+    return None
+
+
+def localizar_ficha_apostavel(frame, valor_ficha):
+    try:
+        candidatos = frame.locator("[data-role='chip'][data-value]")
+        estados_dom = candidatos.evaluate_all(
+            """elementos => elementos.slice(0, 64).map(el => {
+                const classe = String(el.className || '');
+                const estado = String(el.getAttribute('data-state') || '').toLowerCase();
+                const verdadeiro = valor => String(valor || '').toLowerCase() === 'true';
+                const classeSelecionada = /(^|[-_\\s])(selected|active|checked)($|[-_\\s])/i.test(classe);
+                return {
+                    valor: el.getAttribute('data-value') || '',
+                    selecionada: verdadeiro(el.getAttribute('aria-pressed'))
+                        || verdadeiro(el.getAttribute('aria-selected'))
+                        || verdadeiro(el.getAttribute('data-selected'))
+                        || verdadeiro(el.getAttribute('data-is-selected'))
+                        || verdadeiro(el.getAttribute('data-active'))
+                        || ['selected', 'active', 'checked'].includes(estado)
+                        || classeSelecionada
+                };
+            })"""
+        )
+    except Exception:
+        return None, 0, {"visiveis": 0, "selecionadas": 0, "acionaveis": 0}
+
+    indices_correspondentes = []
+    for indice, estado_dom in enumerate(estados_dom or []):
+        try:
+            valor_bruto = estado_dom.get("valor") if isinstance(estado_dom, dict) else ""
+            valor_numerico = float(str(valor_bruto).strip().replace(" ", "").replace(",", "."))
+        except Exception:
+            continue
+        if abs(valor_numerico - float(valor_ficha)) < 0.001:
+            indices_correspondentes.append(indice)
+
+    estatisticas = {"visiveis": 0, "selecionadas": 0, "acionaveis": 0}
+    for indice in indices_correspondentes:
+        candidato = candidatos.nth(indice)
+        try:
+            if not candidato.is_visible():
+                continue
+            estatisticas["visiveis"] += 1
+            estado_dom = estados_dom[indice] if indice < len(estados_dom) else {}
+            if isinstance(estado_dom, dict) and estado_dom.get("selecionada") is True:
+                estatisticas["selecionadas"] += 1
+                return {
+                    "elemento": candidato,
+                    "modo": "JA_SELECIONADA",
+                }, len(indices_correspondentes), estatisticas
+            try:
+                candidato.click(trial=True, timeout=250)
+                estatisticas["acionaveis"] += 1
+                modo = "CLICAR"
+            except Exception:
+                # Selecionar uma ficha não cria exposição financeira. Se o elemento
+                # exato está visível, a tentativa real pode aguardar a estabilidade;
+                # os alvos financeiros continuam pré-validados e o stage é revisto
+                # após esta seleção, antes de qualquer aposta.
+                modo = "CLICAR_AGUARDANDO_ESTABILIDADE"
+            return {
+                "elemento": candidato,
+                "modo": modo,
+            }, len(indices_correspondentes), estatisticas
+        except Exception:
+            continue
+    return None, len(indices_correspondentes), estatisticas
+
+
+def inspecionar_frame_apostavel(frame, planos):
+    fichas_requeridas = sorted({
+        int(ficha)
+        for plano in planos
+        for ficha, _ in plano["cliques_necessarios"]
+    })
+    alvos_requeridos = sorted({
+        str(plano["seletor_alvo"])
+        for plano in planos
+    })
+    elementos_fichas = {}
+    elementos_alvos = {}
+    fichas_encontradas = 0
+    fichas_visiveis = 0
+    fichas_selecionadas = 0
+    fichas_acionaveis = 0
+    alvos_encontrados = 0
+
+    for ficha in fichas_requeridas:
+        elemento, quantidade, estatisticas = localizar_ficha_apostavel(frame, ficha)
+        if quantidade > 0:
+            fichas_encontradas += 1
+        if estatisticas.get("visiveis", 0) > 0:
+            fichas_visiveis += 1
+        if estatisticas.get("selecionadas", 0) > 0:
+            fichas_selecionadas += 1
+        if estatisticas.get("acionaveis", 0) > 0:
+            fichas_acionaveis += 1
+        if elemento is not None:
+            elementos_fichas[ficha] = elemento
+
+    for alvo in alvos_requeridos:
+        locator = frame.locator(f"[data-role='{alvo}']")
+        try:
+            quantidade = max(0, int(locator.count()))
+        except Exception:
+            quantidade = 0
+        if quantidade > 0:
+            alvos_encontrados += 1
+        # BUG-047: nao usa click(trial=True) no fast path. Presenca + visibilidade
+        # bastam para localizar o alvo; o clique financeiro real usa force=True.
+        elemento = primeiro_elemento_dom_visivel(locator)
+        if elemento is not None:
+            elementos_alvos[alvo] = elemento
+
+    diagnostico = {
+        "fichas_necessarias": len(fichas_requeridas),
+        "fichas_encontradas": fichas_encontradas,
+        "fichas_visiveis": fichas_visiveis,
+        "fichas_selecionadas": fichas_selecionadas,
+        "fichas_acionaveis": fichas_acionaveis,
+        "fichas_prontas": len(elementos_fichas),
+        "alvos_necessarios": len(alvos_requeridos),
+        "alvos_encontrados": alvos_encontrados,
+        "alvos_acionaveis": len(elementos_alvos),
+    }
+    completo = (
+        len(elementos_fichas) == len(fichas_requeridas)
+        and len(elementos_alvos) == len(alvos_requeridos)
+    )
+    return {
+        "completo": completo,
+        "frame": frame,
+        "fichas": elementos_fichas,
+        "alvos": elementos_alvos,
+        "diagnostico": diagnostico,
+    }
+
+
+def localizar_contexto_apostavel(page, planos):
+    try:
+        frames = list(page.frames)
+    except Exception:
+        frames = []
+
+    melhor = {
+        "frames": len(frames),
+        "fichas_necessarias": len({f for p in planos for f, _ in p["cliques_necessarios"]}),
+        "fichas_encontradas": 0,
+        "fichas_visiveis": 0,
+        "fichas_selecionadas": 0,
+        "fichas_acionaveis": 0,
+        "fichas_prontas": 0,
+        "alvos_necessarios": len({p["seletor_alvo"] for p in planos}),
+        "alvos_encontrados": 0,
+        "alvos_acionaveis": 0,
+    }
+    melhor_pontuacao = (-1, -1)
+
+    # A identidade da mesa é provada pelos data-role de todas as fichas/alvos,
+    # não por palavras frágeis na URL do iframe.
+    for frame in frames:
+        try:
+            inspecao = inspecionar_frame_apostavel(frame, planos)
+        except Exception:
+            continue
+        diagnostico = inspecao["diagnostico"]
+        pontuacao = (
+            diagnostico["fichas_prontas"] + diagnostico["alvos_acionaveis"],
+            diagnostico["fichas_encontradas"] + diagnostico["alvos_encontrados"],
+        )
+        if pontuacao > melhor_pontuacao:
+            melhor_pontuacao = pontuacao
+            melhor.update(diagnostico)
+        if inspecao["completo"]:
+            diagnostico_completo = {"frames": len(frames), **diagnostico}
+            inspecao["diagnostico"] = diagnostico_completo
+            return inspecao, diagnostico_completo
+
+    return None, melhor
 
 
 def localizar_frame_apostavel(page, planos):
-    seletores_fichas = []
-    seletores_alvos = []
-    for plano in planos:
-        seletores_fichas.extend(
-            f"div[data-role='chip'][data-value='{ficha}']" for ficha, _ in plano["cliques_necessarios"]
-        )
-        seletores_alvos.append(f"[data-role='{plano['seletor_alvo']}']")
+    contexto_dom, _ = localizar_contexto_apostavel(page, planos)
+    return contexto_dom["frame"] if contexto_dom is not None else None
 
-    for frame in page.frames:
-        url = str(frame.url or "").lower()
-        if not ("evolution" in url or "evocdn" in url or "game" in url):
+
+def clicar_superficie_ficha_playwright(page, elemento):
+    """Seleciona a ficha imediatamente no fast path, ignorando actionability do Playwright."""
+    try:
+        elemento.click(force=True, timeout=2000)
+        page.wait_for_timeout(150)
+        return {"acionada": True, "relacao": "CLIQUE_PLAYWRIGHT_FORCE", "via": "PLAYWRIGHT_CLICK"}
+    except Exception as erro:
+        return {
+            "acionada": False,
+            "relacao": type(erro).__name__,
+            "motivo": f"falha no clique forcado da ficha ({type(erro).__name__})",
+        }
+
+
+def selecionar_ficha_com_confirmacao(page, ficha_contexto, valor_ficha):
+    elemento = ficha_contexto.get("elemento") if isinstance(ficha_contexto, dict) else None
+    if elemento is None:
+        return {"confirmada": False, "motivo": "elemento da ficha ausente"}
+    if ficha_contexto.get("modo") == "JA_SELECIONADA":
+        return {"confirmada": True, "via": "JA_SELECIONADA"}
+
+    superficie = clicar_superficie_ficha_playwright(page, elemento)
+    if not isinstance(superficie, dict) or superficie.get("acionada") is not True:
+        relacao = superficie.get("relacao", "n/a") if isinstance(superficie, dict) else "n/a"
+        motivo = superficie.get("motivo", "superfície não acionada") if isinstance(superficie, dict) else "superfície não acionada"
+        return {
+            "confirmada": False,
+            "motivo": f"superfície da ficha não autorizada ({relacao}): {motivo}",
+        }
+
+    # Selecionar a ficha não cria exposição financeira. Não há sleep artificial
+    # aqui: o caminho crítico deve chegar ao alvo enquanto AcceptingBets ainda está
+    # vigente; stage/seq continuam revalidados imediatamente antes do clique financeiro.
+    return {
+        "confirmada": True,
+        "via": f"SUPERFICIE_PLAYWRIGHT_{superficie.get('relacao', 'DOM')}",
+    }
+
+
+def preselecionar_ficha_unica_antes_da_janela(page, planos):
+    """Tenta preparar uma única denominação antes da janela; nunca clica alvo financeiro."""
+    fichas = sorted({
+        int(ficha)
+        for plano in (planos or [])
+        for ficha, _ in plano.get("cliques_necessarios", [])
+    })
+    if len(fichas) != 1:
+        return {"confirmada": False, "ficha": None, "motivo": "PLANO_MULTIFICHAS"}
+
+    ficha = fichas[0]
+    for frame in list(getattr(page, "frames", []) or []):
+        ficha_contexto, _, _ = localizar_ficha_apostavel(frame, ficha)
+        if ficha_contexto is None:
             continue
-        if not all(elemento_apostavel(frame.locator(seletor)) for seletor in set(seletores_fichas)):
+        if ficha_contexto.get("modo") == "JA_SELECIONADA":
+            return {"confirmada": True, "ficha": ficha, "via": "JA_SELECIONADA"}
+
+        elemento = ficha_contexto.get("elemento")
+        if elemento is None:
             continue
-        if not all(elemento_apostavel(frame.locator(seletor)) for seletor in set(seletores_alvos)):
-            continue
-        return frame
-    return None
+        try:
+            # Preparação não financeira e oportunista. Usa a mesma física central
+            # do caminho principal, sem force=True e sem clicar wrappers.
+            superficie = clicar_superficie_ficha_playwright(page, elemento)
+            if superficie.get("acionada") is True:
+                return {"confirmada": True, "ficha": ficha, "via": "PRESELECAO_CENTRO"}
+        except Exception:
+            pass
+        continue
+
+    return {"confirmada": False, "ficha": ficha, "motivo": "PRESELECAO_INDISPONIVEL"}
+
+
+def formatar_diagnostico_janela(contexto, diagnostico):
+    diag = diagnostico or {}
+    idade = contexto.get("idade_stage_ms")
+    idade_texto = "n/a" if idade is None else str(int(idade))
+    return (
+        f"stage={contexto.get('stage') or 'vazio'}, "
+        f"seq={contexto.get('seq_atual')}/{contexto.get('seq_ordem')}, "
+        f"stage_age_ms={idade_texto}, frames={diag.get('frames', 0)}, "
+        f"fichas_prontas={diag.get('fichas_prontas', 0)}/{diag.get('fichas_necessarias', 0)} "
+        f"(DOM {diag.get('fichas_encontradas', 0)}, visíveis {diag.get('fichas_visiveis', 0)}, "
+        f"selecionadas {diag.get('fichas_selecionadas', 0)}, acionáveis {diag.get('fichas_acionaveis', 0)}), "
+        f"alvos={diag.get('alvos_acionaveis', 0)}/{diag.get('alvos_necessarios', 0)} "
+        f"(DOM {diag.get('alvos_encontrados', 0)})"
+    )
 
 
 def aguardar_janela_aposta(page, aposta, planos):
     sincronizar = aposta.get("sincronizar_janela") is True
-    prazo = time.monotonic() + EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS
+    inicio_espera = time.monotonic()
+    prazo = inicio_espera + EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS
+    resolved_base = float(aposta.get("resolved_monotonic_aceite") or 0.0)
+    alvo_temporal = resolved_base + 8.5 if resolved_base > 0 else 0.0
+    ultimo_contexto = avaliar_contexto_janela_aposta(aposta)
+    ultimo_diagnostico = {}
+    ultima_assinatura = None
+    ultima_assinatura_dom = None
+
+    # Mantém somente a limpeza preventiva que já se provou necessária na mesa real.
+    try:
+        seletor_fechar_modal = (
+            'button[aria-label="Close"], '
+            'button[aria-label="Fechar"], '
+            '[class*="close" i]'
+        )
+        candidatos_fechar = page.locator(seletor_fechar_modal)
+        for indice in range(min(candidatos_fechar.count(), 8)):
+            fechar = candidatos_fechar.nth(indice)
+            if fechar.is_visible():
+                fechar.click(force=True, timeout=1200)
+                page.wait_for_timeout(1000)
+                print("🧹 Interface limpa: modal/overlay preventivo fechado antes da espera financeira.")
+                break
+    except Exception:
+        pass
 
     if sincronizar:
+        if alvo_temporal <= 0:
+            return None, {
+                "status": "FALHOU",
+                "motivo": "Ordem sem relógio monotônico do Resolved de origem; execução bloqueada",
+                "cliques_alvo": 0,
+            }
+        restante_ms = max(0.0, (alvo_temporal - time.monotonic()) * 1000.0)
         print(
-            f"⏳ Ordem {aposta.get('order_id', 'n/a')} aguardando janela apostável "
-            f"da rodada após coletor_seq={aposta.get('coletor_seq_aceite', 0)}..."
+            f"⏱️ Ordem {aposta.get('order_id', 'n/a')} sincronizada pelo Resolved: "
+            f"janela real alvo em +8500ms; faltam {restante_ms:.0f}ms."
         )
 
     while True:
@@ -757,47 +1349,221 @@ def aguardar_janela_aposta(page, aposta, planos):
             return None, {
                 "status": "FALHOU",
                 "motivo": "Executor ficou indisponível enquanto aguardava a janela de apostas",
-                "cliques_alvo": 0
+                "cliques_alvo": 0,
             }
 
         contexto = avaliar_contexto_janela_aposta(aposta)
+        ultimo_contexto = contexto
+        assinatura = (contexto["estado"], contexto["stage"], contexto["seq_atual"])
+        if sincronizar and assinatura != ultima_assinatura:
+            print(
+                f"🧭 Ordem {aposta.get('order_id', 'n/a')}: estado={contexto['estado']}, "
+                f"stage={contexto['stage'] or 'vazio'}, seq={contexto['seq_atual']}/{contexto['seq_ordem']}."
+            )
+            ultima_assinatura = assinatura
+
         if contexto["estado"] == "SEM_CONTEXTO":
-            return None, {
-                "status": "FALHOU",
-                "motivo": "Ordem sem contexto de rodada do coletor; execução bloqueada",
-                "cliques_alvo": 0
-            }
+            return None, {"status": "FALHOU", "motivo": "Ordem sem contexto de rodada do coletor; execução bloqueada", "cliques_alvo": 0}
         if contexto["estado"] == "INCONSISTENTE":
-            return None, {
-                "status": "FALHOU",
-                "motivo": "Contexto de rodada inconsistente; execução bloqueada",
-                "cliques_alvo": 0
-            }
+            return None, {"status": "FALHOU", "motivo": "Contexto de rodada inconsistente; execução bloqueada", "cliques_alvo": 0}
         if contexto["estado"] == "EXPIRADA":
-            return None, {
-                "status": "EXPIRADA",
-                "motivo": "Nova rodada foi resolvida antes da execução; ordem descartada sem cliques",
-                "cliques_alvo": 0
-            }
+            return None, {"status": "EXPIRADA", "motivo": "Nova rodada foi resolvida antes da execução; ordem descartada sem cliques", "cliques_alvo": 0}
 
+        agora = time.monotonic()
+        if alvo_temporal > 0 and agora < alvo_temporal:
+            page.wait_for_timeout(min(50, max(1, int((alvo_temporal - agora) * 1000))))
+            continue
+
+        # BUG-047: +8s e fase pre-dados sao a autorizacao temporal. Faz uma unica
+        # leitura do DOM sem esperar actionability/trial dos alvos. Se os elementos
+        # ainda nem existem/nao estao visiveis, falha fechado em vez de chegar atrasado.
         if contexto["estado"] == "ABERTA":
-            frame_jogo = localizar_frame_apostavel(page, planos)
-            if frame_jogo is not None:
-                return frame_jogo, None
+            contexto_dom, ultimo_diagnostico = localizar_contexto_apostavel(page, planos)
+            decorrido_resolved_ms = (time.monotonic() - resolved_base) * 1000.0 if resolved_base > 0 else 0.0
+            if contexto_dom is None:
+                diagnostico_texto = formatar_diagnostico_janela(contexto, ultimo_diagnostico)
+                return None, {
+                    "status": "FALHOU",
+                    "motivo": (
+                        f"+8.5s atingido sem todos os elementos DOM visiveis; fast path nao aguardou actionability; "
+                        f"{diagnostico_texto}"
+                    ),
+                    "cliques_alvo": 0,
+                }
+            if sincronizar:
+                print(
+                    f"⚡ Ordem {aposta.get('order_id', 'n/a')}: fast path liberado em "
+                    f"{decorrido_resolved_ms:.0f}ms após Resolved; stage={contexto['stage'] or 'vazio'}; "
+                    "DOM presente; ficha em fast path com force=True e alvos financeiros com hit-test seguro."
+                )
+            return contexto_dom, None
 
+        # FirstDie/SecondDie/.../Confirmation/Resolved nunca passam por estado ABERTA.
         if time.monotonic() >= prazo:
+            diagnostico_texto = formatar_diagnostico_janela(ultimo_contexto, ultimo_diagnostico)
             return None, {
                 "status": "EXPIRADA",
-                "motivo": f"Janela de apostas não ficou acionável em {EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS:g}s",
-                "cliques_alvo": 0
+                "motivo": f"Fusível operacional atingido sem janela segura; {diagnostico_texto}",
+                "cliques_alvo": 0,
             }
 
-        page.wait_for_timeout(100)
+        page.wait_for_timeout(25)
+
+
+def resolver_ponto_seguro_alvo(elemento):
+    """Encontra um ponto interno cujo hit-test pertence ao alvo financeiro real."""
+    try:
+        return elemento.evaluate(
+            """el => {
+                const r = el.getBoundingClientRect();
+                if (!r || r.width <= 2 || r.height <= 2) {
+                    return {ok:false, motivo:'BOUNDING_BOX_INVALIDO'};
+                }
+                const pontos = [
+                    [0.50,0.50], [0.50,0.35], [0.50,0.65],
+                    [0.35,0.50], [0.65,0.50],
+                    [0.30,0.30], [0.70,0.30], [0.30,0.70], [0.70,0.70],
+                    [0.50,0.22], [0.50,0.78], [0.22,0.50], [0.78,0.50]
+                ];
+                const resumo = hit => ({
+                    tag: hit ? String(hit.tagName || '') : '',
+                    role: hit ? String(hit.getAttribute('data-role') || '') : '',
+                    cls: hit ? String(hit.className || '').slice(0,120) : ''
+                });
+                for (const [fx, fy] of pontos) {
+                    const vx = r.left + (r.width * fx);
+                    const vy = r.top + (r.height * fy);
+                    const hit = document.elementFromPoint(vx, vy);
+                    if (hit && (hit === el || el.contains(hit))) {
+                        return {
+                            ok:true,
+                            x:r.width * fx,
+                            y:r.height * fy,
+                            fx, fy,
+                            alvo_role:String(el.getAttribute('data-role') || ''),
+                            hit:resumo(hit)
+                        };
+                    }
+                }
+                const centro = document.elementFromPoint(r.left + r.width/2, r.top + r.height/2);
+                return {
+                    ok:false,
+                    motivo:'ALVO_COBERTO_NO_HIT_TEST',
+                    alvo_role:String(el.getAttribute('data-role') || ''),
+                    hit_centro:resumo(centro)
+                };
+            }"""
+        )
+    except Exception as erro:
+        return {"ok": False, "motivo": f"HIT_TEST_{type(erro).__name__}"}
+
+
+def clicar_alvo_financeiro_playwright(page, elemento):
+    """Clica somente em ponto comprovadamente pertencente ao alvo financeiro."""
+    ponto = resolver_ponto_seguro_alvo(elemento)
+    if not isinstance(ponto, dict) or ponto.get("ok") is not True:
+        return {
+            "acionada": False,
+            "relacao": "PONTO_SEGURO_INDISPONIVEL",
+            "motivo": str((ponto or {}).get("motivo") or "hit-test nao confirmou o alvo"),
+            "diagnostico": ponto if isinstance(ponto, dict) else {},
+        }
+    try:
+        # Sem force=True: o ponto ja foi validado por elementFromPoint como pertencente
+        # ao alvo. Assim Playwright nao pode transformar um Tie em segundo Player/Banker.
+        elemento.click(
+            position={"x": float(ponto["x"]), "y": float(ponto["y"])},
+            timeout=1200
+        )
+        page.wait_for_timeout(120)
+        return {
+            "acionada": True,
+            "relacao": "CLIQUE_PLAYWRIGHT_ALVO_SEGURO",
+            "diagnostico": ponto,
+        }
+    except Exception as erro:
+        return {
+            "acionada": False,
+            "relacao": type(erro).__name__,
+            "motivo": f"ponto seguro confirmado, mas clique falhou ({type(erro).__name__})",
+            "diagnostico": ponto,
+        }
+
+
+def confirmar_aceite_financeiro_aposta(page, saldo_antes, exposicao_esperada):
+    """Confirma o aceite pela redução observável do saldo disponível da conta."""
+    try:
+        saldo_inicial = round(float(saldo_antes), 2)
+        exposicao = round(float(exposicao_esperada), 2)
+    except (TypeError, ValueError):
+        return {
+            "confirmada": False,
+            "metodo": "SALDO_INDISPONIVEL",
+            "motivo": "Saldo anterior ou exposição inválidos",
+        }
+
+    if saldo_inicial < 0 or exposicao <= 0:
+        return {
+            "confirmada": False,
+            "metodo": "SALDO_INDISPONIVEL",
+            "motivo": "Saldo anterior ou exposição fora do contrato financeiro",
+        }
+
+    tolerancia = max(0.01, float(EXECUTOR_BET_ACCEPTANCE_TOLERANCE))
+
+    # BUG-046: depois do clique financeiro simples, a Evolution pode levar mais de 2 s para
+    # refletir no HTML o débito já processado pelo servidor. Não lê o saldo antes
+    # dessa janela mínima para evitar classificar atualização visual tardia como
+    # "clique fantasma".
+    page.wait_for_timeout(2500)
+    prazo = time.monotonic() + float(EXECUTOR_BET_ACCEPTANCE_TIMEOUT_SECONDS)
+    ultimo_saldo = None
+    ultimo_debito = None
+
+    while time.monotonic() <= prazo:
+        saldo_atual = ler_saldo_atual(page)
+        if saldo_atual is not None:
+            ultimo_saldo = round(float(saldo_atual), 2)
+            ultimo_debito = round(saldo_inicial - ultimo_saldo, 2)
+            if abs(ultimo_debito - exposicao) <= tolerancia:
+                return {
+                    "confirmada": True,
+                    "metodo": "SALDO_DEBITADO",
+                    "saldo_antes": saldo_inicial,
+                    "saldo_depois": ultimo_saldo,
+                    "exposicao_esperada": exposicao,
+                    "debito_observado": ultimo_debito,
+                    "confirmada_em": int(time.time() * 1000),
+                }
+        page.wait_for_timeout(150)
+
+    if ultimo_saldo is None:
+        motivo = "Saldo deixou de ser legível após os cliques financeiros"
+    elif abs(float(ultimo_debito or 0.0)) <= tolerancia:
+        motivo = "Saldo não sofreu débito adicional para esta perna; a Evolution não comprovou este aceite"
+    else:
+        motivo = (
+            f"Variação de saldo R$ {float(ultimo_debito or 0.0):.2f} divergiu da "
+            f"exposição esperada R$ {exposicao:.2f}"
+        )
+
+    return {
+        "confirmada": False,
+        "metodo": "SALDO_NAO_CONFIRMADO",
+        "saldo_antes": saldo_inicial,
+        "saldo_depois": ultimo_saldo,
+        "exposicao_esperada": exposicao,
+        "debito_observado": ultimo_debito,
+        "confirmada_em": None,
+        "motivo": motivo,
+    }
 
 
 def executar_aposta_na_tela(page, aposta):
     """Pré-valida todas as pernas e só então executa a ordem lógica composta."""
     cliques_alvo = 0
+    ficha_corrente = None
+    confirmacoes_financeiras = []
     try:
         mapa_alvos = {
             "PlayerWon": "bacbo-bet-spot-Player",
@@ -834,25 +1600,302 @@ def executar_aposta_na_tela(page, aposta):
                 "cliques_necessarios": cliques_necessarios
             })
 
-        # BUG-019: principal e proteção Tie precisam estar acionáveis antes do primeiro clique real.
-        frame_jogo, bloqueio = aguardar_janela_aposta(page, aposta, planos)
+        # BUG-038/040: a leitura do saldo continua fora do caminho crítico, mas a
+        # ficha não é mais pré-selecionada antes da abertura. A Evolution anima as
+        # fichas no início de AcceptingBets; toda seleção de ficha ocorre somente
+        # depois do delay de estabilização de 1500 ms da janela ABERTA.
+        saldo_antes = ler_saldo_atual(page)
+        if saldo_antes is None:
+            return {
+                "status": "FALHOU",
+                "motivo": (
+                    "Saldo real não pôde ser lido antes da aposta; nenhum clique financeiro foi autorizado"
+                ),
+                "cliques_alvo": 0,
+                "confirmacao": {
+                    "confirmada": False,
+                    "metodo": "SALDO_INDISPONIVEL",
+                },
+            }
+
+        # BUG-019/040: principal e proteção Tie precisam estar acionáveis antes do
+        # primeiro clique financeiro. A ficha será selecionada somente depois que
+        # AcceptingBets permanecer ABERTA durante o delay de animação.
+        contexto_dom, bloqueio = aguardar_janela_aposta(page, aposta, planos)
         if bloqueio is not None:
             print(f"⚠️ Ordem não executada: {bloqueio['motivo']}")
             return bloqueio
 
-        for plano in planos:
-            alvo_elemento = frame_jogo.locator(f"[data-role='{plano['seletor_alvo']}']").first
-            for ficha, qtd in plano["cliques_necessarios"]:
-                seletor_ficha = f"div[data-role='chip'][data-value='{ficha}']"
-                try:
-                    ficha_elemento = frame_jogo.locator(seletor_ficha).first
-                    ficha_elemento.click(timeout=2000)
-                    page.wait_for_timeout(150)
+        frame_jogo = contexto_dom["frame"]
+        saldo_referencia = round(float(saldo_antes), 2)
+
+        # BUG-049: a principal que funcionou em mesa real saiu em ~8.5s. Em plano
+        # composto, executa as duas pernas na mesma janela, mas nao cola os cliques:
+        # cada perna relocaliza/revalida o DOM e a ficha, com uma pausa curta entre
+        # elas. A confirmacao de saldo continua somente depois de todas as pernas.
+        if len(planos) > 1:
+            total_composto = float(sum(p["valor"] for p in planos))
+            tentativas_compostas = []
+            ficha_corrente = None
+
+            for indice_plano, plano in enumerate(planos):
+                if aposta.get("sincronizar_janela") is True:
+                    contexto_atual = avaliar_contexto_janela_aposta(aposta)
+                    if contexto_atual["estado"] != "ABERTA":
+                        return {
+                            "status": "AMBIGUA" if cliques_alvo > 0 else "EXPIRADA",
+                            "motivo": (
+                                "Janela estrutural fechou durante o plano composto; "
+                                f"stage={contexto_atual['stage'] or 'vazio'}, "
+                                f"seq={contexto_atual['seq_atual']}/{contexto_atual['seq_ordem']}"
+                            ),
+                            "cliques_alvo": cliques_alvo,
+                        }
+
+                alvo_elemento = primeiro_elemento_dom_visivel(
+                    frame_jogo.locator(f"[data-role='{plano['seletor_alvo']}']")
+                )
+                if alvo_elemento is None:
+                    return {
+                        "status": "AMBIGUA" if cliques_alvo > 0 else "FALHOU",
+                        "motivo": f"Alvo {plano['alvo']} ausente/oculto durante o plano composto",
+                        "cliques_alvo": cliques_alvo,
+                    }
+
+                for ficha, qtd in plano["cliques_necessarios"]:
+                    ficha_contexto, _, _ = localizar_ficha_apostavel(frame_jogo, ficha)
+                    if ficha_contexto is None:
+                        return {
+                            "status": "AMBIGUA" if cliques_alvo > 0 else "FALHOU",
+                            "motivo": f"Ficha R$ {ficha} ausente/oculta durante o plano composto",
+                            "cliques_alvo": cliques_alvo,
+                        }
+
+                    # A mesma denominacao continua selecionada entre Player/Banker e Tie.
+                    # Nao reclica a ficha R$5 entre pernas iguais: o reclick era ruido
+                    # desnecessario no intervalo financeiro composto.
+                    precisa_selecionar = ficha_corrente != int(ficha)
+                    if precisa_selecionar:
+                        selecao = selecionar_ficha_com_confirmacao(page, ficha_contexto, ficha)
+                        if selecao.get("confirmada") is not True:
+                            return {
+                                "status": "AMBIGUA" if cliques_alvo > 0 else "FALHOU",
+                                "motivo": f"Ficha R$ {ficha} nao confirmou selecao antes de {plano['alvo']}: {selecao.get('motivo', 'motivo desconhecido')}",
+                                "cliques_alvo": cliques_alvo,
+                            }
+                        print(
+                            f"✅ Ficha R$ {ficha} preparada para {plano['alvo']} "
+                            f"({selecao.get('via', 'n/a')})."
+                        )
+                    ficha_corrente = int(ficha)
 
                     for _ in range(int(qtd)):
-                        alvo_elemento.click(timeout=2000)
+                        if aposta.get("sincronizar_janela") is True:
+                            contexto_atual = avaliar_contexto_janela_aposta(aposta)
+                            if contexto_atual["estado"] != "ABERTA":
+                                return {
+                                    "status": "AMBIGUA" if cliques_alvo > 0 else "EXPIRADA",
+                                    "motivo": (
+                                        "Janela estrutural fechou antes de concluir o plano composto; "
+                                        f"stage={contexto_atual['stage'] or 'vazio'}"
+                                    ),
+                                    "cliques_alvo": cliques_alvo,
+                                }
+
+                        alvo_real = clicar_alvo_financeiro_playwright(page, alvo_elemento)
+                        if alvo_real.get("acionada") is not True:
+                            return {
+                                "status": "AMBIGUA" if cliques_alvo > 0 else "FALHOU",
+                                "motivo": (
+                                    f"Falha no clique composto em {plano['alvo']}: "
+                                    f"{alvo_real.get('motivo', alvo_real.get('relacao', 'motivo desconhecido'))}"
+                                ),
+                                "cliques_alvo": cliques_alvo,
+                            }
                         cliques_alvo += 1
-                        page.wait_for_timeout(120)
+                        tentativas_compostas.append({
+                            "alvo": plano["alvo"],
+                            "ficha": int(ficha),
+                            "superficie": alvo_real.get("relacao"),
+                        })
+                        diag_alvo = alvo_real.get("diagnostico") if isinstance(alvo_real, dict) else {}
+                        hit_alvo = diag_alvo.get("hit", {}) if isinstance(diag_alvo, dict) else {}
+                        print(
+                            f"⚡ COMPOSTO: clique {cliques_alvo} enviado para "
+                            f"R$ {int(ficha)} {plano['alvo']} via {alvo_real.get('relacao', 'n/a')}; "
+                            f"role={diag_alvo.get('alvo_role', 'n/a')}, hit_role={hit_alvo.get('role', '') or 'descendente'}."
+                        )
+
+                if indice_plano < len(planos) - 1:
+                    page.wait_for_timeout(250)
+
+            confirmacao_composta = confirmar_aceite_financeiro_aposta(
+                page, saldo_antes, total_composto
+            )
+            debito_observado = float(confirmacao_composta.get("debito_observado") or 0.0)
+            if confirmacao_composta.get("confirmada") is not True:
+                tolerancia = max(0.01, float(EXECUTOR_BET_ACCEPTANCE_TOLERANCE))
+                if debito_observado > tolerancia and debito_observado < total_composto - tolerancia:
+                    motivo = (
+                        f"Debito parcial no plano composto: R$ {debito_observado:.2f} de "
+                        f"R$ {total_composto:.2f}; uma ou mais pernas nao foram aceitas"
+                    )
+                elif abs(debito_observado) <= tolerancia:
+                    motivo = f"Nenhum debito confirmado no plano composto; esperado R$ {total_composto:.2f}"
+                else:
+                    motivo = str(confirmacao_composta.get("motivo") or "Debito composto nao confirmado")
+                print(f"🚨 {motivo}.")
+                return {
+                    "status": "AMBIGUA",
+                    "motivo": motivo,
+                    "cliques_alvo": cliques_alvo,
+                    "confirmacao": {
+                        **confirmacao_composta,
+                        "confirmada": False,
+                        "metodo": "SALDO_COMPOSTO_NAO_CONFIRMADO",
+                        "pernas_tentadas": tentativas_compostas,
+                    },
+                }
+
+            print(
+                f"✅ PLANO COMPOSTO ACEITO: debito agregado R$ {total_composto:.2f} confirmado; "
+                f"saldo R$ {confirmacao_composta['saldo_antes']:.2f} -> "
+                f"R$ {confirmacao_composta['saldo_depois']:.2f}."
+            )
+            confirmacao_composta["pernas_tentadas"] = tentativas_compostas
+            return {
+                "status": "EXECUTADA",
+                "motivo": "Plano composto confirmado por debito agregado do saldo disponivel",
+                "cliques_alvo": cliques_alvo,
+                "confirmacao": confirmacao_composta,
+            }
+
+        for plano in planos:
+            alvo_elemento = contexto_dom["alvos"].get(plano["seletor_alvo"])
+            if alvo_elemento is None:
+                alvo_elemento = primeiro_elemento_dom_visivel(
+                    frame_jogo.locator(f"[data-role='{plano['seletor_alvo']}']")
+                )
+            if alvo_elemento is None:
+                status = "AMBIGUA" if cliques_alvo > 0 else "FALHOU"
+                return {
+                    "status": status,
+                    "motivo": f"Alvo {plano['alvo']} deixou de estar presente/visivel antes do clique",
+                    "cliques_alvo": cliques_alvo
+                }
+
+            for ficha, qtd in plano["cliques_necessarios"]:
+                try:
+                    if aposta.get("sincronizar_janela") is True:
+                        contexto_atual = avaliar_contexto_janela_aposta(aposta)
+                        if contexto_atual["estado"] != "ABERTA":
+                            status = "AMBIGUA" if cliques_alvo > 0 else "EXPIRADA"
+                            return {
+                                "status": status,
+                                "motivo": (
+                                    "Janela estrutural deixou de estar apostável antes da conclusão; "
+                                    f"stage={contexto_atual['stage'] or 'vazio'}, "
+                                    f"seq={contexto_atual['seq_atual']}/{contexto_atual['seq_ordem']}"
+                                ),
+                                "cliques_alvo": cliques_alvo
+                            }
+
+                    ficha_contexto = contexto_dom["fichas"].get(int(ficha))
+                    if ficha_contexto is None:
+                        ficha_contexto, _, _ = localizar_ficha_apostavel(frame_jogo, ficha)
+                    if ficha_contexto is None:
+                        status = "AMBIGUA" if cliques_alvo > 0 else "FALHOU"
+                        return {
+                            "status": status,
+                            "motivo": f"Ficha R$ {ficha} deixou de estar acionável antes do clique",
+                            "cliques_alvo": cliques_alvo
+                        }
+                    precisa_selecionar = (
+                        ficha_contexto.get("modo") != "JA_SELECIONADA"
+                        and ficha_corrente != int(ficha)
+                    )
+                    if precisa_selecionar:
+                        selecao = selecionar_ficha_com_confirmacao(page, ficha_contexto, ficha)
+                        if selecao.get("confirmada") is not True:
+                            status = "AMBIGUA" if cliques_alvo > 0 else "FALHOU"
+                            return {
+                                "status": status,
+                                "motivo": f"Ficha R$ {ficha} não confirmou seleção: {selecao.get('motivo', 'motivo desconhecido')}",
+                                "cliques_alvo": cliques_alvo,
+                            }
+                        if str(selecao.get("via") or "").startswith("SUPERFICIE_"):
+                            print(
+                                f"✅ Ficha R$ {ficha} acionada pela superfície real do Playwright "
+                                f"({selecao.get('via')}) antes do clique financeiro."
+                            )
+                        ficha_corrente = int(ficha)
+                    elif ficha_contexto.get("modo") == "JA_SELECIONADA":
+                        ficha_corrente = int(ficha)
+
+                    for _ in range(int(qtd)):
+                        if aposta.get("sincronizar_janela") is True:
+                            contexto_atual = avaliar_contexto_janela_aposta(aposta)
+                            if contexto_atual["estado"] != "ABERTA":
+                                status = "AMBIGUA" if cliques_alvo > 0 else "EXPIRADA"
+                                return {
+                                    "status": status,
+                                    "motivo": (
+                                        "Janela estrutural fechou durante o plano composto; "
+                                        f"stage={contexto_atual['stage'] or 'vazio'}, "
+                                        f"seq={contexto_atual['seq_atual']}/{contexto_atual['seq_ordem']}"
+                                    ),
+                                    "cliques_alvo": cliques_alvo
+                                }
+                        inicio_clique = time.monotonic()
+                        alvo_real = clicar_alvo_financeiro_playwright(page, alvo_elemento)
+                        if alvo_real.get("acionada") is not True:
+                            status = "AMBIGUA" if cliques_alvo > 0 else "FALHOU"
+                            return {
+                                "status": status,
+                                "motivo": (
+                                    f"Superfície financeira de {plano['alvo']} não foi autorizada: "
+                                    f"{alvo_real.get('motivo', alvo_real.get('relacao', 'motivo desconhecido'))}"
+                                ),
+                                "cliques_alvo": cliques_alvo,
+                            }
+                        cliques_alvo += 1
+
+                        # BUG-039: cada clique precisa produzir o débito da própria
+                        # ficha antes que qualquer outra perna/clique seja autorizado.
+                        confirmacao_perna = confirmar_aceite_financeiro_aposta(
+                            page, saldo_referencia, float(ficha)
+                        )
+                        confirmacao_perna["alvo"] = plano["alvo"]
+                        confirmacao_perna["ficha"] = int(ficha)
+                        confirmacao_perna["superficie"] = alvo_real.get("relacao")
+                        confirmacoes_financeiras.append(confirmacao_perna)
+                        if confirmacao_perna.get("confirmada") is not True:
+                            motivo = str(confirmacao_perna.get("motivo") or "Aceite financeiro da perna não comprovado")
+                            print(
+                                f"🚨 CLIQUE SEM ACEITE COMPROVADO: R$ {int(ficha)} {plano['alvo']}; "
+                                f"superfície={alvo_real.get('relacao', 'n/a')}; {motivo}."
+                            )
+                            return {
+                                "status": "AMBIGUA",
+                                "motivo": motivo,
+                                "cliques_alvo": cliques_alvo,
+                                "confirmacao": {
+                                    "confirmada": False,
+                                    "metodo": "SALDO_NAO_CONFIRMADO",
+                                    "saldo_antes": saldo_antes,
+                                    "saldo_depois": confirmacao_perna.get("saldo_depois"),
+                                    "exposicao_esperada": sum(p["valor"] for p in planos),
+                                    "pernas": confirmacoes_financeiras,
+                                },
+                            }
+                        saldo_referencia = round(float(confirmacao_perna["saldo_depois"]), 2)
+                        print(
+                            f"✅ PERNA ACEITA: R$ {int(ficha)} {plano['alvo']} via "
+                            f"{alvo_real.get('relacao', 'n/a')}; débito confirmado em "
+                            f"{(time.monotonic() - inicio_clique) * 1000:.0f}ms; "
+                            f"saldo R$ {confirmacao_perna['saldo_antes']:.2f} -> "
+                            f"R$ {confirmacao_perna['saldo_depois']:.2f}."
+                        )
                 except PlaywrightTimeoutError as e:
                     status = "AMBIGUA" if cliques_alvo > 0 else "FALHOU"
                     print(f"⚠️ Timeout durante tentativa DOM da ficha {ficha}: {e}")
@@ -872,11 +1915,44 @@ def executar_aposta_na_tela(page, aposta):
 
         total = sum(p["valor"] for p in planos)
         resumo = " + ".join(f"R$ {p['valor']} {p['alvo']}" for p in planos)
-        print(f"🎯 INTERAÇÃO DOM CONCLUÍDA: {resumo}; exposição total R$ {total}; {cliques_alvo} clique(s) de alvo.")
+        debito_total = round(float(saldo_antes) - float(saldo_referencia), 2)
+        if abs(debito_total - float(total)) > float(EXECUTOR_BET_ACCEPTANCE_TOLERANCE):
+            return {
+                "status": "AMBIGUA",
+                "motivo": (
+                    f"Débito agregado R$ {debito_total:.2f} divergiu da exposição esperada R$ {float(total):.2f}"
+                ),
+                "cliques_alvo": cliques_alvo,
+                "confirmacao": {
+                    "confirmada": False,
+                    "metodo": "SALDO_NAO_CONFIRMADO",
+                    "saldo_antes": round(float(saldo_antes), 2),
+                    "saldo_depois": round(float(saldo_referencia), 2),
+                    "exposicao_esperada": float(total),
+                    "debito_observado": debito_total,
+                    "pernas": confirmacoes_financeiras,
+                },
+            }
+        confirmacao = {
+            "confirmada": True,
+            "metodo": "SALDO_DEBITADO",
+            "saldo_antes": round(float(saldo_antes), 2),
+            "saldo_depois": round(float(saldo_referencia), 2),
+            "exposicao_esperada": float(total),
+            "debito_observado": debito_total,
+            "confirmada_em": int(time.time() * 1000),
+            "pernas": confirmacoes_financeiras,
+        }
+
+        print(
+            f"✅ APOSTA ACEITA PELA EVOLUTION: {resumo}; exposição R$ {total}; "
+            f"saldo R$ {confirmacao['saldo_antes']:.2f} -> R$ {confirmacao['saldo_depois']:.2f}."
+        )
         return {
             "status": "EXECUTADA",
-            "motivo": "Plano DOM composto concluído localmente",
-            "cliques_alvo": cliques_alvo
+            "motivo": "Aceite confirmado por débito do saldo disponível",
+            "cliques_alvo": cliques_alvo,
+            "confirmacao": confirmacao,
         }
     except ValueError as e:
         return {"status": "FALHOU", "motivo": str(e), "cliques_alvo": cliques_alvo}
@@ -989,7 +2065,7 @@ def sincronizar_saldo_com_node(page, estado_saldo):
 
 
 def processar_resultado(dados):
-    global ultimo_tempo_rodada, coletor_seq
+    global ultimo_tempo_rodada, ultimo_resolved_monotonic, coletor_seq
     try:
         game_info = dados.get("args", {}).get("game", {})
         status_atual = game_info.get("stage")
@@ -1018,6 +2094,10 @@ def processar_resultado(dados):
                     10
                 )
                 return
+
+            # BUG-046: este instante é o relógio mestre da próxima janela financeira.
+            # A mesa real libera fichas/alvos aproximadamente 8 s após este Resolved.
+            ultimo_resolved_monotonic = time.monotonic()
 
             # Consome a sequência somente depois da deduplicação da rodada resolvida.
             # Se parsing ou POST falhar depois daqui, o próximo resultado real deixará
@@ -1052,6 +2132,8 @@ def processar_resultado(dados):
                 "rodada_origem": identidade_rodada_evolution(game_info),
                 "interrupcao_fluxo": houve_interrupcao,
                 "motivo_interrupcao": motivo_interrupcao,
+                "interrupcao_id": id_interrupcao_fluxo(interrupcao_pendente) if houve_interrupcao else "",
+                "interrupcao_geracao": interrupcao_pendente["geracao"] if houve_interrupcao else 0,
                 "timestamp_coleta": int(tempo_atual * 1000)
             }
 
@@ -1063,6 +2145,7 @@ def processar_resultado(dados):
                     timeout=2
                 )
                 resposta.raise_for_status()
+                registrar_resultado_confirmado(resultado)
                 if interrupcao_pendente["interrompida"]:
                     confirmar_interrupcao_reportada(interrupcao_pendente["geracao"])
                 executor_pronto.set()
@@ -1120,6 +2203,7 @@ def iniciar_robo_blindado():
             "ws_conectado": False,
             "ws_oficial": None,
             "ultimo_player_state_monotonic": 0.0,
+            "reconexao_pendente": None,
         }
         estado_saldo = {
             "ultima_tentativa": 0.0,
@@ -1140,14 +2224,20 @@ def iniciar_robo_blindado():
                     if status_conexao.get("ws_oficial") is not ws:
                         return
                     executor_pronto.clear()
+                    if status_conexao.get("reconexao_pendente") is not None:
+                        return
                     status_conexao.update({
-                        "ativa": False,
                         "ws_conectado": False,
                         "ws_oficial": None,
+                        "reconexao_pendente": {
+                            "iniciada_monotonic": time.monotonic(),
+                            "estado_anterior": snapshot_estado_mesa(),
+                        },
                     })
-                    if marcar_interrupcao_fluxo("WEBSOCKET_PLAYER_STATE_FECHADO"):
-                        print("🚨 WebSocket oficial da mesa foi fechado; sinais pendentes serão invalidados.")
-                        notificar_interrupcao_node("WEBSOCKET_PLAYER_STATE_FECHADO")
+                    print(
+                        "🔄 WebSocket oficial da mesa foi fechado; novas apostas estão bloqueadas enquanto "
+                        f"a continuidade é verificada por até {WEBSOCKET_RECONNECT_GRACE_SECONDS:g}s."
+                    )
 
                 ws.on("close", websocket_fechado)
 
@@ -1163,22 +2253,68 @@ def iniciar_robo_blindado():
                     ws_oficial = status_conexao.get("ws_oficial")
                     if ws_oficial is not None and ws_oficial is not ws:
                         return
+                    reconexao = status_conexao.get("reconexao_pendente")
+                    classificacao_reconexao = None
+                    if isinstance(reconexao, dict):
+                        # A Evolution pode emitir frames transitórios sem roundId ao
+                        # abrir um novo socket. Eles não provam continuidade nem
+                        # buraco: aguarda o próximo playerState completo até o timeout.
+                        if not player_state_reconexao_elegivel(dados):
+                            reconciliacao = reconciliar_reconexao_por_roadmap(page, dados)
+                            if reconciliacao["confirmada"]:
+                                classificacao_reconexao = {
+                                    "segura": True,
+                                    "motivo": reconciliacao["motivo"],
+                                    "tipo": "ROADMAP_DOM",
+                                }
+                            else:
+                                diagnostico = reconciliacao.get("diagnostico") or {}
+                                registrar_erro_limitado(
+                                    "reconexao_player_state_incompleto",
+                                    "⏳ WebSocket em reconexão: aguardando playerState completo ou roadmap "
+                                    f"compatível ({reconciliacao['motivo']}; frames={diagnostico.get('frames', 0)}, "
+                                    f"raízes={diagnostico.get('raizes', 0)}, trilhas={diagnostico.get('trilhas', 0)}).",
+                                    5,
+                                )
+                                return
+                        if classificacao_reconexao is None:
+                            decorrido = time.monotonic() - float(reconexao.get("iniciada_monotonic") or 0.0)
+                            classificacao_reconexao = classificar_reconexao_player_state(
+                                reconexao.get("estado_anterior"),
+                                dados,
+                                decorrido,
+                                WEBSOCKET_RECONNECT_GRACE_SECONDS,
+                            )
                     status_conexao.update({
                         "ativa": True,
                         "ws_conectado": True,
                         "ws_oficial": ws,
                         "ultimo_player_state_monotonic": time.monotonic(),
+                        "reconexao_pendente": None,
                     })
                     # Atualiza o stage antes de processar Resolved. O POST ao Node pode
                     # gerar uma ordem imediatamente, e ela precisa nascer vinculada a
                     # um estado explicitamente Resolved.
                     motivo_estado = atualizar_estado_mesa_player(dados)
-                    if motivo_estado:
+                    motivo_reconexao = ""
+                    if classificacao_reconexao is not None:
+                        if classificacao_reconexao["segura"]:
+                            print(
+                                "✅ WebSocket restabelecido com continuidade confirmada "
+                                f"({classificacao_reconexao['motivo']}); sessão estatística preservada."
+                            )
+                        else:
+                            motivo_reconexao = classificacao_reconexao["motivo"]
+
+                    motivo_interrupcao = motivo_estado or motivo_reconexao
+                    if motivo_interrupcao:
                         executor_pronto.clear()
-                        if marcar_interrupcao_fluxo(motivo_estado):
-                            print(f"🚨 Continuidade da rodada Evolution inválida ({motivo_estado}).")
-                            notificar_interrupcao_node(motivo_estado)
+                        if marcar_interrupcao_fluxo(motivo_interrupcao):
+                            print(f"🚨 Continuidade da rodada Evolution inválida ({motivo_interrupcao}).")
+                            notificar_interrupcao_node(motivo_interrupcao)
                     processar_resultado(dados)
+                    if not snapshot_interrupcao_fluxo()["interrompida"]:
+                        executor_pronto.set()
             except json.JSONDecodeError:
                 registrar_erro_limitado(
                     "frame_websocket_json_invalido",
@@ -1200,6 +2336,7 @@ def iniciar_robo_blindado():
                 status_conexao["ws_conectado"] = False
                 status_conexao["ws_oficial"] = None
                 status_conexao["ultimo_player_state_monotonic"] = 0.0
+                status_conexao["reconexao_pendente"] = None
                 page.goto(URL_CASSINO, wait_until="domcontentloaded", timeout=60000)
                 fechar_popups(page)
                 
@@ -1220,9 +2357,10 @@ def iniciar_robo_blindado():
                 executor_pronto.set()
                 print("✅ Acesso validado! Executor liberado para novas ordens.")
                 
-                tempo_passado = 0
-                while tempo_passado < (2 * 60 * 60 * 1000): # Reinicia a cada 2 horas
-                    if not status_conexao["ativa"]: break
+                # Mantém a sessão saudável indefinidamente. A navegação é reiniciada
+                # somente por evidência operacional (WebSocket/stale/login/Playwright),
+                # nunca apenas pela idade da conexão.
+                while status_conexao["ativa"]:
                     
                     # CÉREBRO DE EXECUÇÃO: Checa a fila de apostas frequentemente
                     for _ in range(20):
@@ -1230,7 +2368,25 @@ def iniciar_robo_blindado():
                         if not fila_apostas.empty():
                             ordem = fila_apostas.get()
                             processar_ordem_executor(page, ordem)
-                        page.wait_for_timeout(500)
+                        # 500ms de polling consumiam uma fração grande da janela
+                        # real de aposta. Mantém o event loop responsivo sem busy-wait.
+                        page.wait_for_timeout(50)
+
+                        reconexao = status_conexao.get("reconexao_pendente")
+                        if isinstance(reconexao, dict):
+                            decorrido_reconexao = time.monotonic() - float(reconexao.get("iniciada_monotonic") or 0.0)
+                            if decorrido_reconexao > WEBSOCKET_RECONNECT_GRACE_SECONDS:
+                                status_conexao["reconexao_pendente"] = None
+                                status_conexao["ativa"] = False
+                                motivo = "WEBSOCKET_RECONEXAO_TIMEOUT"
+                                if marcar_interrupcao_fluxo(motivo):
+                                    print(
+                                        "🚨 WebSocket oficial não foi restabelecido com evidência segura; "
+                                        "sinais pendentes serão invalidados."
+                                    )
+                                    notificar_interrupcao_node(motivo)
+                                break
+                            continue
 
                         ultimo_player_state = float(status_conexao.get("ultimo_player_state_monotonic") or 0.0)
                         if ultimo_player_state > 0 and time.monotonic() - ultimo_player_state > COLLECTOR_PLAYER_STATE_STALE_SECONDS:
@@ -1255,8 +2411,6 @@ def iniciar_robo_blindado():
                                 if btn.count() > 0 and btn.first.is_visible(): btn.first.click(force=True)
                             except: pass
                     
-                    tempo_passado += 10000
-
                 executor_pronto.clear()
                 
             except PlaywrightTimeoutError as e:

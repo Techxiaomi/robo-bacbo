@@ -43,6 +43,10 @@ class FakeTime:
     def time(cls):
         return cls.atual
 
+    @classmethod
+    def monotonic(cls):
+        return cls.atual
+
 
 class FakeResponse:
     def __init__(self, erro=None):
@@ -103,6 +107,45 @@ class TestParsearValorMonetario(unittest.TestCase):
         self.assertIsNone(self.parsear("R$ -1.234,56"))
 
 
+class TestConfirmarAceiteFinanceiroAposta(unittest.TestCase):
+    class FakePage:
+        @staticmethod
+        def wait_for_timeout(_milissegundos):
+            return None
+
+    @staticmethod
+    def carregar_com_leitor(leitor, timeout=0.01):
+        ns = {
+            "time": time,
+            "ler_saldo_atual": leitor,
+            "EXECUTOR_BET_ACCEPTANCE_TIMEOUT_SECONDS": timeout,
+            "EXECUTOR_BET_ACCEPTANCE_TOLERANCE": 0.10,
+        }
+        carregar_funcoes(["confirmar_aceite_financeiro_aposta"], ns)
+        return ns["confirmar_aceite_financeiro_aposta"]
+
+    def test_debito_exato_confirma_aceite(self):
+        confirmar = self.carregar_com_leitor(lambda _page: 1595.0)
+        resultado = confirmar(self.FakePage(), 1600.0, 5.0)
+        self.assertTrue(resultado["confirmada"])
+        self.assertEqual(resultado["metodo"], "SALDO_DEBITADO")
+        self.assertEqual(resultado["debito_observado"], 5.0)
+
+    def test_saldo_inalterado_permanece_ambiguo(self):
+        confirmar = self.carregar_com_leitor(lambda _page: 1600.0)
+        resultado = confirmar(self.FakePage(), 1600.0, 5.0)
+        self.assertFalse(resultado["confirmada"])
+        self.assertEqual(resultado["metodo"], "SALDO_NAO_CONFIRMADO")
+        self.assertIn("não sofreu débito adicional", resultado["motivo"])
+
+    def test_variacao_diferente_da_exposicao_nao_e_aceita(self):
+        confirmar = self.carregar_com_leitor(lambda _page: 1590.0)
+        resultado = confirmar(self.FakePage(), 1600.0, 5.0)
+        self.assertFalse(resultado["confirmada"])
+        self.assertEqual(resultado["debito_observado"], 10.0)
+        self.assertIn("divergiu", resultado["motivo"])
+
+
 class TestRegistrarOrdemIdempotente(unittest.TestCase):
     FUNCOES = [
         "normalizar_apostas_recebidas",
@@ -155,6 +198,8 @@ class TestRegistrarOrdemIdempotente(unittest.TestCase):
         self.assertGreater(enfileirada["aceita_em_ms"], 0)
         self.assertTrue(enfileirada["sincronizar_janela"])
         self.assertEqual(enfileirada["coletor_seq_aceite"], 0)
+        self.assertEqual(enfileirada["round_id_aceite"], "")
+        self.assertFalse(enfileirada["round_resolvido_aceite"])
         self.assertTrue(os.path.isfile(self.journal))
 
     def test_repeticao_identica_nao_duplica_fila(self):
@@ -218,6 +263,9 @@ class TestProcessarResultado(unittest.TestCase):
             "coletor_seq": 0,
             "ultimo_resultado_chave": None,
             "ultimo_resultado_chave_em": 0.0,
+            "historico_resultados_confirmados_lock": threading.Lock(),
+            "historico_resultados_confirmados": [],
+            "HISTORICO_RESULTADOS_CONFIRMADOS_LIMITE": 12,
             "RESULT_DEDUP_WINDOW_SECONDS": 3.0,
             "continuidade_fluxo_lock": threading.Lock(),
             "continuidade_fluxo": {
@@ -233,9 +281,12 @@ class TestProcessarResultado(unittest.TestCase):
         carregar_funcoes([
             "chave_resultado_resolvido",
             "identidade_rodada_evolution",
+            "marcador_resultado",
+            "registrar_resultado_confirmado",
             "resultado_resolvido_duplicado",
             "marcar_interrupcao_fluxo",
             "snapshot_interrupcao_fluxo",
+            "id_interrupcao_fluxo",
             "confirmar_interrupcao_reportada",
             "validar_resultado_resolvido",
             "processar_resultado",
@@ -295,6 +346,7 @@ class TestProcessarResultado(unittest.TestCase):
         self.assertEqual(payload["motivo_interrupcao"], "")
         self.assertEqual(payload["timestamp_coleta"], 100000)
         self.assertEqual(self.ns["ultimo_tempo_rodada"], 100.0)
+        self.assertEqual(self.ns["historico_resultados_confirmados"], ["P"])
 
     def test_normaliza_tie_e_trata_intervalo_maior_que_60s_apenas_como_aviso(self):
         self.ns["ultimo_tempo_rodada"] = 30.0
@@ -421,6 +473,8 @@ class TestProcessarResultado(unittest.TestCase):
         payload = FakeRequests.chamadas[0]["kwargs"]["json"]
         self.assertTrue(payload["interrupcao_fluxo"])
         self.assertEqual(payload["motivo_interrupcao"], "PLAYER_STATE_STALE")
+        self.assertEqual(payload["interrupcao_id"], "sessao-teste:1")
+        self.assertEqual(payload["interrupcao_geracao"], 1)
         self.assertFalse(self.ns["continuidade_fluxo"]["interrompida"])
 
     def test_nova_interrupcao_nao_e_apagada_por_ack_de_snapshot_anterior(self):
@@ -487,8 +541,12 @@ class TestEstadoRodadaEvolution(unittest.TestCase):
         carregar_funcoes([
             "identidade_rodada_evolution",
             "atualizar_estado_mesa_player",
+            "player_state_reconexao_elegivel",
+            "classificar_reconexao_player_state",
         ], self.ns)
         self.atualizar = self.ns["atualizar_estado_mesa_player"]
+        self.reconexao_elegivel = self.ns["player_state_reconexao_elegivel"]
+        self.classificar_reconexao = self.ns["classificar_reconexao_player_state"]
 
     @staticmethod
     def estado(stage, round_id=None):
@@ -523,18 +581,179 @@ class TestEstadoRodadaEvolution(unittest.TestCase):
             "PLAYER_STATE_SEM_STAGE",
         )
 
+    def test_reconexao_aguarda_frame_completo_antes_de_classificar(self):
+        self.assertFalse(self.reconexao_elegivel(self.estado("Betting")))
+        self.assertFalse(self.reconexao_elegivel({"args": {"game": {"roundId": "100"}}}))
+        self.assertTrue(self.reconexao_elegivel(self.estado("Betting", "100")))
+
+    def test_reconexao_na_mesma_rodada_preserva_continuidade(self):
+        resultado = self.classificar_reconexao(
+            {"round_id": "100", "round_resolvido": False, "stage": "Dealing"},
+            self.estado("Dealing", "100"),
+            3,
+            10,
+        )
+        self.assertTrue(resultado["segura"])
+        self.assertEqual(resultado["motivo"], "MESMA_RODADA")
+
+    def test_reconexao_na_proxima_rodada_so_e_segura_apos_resolved(self):
+        segura = self.classificar_reconexao(
+            {"round_id": "100", "round_resolvido": True, "stage": "Resolved"},
+            self.estado("Betting", "qualquer-id-novo"),
+            4,
+            10,
+        )
+        self.assertTrue(segura["segura"])
+        self.assertEqual(segura["motivo"], "PROXIMA_RODADA_APOS_RESOLVED")
+
+        insegura = self.classificar_reconexao(
+            {"round_id": "100", "round_resolvido": False, "stage": "Dealing"},
+            self.estado("Betting", "101"),
+            4,
+            10,
+        )
+        self.assertFalse(insegura["segura"])
+        self.assertEqual(insegura["motivo"], "TROCA_RODADA_DURANTE_RECONEXAO")
+
+    def test_reconexao_ambigua_ou_fora_da_janela_falha_fechado(self):
+        sem_id = self.classificar_reconexao(
+            {"round_id": "100", "round_resolvido": True},
+            self.estado("Betting"),
+            2,
+            10,
+        )
+        self.assertFalse(sem_id["segura"])
+        self.assertEqual(sem_id["motivo"], "RECONEXAO_SEM_ROUND_ID")
+
+        tardia = self.classificar_reconexao(
+            {"round_id": "100", "round_resolvido": True},
+            self.estado("Betting", "101"),
+            10.01,
+            10,
+        )
+        self.assertFalse(tardia["segura"])
+        self.assertEqual(tardia["motivo"], "RECONEXAO_FORA_DA_JANELA")
+
 
 class TestContratoWebSocketFailClosed(unittest.TestCase):
-    def test_socket_oficial_exige_player_state_e_close_lacra_fluxo(self):
+    def test_socket_oficial_exige_player_state_e_close_entra_em_quarentena(self):
         self.assertIn('dados.get("type") == "bacbo.playerState"', SOURCE)
         self.assertIn('"ws_oficial": ws', SOURCE)
         self.assertIn('if status_conexao.get("ws_oficial") is not ws:', SOURCE)
-        self.assertIn('marcar_interrupcao_fluxo("WEBSOCKET_PLAYER_STATE_FECHADO")', SOURCE)
+        self.assertIn('"reconexao_pendente"', SOURCE)
+        self.assertIn('WEBSOCKET_RECONNECT_GRACE_SECONDS', SOURCE)
+        self.assertNotIn('marcar_interrupcao_fluxo("WEBSOCKET_PLAYER_STATE_FECHADO")', SOURCE)
+        self.assertIn('motivo = "WEBSOCKET_RECONEXAO_TIMEOUT"', SOURCE)
+        self.assertIn('not player_state_reconexao_elegivel(dados)', SOURCE)
+        self.assertIn('reconciliar_reconexao_por_roadmap(page, dados)', SOURCE)
+        self.assertIn('ROADMAP_DOM_CAUSA_COMPATIVEL', SOURCE)
+        self.assertIn('ROADMAP_RECONCILIATION_MIN_RESULTS', SOURCE)
+        self.assertIn('aguardando playerState completo ou roadmap', SOURCE)
+
+    def test_sessao_saudavel_nao_e_recarregada_por_tempo_fixo(self):
+        self.assertIn('while status_conexao["ativa"]:', SOURCE)
+        self.assertNotIn('(2 * 60 * 60 * 1000)', SOURCE)
+        self.assertNotIn('Reinicia a cada 2 horas', SOURCE)
+        self.assertNotIn('tempo_passado += 10000', SOURCE)
 
     def test_watchdog_reinicia_coletor_e_notifica_node(self):
         self.assertIn("COLLECTOR_PLAYER_STATE_STALE_SECONDS", SOURCE)
         self.assertIn('marcar_interrupcao_fluxo("PLAYER_STATE_STALE")', SOURCE)
         self.assertIn('notificar_interrupcao_node("PLAYER_STATE_STALE")', SOURCE)
+
+
+class TestBug028JanelaApostavelEstrutural(unittest.TestCase):
+    def setUp(self):
+        self.ns = {
+            "re": re,
+            "time": time,
+            "threading": threading,
+            "estado_mesa_lock": threading.Lock(),
+            "estado_mesa": {
+                "stage": "Resolved",
+                "atualizado_em_ms": int(time.time() * 1000),
+                "round_id": "round-10",
+                "round_resolvido": True,
+            },
+            "coletor_seq": 10,
+            "COLLECTOR_PLAYER_STATE_STALE_SECONDS": 20.0,
+        }
+        carregar_funcoes([
+            "stage_evolution_apostavel",
+            "avaliar_contexto_janela_aposta",
+        ], self.ns)
+        self.avaliar = self.ns["avaliar_contexto_janela_aposta"]
+        self.ordem = {
+            "sincronizar_janela": True,
+            "coletor_seq_aceite": 10,
+            "stage_aceite": "Resolved",
+            "round_id_aceite": "round-10",
+        }
+
+    def test_somente_stage_apostavel_fresco_abre_e_novo_resolved_expira(self):
+        self.assertEqual(self.avaliar(self.ordem)["estado"], "AGUARDAR_STAGE")
+
+        for stage_aberto in ("WaitingForBets", "ClosingBets", "AcceptingBets", "Betting"):
+            with self.ns["estado_mesa_lock"]:
+                self.ns["estado_mesa"]["stage"] = stage_aberto
+                self.ns["estado_mesa"]["atualizado_em_ms"] = int(time.time() * 1000)
+            self.assertEqual(self.avaliar(self.ordem)["estado"], "ABERTA")
+
+        for stage_fechado in (
+            "FirstDie", "SecondDie", "ThirdDie", "FourthDie", "Confirmation", "Resolved"
+        ):
+            with self.ns["estado_mesa_lock"]:
+                self.ns["estado_mesa"]["stage"] = stage_fechado
+                self.ns["estado_mesa"]["atualizado_em_ms"] = int(time.time() * 1000)
+            self.assertEqual(self.avaliar(self.ordem)["estado"], "AGUARDAR_STAGE")
+
+        self.ns["coletor_seq"] = 11
+        self.assertEqual(self.avaliar(self.ordem)["estado"], "EXPIRADA")
+
+    def test_betting_stale_nao_autoriza_clique(self):
+        with self.ns["estado_mesa_lock"]:
+            self.ns["estado_mesa"]["stage"] = "AcceptingBets"
+            self.ns["estado_mesa"]["atualizado_em_ms"] = int((time.time() - 21) * 1000)
+        resultado = self.avaliar(self.ordem)
+        self.assertEqual(resultado["estado"], "AGUARDAR_FRESCOR")
+
+
+class TestReconciliacaoRoadmap(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        ns = {"re": re}
+        carregar_funcoes([
+            "normalizar_marcador_roadmap",
+            "reconciliar_trilhas_roadmap",
+        ], ns)
+        cls.normalizar = staticmethod(ns["normalizar_marcador_roadmap"])
+        cls.reconciliar = staticmethod(ns["reconciliar_trilhas_roadmap"])
+
+    def test_normaliza_semantica_da_roadmap(self):
+        self.assertEqual(self.normalizar("badge PlayerWon blue"), "P")
+        self.assertEqual(self.normalizar("resultado-banca red"), "B")
+        self.assertEqual(self.normalizar("Tie / yellow"), "T")
+        self.assertEqual(self.normalizar("sem resultado"), "")
+
+    def test_preserva_reconexao_apenas_com_cauda_exata(self):
+        historico = ["P", "B", "T", "B", "P", "B"]
+        confirmado = self.reconciliar(
+            historico,
+            [["T", "P", "B", "T", "B", "P", "B"]],
+            6,
+        )
+        self.assertTrue(confirmado["confirmada"])
+        self.assertEqual(confirmado["motivo"], "ROADMAP_DOM_CAUSA_COMPATIVEL")
+        self.assertEqual(confirmado["orientacao"], "DIRETA")
+
+        divergente = self.reconciliar(historico, [["P", "B", "T", "B", "B", "P"]], 6)
+        self.assertFalse(divergente["confirmada"])
+        self.assertEqual(divergente["motivo"], "ROADMAP_DOM_SEM_CAUSA_COMPATIVEL")
+
+    def test_historico_insuficiente_permanece_fechado(self):
+        resultado = self.reconciliar(["P", "B", "T"], [["P", "B", "T", "B"]], 6)
+        self.assertFalse(resultado["confirmada"])
+        self.assertEqual(resultado["motivo"], "HISTORICO_LOCAL_INSUFICIENTE")
 
 
 
