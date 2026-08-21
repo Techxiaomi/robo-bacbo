@@ -112,11 +112,11 @@ except ValueError:
 
 try:
     WEBSOCKET_RECONNECT_GRACE_SECONDS = max(
-        25.0,
-        min(30.0, float(os.getenv("WEBSOCKET_RECONNECT_GRACE_SECONDS", "25")))
+        1.0,
+        min(5.0, float(os.getenv("WEBSOCKET_RECONNECT_GRACE_SECONDS", "5")))
     )
 except ValueError:
-    WEBSOCKET_RECONNECT_GRACE_SECONDS = 25.0
+    WEBSOCKET_RECONNECT_GRACE_SECONDS = 5.0
 
 try:
     ROADMAP_RECONCILIATION_MIN_RESULTS = max(
