@@ -135,9 +135,7 @@
         return criarSchedulerParaSocket(ioOriginal(...args));
     }
 
-    for (const chave of Object.keys(ioOriginal)) {
-        try { ioCoalescido[chave] = ioOriginal[chave]; } catch (_) {}
-    }
-
+    Object.assign(ioCoalescido, ioOriginal);
     window.io = ioCoalescido;
+    window.__realtimeUiSchedulerReady = true;
 })();
