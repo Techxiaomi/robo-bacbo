@@ -2,6 +2,7 @@
 
 const { criarBarreiraSaldoFrescoStops } = require('./bug051c_balance_barrier');
 const { validarConfiguracaoAutoTrader } = require('./bug051d_config_validation');
+const { criarIntegracaoCicloFinanceiro } = require('./bug051e_financial_cycle');
 
 const GUARDA_CONFIG_INSTALADA = Symbol.for('robo-bacbo.bug051d.guarda-config');
 
@@ -127,6 +128,7 @@ function criarIntegracaoContadorDiario({ controleDiarioAutoTrader, dbPool, ioSer
     const barreiraSaldoStops = criarBarreiraSaldoFrescoStops({ dbPool });
     const pulosAntesDaMecanica = new Map();
     instalarGuardaPersistenciaConfig({ dbPool, traders, pulosAntesDaMecanica });
+    const cicloFinanceiro = criarIntegracaoCicloFinanceiro({ dbPool });
 
     async function garantirAntesDaEntrada(trader) {
         const validacaoConfig = validarConfiguracaoAutoTrader(trader?.config);
@@ -207,6 +209,7 @@ function criarIntegracaoContadorDiario({ controleDiarioAutoTrader, dbPool, ioSer
     }
 
     async function inicializarDatasLegadas() {
+        await cicloFinanceiro.inicializarSchema();
         const hoje = controleDiarioAutoTrader.dataOperacional();
         await dbPool.query(
             `UPDATE auto_traders
