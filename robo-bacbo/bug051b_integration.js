@@ -1,10 +1,39 @@
 'use strict';
 
+const { AsyncLocalStorage } = require('async_hooks');
+const express = require('express');
 const { criarBarreiraSaldoFrescoStops } = require('./bug051c_balance_barrier');
 const { validarConfiguracaoAutoTrader } = require('./bug051d_config_validation');
 const { criarIntegracaoCicloFinanceiro } = require('./bug051e_financial_cycle');
 
 const GUARDA_CONFIG_INSTALADA = Symbol.for('robo-bacbo.bug051d.guarda-config');
+const CONTEXTO_LEDGER_REQUEST = new AsyncLocalStorage();
+const EXPRESS_JSON_LEDGER_INSTALADO = Symbol.for('robo-bacbo.arch-road-02.express-json-ledger');
+
+function instalarContextoLedgerExpress() {
+    if (express[EXPRESS_JSON_LEDGER_INSTALADO]) return;
+
+    const jsonOriginal = express.json;
+    express.json = function jsonComContextoLedger(...args) {
+        const middleware = jsonOriginal(...args);
+        return function middlewareComContextoLedger(req, res, next) {
+            middleware(req, res, erro => {
+                if (erro) return next(erro);
+                const payload = req && req.body && typeof req.body === 'object' ? req.body : {};
+                return CONTEXTO_LEDGER_REQUEST.run(payload, next);
+            });
+        };
+    };
+
+    Object.defineProperty(express, EXPRESS_JSON_LEDGER_INSTALADO, {
+        value: true,
+        enumerable: false,
+        configurable: false,
+        writable: false
+    });
+}
+
+instalarContextoLedgerExpress();
 
 function normalizarSql(sql) {
     return typeof sql === 'string'
@@ -51,13 +80,84 @@ function criarErroConfiguracaoInvalida(validacao) {
     return erro;
 }
 
+function normalizarMetadadosLedger(payload) {
+    const dados = payload && typeof payload === 'object' ? payload : {};
+    const roundIdTexto = String(dados.rodada_origem || '').trim();
+    const sessaoTexto = String(dados.coletor_sessao || '').trim();
+    const seqNumero = Number(dados.coletor_seq);
+
+    return {
+        round_id: roundIdTexto ? roundIdTexto.slice(0, 128) : null,
+        coletor_seq: Number.isInteger(seqNumero) && seqNumero >= 0 ? seqNumero : null,
+        coletor_sessao: sessaoTexto ? sessaoTexto.slice(0, 64) : null
+    };
+}
+
+function enriquecerCreateGirosRecentes(sql) {
+    const bruto = String(sql || '');
+    const normalizado = normalizarSql(bruto).toLowerCase();
+    if (!normalizado.startsWith('create table if not exists giros_recentes')) return bruto;
+    if (normalizado.includes('round_id') || normalizado.includes('coletor_seq') || normalizado.includes('coletor_sessao')) {
+        return bruto;
+    }
+
+    return bruto.replace(
+        /(\s*)id_sessao\s+BIGINT\s*,/i,
+        (_, indentacao) => (
+            `${indentacao}round_id VARCHAR(128) DEFAULT NULL,`
+            + `${indentacao}coletor_seq INT DEFAULT NULL,`
+            + `${indentacao}coletor_sessao VARCHAR(64) DEFAULT NULL,`
+            + `${indentacao}id_sessao BIGINT,`
+            + `${indentacao}INDEX idx_giros_recentes_round_id (round_id),`
+        )
+    );
+}
+
+function enriquecerInsertGiroRecente(sql, params) {
+    const sqlNormalizado = normalizarSql(sql);
+    const minusculo = sqlNormalizado.toLowerCase();
+    const parametros = Array.isArray(params) ? params : [];
+
+    if (!minusculo.startsWith('insert into giros_recentes')) {
+        return { sql, params };
+    }
+
+    if (minusculo.includes('round_id') || minusculo.includes('coletor_seq') || minusculo.includes('coletor_sessao')) {
+        return { sql, params };
+    }
+
+    if (parametros.length !== 9) {
+        return { sql, params };
+    }
+
+    const metadados = normalizarMetadadosLedger(CONTEXTO_LEDGER_REQUEST.getStore());
+    const novosParametros = [
+        ...parametros.slice(0, 7),
+        metadados.round_id,
+        metadados.coletor_seq,
+        metadados.coletor_sessao,
+        ...parametros.slice(7)
+    ];
+
+    return {
+        sql: 'INSERT INTO giros_recentes (resultado, p_d1, p_d2, b_d1, b_d2, numero_empate, multiplicador, round_id, coletor_seq, coletor_sessao, id_sessao, data_hora) VALUES (?,?,?,?,?,?,?,?,?,?,?,FROM_UNIXTIME(?))',
+        params: novosParametros
+    };
+}
+
 function instalarGuardaPersistenciaConfig({ dbPool, traders, pulosAntesDaMecanica }) {
     if (dbPool[GUARDA_CONFIG_INSTALADA]) return;
 
     const queryOriginal = dbPool.query.bind(dbPool);
     dbPool.query = async function queryComGuardaBug051D(sql, params, ...rest) {
-        const sqlNormalizado = normalizarSql(sql);
-        const parametros = Array.isArray(params) ? params : [];
+        let sqlEfetivo = enriquecerCreateGirosRecentes(sql);
+        let parametrosEfetivos = Array.isArray(params) ? params : params;
+        const insertGiro = enriquecerInsertGiroRecente(sqlEfetivo, parametrosEfetivos);
+        sqlEfetivo = insertGiro.sql;
+        parametrosEfetivos = insertGiro.params;
+
+        const sqlNormalizado = normalizarSql(sqlEfetivo);
+        const parametros = Array.isArray(parametrosEfetivos) ? parametrosEfetivos : [];
         const indiceConfig = indiceParametroConfigJson(sqlNormalizado);
 
         if (indiceConfig !== null) {
@@ -82,7 +182,7 @@ function instalarGuardaPersistenciaConfig({ dbPool, traders, pulosAntesDaMecanic
             }
         }
 
-        const resultado = await queryOriginal(sql, params, ...rest);
+        const resultado = await queryOriginal(sqlEfetivo, parametrosEfetivos, ...rest);
 
         const atualizacaoPulos = /^update\s+auto_traders\s+set\s+pulos_restantes\s*=\s*\?\s+where\s+id\s*=\s*\?$/i.exec(sqlNormalizado);
         if (atualizacaoPulos && parametros.length >= 2) {
@@ -120,6 +220,31 @@ function instalarGuardaPersistenciaConfig({ dbPool, traders, pulosAntesDaMecanic
         configurable: false,
         writable: false
     });
+}
+
+async function inicializarLedgerForense(dbPool) {
+    const alteracoes = [
+        'ALTER TABLE giros_recentes ADD COLUMN round_id VARCHAR(128) DEFAULT NULL',
+        'ALTER TABLE giros_recentes ADD COLUMN coletor_seq INT DEFAULT NULL',
+        'ALTER TABLE giros_recentes ADD COLUMN coletor_sessao VARCHAR(64) DEFAULT NULL'
+    ];
+
+    for (const query of alteracoes) {
+        try {
+            await dbPool.query(query);
+        } catch (erro) {
+            if (erro && (erro.code === 'ER_DUP_FIELDNAME' || Number(erro.errno) === 1060)) continue;
+            throw erro;
+        }
+    }
+
+    try {
+        await dbPool.query('ALTER TABLE giros_recentes ADD INDEX idx_giros_recentes_round_id (round_id)');
+    } catch (erro) {
+        if (!(erro && (erro.code === 'ER_DUP_KEYNAME' || Number(erro.errno) === 1061))) {
+            throw erro;
+        }
+    }
 }
 
 // Integração BUG-051B encapsulada como fonte de domínio: o backend chama estas rotinas
@@ -210,6 +335,7 @@ function criarIntegracaoContadorDiario({ controleDiarioAutoTrader, dbPool, ioSer
 
     async function inicializarDatasLegadas() {
         await cicloFinanceiro.inicializarSchema();
+        await inicializarLedgerForense(dbPool);
         const hoje = controleDiarioAutoTrader.dataOperacional();
         await dbPool.query(
             `UPDATE auto_traders
