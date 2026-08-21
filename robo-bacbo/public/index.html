@@ -11,6 +11,7 @@
     <script src="/socket.io/socket.io.js"></script>
     <script src="/realtime-ui-scheduler.js"></script>
     <script src="/dashboard-ui.js"></script>
+    <script src="/dom-ui2-transform.js"></script>
 
     <style>
         html, body {
@@ -42,6 +43,9 @@
                 if (typeof window.atualizarDashboardValores !== 'function') {
                     throw new Error('Controlador do dashboard não carregado');
                 }
+                if (window.__domUi2Ready !== true || typeof window.otimizarScriptPrincipalUI2 !== 'function') {
+                    throw new Error('Transformador DOM UI-2 não carregado');
+                }
 
                 const response = await fetch('/dashboard-app.html?_t=' + Date.now(), {
                     cache: 'no-store',
@@ -63,6 +67,7 @@
                 if (!scriptPrincipal) {
                     throw new Error('JavaScript principal do painel não encontrado');
                 }
+                const scriptPrincipalOtimizado = window.otimizarScriptPrincipalUI2(scriptPrincipal);
 
                 // As dependências externas já foram carregadas acima em ordem fixa.
                 // Removemos todos os scripts do documento-base para impedir execução duplicada.
@@ -77,7 +82,7 @@
                 );
 
                 const script = document.createElement('script');
-                script.textContent = scriptPrincipal;
+                script.textContent = scriptPrincipalOtimizado;
                 document.body.appendChild(script);
 
                 const finalizarInicializacao = () => {
