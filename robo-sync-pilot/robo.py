@@ -108,11 +108,11 @@ except ValueError:
 
 try:
     WEBSOCKET_RECONNECT_GRACE_SECONDS = max(
-        2.0,
-        min(30.0, float(os.getenv("WEBSOCKET_RECONNECT_GRACE_SECONDS", "10")))
+        25.0,
+        min(30.0, float(os.getenv("WEBSOCKET_RECONNECT_GRACE_SECONDS", "25")))
     )
 except ValueError:
-    WEBSOCKET_RECONNECT_GRACE_SECONDS = 10.0
+    WEBSOCKET_RECONNECT_GRACE_SECONDS = 25.0
 
 try:
     ROADMAP_RECONCILIATION_MIN_RESULTS = max(
@@ -751,6 +751,8 @@ def reconciliar_reconexao_por_roadmap(page, dados):
     if not stage:
         return {"confirmada": False, "motivo": "PLAYER_STATE_SEM_STAGE", "diagnostico": {}}
 
+    # ARCH-ROAD-01: cookies/overlays não podem cegar o fallback visual.
+    fechar_popups(page)
     extraido = extrair_trilhas_roadmap_dom(page)
     resultado = reconciliar_trilhas_roadmap(
         snapshot_resultados_confirmados(),
