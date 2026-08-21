@@ -10,8 +10,21 @@ const { criarIntegracaoCicloFinanceiro } = require('./bug051e_financial_cycle');
 const GUARDA_CONFIG_INSTALADA = Symbol.for('robo-bacbo.bug051d.guarda-config');
 const CONTEXTO_LEDGER_REQUEST = new AsyncLocalStorage();
 const EXPRESS_JSON_LEDGER_INSTALADO = Symbol.for('robo-bacbo.arch-road-02.express-json-ledger');
+const ORIENTACAO_ROAD = Object.freeze({
+    OLD_TO_NEW: 'OLD_TO_NEW',
+    NEW_TO_OLD: 'NEW_TO_OLD'
+});
+const LIMITE_HISTORY_CANONICO = 1000;
+const estadoCanonicoEvolution = {
+    pronto: false,
+    orientacao: null,
+    history: [],
+    coletor_sessao: null,
+    snapshot_timestamp: null,
+    atualizado_em: null
+};
 
-function tokenInternoValidoCollectorRoad(req) {
+function tokenInternoValidoShadow(req) {
     const recebido = Buffer.from(String(req?.get?.('X-Internal-Token') || ''), 'utf8');
     const esperado = Buffer.from(String(process.env.INTERNAL_API_TOKEN || '').trim(), 'utf8');
     return esperado.length > 0
@@ -19,10 +32,195 @@ function tokenInternoValidoCollectorRoad(req) {
         && crypto.timingSafeEqual(recebido, esperado);
 }
 
+function normalizarWinnerRoad(valor) {
+    const bruto = String(valor || '').trim().toUpperCase();
+    if (!bruto) return null;
+    if (bruto.includes('PLAYER') || bruto === 'P' || bruto === 'AZUL') return 'PlayerWon';
+    if (bruto.includes('BANKER') || bruto === 'B' || bruto === 'VERMELHO') return 'BankerWon';
+    if (bruto.includes('TIE') || bruto === 'T' || bruto === 'EMPATE') return 'Tie';
+    return null;
+}
+
+function numeroRoad(valor) {
+    if (valor === undefined || valor === null || valor === '') return null;
+    const numero = Number(valor);
+    return Number.isFinite(numero) ? numero : null;
+}
+
+function somarDadosRoad(valores) {
+    if (!Array.isArray(valores) || valores.length === 0) return null;
+    let total = 0;
+    for (const valor of valores) {
+        const numero = numeroRoad(valor);
+        if (numero === null) return null;
+        total += numero;
+    }
+    return total;
+}
+
+function primeiroNumeroRoad(candidatos) {
+    for (const candidato of candidatos) {
+        const numero = numeroRoad(candidato);
+        if (numero !== null) return numero;
+    }
+    return null;
+}
+
+function normalizarItemHistoryRoad(item) {
+    if (!item || typeof item !== 'object') return null;
+    const winner = normalizarWinnerRoad(item.winner);
+    const playerScore = numeroRoad(item.playerScore);
+    const bankerScore = numeroRoad(item.bankerScore);
+    if (!winner || playerScore === null || bankerScore === null) return null;
+
+    return {
+        ...item,
+        winner,
+        playerScore,
+        bankerScore
+    };
+}
+
+function normalizarGiroIncrementalRoad(dados) {
+    if (!dados || typeof dados !== 'object') return null;
+
+    const scores = dados.scores && typeof dados.scores === 'object' ? dados.scores : {};
+    const winner = normalizarWinnerRoad(dados.winner || dados.vencedor || dados.resultado);
+    const playerScore = primeiroNumeroRoad([
+        dados.playerScore,
+        dados.player_score,
+        scores.playerScore,
+        scores.player,
+        dados.pontos_jogador,
+        somarDadosRoad(dados.dados_jogador)
+    ]);
+    const bankerScore = primeiroNumeroRoad([
+        dados.bankerScore,
+        dados.banker_score,
+        scores.bankerScore,
+        scores.banker,
+        dados.pontos_banca,
+        somarDadosRoad(dados.dados_banca)
+    ]);
+
+    if (!winner || playerScore === null || bankerScore === null) return null;
+
+    const giro = { winner, playerScore, bankerScore };
+    const roundId = String(dados.rodada_origem || dados.round_id || '').trim();
+    const coletorSeq = Number(dados.coletor_seq);
+    const timestamp = Number(dados.timestamp_coleta);
+    if (roundId) giro.roundId = roundId.slice(0, 128);
+    if (Number.isSafeInteger(coletorSeq) && coletorSeq >= 0) giro.coletorSeq = coletorSeq;
+    if (Number.isFinite(timestamp) && timestamp > 0) giro.timestamp = Math.trunc(timestamp);
+    return giro;
+}
+
+function mesmoGiroRoad(a, b) {
+    return Boolean(a && b)
+        && normalizarWinnerRoad(a.winner) === normalizarWinnerRoad(b.winner)
+        && numeroRoad(a.playerScore) === numeroRoad(b.playerScore)
+        && numeroRoad(a.bankerScore) === numeroRoad(b.bankerScore);
+}
+
+function pontaNovaEstadoCanonico() {
+    if (!estadoCanonicoEvolution.pronto || estadoCanonicoEvolution.history.length === 0) return null;
+    if (estadoCanonicoEvolution.orientacao === ORIENTACAO_ROAD.NEW_TO_OLD) {
+        return estadoCanonicoEvolution.history[0];
+    }
+    return estadoCanonicoEvolution.history[estadoCanonicoEvolution.history.length - 1];
+}
+
+function logEstadoCanonicoReady() {
+    if (!estadoCanonicoEvolution.pronto) return;
+    const pontaNova = pontaNovaEstadoCanonico();
+    if (!pontaNova) return;
+    console.log(
+        `🧠 SHADOW ROAD | READY atualizado | orientação=${estadoCanonicoEvolution.orientacao} | `
+        + `rodadas=${estadoCanonicoEvolution.history.length} | `
+        + `último=${pontaNova.winner}:${pontaNova.playerScore}x${pontaNova.bankerScore}`
+    );
+}
+
+function hidratarEstadoCanonicoEvolution(dados, historyNormalizado) {
+    const sessao = String(dados.coletor_sessao || '').trim();
+    const timestamp = Number(dados.timestamp_coleta);
+    const mesmaSessao = Boolean(
+        estadoCanonicoEvolution.coletor_sessao
+        && estadoCanonicoEvolution.coletor_sessao === sessao
+    );
+    const orientacaoPreservada = mesmaSessao ? estadoCanonicoEvolution.orientacao : null;
+
+    estadoCanonicoEvolution.pronto = Boolean(orientacaoPreservada);
+    estadoCanonicoEvolution.orientacao = orientacaoPreservada;
+    estadoCanonicoEvolution.history = historyNormalizado;
+    estadoCanonicoEvolution.coletor_sessao = sessao;
+    estadoCanonicoEvolution.snapshot_timestamp = Math.trunc(timestamp);
+    estadoCanonicoEvolution.atualizado_em = Date.now();
+}
+
+function orientarOuAtualizarEstadoCanonicoComIncremental(dados) {
+    const giro = normalizarGiroIncrementalRoad(dados);
+    if (!giro || estadoCanonicoEvolution.history.length === 0) return false;
+
+    const sessaoIncremental = String(dados.coletor_sessao || '').trim();
+    if (
+        estadoCanonicoEvolution.coletor_sessao
+        && sessaoIncremental
+        && sessaoIncremental !== estadoCanonicoEvolution.coletor_sessao
+    ) {
+        estadoCanonicoEvolution.pronto = false;
+        estadoCanonicoEvolution.orientacao = null;
+        estadoCanonicoEvolution.history = [];
+        estadoCanonicoEvolution.coletor_sessao = sessaoIncremental;
+        estadoCanonicoEvolution.snapshot_timestamp = null;
+        estadoCanonicoEvolution.atualizado_em = Date.now();
+        return false;
+    }
+
+    if (!estadoCanonicoEvolution.orientacao) {
+        const primeiro = estadoCanonicoEvolution.history[0];
+        const ultimo = estadoCanonicoEvolution.history[estadoCanonicoEvolution.history.length - 1];
+        const batePrimeiro = mesmoGiroRoad(giro, primeiro);
+        const bateUltimo = mesmoGiroRoad(giro, ultimo);
+
+        // Se as duas pontas forem iguais ou nenhuma ponta casar, a orientação continua ambígua.
+        if (batePrimeiro === bateUltimo) return false;
+
+        estadoCanonicoEvolution.orientacao = batePrimeiro
+            ? ORIENTACAO_ROAD.NEW_TO_OLD
+            : ORIENTACAO_ROAD.OLD_TO_NEW;
+        estadoCanonicoEvolution.pronto = true;
+        estadoCanonicoEvolution.atualizado_em = Date.now();
+        logEstadoCanonicoReady();
+        return true;
+    }
+
+    if (!estadoCanonicoEvolution.pronto) return false;
+
+    const pontaNova = pontaNovaEstadoCanonico();
+    if (mesmoGiroRoad(giro, pontaNova)) return false;
+
+    if (estadoCanonicoEvolution.orientacao === ORIENTACAO_ROAD.NEW_TO_OLD) {
+        estadoCanonicoEvolution.history.unshift(giro);
+        if (estadoCanonicoEvolution.history.length > LIMITE_HISTORY_CANONICO) {
+            estadoCanonicoEvolution.history.pop();
+        }
+    } else {
+        estadoCanonicoEvolution.history.push(giro);
+        if (estadoCanonicoEvolution.history.length > LIMITE_HISTORY_CANONICO) {
+            estadoCanonicoEvolution.history.shift();
+        }
+    }
+
+    estadoCanonicoEvolution.atualizado_em = Date.now();
+    logEstadoCanonicoReady();
+    return true;
+}
+
 function responderCollectorRoadShadow(req, res) {
     if (req.method !== 'POST' || req.path !== '/collector-road') return false;
 
-    if (!tokenInternoValidoCollectorRoad(req)) {
+    if (!tokenInternoValidoShadow(req)) {
         res.status(401).json({ erro: 'Nao autorizado' });
         return true;
     }
@@ -32,30 +230,37 @@ function responderCollectorRoadShadow(req, res) {
     const sessao = String(dados.coletor_sessao || '').trim();
     const timestamp = Number(dados.timestamp_coleta);
 
-    if (!history || history.length === 0 || history.length > 1000 || !sessao) {
+    if (!history || history.length === 0 || history.length > LIMITE_HISTORY_CANONICO || !sessao) {
         res.status(400).json({ erro: 'snapshot road invalido' });
         return true;
     }
 
-    const itensValidos = history.every(item => (
-        item
-        && typeof item === 'object'
-        && typeof item.winner === 'string'
-        && Number.isFinite(Number(item.playerScore))
-        && Number.isFinite(Number(item.bankerScore))
-    ));
-
-    if (!itensValidos || !Number.isFinite(timestamp) || timestamp <= 0) {
+    const historyNormalizado = history.map(normalizarItemHistoryRoad);
+    if (
+        historyNormalizado.some(item => item === null)
+        || !Number.isFinite(timestamp)
+        || timestamp <= 0
+    ) {
         res.status(400).json({ erro: 'snapshot road invalido' });
         return true;
     }
 
-    console.log(
-        `🛣️ SHADOW ROAD | snapshot histórico recebido | `
-        + `rodadas=${history.length} | sessão=${sessao} | timestamp=${Math.trunc(timestamp)}`
-    );
-    res.status(200).json({ recebido: true, shadow: true, quantidade: history.length });
+    hidratarEstadoCanonicoEvolution(dados, historyNormalizado);
+    res.status(200).json({
+        recebido: true,
+        shadow: true,
+        quantidade: historyNormalizado.length,
+        pronto: estadoCanonicoEvolution.pronto,
+        orientacao: estadoCanonicoEvolution.orientacao
+    });
     return true;
+}
+
+function processarReceberSinalShadow(req) {
+    if (req.method !== 'POST' || req.path !== '/receber-sinal') return false;
+    if (!tokenInternoValidoShadow(req)) return false;
+    const dados = req.body && typeof req.body === 'object' ? req.body : {};
+    return orientarOuAtualizarEstadoCanonicoComIncremental(dados);
 }
 
 function instalarContextoLedgerExpress() {
@@ -68,6 +273,11 @@ function instalarContextoLedgerExpress() {
             middleware(req, res, erro => {
                 if (erro) return next(erro);
                 if (responderCollectorRoadShadow(req, res)) return;
+                try {
+                    processarReceberSinalShadow(req);
+                } catch (erroShadow) {
+                    // Shadow Mode nunca interfere no caminho produtivo do /receber-sinal.
+                }
                 const payload = req && req.body && typeof req.body === 'object' ? req.body : {};
                 return CONTEXTO_LEDGER_REQUEST.run(payload, next);
             });
