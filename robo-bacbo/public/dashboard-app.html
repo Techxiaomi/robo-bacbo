@@ -1021,7 +1021,7 @@
         <!-- 🌟 ABA 4: AUTO-TRADER (MOTO DE EXECUÇÃO) -->
         <!-- ========================================== -->
         <div id="aba-autotrader" class="aba-conteudo">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+            <div style="display: flex; justify-content:space-between; align-items: center; margin-bottom: 15px;">
                 <h2 style="margin: 0; font-size: 16px; color: #aaa; text-transform: uppercase;">Motores de Execução (Auto-Traders)</h2>
                 <button class="btn" style="background: #28a745; font-size: 14px; box-shadow: 0 4px 10px rgba(40, 167, 69, 0.3);" onclick="abrirFormularioAutoTrader()">+ Novo Motor de Execução</button>
             </div>
@@ -1771,7 +1771,8 @@
                     <div class="pdf-box"><strong>P&amp;L calculado (aceites confirmados):</strong><br><span id="pdf-lucro-liquido" style="font-weight:bold; font-size:16px;">-</span></div>
                     <div class="pdf-box"><strong>Volume aceito comprovado:</strong><br><span id="pdf-turnover">-</span></div>
                     <div class="pdf-box"><strong>Saldo inicial de referência:</strong><br><span id="pdf-banca-inicial">-</span></div>
-                    <div class="pdf-box"><strong>Saldo sincronizado de referência:</strong><br><span id="pdf-saldo-final" style="font-weight:bold;">-</span></div>
+                    <div class="pdf-box"><strong>Banca atual sincronizada:</strong><br><span id="pdf-saldo-final" style="font-weight:bold;">-</span></div>
+                    <div class="pdf-box"><strong>Saldo real após liquidação:</strong><br><span id="pdf-saldo-liquidacao" style="font-weight:bold;">NÃO CONFIRMADO</span></div>
                     <div class="pdf-box"><strong>Ordens com aceite comprovado:</strong><br><span id="pdf-confirmadas">-</span></div>
                     <div class="pdf-box"><strong>Registros sem aceite comprovado:</strong><br><span id="pdf-legadas">-</span></div>
                 </div>
@@ -2775,8 +2776,16 @@
             );
             const legadasSemProva = ordens.length - ordensConfirmadas.length;
             const corLucro = lucroLiquido >= 0 ? '#28a745' : '#dc3545';
+            const ultimaLiquidacao = ordens.find(o =>
+                ['WIN','LOSS','TIE'].includes(String(o.status_ordem || '').toUpperCase())
+                && Number(o.resultado_confirmado_em) > 0
+            );
+            const saldoLiquidacaoConfirmado = ultimaLiquidacao
+                && ultimaLiquidacao.saldo_pos !== null
+                && ultimaLiquidacao.saldo_pos !== undefined
+                && Number(ultimaLiquidacao.saldo_pos_confirmado_em) > Number(ultimaLiquidacao.resultado_confirmado_em);
 
-            document.getElementById('pdf-nome-trader').innerText = at.nome; document.getElementById('pdf-periodo').innerText = `Até ${dataFmt}`; document.getElementById('pdf-lucro-liquido').innerText = formatarMoedaPdf(lucroLiquido); document.getElementById('pdf-lucro-liquido').style.color = corLucro; document.getElementById('pdf-banca-inicial').innerText = formatarMoedaPdf(at.saldo_inicial); document.getElementById('pdf-saldo-final').innerText = formatarMoedaPdf(at.saldo_atual); document.getElementById('pdf-confirmadas').innerText = `${ordensConfirmadas.length} de ${ordens.length}`; document.getElementById('pdf-legadas').innerText = String(legadasSemProva); document.getElementById('pdf-hash').innerText = hashValidador;
+            document.getElementById('pdf-nome-trader').innerText = at.nome; document.getElementById('pdf-periodo').innerText = `Até ${dataFmt}`; document.getElementById('pdf-lucro-liquido').innerText = formatarMoedaPdf(lucroLiquido); document.getElementById('pdf-lucro-liquido').style.color = corLucro; document.getElementById('pdf-banca-inicial').innerText = formatarMoedaPdf(at.saldo_inicial); document.getElementById('pdf-saldo-final').innerText = formatarMoedaPdf(at.saldo_atual); document.getElementById('pdf-saldo-liquidacao').innerText = saldoLiquidacaoConfirmado ? formatarMoedaPdf(ultimaLiquidacao.saldo_pos) : 'NÃO CONFIRMADO'; document.getElementById('pdf-confirmadas').innerText = `${ordensConfirmadas.length} de ${ordens.length}`; document.getElementById('pdf-legadas').innerText = String(legadasSemProva); document.getElementById('pdf-hash').innerText = hashValidador;
             let tbody = document.getElementById('pdf-table-body'); tbody.innerHTML = '';
 
             ordens.forEach(o => {
@@ -2790,8 +2799,12 @@
                 const evidencia = confirmada
                     ? `<strong style="color:#15803d;">ACEITE COMPROVADO</strong><br>${formatarMoedaPdf(o.executor_saldo_antes)} → ${formatarMoedaPdf(o.executor_saldo_depois)}<br><span style="color:#555;">Débito: ${formatarMoedaPdf(o.executor_debito_observado)}</span>`
                     : `<strong style="color:#b45309;">SEM PROVA EXTERNA</strong><br><span style="color:#666;">Clique/resultado interno não comprova aposta na casa.</span>`;
+                const saldoPosConfirmado = o.saldo_pos !== null
+                    && o.saldo_pos !== undefined
+                    && Number(o.resultado_confirmado_em) > 0
+                    && Number(o.saldo_pos_confirmado_em) > Number(o.resultado_confirmado_em);
                 const saldoModelo = confirmada && estadosFinalizados.has(String(o.status_ordem || '').toUpperCase())
-                    ? formatarMoedaPdf(o.saldo_pos)
+                    ? (saldoPosConfirmado ? formatarMoedaPdf(o.saldo_pos) : 'NÃO CONFIRMADO')
                     : 'Não auditável';
 
                 tbody.innerHTML += `<tr><td style="color:#666;">#${escaparHtmlPdf(o.id)}</td><td>${escaparHtmlPdf(dObFmt)}</td><td><strong>${escaparHtmlPdf(o.fonte_sinal)}</strong><br><span style="font-size:8px; color:#666;">${escaparHtmlPdf(o.estrategia_nome)}</span></td><td>${escaparHtmlPdf(String(o.alvo || '').replace('Won',''))}<br>Principal: ${formatarMoedaPdf(vPrincipal)}${vEmpate > 0 ? `<br>Tie: ${formatarMoedaPdf(vEmpate)}` : ''}</td><td>${escaparHtmlPdf(o.nivel)}<br><span style="color:#666;">${escaparHtmlPdf(o.status_ordem)}</span></td><td>${evidencia}</td><td style="color:${corStatus}; font-weight:bold;">${escaparHtmlPdf(o.status_ordem)}<br>${confirmada ? `${sinalResult}${formatarMoedaPdf(vLucro)}` : 'Excluído dos totais'}<br><span style="color:#0056b3;">${escaparHtmlPdf(o.placar_mesa || 'Sem placar')}</span></td><td>${saldoModelo}</td></tr>`;

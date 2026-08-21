@@ -355,13 +355,13 @@ test("BUG-033: painel lista somente robôs ativos e não renderiza origens", () 
     assert.match(source, /Auto-Trader \$\{trader\.id\} \(\$\{trader\.nome\}\) autorizado para o sinal/);
 });
 
-test("BUG-046: executor ancora a janela em Resolved + 8s e Node preserva o callback", () => {
+test("BUG-046: executor ancora a janela em Resolved + 8.5s e Node preserva o callback", () => {
     assert.match(executorPythonSource, /EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS = 180\.0/);
     assert.match(executorPythonSource, /normalizado in \{"waitingforbets", "closingbets", "acceptingbets", "betting"\}/);
     assert.match(executorPythonSource, /ultimo_resolved_monotonic = 0\.0/);
     assert.match(executorPythonSource, /resolved_monotonic_aceite/);
-    assert.match(executorPythonSource, /alvo_temporal = resolved_base \+ 8\.0/);
-    assert.match(executorPythonSource, /janela real alvo em \+8000ms/);
+    assert.match(executorPythonSource, /alvo_temporal = resolved_base \+ 8\.5/);
+    assert.match(executorPythonSource, /janela real alvo em \+8500ms/);
     assert.match(executorPythonSource, /janela real liberada em/);
     assert.match(executorPythonSource, /if contexto\["estado"\] == "EXPIRADA":/);
     assert.match(executorPythonSource, /fichas_acionaveis/);

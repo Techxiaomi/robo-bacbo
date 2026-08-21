@@ -136,7 +136,7 @@ class TestConfirmarAceiteFinanceiroAposta(unittest.TestCase):
         resultado = confirmar(self.FakePage(), 1600.0, 5.0)
         self.assertFalse(resultado["confirmada"])
         self.assertEqual(resultado["metodo"], "SALDO_NAO_CONFIRMADO")
-        self.assertIn("permaneceu inalterado", resultado["motivo"])
+        self.assertIn("não sofreu débito adicional", resultado["motivo"])
 
     def test_variacao_diferente_da_exposicao_nao_e_aceita(self):
         confirmar = self.carregar_com_leitor(lambda _page: 1590.0)
