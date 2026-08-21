@@ -834,20 +834,30 @@ async function responderCollectorRoadCanonico(req, res) {
     return true;
 }
 
-async function processarReceberSinalCanonico(req) {
-    if (req.method !== 'POST' || req.path !== '/receber-sinal') return false;
-    if (!tokenInternoValidoRoad(req)) return false;
-    const dados = req.body && typeof req.body === 'object' ? req.body : {};
-    const giroIncremental = normalizarGiroIncrementalRoad(dados);
-    return enfileirarReconciliacaoRoad(async () => {
+function agendarReconciliacaoIncrementalLedger(giroIncremental) {
+    if (!giroIncremental) return;
+
+    enfileirarReconciliacaoRoad(async () => {
         await resolverHoldbackAntesIncremental(giroIncremental);
-        const atualizado = orientarOuAtualizarEstadoCanonicoComIncremental(dados);
         if (estadoCanonicoEvolution.pronto === true && estadoLedgerRoad.snapshotPendente) {
             await concluirSnapshotPendenteAposOrientacao();
             await resolverHoldbackAntesIncremental(giroIncremental);
         }
-        return atualizado;
+    }).catch(erroLedger => {
+        console.error(
+            `❌ ROAD LEDGER | falha assíncrona fora do caminho live: ${String(erroLedger?.message || erroLedger)}`
+        );
     });
+}
+
+function processarReceberSinalCanonico(req) {
+    if (req.method !== 'POST' || req.path !== '/receber-sinal') return false;
+    if (!tokenInternoValidoRoad(req)) return false;
+    const dados = req.body && typeof req.body === 'object' ? req.body : {};
+    const giroIncremental = normalizarGiroIncrementalRoad(dados);
+    const atualizado = orientarOuAtualizarEstadoCanonicoComIncremental(dados);
+    agendarReconciliacaoIncrementalLedger(giroIncremental);
+    return atualizado;
 }
 
 function instalarContextoLedgerExpress() {
@@ -873,15 +883,14 @@ function instalarContextoLedgerExpress() {
                 }
 
                 const payload = req && req.body && typeof req.body === 'object' ? req.body : {};
-                processarReceberSinalCanonico(req)
-                    .catch(erroCore => {
-                        invalidarEstadoCanonicoEvolution(
-                            `falha ao reconciliar incremental: ${String(erroCore?.message || erroCore)}`
-                        );
-                    })
-                    .finally(() => {
-                        CONTEXTO_LEDGER_REQUEST.run(payload, next);
-                    });
+                try {
+                    processarReceberSinalCanonico(req);
+                } catch (erroCore) {
+                    invalidarEstadoCanonicoEvolution(
+                        `falha ao atualizar incremental live: ${String(erroCore?.message || erroCore)}`
+                    );
+                }
+                return CONTEXTO_LEDGER_REQUEST.run(payload, next);
             });
         };
     };
