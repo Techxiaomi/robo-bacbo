@@ -892,47 +892,36 @@ def frame_evolution_relevante(frame):
 
 
 def interagir_keepalive_evolution(page):
-    """Gera movimento real do ponteiro sobre uma superfície neutra/visual da mesa."""
-    seletores_neutros = (
-        "canvas",
-        "[data-roadmap]",
-        "[data-history]",
-        "[data-results]",
-        "[class*='roadmap' i]",
-        "[class*='bead' i]",
-        "[class*='history' i]",
-        "[class*='road' i]",
-        "body",
-    )
+    """Injeta atividade DOM silenciosa sem mover o mouse físico nem alterar foco/teclado."""
+    script = """() => {
+        const largura = Math.max(1, window.innerWidth || (document.documentElement && document.documentElement.clientWidth) || 1);
+        const altura = Math.max(1, window.innerHeight || (document.documentElement && document.documentElement.clientHeight) || 1);
+        const clientX = Math.max(1, Math.floor(largura * 0.5));
+        const clientY = Math.max(1, Math.floor(altura * 0.5));
+        const comum = { bubbles: true, cancelable: true, composed: true, clientX, clientY };
+        try {
+            document.dispatchEvent(new PointerEvent('pointerdown', {
+                ...comum, pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1
+            }));
+            document.dispatchEvent(new PointerEvent('pointerup', {
+                ...comum, pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 0
+            }));
+        } catch (_) {
+            document.dispatchEvent(new MouseEvent('mousedown', { ...comum, button: 0, buttons: 1 }));
+            document.dispatchEvent(new MouseEvent('mouseup', { ...comum, button: 0, buttons: 0 }));
+        }
+        document.dispatchEvent(new MouseEvent('mousemove', { ...comum, buttons: 0 }));
+        return true;
+    }"""
 
     for frame in list(getattr(page, "frames", []) or []):
         if not frame_evolution_relevante(frame):
             continue
-        for seletor in seletores_neutros:
-            try:
-                candidatos = frame.locator(seletor)
-                quantidade = min(max(0, int(candidatos.count())), 6)
-            except Exception:
-                continue
-
-            for indice in range(quantidade):
-                try:
-                    elemento = candidatos.nth(indice)
-                    if not elemento.is_visible(timeout=100):
-                        continue
-                    caixa = elemento.bounding_box(timeout=200)
-                    if not caixa or caixa.get("width", 0) < 8 or caixa.get("height", 0) < 8:
-                        continue
-                    largura = float(caixa["width"])
-                    altura = float(caixa["height"])
-                    x = max(3.0, min(largura - 3.0, largura * random.uniform(0.35, 0.65)))
-                    y = max(3.0, min(altura - 3.0, altura * random.uniform(0.35, 0.65)))
-                    # Locator.hover usa o dispositivo de ponteiro do Playwright e produz
-                    # pointer/mouse events reais no elemento, ao contrário de dispatchEvent.
-                    elemento.hover(position={"x": x, "y": y}, force=True, timeout=400)
-                    return True
-                except Exception:
-                    continue
+        try:
+            if frame.evaluate(script) is True:
+                return True
+        except Exception:
+            continue
     return False
 
 
@@ -2367,6 +2356,7 @@ def iniciar_robo_blindado():
             "ws_oficial": None,
             "ultimo_player_state_monotonic": 0.0,
             "reconexao_pendente": None,
+            "reload_idle_imediato": False,
         }
         estado_saldo = {
             "ultima_tentativa": 0.0,
@@ -2505,12 +2495,21 @@ def iniciar_robo_blindado():
 
         while True:
             try:
+                reload_idle_imediato = bool(status_conexao.get("reload_idle_imediato"))
                 executor_pronto.clear()
                 status_conexao["ws_conectado"] = False
                 status_conexao["ws_oficial"] = None
                 status_conexao["ultimo_player_state_monotonic"] = 0.0
                 status_conexao["reconexao_pendente"] = None
-                page.goto(URL_CASSINO, wait_until="domcontentloaded", timeout=60000)
+                status_conexao["reload_idle_imediato"] = False
+                if reload_idle_imediato:
+                    print("⚡ ANTI-IDLE | reiniciando a mesa imediatamente, sem aguardar grace period do WebSocket.")
+                    try:
+                        page.reload(wait_until="commit", timeout=5000)
+                    except PlaywrightTimeoutError:
+                        page.goto(URL_CASSINO, wait_until="domcontentloaded", timeout=60000)
+                else:
+                    page.goto(URL_CASSINO, wait_until="domcontentloaded", timeout=60000)
                 fechar_popups(page)
                 
                 sucesso_login = False
@@ -2533,7 +2532,7 @@ def iniciar_robo_blindado():
                 executor_pronto.set()
                 print("✅ Acesso validado! Executor liberado para novas ordens.")
                 ultima_interacao_keepalive = time.time()
-                intervalo_keepalive = random.uniform(30.0, 45.0)
+                intervalo_keepalive = random.uniform(25.0, 35.0)
                 
                 # Mantém a sessão saudável indefinidamente. A navegação é reiniciada
                 # somente por evidência operacional (WebSocket/stale/login/Playwright),
@@ -2547,7 +2546,7 @@ def iniciar_robo_blindado():
                             ordem = fila_apostas.get()
                             processar_ordem_executor(page, ordem)
                             ultima_interacao_keepalive = time.time()
-                            intervalo_keepalive = random.uniform(30.0, 45.0)
+                            intervalo_keepalive = random.uniform(25.0, 35.0)
                         # 500ms de polling consumiam uma fração grande da janela
                         # real de aposta. Mantém o event loop responsivo sem busy-wait.
                         page.wait_for_timeout(50)
@@ -2584,15 +2583,15 @@ def iniciar_robo_blindado():
                         if agora_keepalive - ultima_interacao_keepalive >= intervalo_keepalive:
                             if interagir_keepalive_evolution(page):
                                 ultima_interacao_keepalive = agora_keepalive
-                                intervalo_keepalive = random.uniform(30.0, 45.0)
+                                intervalo_keepalive = random.uniform(25.0, 35.0)
                             else:
-                                # Não mascara falha do keep-alive por mais 30-45 s.
+                                # Não mascara falha do keep-alive por mais 25-35 s.
                                 # Tenta novamente em breve sem transformar o loop em busy-wait.
                                 ultima_interacao_keepalive = agora_keepalive
                                 intervalo_keepalive = 5.0
                                 registrar_erro_limitado(
                                     "keepalive_evolution_indisponivel",
-                                    "⚠️ Keep-Alive Evolution não encontrou superfície neutra visível; nova tentativa em 5s.",
+                                    "⚠️ Keep-Alive Evolution não conseguiu injetar atividade DOM; nova tentativa em 5s.",
                                     30,
                                 )
 
@@ -2600,6 +2599,7 @@ def iniciar_robo_blindado():
                         break
                     
                     # Fecha qualquer overlay de pausa/inatividade conhecido caso a prevenção não seja suficiente.
+                    modal_idle_dispensado = False
                     for frame in page.frames:
                         if frame_evolution_relevante(frame):
                             try:
@@ -2609,9 +2609,29 @@ def iniciar_robo_blindado():
                                 if btn.count() > 0 and btn.first.is_visible(timeout=100):
                                     btn.first.click(force=True, timeout=300)
                                     ultima_interacao_keepalive = time.time()
-                                    intervalo_keepalive = random.uniform(30.0, 45.0)
+                                    intervalo_keepalive = random.uniform(25.0, 35.0)
+
+                                    # ANTI-IDLE-04: a Evolution derruba o socket ao pausar e não
+                                    # reenvia playerState ao despausar. Não aguarda o grace period
+                                    # conhecido como inútil: lacra o fluxo e reinicia a mesa já.
+                                    executor_pronto.clear()
+                                    status_conexao["reconexao_pendente"] = None
+                                    status_conexao["reload_idle_imediato"] = True
+                                    status_conexao["ativa"] = False
+                                    motivo_idle = "IDLE_MODAL_RELOAD"
+                                    if marcar_interrupcao_fluxo(motivo_idle):
+                                        threading.Thread(
+                                            target=notificar_interrupcao_node,
+                                            args=(motivo_idle,),
+                                            daemon=True,
+                                        ).start()
+                                    print("⚡ ANTI-IDLE | modal de inatividade dispensado; reload imediato acionado.")
+                                    modal_idle_dispensado = True
+                                    break
                             except Exception:
                                 pass
+                    if modal_idle_dispensado:
+                        break
                     
                 executor_pronto.clear()
                 
