@@ -1552,6 +1552,7 @@
                         <h4 style="margin:0 0 10px 0; font-size:12px; color:#17a2b8; text-transform:uppercase;">🛡️ Quarentena & Anti-Spam</h4>
                         <div style="display:flex; gap:10px; flex-wrap:wrap; background:#111; padding:15px; border-radius:6px; border:1px solid #333; margin-bottom:15px;">
                             <div class="form-group" style="flex:1; min-width:200px;"><label>Validação histórica (últimos X giros):</label><input type="number" id="robo-ia-shadow" value="0" min="0"></div>
+                            <div class="form-group" style="flex:1; min-width:200px;"><label>MÁX. REDS SEGUIDOS (BACKTEST):</label><input type="number" id="robo-ia-max-red-streak-historico" value="0" min="0"><small style="color:#777;">0 desativa.</small></div>
                         <div class="form-group">
                             <label>Shadow Live (mínimo X ocorrências)</label>
                             <input type="number" id="robo-ia-shadow-live" min="0" max="100" value="10">
@@ -2012,6 +2013,7 @@
             preencherCampoRobo('robo-ia-shadow-live', 10);
             preencherCampoRobo('robo-ia-shadow-live-max', 10);
             preencherCampoRobo('robo-ia-max', 4);
+            preencherCampoRobo('robo-ia-max-red-streak-historico', 0);
             preencherCampoRobo('robo-ia-drop-reds', 2);
             preencherCampoRobo('robo-ia-drop-assert', 85);
             preencherCampoRobo('robo-ia-ttl', 4);
@@ -2092,6 +2094,7 @@
             preencherCampoRobo('robo-ia-shadow-live', ia.shadow_live_ocorrencias ?? 10);
             preencherCampoRobo('robo-ia-shadow-live-max', ia.shadow_live_max_candidatos ?? 10);
             preencherCampoRobo('robo-ia-max', ia.max_padroes ?? 4);
+            preencherCampoRobo('robo-ia-max-red-streak-historico', ia.max_red_streak_historico ?? 0);
             preencherCampoRobo('robo-ia-drop-reds', ia.drop_reds ?? 2);
             preencherCampoRobo('robo-ia-drop-assert', ia.drop_assert ?? 85);
             preencherCampoRobo('robo-ia-ttl', ia.ttl_horas ?? 4);
@@ -2146,6 +2149,7 @@
                     shadow_live_ocorrencias: parseInt(document.getElementById('robo-ia-shadow-live').value) || 0,
                     shadow_live_max_candidatos: parseInt(document.getElementById('robo-ia-shadow-live-max').value) || 10,
                     max_padroes: parseInt(document.getElementById('robo-ia-max').value) || 4,
+                    max_red_streak_historico: Math.max(0, parseInt(document.getElementById('robo-ia-max-red-streak-historico').value) || 0),
                     drop_reds: parseInt(document.getElementById('robo-ia-drop-reds').value) || 1,
                     drop_assert: parseFloat(document.getElementById('robo-ia-drop-assert').value) || 85,
                     ttl_horas: parseFloat(document.getElementById('robo-ia-ttl').value) || 4,
