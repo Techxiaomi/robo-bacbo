@@ -1,0 +1,65 @@
+name: Trigger Auto-Trader native materialization
+
+on:
+  push:
+    branches:
+      - agent/auto-trader-state-machine-schedules
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    if: ${{ !contains(github.event.head_commit.message, '[auto-trader-materialized]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/auto-trader-state-machine-schedules
+          fetch-depth: 0
+
+      - name: Materialize native source
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          source = Path('.github/workflows/materialize-auto-trader-state-machine.yml').read_text(encoding='utf-8')
+          start_marker = "          cat > /tmp/auto-trader-native.patch <<'PATCH'\n"
+          end_marker = "\n          PATCH\n"
+          start = source.index(start_marker) + len(start_marker)
+          end = source.index(end_marker, start)
+          patch = source[start:end]
+          prefix = '          '
+          lines = [line[len(prefix):] if line.startswith(prefix) else line for line in patch.splitlines()]
+          Path('/tmp/auto-trader-native.patch').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+          PY
+          git apply --check /tmp/auto-trader-native.patch
+          git apply /tmp/auto-trader-native.patch
+
+      - name: Validate
+        run: |
+          cd robo-bacbo
+          node --check auto_trader.js
+          node --check bot2_coletor.js
+          node --test test/auto_trader.test.js
+          node - <<'NODE'
+          const fs = require('fs');
+          const vm = require('vm');
+          const html = fs.readFileSync('public/dashboard-app.html', 'utf8');
+          const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);
+          const principal = scripts.find(codigo => codigo.includes('const socketWeb = io();'));
+          if (!principal) throw new Error('Script principal não encontrado');
+          new vm.Script(principal, { filename: 'dashboard-inline.js' });
+          NODE
+          cd ..
+          git diff --check
+
+      - name: Commit native implementation
+        run: |
+          rm -f .github/workflows/materialize-auto-trader-state-machine.yml .github/workflows/materialize-auto-trader-trigger.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- robo-bacbo/auto_trader.js robo-bacbo/test/auto_trader.test.js robo-bacbo/bot2_coletor.js robo-bacbo/public/dashboard-app.html
+          git add -u -- .github/workflows/materialize-auto-trader-state-machine.yml .github/workflows/materialize-auto-trader-trigger.yml
+          git diff --cached --check
+          git commit -m "refactor(auto-trader): state-machine cycles and multi-window schedules [auto-trader-materialized]"
+          git push origin HEAD:agent/auto-trader-state-machine-schedules
