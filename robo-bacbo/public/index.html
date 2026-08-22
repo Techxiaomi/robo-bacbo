@@ -12,6 +12,7 @@
     <script src="/dom-ui2-transform.js"></script>
     <script src="/backtest-ui3-transform.js"></script>
     <script src="/resources-ui4.js"></script>
+    <script src="/auto-trader-schedules-ui.js"></script>
 
     <style>
         html, body {
@@ -91,6 +92,10 @@
                 const script = document.createElement('script');
                 script.textContent = scriptPrincipalOtimizado;
                 document.body.appendChild(script);
+
+                if (typeof window.aplicarHorariosAutoTrader === 'function') {
+                    window.aplicarHorariosAutoTrader();
+                }
 
                 const finalizarInicializacao = () => {
                     // O HTML-base foi montado depois do DOMContentLoaded original do loader.

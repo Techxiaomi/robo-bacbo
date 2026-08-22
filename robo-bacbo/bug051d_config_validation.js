@@ -173,11 +173,30 @@ function validarConfiguracaoAutoTrader(config) {
         }
     }
 
-    if (!horarioValido(config.hora_inicio)) {
-        return falha('hora_inicio', 'deve usar o formato HH:MM entre 00:00 e 23:59');
-    }
-    if (!horarioValido(config.hora_fim)) {
-        return falha('hora_fim', 'deve usar o formato HH:MM entre 00:00 e 23:59');
+    const possuiFaixasNovas = Array.isArray(config.faixas_horario);
+    if (possuiFaixasNovas) {
+        if (config.faixas_horario.length === 0) {
+            return falha('faixas_horario', 'deve conter ao menos uma faixa');
+        }
+        for (let i = 0; i < config.faixas_horario.length; i++) {
+            const faixa = config.faixas_horario[i];
+            if (!faixa || typeof faixa !== 'object' || Array.isArray(faixa)) {
+                return falha(`faixas_horario[${i}]`, 'deve ser um objeto com inicio e fim');
+            }
+            if (!horarioValido(faixa.inicio)) {
+                return falha(`faixas_horario[${i}].inicio`, 'deve usar o formato HH:MM entre 00:00 e 23:59');
+            }
+            if (!horarioValido(faixa.fim)) {
+                return falha(`faixas_horario[${i}].fim`, 'deve usar o formato HH:MM entre 00:00 e 23:59');
+            }
+        }
+    } else {
+        if (!horarioValido(config.hora_inicio)) {
+            return falha('hora_inicio', 'deve usar o formato HH:MM entre 00:00 e 23:59');
+        }
+        if (!horarioValido(config.hora_fim)) {
+            return falha('hora_fim', 'deve usar o formato HH:MM entre 00:00 e 23:59');
+        }
     }
 
     if (!Array.isArray(config.fontes_sinal)) {

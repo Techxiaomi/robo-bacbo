@@ -6,6 +6,7 @@ const express = require('express');
 const { criarBarreiraSaldoFrescoStops } = require('./bug051c_balance_barrier');
 const { validarConfiguracaoAutoTrader } = require('./bug051d_config_validation');
 const { criarIntegracaoCicloFinanceiro } = require('./bug051e_financial_cycle');
+const { traderDentroHorarioExecucao, formatarFaixasHorario } = require('./auto_trader');
 
 const GUARDA_CONFIG_INSTALADA = Symbol.for('robo-bacbo.bug051d.guarda-config');
 const CONTEXTO_LEDGER_REQUEST = new AsyncLocalStorage();
@@ -725,7 +726,7 @@ function orientarOuAtualizarEstadoCanonicoComIncremental(dados) {
     return true;
 }
 
-function obterHistoricoCanonicoLive(limiteSolicitado = LIMITE_HISTORY_CANONICO, coletorSeqMax = null) {
+function obterHistoricoCanonicoLive() {
     const orientacaoValida = orientacaoRoadValida(estadoCanonicoEvolution.orientacao);
     if (
         estadoCanonicoEvolution.pronto !== true
@@ -745,30 +746,7 @@ function obterHistoricoCanonicoLive(limiteSolicitado = LIMITE_HISTORY_CANONICO, 
         estadoCanonicoEvolution.history,
         estadoCanonicoEvolution.orientacao
     );
-    const limiteNumero = Number(limiteSolicitado);
-    const limite = Number.isSafeInteger(limiteNumero) && limiteNumero > 0
-        ? Math.min(LIMITE_HISTORY_CANONICO, limiteNumero)
-        : LIMITE_HISTORY_CANONICO;
-    const seqMax = sequenciaColetorRoad(coletorSeqMax);
-    const ultimoSeq = sequenciaColetorRoad(estadoCanonicoEvolution.ultimo_coletor_seq);
-    const primeiroSeqInferido = ultimoSeq !== null
-        ? ultimoSeq - (cronologico.length - 1)
-        : null;
-    const cronologicoAlinhado = cronologico.map((item, indice) => {
-        const seqExplicita = sequenciaColetorRoad(item?.coletorSeq || item?.coletor_seq);
-        const seqInferida = primeiroSeqInferido !== null && primeiroSeqInferido + indice > 0
-            ? primeiroSeqInferido + indice
-            : null;
-        const seqEfetiva = seqExplicita !== null ? seqExplicita : seqInferida;
-        return seqEfetiva === null ? item : { ...item, coletorSeq: seqEfetiva };
-    });
-    const visivelAteTurno = seqMax === null
-        ? cronologicoAlinhado
-        : cronologicoAlinhado.filter(item => {
-            const seqItem = sequenciaColetorRoad(item?.coletorSeq || item?.coletor_seq);
-            return seqItem !== null && seqItem <= seqMax;
-        });
-    const cauda = visivelAteTurno.slice(-limite);
+    const cauda = cronologico.slice(-LIMITE_HISTORY_CANONICO);
     const history = cauda.map(item => {
         const resultado = resultadoLiveRoad(item.winner);
         if (!resultado) return null;
@@ -800,7 +778,6 @@ function obterHistoricoCanonicoLive(limiteSolicitado = LIMITE_HISTORY_CANONICO, 
         orientacao: estadoCanonicoEvolution.orientacao,
         history,
         coletor_sessao: estadoCanonicoEvolution.coletor_sessao,
-        ultimo_coletor_seq: estadoCanonicoEvolution.ultimo_coletor_seq,
         atualizado_em: estadoCanonicoEvolution.atualizado_em
     };
 }
@@ -845,19 +822,6 @@ async function responderCollectorRoadCanonico(req, res) {
     const reconciliacao = await enfileirarReconciliacaoRoad(
         () => reconciliarSnapshotComLedger(dados, historyNormalizado)
     );
-
-    if (
-        estadoCanonicoEvolution.pronto === true
-        && typeof global.__signalCycleRecoveryFromRoad === 'function'
-    ) {
-        const snapshotRecuperacao = obterHistoricoCanonicoLive();
-        Promise.resolve(global.__signalCycleRecoveryFromRoad(snapshotRecuperacao)).catch(erroRecuperacao => {
-            console.error(
-                `❌ SIGNAL CYCLE | recuperação pós-ROAD falhou: ${String(erroRecuperacao?.message || erroRecuperacao)}`
-            );
-        });
-    }
-
     res.status(200).json({
         recebido: true,
         core: 'RAM_CANONICA',
@@ -1208,6 +1172,14 @@ function criarIntegracaoContadorDiario({ controleDiarioAutoTrader, dbPool, ioSer
             console.error(
                 `🚫 CONFIG AUTO-TRADER | trader=${trader?.id || 'n/a'} | execução bloqueada | `
                 + validacaoConfig.motivo
+            );
+            return false;
+        }
+
+        if (!traderDentroHorarioExecucao(trader?.config)) {
+            console.log(
+                `🕒 Auto-Trader ${trader?.id || 'n/a'} fora das faixas de execução `
+                + `(${formatarFaixasHorario(trader?.config)}). Nova entrada ignorada.`
             );
             return false;
         }
