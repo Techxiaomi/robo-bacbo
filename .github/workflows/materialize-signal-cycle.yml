@@ -1,0 +1,65 @@
+name: Materialize native signal-cycle source
+
+on:
+  push:
+    branches:
+      - agent/signal-cycle-phase3
+    paths:
+      - .github/workflows/materialize-signal-cycle.yml
+      - robo-bacbo/generate_native_signal_cycle.js
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    if: ${{ !contains(github.event.head_commit.message, '[native-materialized]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/signal-cycle-phase3
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Materialize native source
+        working-directory: robo-bacbo
+        run: |
+          node generate_native_signal_cycle.js
+          node --check bot2_coletor.js
+          node --check bug051b_integration.js
+          grep -q "const watermarkRecuperacaoPorRobo = new Map();" bot2_coletor.js
+          grep -q "function enfileirarTrabalhoFinanceiroAutoTrader" bot2_coletor.js
+          grep -q "async function recuperarSinaisAguardandoRecuperacao" bot2_coletor.js
+          grep -q "function obterHistoricoCanonicoLive(limiteSolicitado = LIMITE_HISTORY_CANONICO, coletorSeqMax = null)" bug051b_integration.js
+          if grep -E "signal_cycle_phase[23]_patch|substituirUnico\(|replaceExactly\(|module\._compile\(" bot2_coletor.js bug051b_integration.js; then
+            echo "Runtime patch residue found in native source"
+            exit 1
+          fi
+
+      - name: Remove materialization infrastructure
+        run: |
+          rm -f robo-bacbo/generate_native_signal_cycle.js
+          rm -f .github/workflows/materialize-signal-cycle.yml
+          git rm -f --ignore-unmatch -- \
+            robo-bacbo/bot2_coletor.phase0.js \
+            robo-bacbo/bot2_coletor.phase1.js \
+            robo-bacbo/bot2_coletor.phase1_base.txt \
+            robo-bacbo/bot2_coletor.phase1_base.js \
+            robo-bacbo/signal_cycle_phase2_patch.js \
+            robo-bacbo/signal_cycle_phase3_patch.js \
+            robo-bacbo/bug051b_integration.phase0.js
+          git add -- robo-bacbo/bot2_coletor.js robo-bacbo/bug051b_integration.js
+
+      - name: Commit native implementation
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -u -- .github/workflows/materialize-signal-cycle.yml robo-bacbo/generate_native_signal_cycle.js
+          git diff --cached --check
+          git status --short
+          git commit -m "refactor(signals): materialize native signal-cycle architecture [native-materialized]"
+          git push origin HEAD:agent/signal-cycle-phase3
