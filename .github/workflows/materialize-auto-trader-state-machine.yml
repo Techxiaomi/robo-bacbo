@@ -1,0 +1,771 @@
+name: Materialize Auto-Trader state machine
+
+on:
+  push:
+    branches:
+      - agent/auto-trader-state-machine-schedules
+    paths:
+      - .github/workflows/materialize-auto-trader-state-machine.yml
+      - robo-bacbo/auto_trader.js
+      - robo-bacbo/test/auto_trader.test.js
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    if: ${{ !contains(github.event.head_commit.message, '[auto-trader-materialized]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/auto-trader-state-machine-schedules
+          fetch-depth: 0
+
+      - name: Apply native source changes
+        run: |
+          cat > /tmp/auto-trader-native.patch <<'PATCH'
+          diff --git a/robo-bacbo/bot2_coletor.js b/robo-bacbo/bot2_coletor.js
+          index afdfe42..0000000 100644
+          --- a/robo-bacbo/bot2_coletor.js
+          +++ b/robo-bacbo/bot2_coletor.js
+          @@ -10,6 +10,18 @@ const { Server } = require("socket.io");
+           const { criarAutoPilotService } = require("./auto_pilot_ia");
+           const { criarControleDiarioAutoTrader } = require("./bug051b_daily_counter");
+           const { criarIntegracaoContadorDiario } = require("./bug051b_integration");
+          +const {
+          +    normalizarConfigAutoTrader,
+          +    traderDentroHorarioExecucao,
+          +    formatarFaixasHorario,
+          +    normalizarEstadoCiclo,
+          +    estadoInicialCiclo,
+          +    configuracaoCicloMudou,
+          +    processarResultadoDormindo,
+          +    avaliarSinalOnda,
+          +    avancarAposSinalOperado,
+          +    aplicarEstadoCiclo
+          +} = require("./auto_trader");
+           require("./env_loader").loadEnvFile(path.join(__dirname, "..", ".env"));
+           
+           // Erros globais realmente não tratados são fatais: continuar pode deixar estado financeiro incoerente.
+          @@ -237,6 +249,10 @@ async function prepararBancoDeDados() {
+                           status_operacao VARCHAR(50) DEFAULT 'STANDBY',
+                           entradas_feitas INT DEFAULT 0,
+                           pulos_restantes INT DEFAULT 0,
+          +                estado_ciclo VARCHAR(20) DEFAULT 'DORMINDO',
+          +                reds_virtuais_observados INT DEFAULT 0,
+          +                sinais_operados_onda INT DEFAULT 0,
+          +                ciclos_concluidos INT DEFAULT 0,
+                           data_contador_entradas VARCHAR(10) DEFAULT NULL,
+                           reds_consecutivos INT DEFAULT 0,
+                           stop_reds_pausado_ate BIGINT DEFAULT 0,
+          @@ -319,6 +335,10 @@ async function prepararBancoDeDados() {
+                   await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN stop_reds_pausado_ate BIGINT DEFAULT 0");
+                   await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN trailing_pico_lucro DECIMAL(12,2) DEFAULT 0");
+                   await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN data_contador_entradas VARCHAR(10) DEFAULT NULL");
+          +        await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN estado_ciclo VARCHAR(20) DEFAULT 'DORMINDO'");
+          +        await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN reds_virtuais_observados INT DEFAULT 0");
+          +        await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN sinais_operados_onda INT DEFAULT 0");
+          +        await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN ciclos_concluidos INT DEFAULT 0");
+                   await integracaoContadorDiario.inicializarDatasLegadas();
+           
+                   // Corrige estados legados impossíveis: um trader desligado manualmente não pode permanecer OPERANDO/STANDBY.
+          @@ -2378,6 +2398,111 @@ function autoTraderAutorizaEstrategia(config, est, robos = []) {
+               return !est.is_dinamico && fontes.includes(String(est.origem || '').trim());
+           }
+           
+          +function autoTraderParticipouDoSinal(trader, est, estado) {
+          +    const idsSelecionados = idsRobosSelecionadosAutoTrader(trader && trader.config, ROBOS_MEMORIA);
+          +    const idsSinal = idsRobosEstadoSinal(estado).map(Number).filter(Number.isFinite);
+          +
+          +    if (idsSelecionados.size > 0 && idsSinal.length > 0) {
+          +        return idsSinal.some(id => idsSelecionados.has(id));
+          +    }
+          +
+          +    return autoTraderAutorizaEstrategia(trader && trader.config, est, ROBOS_MEMORIA);
+          +}
+          +
+          +async function persistirEstadoCicloAutoTrader(trader, estadoBruto, { autoStop = false } = {}) {
+          +    const estado = normalizarEstadoCiclo(estadoBruto);
+          +    const desligarPorCiclos = autoStop === true && trader && trader.ativo === true;
+          +
+          +    if (desligarPorCiclos) {
+          +        await dbPool.query(
+          +            `UPDATE auto_traders
+          +             SET ativo=false, status_operacao='LIMITE_CICLOS', estado_ciclo=?,
+          +                 reds_virtuais_observados=?, sinais_operados_onda=?, ciclos_concluidos=?, pulos_restantes=?
+          +             WHERE id=?`,
+          +            [
+          +                estado.estado_ciclo,
+          +                estado.reds_virtuais_observados,
+          +                estado.sinais_operados_onda,
+          +                estado.ciclos_concluidos,
+          +                estado.pulos_restantes,
+          +                trader.id
+          +            ]
+          +        );
+          +    } else {
+          +        await dbPool.query(
+          +            `UPDATE auto_traders
+          +             SET estado_ciclo=?, reds_virtuais_observados=?, sinais_operados_onda=?,
+          +                 ciclos_concluidos=?, pulos_restantes=?
+          +             WHERE id=?`,
+          +            [
+          +                estado.estado_ciclo,
+          +                estado.reds_virtuais_observados,
+          +                estado.sinais_operados_onda,
+          +                estado.ciclos_concluidos,
+          +                estado.pulos_restantes,
+          +                trader.id
+          +            ]
+          +        );
+          +    }
+          +
+          +    aplicarEstadoCiclo(trader, estado);
+          +    if (desligarPorCiclos) {
+          +        trader.ativo = false;
+          +        trader.status_operacao = 'LIMITE_CICLOS';
+          +    }
+          +    return estado;
+          +}
+          +
+          +async function processarResultadoVirtualAutoTraders(est, estado, tipoResultado) {
+          +    let alterados = 0;
+          +    for (const trader of AUTO_TRADERS_MEMORIA) {
+          +        if (!trader.ativo) continue;
+          +        if (!['OPERANDO', 'STANDBY'].includes(String(trader.status_operacao || ''))) continue;
+          +        if (!autoTraderParticipouDoSinal(trader, est, estado)) continue;
+          +
+          +        const avaliacao = processarResultadoDormindo(trader, tipoResultado);
+          +        if (!avaliacao.mudou) continue;
+          +
+          +        await persistirEstadoCicloAutoTrader(trader, avaliacao.estado);
+          +        alterados++;
+          +        if (avaliacao.acordou) {
+          +            console.log(
+          +                `🌊 Auto-Trader ${trader.id}: gatilho de REDs virtuais atingido; `
+          +                + `máquina avançou para ONDA_ATIVA.`
+          +            );
+          +        }
+          +    }
+          +
+          +    if (alterados > 0) ioServer.emit('atualizar_interface');
+          +    return alterados;
+          +}
+          +
+          +async function prepararEntradaCicloAutoTrader(trader) {
+          +    const decisao = avaliarSinalOnda(trader);
+          +    if (decisao.auto_stop) {
+          +        await persistirEstadoCicloAutoTrader(trader, decisao.estado, { autoStop: true });
+          +        console.log(`🔁 Auto-Trader ${trader.id}: limite de ciclos já atingido; motor desligado.`);
+          +        ioServer.emit('atualizar_interface');
+          +        return false;
+          +    }
+          +
+          +    if (decisao.persistir) {
+          +        await persistirEstadoCicloAutoTrader(trader, decisao.estado);
+          +    }
+          +
+          +    if (!decisao.permitido) return false;
+          +    return true;
+          +}
+          +
+          +async function concluirSinalOperadoAutoTrader(trader) {
+          +    const progresso = avancarAposSinalOperado(trader);
+          +    if (!progresso.mudou) return progresso;
+          +
+          +    const autoStopEfetivo = progresso.auto_stop === true && trader.ativo === true;
+          +    await persistirEstadoCicloAutoTrader(trader, progresso.estado, { autoStop: autoStopEfetivo });
+          +
+          +    if (progresso.ciclo_concluido) {
+          +        console.log(
+          +            `🌊 Auto-Trader ${trader.id}: onda concluída; `
+          +            + `ciclos=${progresso.estado.ciclos_concluidos}.`
+          +        );
+          +    }
+          +    if (autoStopEfetivo) {
+          +        console.log(
+          +            `🔁 Auto-Trader ${trader.id}: limite de ciclos concluídos atingido. `
+          +            + `Motor desligado até reativação manual.`
+          +        );
+          +        ioServer.emit('atualizar_interface');
+          +    }
+          +    return progresso;
+          +}
+          +
+           function avaliarStopRedsRobo(robo, tipoResultado) {
+               const limite = Math.max(0, Math.trunc(Number(robo && robo.stop_reds_seguidos) || 0));
+               const redsAtuais = Math.max(0, Math.trunc(Number(robo && robo.reds_consecutivos) || 0));
+          @@ -3493,28 +3618,6 @@ async function registrarHistoricoRobosInscritos(est, estado, tipoResultado, gal
+               );
+           }
+           
+          -function horarioParaMinutos(valor, padrao) {
+          -    const texto = String(valor || padrao).trim();
+          -    const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(texto);
+          -    if (!match) return null;
+          -    return (Number(match[1]) * 60) + Number(match[2]);
+          -}
+          -
+          -function traderDentroHorarioExecucao(config, agora = new Date()) {
+          -    const cf = config || {};
+          -    const inicio = horarioParaMinutos(cf.hora_inicio, '00:00');
+          -    const fim = horarioParaMinutos(cf.hora_fim, '23:59');
+          -
+          -    if (inicio === null || fim === null) return false;
+          -    if (inicio === fim) return true;
+          -
+          -    const minutoAtual = (agora.getHours() * 60) + agora.getMinutes();
+          -    if (inicio < fim) return minutoAtual >= inicio && minutoAtual <= fim;
+          -    return minutoAtual >= inicio || minutoAtual <= fim;
+          -}
+          -
+           function avaliarStopRedsAutoTrader(trader, tipoResultado, agora = Date.now()) {
+               const cf = (trader && trader.config) || {};
+               const limite = Math.max(0, Math.trunc(Number(cf.stop_reds_seguidos) || 0));
+          @@ -1939,13 +2042,19 @@ app.get("/api/auto-traders", async (req, res) => {
+                   const [linhas] = await dbPool.query('SELECT * FROM auto_traders ORDER BY id DESC');
+                   let sanitizados = linhas.map(at => {
+                       let confObj = {}; try { confObj = JSON.parse(at.config_json); } catch(e) {}
+          +            confObj = normalizarConfigAutoTrader(confObj);
+          +            const estadoCiclo = normalizarEstadoCiclo(at);
+                       return {
+                           id: at.id,
+                           nome: at.nome,
+                           ativo: at.ativo === 1,
+                           config: confObj,
+                           saldo_inicial: parseFloat(at.saldo_inicial),
+                           saldo_atual: parseFloat(at.saldo_atual),
+                           status_operacao: at.status_operacao,
+                           entradas_feitas: at.entradas_feitas,
+                           pulos_restantes: at.pulos_restantes,
+          +                estado_ciclo: estadoCiclo.estado_ciclo,
+          +                reds_virtuais_observados: estadoCiclo.reds_virtuais_observados,
+          +                sinais_operados_onda: estadoCiclo.sinais_operados_onda,
+          +                ciclos_concluidos: estadoCiclo.ciclos_concluidos,
+                           data_contador_entradas: String(at.data_contador_entradas || ''),
+                           reds_consecutivos: Math.max(0, Number(at.reds_consecutivos) || 0),
+                           stop_reds_pausado_ate: Math.max(0, Number(at.stop_reds_pausado_ate) || 0),
+          @@ -1961,10 +2070,11 @@ app.post("/api/auto-trader", async (req, res) => {
+               try {
+                   const { nome, ativo, config } = req.body;
+          -        const configJson = JSON.stringify(config || {});
+          +        const configNormalizada = normalizarConfigAutoTrader(config || {});
+          +        const configJson = JSON.stringify(configNormalizada);
+                   const novoAtivo = ativo === true || ativo === 1;
+                   if (novoAtivo) {
+          -            const politicaEmpate = validarPoliticaProtecao(config || {});
+          +            const politicaEmpate = validarPoliticaProtecao(configNormalizada);
+                       if (!politicaEmpate.ok) {
+                           return res.status(400).json({ sucesso: false, erro: 'protecao_empate_invalida', mensagem: politicaEmpate.motivo });
+                       }
+          @@ -1981,11 +2091,19 @@ app.post("/api/auto-trader", async (req, res) => {
+                   const saldoBaseline = novoAtivo ? saldoFresco : 0;
+                   const statusInicial = novoAtivo ? 'STANDBY' : 'DESLIGADO';
+                   const dataContadorEntradas = controleDiarioAutoTrader.dataOperacional();
+          +        const estadoCiclo = estadoInicialCiclo(configNormalizada);
+                   await dbPool.query(
+          -            `INSERT INTO auto_traders (nome, ativo, config_json, saldo_inicial, saldo_atual, status_operacao, entradas_feitas, pulos_restantes, data_contador_entradas)
+          -             VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?)`,
+          -            [nome, novoAtivo ? 1 : 0, configJson, saldoBaseline, saldoBaseline, statusInicial, dataContadorEntradas]
+          +            `INSERT INTO auto_traders
+          +                (nome, ativo, config_json, saldo_inicial, saldo_atual, status_operacao,
+          +                 entradas_feitas, pulos_restantes, estado_ciclo, reds_virtuais_observados,
+          +                 sinais_operados_onda, ciclos_concluidos, data_contador_entradas)
+          +             VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
+          +            [
+          +                nome, novoAtivo ? 1 : 0, configJson, saldoBaseline, saldoBaseline, statusInicial,
+          +                estadoCiclo.pulos_restantes, estadoCiclo.estado_ciclo,
+          +                estadoCiclo.reds_virtuais_observados, estadoCiclo.sinais_operados_onda,
+          +                estadoCiclo.ciclos_concluidos, dataContadorEntradas
+          +            ]
+                   );
+                   await carregarSistemasParaMemoria();
+                   res.json({ sucesso: true, saldo_inicial: saldoBaseline });
+          @@ -2000,10 +2118,11 @@ app.put("/api/auto-trader/:id", async (req, res) => {
+                   const { id } = req.params;
+                   const { nome, ativo, config } = req.body;
+          -        const configJson = JSON.stringify(config || {});
+          +        const configNova = normalizarConfigAutoTrader(config || {});
+          +        const configJson = JSON.stringify(configNova);
+                   const novoAtivo = ativo === true || ativo === 1;
+                   if (novoAtivo) {
+          -            const politicaEmpate = validarPoliticaProtecao(config || {});
+          +            const politicaEmpate = validarPoliticaProtecao(configNova);
+                       if (!politicaEmpate.ok) {
+                           return res.status(400).json({ sucesso: false, erro: 'protecao_empate_invalida', mensagem: politicaEmpate.motivo });
+                       }
+          @@ -2020,12 +2139,14 @@ app.put("/api/auto-trader/:id", async (req, res) => {
+                   }
+           
+                   let configAnterior = {};
+                   try { configAnterior = JSON.parse(existentes[0].config_json || '{}'); } catch(e) {}
+          -        const configNova = config || {};
+          +        configAnterior = normalizarConfigAutoTrader(configAnterior);
+                   const trailingAnteriorAtivo = configAnterior.trailing_stop === true;
+                   const trailingNovoAtivo = configNova.trailing_stop === true;
+                   const trailingAnteriorRecuo = Math.max(0, Number(configAnterior.trailing_recuo) || 0);
+                   const trailingNovoRecuo = Math.max(0, Number(configNova.trailing_recuo) || 0);
+          +        const cicloConfigMudou = configuracaoCicloMudou(configAnterior, configNova);
+                   const trailingConfigMudou =
+                       trailingAnteriorAtivo !== trailingNovoAtivo
+                       || trailingAnteriorRecuo !== trailingNovoRecuo;
+          @@ -2044,12 +2165,18 @@ app.put("/api/auto-trader/:id", async (req, res) => {
+                       });
+                   }
+           
+          +            const estadoCiclo = estadoInicialCiclo(configNova);
+                       await dbPool.query(
+                           `UPDATE auto_traders
+                            SET nome=?, ativo=true, config_json=?, saldo_inicial=?, saldo_atual=?,
+                                status_operacao='STANDBY',
+          -                     reds_consecutivos=0, stop_reds_pausado_ate=0, trailing_pico_lucro=0
+          +                     reds_consecutivos=0, stop_reds_pausado_ate=0, trailing_pico_lucro=0,
+          +                     estado_ciclo=?, reds_virtuais_observados=?, sinais_operados_onda=?,
+          +                     ciclos_concluidos=?, pulos_restantes=?
+                            WHERE id=?`,
+          -                [nome, configJson, saldoFresco, saldoFresco, id]
+          +                [
+          +                    nome, configJson, saldoFresco, saldoFresco, estadoCiclo.estado_ciclo,
+          +                    estadoCiclo.reds_virtuais_observados, estadoCiclo.sinais_operados_onda,
+          +                    estadoCiclo.ciclos_concluidos, estadoCiclo.pulos_restantes, id
+          +                ]
+                       );
+                   } else if (desligando) {
+                       if (trailingConfigMudou) {
+          @@ -2069,7 +2196,32 @@ app.put("/api/auto-trader/:id", async (req, res) => {
+                               [nome, configJson, id]
+                           );
+                       }
+          +        } else if (cicloConfigMudou) {
+          +            const estadoCiclo = estadoInicialCiclo(configNova);
+          +            if (trailingConfigMudou) {
+          +                await dbPool.query(
+          +                    `UPDATE auto_traders
+          +                     SET nome=?, ativo=?, config_json=?, trailing_pico_lucro=0,
+          +                         estado_ciclo=?, reds_virtuais_observados=?, sinais_operados_onda=?,
+          +                         ciclos_concluidos=?, pulos_restantes=?
+          +                     WHERE id=?`,
+          +                    [
+          +                        nome, novoAtivo ? 1 : 0, configJson, estadoCiclo.estado_ciclo,
+          +                        estadoCiclo.reds_virtuais_observados, estadoCiclo.sinais_operados_onda,
+          +                        estadoCiclo.ciclos_concluidos, estadoCiclo.pulos_restantes, id
+          +                    ]
+          +                );
+          +            } else {
+          +                await dbPool.query(
+          +                    `UPDATE auto_traders
+          +                     SET nome=?, ativo=?, config_json=?, estado_ciclo=?, reds_virtuais_observados=?,
+          +                         sinais_operados_onda=?, ciclos_concluidos=?, pulos_restantes=?
+          +                     WHERE id=?`,
+          +                    [
+          +                        nome, novoAtivo ? 1 : 0, configJson, estadoCiclo.estado_ciclo,
+          +                        estadoCiclo.reds_virtuais_observados, estadoCiclo.sinais_operados_onda,
+          +                        estadoCiclo.ciclos_concluidos, estadoCiclo.pulos_restantes, id
+          +                    ]
+          +                );
+          +            }
+                   } else {
+                       if (trailingConfigMudou) {
+                           await dbPool.query(
+          @@ -3996,13 +4148,19 @@ async function carregarSistemasParaMemoria() {
+           
+                   const [linhasAT] = await dbPool.query('SELECT * FROM auto_traders');
+                   AUTO_TRADERS_MEMORIA = linhasAT.map(at => {
+          -            let cfg = {}; try { cfg = JSON.parse(at.config_json); } catch(e){}
+          +            let cfg = {}; try { cfg = JSON.parse(at.config_json); } catch(e) {}
+          +            cfg = normalizarConfigAutoTrader(cfg);
+          +            const estadoCiclo = normalizarEstadoCiclo(at);
+                       return {
+                           id: at.id, nome: at.nome, ativo: at.ativo === 1, config: cfg,
+                           saldo_inicial: parseFloat(at.saldo_inicial), saldo_atual: parseFloat(at.saldo_atual),
+                           status_operacao: at.status_operacao, entradas_feitas: at.entradas_feitas, pulos_restantes: at.pulos_restantes,
+          +                estado_ciclo: estadoCiclo.estado_ciclo,
+          +                reds_virtuais_observados: estadoCiclo.reds_virtuais_observados,
+          +                sinais_operados_onda: estadoCiclo.sinais_operados_onda,
+          +                ciclos_concluidos: estadoCiclo.ciclos_concluidos,
+                           data_contador_entradas: String(at.data_contador_entradas || ''),
+                           reds_consecutivos: Math.max(0, Number(at.reds_consecutivos) || 0),
+                           stop_reds_pausado_ate: Math.max(0, Number(at.stop_reds_pausado_ate) || 0),
+          @@ -2962,6 +3120,13 @@ async function finalizarSinalRecuperado(est, estado, desfecho) {
+                   void enviarTelegramParaInscritos('GREEN', est, snapshot, extrasFinal).catch(e => {
+                       console.error(`⚠️ Falha inesperada no Telegram GREEN recuperado da estratégia ${est.id}:`, e.message);
+                   });
+               }
+          +
+          +    try {
+          +        await processarResultadoVirtualAutoTraders(est, snapshot, desfecho.tipo === 'RED' ? 'RED' : (desfecho.tipo === 'TIE' ? 'TIE' : 'GREEN'));
+          +    } catch (e) {
+          +        console.error(`⚠️ Auto-Trader: falha ao atualizar gatilho virtual após recuperação de ${est.id}:`, e.message);
+          +    }
+           
+               limparEstadoSinal(estado);
+           
+          @@ -4275,6 +4440,13 @@ app.post("/receber-sinal", async (req, res) => {
+                       void enviarTelegramParaInscritos('GREEN', est, snapshotFinal, extrasFinal).catch(e => {
+                           console.error(`⚠️ Falha inesperada no envio Telegram GREEN da estratégia ${est.id}:`, e.message);
+                       });
+          +
+          +            try {
+          +                await processarResultadoVirtualAutoTraders(est, snapshotFinal, isTie ? 'TIE' : 'GREEN');
+          +            } catch (e) {
+          +                console.error(`⚠️ Auto-Trader: falha ao atualizar gatilho virtual após ${isTie ? 'TIE' : 'GREEN'} de ${est.id}:`, e.message);
+          +            }
+           
+                       void enfileirarTrabalhoFinanceiroAutoTrader('GREEN:' + String(st.ciclo_id || est.id), async () => {
+                           if (est.quarentena_restante <= 0) {
+          @@ -4311,6 +4483,7 @@ app.post("/receber-sinal", async (req, res) => {
+                                                   trader,
+                                                   isTie ? 'TIE' : 'GREEN',
+                                                   dados.timestamp_coleta
+                                               );
+          +                                    await concluirSinalOperadoAutoTrader(trader);
+                                           } catch(e) {
+                                               console.error(`❌ Falha ao fechar ordem ${pendentes[0].id} como ${isTie ? 'TIE' : 'WIN'} do trader ${trader.id}:`, e.message);
+                                           }
+          @@ -4510,6 +4683,13 @@ app.post("/receber-sinal", async (req, res) => {
+                               console.error(`⚠️ Falha inesperada no envio Telegram RED/proteção da estratégia ${est.id}:`, e.message);
+                           });
+           
+          +            try {
+          +                await processarResultadoVirtualAutoTraders(est, snapshotFinal, 'RED');
+          +            } catch (e) {
+          +                console.error(`⚠️ Auto-Trader: falha ao atualizar gatilho virtual após RED de ${est.id}:`, e.message);
+          +            }
+          +
+                           void enfileirarTrabalhoFinanceiroAutoTrader('RED:' + String(st.ciclo_id || est.id), async () => {
+                               if (est.quarentena_restante <= 0) {
+                                   for (let trader of AUTO_TRADERS_MEMORIA) {
+          @@ -4539,6 +4719,7 @@ app.post("/receber-sinal", async (req, res) => {
+                                                   'RED',
+                                                   dados.timestamp_coleta
+                                               );
+          +                                    await concluirSinalOperadoAutoTrader(trader);
+                                           } catch(e) {
+                                               console.error(`❌ Falha ao fechar ordem LOSS ${pendentes[0].id} do trader ${trader.id}:`, e.message);
+                                           }
+          @@ -4666,10 +4847,26 @@ app.post("/receber-sinal", async (req, res) => {
+                                       );
+           
+                                       if (!traderDentroHorarioExecucao(cf)) {
+          -                                console.log(`Trader ${trader.id} fora da janela de execucao (${cf.hora_inicio || '00:00'}-${cf.hora_fim || '23:59'}). Nova entrada ignorada.`);
+          +                                console.log(
+          +                                    `Trader ${trader.id} fora das faixas de execução `
+          +                                    + `(${formatarFaixasHorario(cf)}). Nova entrada ignorada.`
+          +                                );
+                                           continue;
+                                       }
+           
+          -                            if (!(await autorizarNovaEntradaFinanceiraTrader(trader))) {
+          -                                continue;
+          -                            }
+          -
+                                       if (cf.limite_entradas && trader.entradas_feitas >= cf.limite_entradas) {
+                                           trader.status_operacao = 'META_ATINGIDA';
+                                           try {
+          @@ -4680,19 +4877,17 @@ app.post("/receber-sinal", async (req, res) => {
+                                           continue;
+                                       }
+           
+          -                            if (cf.modo_camuflagem === 'PULOS') {
+          -                                if (trader.pulos_restantes > 0) {
+          -                                    trader.pulos_restantes--;
+          -                                    try { await dbPool.query('UPDATE auto_traders SET pulos_restantes=? WHERE id=?', [trader.pulos_restantes, trader.id]); } catch(e) { console.error(`❌ Falha ao persistir pulos_restantes do trader ${trader.id}:`, e.message); }
+          -                                    continue;
+          -                                } else {
+          -                                    let pMin = cf.camuflagem_pulos_min || 1;
+          -                                    let pMax = cf.camuflagem_pulos_max || 3;
+          -                                    trader.pulos_restantes = Math.floor(Math.random() * (pMax - pMin + 1)) + pMin;
+          -                                    try { await dbPool.query('UPDATE auto_traders SET pulos_restantes=? WHERE id=?', [trader.pulos_restantes, trader.id]); } catch(e) { console.error(`❌ Falha ao persistir novo ciclo de pulos do trader ${trader.id}:`, e.message); }
+          -                                }
+          +                            try {
+          +                                if (!(await prepararEntradaCicloAutoTrader(trader))) continue;
+          +                            } catch (e) {
+          +                                console.error(`❌ Trader ${trader.id}: falha ao persistir máquina de estados; entrada bloqueada:`, e.message);
+          +                                continue;
+          +                            }
+          +
+          +                            if (!(await autorizarNovaEntradaFinanceiraTrader(trader))) {
+          +                                continue;
+                                       }
+           
+                                       const planoDireto = calcularPlanoAposta(cf, est, 0);
+          diff --git a/robo-bacbo/public/dashboard-app.html b/robo-bacbo/public/dashboard-app.html
+          index 6d3f0b7..0000000 100644
+          --- a/robo-bacbo/public/dashboard-app.html
+          +++ b/robo-bacbo/public/dashboard-app.html
+          @@ -1641,7 +1641,7 @@
+                           
+                           <div class="robo-nav-tabs" style="border-bottom-color:#28a745;">
+                               <button class="robo-nav-btn ativo" style="color:#28a745; border-color:#28a745;" id="btn-at-tab-gestao" onclick="mudarAbaAT('gestao')">💰 Gestão de Fichas</button>
+          -                    <button class="robo-nav-btn" id="btn-at-tab-camuflagem" onclick="mudarAbaAT('camuflagem')">👻 Camuflagem</button>
+          +                    <button class="robo-nav-btn" id="btn-at-tab-camuflagem" onclick="mudarAbaAT('camuflagem')">🎛️ Camuflagem e Estratégia</button>
+                               <button class="robo-nav-btn" id="btn-at-tab-risco" onclick="mudarAbaAT('risco')">🛡️ Limites de Risco</button>
+                               <button class="robo-nav-btn" id="btn-at-tab-fontes" onclick="mudarAbaAT('fontes')">📡 Fontes de Sinal</button>
+                           </div>
+          @@ -1690,27 +1690,48 @@
+                           </div>
+                       </div>
+                       
+          -            <!-- CAMUFLAGEM -->
+          +            <!-- CAMUFLAGEM E ESTRATÉGIA -->
+                       <div id="at-tab-camuflagem" class="robo-tab-content">
+                           <div style="background:#1a1a1a; padding:15px; border-radius:8px; border:1px solid #333; margin-bottom:15px;">
+          -                    <h4 style="margin:0 0 10px 0; font-size:12px; color:#17a2b8; text-transform:uppercase;">Evasão de Algoritmo</h4>
+          -                    <div class="form-group" style="margin-bottom:15px;">
+          -                        <select id="at-camuflagem" onchange="toggleConfigCamuflagem()">
+          -                            <option value="TODAS">Entrar em Todos os Sinais (Sem Camuflagem)</option>
+          -                            <option value="PULOS">Pulos Randômicos (Modo Humano)</option>
+          -                        </select>
+          -                    </div>
+          -                    <div id="box-at-pulos" style="display:none; padding:10px; background:#111; border-radius:6px; border:1px dashed #17a2b8;">
+          -                        <p style="font-size:11px; color:#ccc; margin-top:0;">O robô vai sortear um número e pular essa quantidade exata de sinais válidos antes de fazer a próxima execução.</p>
+          -                        <div style="display:flex; gap:15px;">
+          -                            <div class="form-group" style="flex:1;"><label>Pular no Mínimo:</label><input type="number" id="at-pulo-min" value="1" min="1"></div>
+          -                            <div class="form-group" style="flex:1;"><label>Pular no Máximo:</label><input type="number" id="at-pulo-max" value="3" min="1"></div>
+          -                        </div>
+          +                    <h4 style="margin:0 0 8px 0; font-size:12px; color:#17a2b8; text-transform:uppercase;">1. Gatilho de Início</h4>
+          +                    <div class="form-group"><label>REDs virtuais antes de acordar:</label><input type="number" id="at-gatilho-reds-virtuais" value="0" min="0"><span style="font-size:9px; color:#666;">0 = operar imediatamente.</span></div>
+          +                </div>
+          +                <div style="background:#1a1a1a; padding:15px; border-radius:8px; border:1px solid #333; margin-bottom:15px;">
+          +                    <h4 style="margin:0 0 8px 0; font-size:12px; color:#17a2b8; text-transform:uppercase;">2. Duração da Onda</h4>
+          +                    <div class="form-group"><label>Sinais operados por onda:</label><input type="number" id="at-sinais-por-onda" value="0" min="0"><span style="font-size:9px; color:#666;">0 = onda infinita.</span></div>
+          +                </div>
+          +                <div style="background:#1a1a1a; padding:15px; border-radius:8px; border:1px solid #333; margin-bottom:15px;">
+          +                    <h4 style="margin:0 0 8px 0; font-size:12px; color:#17a2b8; text-transform:uppercase;">3. Aleatoriedade</h4>
+          +                    <div class="form-group" style="margin-bottom:10px;"><label>Tipo:</label><select id="at-tipo-aleatoriedade" onchange="toggleEstrategiaAutoTrader()"><option value="NENHUMA">Nenhuma — operar todos os sinais da onda</option><option value="PULOS">Pulos entre entradas</option><option value="PROBABILIDADE">Probabilidade por sinal</option></select></div>
+          +                    <div id="box-at-pulos" style="display:none; padding:10px; background:#111; border-radius:6px; border:1px dashed #17a2b8;">
+          +                        <div style="display:flex; gap:15px;"><div class="form-group" style="flex:1;"><label>Pulo mínimo:</label><input type="number" id="at-pulo-min" value="1" min="1"></div><div class="form-group" style="flex:1;"><label>Pulo máximo:</label><input type="number" id="at-pulo-max" value="3" min="1"></div></div>
+          +                    </div>
+          +                    <div id="box-at-probabilidade" style="display:none; padding:10px; background:#111; border-radius:6px; border:1px dashed #17a2b8;">
+          +                        <div class="form-group"><label>Chance de entrada (%):</label><input type="number" id="at-chance-entrada-pct" value="100" min="1" max="100"></div>
+                           </div>
+                       </div>
+          +                <div style="background:#1a1a1a; padding:15px; border-radius:8px; border:1px solid #333; margin-bottom:15px;">
+          +                    <h4 style="margin:0 0 8px 0; font-size:12px; color:#17a2b8; text-transform:uppercase;">4. Limite de Ciclos</h4>
+          +                    <div class="form-group"><label>Ondas completas antes de auto-desligar:</label><input type="number" id="at-limite-ciclos" value="0" min="0"><span style="font-size:9px; color:#666;">0 = sem limite.</span></div>
+          +                </div>
+                           <div style="background:#1a1a1a; padding:15px; border-radius:8px; border:1px solid #333; margin-bottom:15px;">
+                               <h4 style="margin:0 0 10px 0; font-size:12px; color:#aaa; text-transform:uppercase;">Limitação de Volume Diário</h4>
+                               <div class="form-group"><label>Pausar motor automaticamente após X execuções concluídas:</label><input type="number" id="at-max-entradas" value="15" min="1"></div>
+          @@ -1742,8 +1763,10 @@
+                           </div>
+                           <div style="background:#1a1a1a; padding:15px; border-radius:8px; border:1px solid #333; margin-bottom:15px;">
+          -                    <h4 style="margin:0 0 10px 0; font-size:12px; color:#aaa; text-transform:uppercase;">Horário de Execução</h4>
+          -                    <div style="display:flex; gap:15px;"><div class="form-group" style="flex:1;"><label>Ligar motor às:</label><input type="time" id="at-hora-inicio" value="00:00"></div><div class="form-group" style="flex:1;"><label>Desligar motor às:</label><input type="time" id="at-hora-fim" value="23:59"></div></div>
+          +                    <h4 style="margin:0 0 8px 0; font-size:12px; color:#aaa; text-transform:uppercase;">Horários de Execução</h4>
+          +                    <p style="font-size:10px; color:#777; margin:0 0 10px 0;">O motor pode operar em qualquer uma das faixas abaixo. Faixas que cruzam meia-noite também são aceitas.</p>
+          +                    <div id="at-faixas-horario"></div>
+          +                    <button type="button" class="btn" style="background:#17a2b8; height:30px; font-size:11px; margin-top:8px;" onclick="adicionarFaixaHorarioAutoTrader()">+ Adicionar Faixa</button>
+                           </div>
+                       </div>
+                       
+          @@ -2471,7 +2494,66 @@
+                       if (val) val.style.display = modo === 'VALOR' ? 'flex' : 'none';
+                       atualizarPreviewProtecaoEmpateAutoTrader();
+                   }
+          -        function toggleConfigCamuflagem() { let modo = document.getElementById('at-camuflagem').value; let boxPulos = document.getElementById('box-at-pulos'); if (modo === 'PULOS') boxPulos.style.display = 'block'; else boxPulos.style.display = 'none'; }
+          +        function toggleEstrategiaAutoTrader() {
+          +            const tipo = document.getElementById('at-tipo-aleatoriedade')?.value || 'NENHUMA';
+          +            const boxPulos = document.getElementById('box-at-pulos');
+          +            const boxProbabilidade = document.getElementById('box-at-probabilidade');
+          +            if (boxPulos) boxPulos.style.display = tipo === 'PULOS' ? 'block' : 'none';
+          +            if (boxProbabilidade) boxProbabilidade.style.display = tipo === 'PROBABILIDADE' ? 'block' : 'none';
+          +        }
+          +
+          +        function horaValidaAutoTrader(valor) {
+          +            return /^([01]\d|2[0-3]):([0-5]\d)$/.test(String(valor || '').trim());
+          +        }
+          +
+          +        function adicionarFaixaHorarioAutoTrader(inicio = '08:00', fim = '18:00') {
+          +            const box = document.getElementById('at-faixas-horario');
+          +            if (!box) return;
+          +            const inicioSeguro = horaValidaAutoTrader(inicio) ? String(inicio) : '08:00';
+          +            const fimSeguro = horaValidaAutoTrader(fim) ? String(fim) : '18:00';
+          +            const linha = document.createElement('div');
+          +            linha.className = 'at-faixa-horario';
+          +            linha.style.cssText = 'display:flex; gap:10px; align-items:flex-end; background:#111; padding:10px; border-radius:6px; border:1px solid #333; margin-bottom:8px;';
+          +            linha.innerHTML = `<div class="form-group" style="flex:1; margin:0;"><label>Início:</label><input type="time" class="at-faixa-inicio" value="${inicioSeguro}"></div><div class="form-group" style="flex:1; margin:0;"><label>Fim:</label><input type="time" class="at-faixa-fim" value="${fimSeguro}"></div><button type="button" class="btn" style="background:#ff7777; height:34px; padding:0 10px;" onclick="this.closest('.at-faixa-horario').remove()">🗑️</button>`;
+          +            box.appendChild(linha);
+          +        }
+          +
+          +        function renderizarFaixasHorarioAutoTrader(faixas) {
+          +            const box = document.getElementById('at-faixas-horario');
+          +            if (!box) return;
+          +            box.innerHTML = '';
+          +            const lista = Array.isArray(faixas) ? faixas.filter(f => horaValidaAutoTrader(f?.inicio) && horaValidaAutoTrader(f?.fim)) : [];
+          +            const efetivas = lista.length > 0 ? lista : [{ inicio: '00:00', fim: '23:59' }];
+          +            efetivas.forEach(faixa => adicionarFaixaHorarioAutoTrader(faixa.inicio, faixa.fim));
+          +        }
+          +
+          +        function faixasHorarioConfigAutoTrader(config) {
+          +            const cf = config || {};
+          +            if (Array.isArray(cf.faixas_horario) && cf.faixas_horario.length > 0) return cf.faixas_horario;
+          +            return [{ inicio: horaValidaAutoTrader(cf.hora_inicio) ? cf.hora_inicio : '00:00', fim: horaValidaAutoTrader(cf.hora_fim) ? cf.hora_fim : '23:59' }];
+          +        }
+          +
+          +        function coletarFaixasHorarioAutoTrader() {
+          +            return Array.from(document.querySelectorAll('#at-faixas-horario .at-faixa-horario'))
+          +                .map(linha => ({
+          +                    inicio: linha.querySelector('.at-faixa-inicio')?.value || '',
+          +                    fim: linha.querySelector('.at-faixa-fim')?.value || ''
+          +                }))
+          +                .filter(faixa => horaValidaAutoTrader(faixa.inicio) && horaValidaAutoTrader(faixa.fim));
+          +        }
+                   function toggleTrailingStopAutoTrader() {
+                       const ativo = document.getElementById('at-trailing-stop')?.checked === true;
+                       const input = document.getElementById('at-trailing-recuo');
+          @@ -2530,7 +2612,13 @@
+                   function abrirFormularioAutoTrader() {
+                       autoTraderEditandoId = null; document.getElementById('at-titulo').innerText = "💸 Cadastrar Motor de Execução";
+          -            document.getElementById('at-nome').value = ''; document.getElementById('at-ativo').checked = true; document.getElementById('at-saldo-visor').innerText = "R$ 0,00"; document.getElementById('at-saldo-visor').style.color = '#fff'; document.getElementById('at-stake').value = "10.00"; document.getElementById('at-gale1').value = "2.0"; document.getElementById('at-gale2').value = "4.0"; document.getElementById('at-camuflagem').value = "TODAS"; toggleConfigCamuflagem(); document.getElementById('at-pulo-min').value = "1"; document.getElementById('at-pulo-max').value = "3"; document.getElementById('at-max-entradas').value = "15"; document.getElementById('at-stop-win').value = "100.00"; document.getElementById('at-trailing-stop').checked = true; document.getElementById('at-trailing-recuo').value = "0.00"; toggleTrailingStopAutoTrader(); document.getElementById('at-stop-loss').value = "250.00"; document.getElementById('at-hora-inicio').value = "00:00"; document.getElementById('at-hora-fim').value = "23:59";
+          +            document.getElementById('at-nome').value = ''; document.getElementById('at-ativo').checked = true; document.getElementById('at-saldo-visor').innerText = "R$ 0,00"; document.getElementById('at-saldo-visor').style.color = '#fff'; document.getElementById('at-stake').value = "10.00"; document.getElementById('at-gale1').value = "2.0"; document.getElementById('at-gale2').value = "4.0";
+          +            document.getElementById('at-gatilho-reds-virtuais').value = "0"; document.getElementById('at-sinais-por-onda').value = "0"; document.getElementById('at-tipo-aleatoriedade').value = "NENHUMA"; document.getElementById('at-pulo-min').value = "1"; document.getElementById('at-pulo-max').value = "3"; document.getElementById('at-chance-entrada-pct').value = "100"; document.getElementById('at-limite-ciclos').value = "0"; toggleEstrategiaAutoTrader();
+          +            document.getElementById('at-max-entradas').value = "15"; document.getElementById('at-stop-win').value = "100.00"; document.getElementById('at-trailing-stop').checked = true; document.getElementById('at-trailing-recuo').value = "0.00"; toggleTrailingStopAutoTrader(); document.getElementById('at-stop-loss').value = "250.00";
+          +            renderizarFaixasHorarioAutoTrader([{ inicio: '00:00', fim: '23:59' }]);
+                       document.getElementById('at-tie-modo').value = 'PERCENTUAL'; document.getElementById('at-tie-percent').value = ''; document.getElementById('at-tie-valor').value = ''; toggleProtecaoEmpateAutoTrader();
+                       document.getElementById('at-stop-reds').value = "0";
+                       document.getElementById('at-stop-reds-acao').value = "PAUSAR";
+          @@ -2544,7 +2632,13 @@
+                   function prepararEdicaoAutoTrader(id) {
+                       let at = autoTradersGlobais.find(x => x.id === id); if (!at) return;
+                       autoTraderEditandoId = at.id; let cf = at.config;
+          -            document.getElementById('at-titulo').innerText = "✏️ Editar Motor de Execução"; document.getElementById('at-nome').value = at.nome; document.getElementById('at-ativo').checked = at.ativo; document.getElementById('at-saldo-visor').innerText = `R$ ${parseFloat(at.saldo_atual).toFixed(2).replace('.',',')}`; document.getElementById('at-saldo-visor').style.color = '#28a745'; document.getElementById('at-stake').value = (cf.stake_inicial || 10).toFixed(2); document.getElementById('at-gale1').value = cf.gale_1_mult || 2.0; document.getElementById('at-gale2').value = cf.gale_2_mult || 4.0; document.getElementById('at-camuflagem').value = cf.modo_camuflagem || 'TODAS'; toggleConfigCamuflagem(); document.getElementById('at-pulo-min').value = cf.camuflagem_pulos_min || 1; document.getElementById('at-pulo-max').value = cf.camuflagem_pulos_max || 3; document.getElementById('at-max-entradas').value = cf.limite_entradas || 15; document.getElementById('at-stop-win').value = (cf.stop_win || 100).toFixed(2); document.getElementById('at-trailing-stop').checked = cf.trailing_stop !== false; document.getElementById('at-trailing-recuo').value = Math.max(0, Number(cf.trailing_recuo) || 0).toFixed(2); toggleTrailingStopAutoTrader(); document.getElementById('at-stop-loss').value = (cf.stop_loss || 250).toFixed(2); document.getElementById('at-hora-inicio').value = cf.hora_inicio || "00:00"; document.getElementById('at-hora-fim').value = cf.hora_fim || "23:59";
+          +            document.getElementById('at-titulo').innerText = "✏️ Editar Motor de Execução"; document.getElementById('at-nome').value = at.nome; document.getElementById('at-ativo').checked = at.ativo; document.getElementById('at-saldo-visor').innerText = `R$ ${parseFloat(at.saldo_atual).toFixed(2).replace('.',',')}`; document.getElementById('at-saldo-visor').style.color = '#28a745'; document.getElementById('at-stake').value = (cf.stake_inicial || 10).toFixed(2); document.getElementById('at-gale1').value = cf.gale_1_mult || 2.0; document.getElementById('at-gale2').value = cf.gale_2_mult || 4.0;
+          +            document.getElementById('at-gatilho-reds-virtuais').value = Math.max(0, Number(cf.gatilho_reds_virtuais) || 0); document.getElementById('at-sinais-por-onda').value = Math.max(0, Number(cf.sinais_por_onda) || 0); document.getElementById('at-tipo-aleatoriedade').value = cf.tipo_aleatoriedade || (cf.modo_camuflagem === 'PULOS' ? 'PULOS' : 'NENHUMA'); document.getElementById('at-pulo-min').value = Math.max(1, Number(cf.pulo_min ?? cf.camuflagem_pulos_min) || 1); document.getElementById('at-pulo-max').value = Math.max(1, Number(cf.pulo_max ?? cf.camuflagem_pulos_max) || 3); document.getElementById('at-chance-entrada-pct').value = Math.min(100, Math.max(1, Number(cf.chance_entrada_pct) || 100)); document.getElementById('at-limite-ciclos').value = Math.max(0, Number(cf.limite_ciclos) || 0); toggleEstrategiaAutoTrader();
+          +            document.getElementById('at-max-entradas').value = cf.limite_entradas || 15; document.getElementById('at-stop-win').value = (cf.stop_win || 100).toFixed(2); document.getElementById('at-trailing-stop').checked = cf.trailing_stop !== false; document.getElementById('at-trailing-recuo').value = Math.max(0, Number(cf.trailing_recuo) || 0).toFixed(2); toggleTrailingStopAutoTrader(); document.getElementById('at-stop-loss').value = (cf.stop_loss || 250).toFixed(2);
+          +            renderizarFaixasHorarioAutoTrader(faixasHorarioConfigAutoTrader(cf));
+                       document.getElementById('at-tie-modo').value = String(cf.tie_stake_mode || 'PERCENTUAL').toUpperCase() === 'VALOR' ? 'VALOR' : 'PERCENTUAL'; document.getElementById('at-tie-percent').value = Number(cf.tie_stake_percent) > 0 ? Number(cf.tie_stake_percent) : ''; document.getElementById('at-tie-valor').value = Number(cf.tie_stake_value) > 0 ? Number(cf.tie_stake_value).toFixed(2) : ''; toggleProtecaoEmpateAutoTrader();
+                       document.getElementById('at-stop-reds').value = Math.max(0, Number(cf.stop_reds_seguidos) || 0);
+                       document.getElementById('at-stop-reds-acao').value = String(cf.stop_reds_acao || 'PAUSAR').toUpperCase() === 'DESLIGAR' ? 'DESLIGAR' : 'PAUSAR';
+          @@ -2590,6 +2684,18 @@
+                       return alert('Defina a política financeira da proteção no empate antes de ativar o Auto-Trader.');
+                   }
+           
+          +        const tipoAleatoriedade = document.getElementById('at-tipo-aleatoriedade').value || 'NENHUMA';
+          +        const puloMin = Math.max(1, parseInt(document.getElementById('at-pulo-min').value) || 1);
+          +        const puloMax = Math.max(1, parseInt(document.getElementById('at-pulo-max').value) || 1);
+          +        const chanceEntrada = Math.min(100, Math.max(1, parseFloat(document.getElementById('at-chance-entrada-pct').value) || 100));
+          +        const faixasHorario = coletarFaixasHorarioAutoTrader();
+          +        if (faixasHorario.length === 0) return alert('Adicione ao menos uma faixa de horário válida.');
+          +        if (tipoAleatoriedade === 'PULOS' && puloMax < puloMin) {
+          +            return alert('O pulo máximo não pode ser menor que o pulo mínimo.');
+          +        }
+          +        if (tipoAleatoriedade === 'PROBABILIDADE' && (chanceEntrada < 1 || chanceEntrada > 100)) {
+          +            return alert('A chance de entrada deve ficar entre 1 e 100%.');
+          +        }
+          +
+                       const payload = {
+                           nome,
+                           ativo: ativoAT,
+          @@ -2602,9 +2708,13 @@
+                               tie_stake_mode: tieModo,
+                               tie_stake_percent: tiePercent,
+                               tie_stake_value: tieValor,
+          -                    modo_camuflagem: document.getElementById('at-camuflagem').value,
+          -                    camuflagem_pulos_min: parseInt(document.getElementById('at-pulo-min').value) || 1,
+          -                    camuflagem_pulos_max: parseInt(document.getElementById('at-pulo-max').value) || 3,
+          +                    gatilho_reds_virtuais: Math.max(0, parseInt(document.getElementById('at-gatilho-reds-virtuais').value) || 0),
+          +                    sinais_por_onda: Math.max(0, parseInt(document.getElementById('at-sinais-por-onda').value) || 0),
+          +                    tipo_aleatoriedade: tipoAleatoriedade,
+          +                    pulo_min: puloMin,
+          +                    pulo_max: puloMax,
+          +                    chance_entrada_pct: chanceEntrada,
+          +                    limite_ciclos: Math.max(0, parseInt(document.getElementById('at-limite-ciclos').value) || 0),
+                               limite_entradas: parseInt(document.getElementById('at-max-entradas').value) || 15,
+                               stop_win: parseFloat(document.getElementById('at-stop-win').value) || 100.0,
+                               trailing_stop: document.getElementById('at-trailing-stop').checked,
+          @@ -2614,8 +2724,7 @@
+                               stop_reds_seguidos: Math.max(0, parseInt(document.getElementById('at-stop-reds').value) || 0),
+                               stop_reds_acao: document.getElementById('at-stop-reds-acao').value === 'DESLIGAR' ? 'DESLIGAR' : 'PAUSAR',
+                               stop_reds_pausa_min: Math.max(1, parseInt(document.getElementById('at-stop-reds-pausa').value) || 60),
+          -                    hora_inicio: document.getElementById('at-hora-inicio').value,
+          -                    hora_fim: document.getElementById('at-hora-fim').value,
+          +                    faixas_horario: faixasHorario,
+                               fontes_sinal: Array.from(document.querySelectorAll('.chk-at-fonte:checked')).map(i => i.value)
+                           }
+                       };
+          @@ -2674,6 +2783,7 @@
+                       else if (at.status_operacao === 'STOP_REDS_PAUSA' && at.ativo) tagStatus = `<span style="background:#fd7e14; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">STOP REDS - ${pausaStopRedsMin > 0 ? `PAUSADO (${pausaStopRedsMin} min)` : 'REARMANDO'}</span>`;
+                       else if (at.status_operacao === 'DADOS_INCOMPLETOS') tagStatus = `<span style="background:#b02a37; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">⚠️ DADOS INCOMPLETOS</span>`;
+                       else if (at.status_operacao === 'BLOQUEADO_AMBIGUIDADE') tagStatus = `<span style="background:#7f1d1d; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">🚨 BLOQUEADO - ACEITE AMBÍGUO</span>`;
+          +            else if (at.status_operacao === 'LIMITE_CICLOS') tagStatus = `<span style="background:#6f42c1; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">🔁 LIMITE DE CICLOS ATINGIDO</span>`;
+                       else if (!at.ativo) tagStatus = `<span style="background:#555; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">🔴 DESLIGADO</span>`;
+                       else if (at.status_operacao === 'STANDBY') tagStatus = `<span style="background:#ffc107; color:black; padding:2px 8px; border-radius:4px; font-size:10px;">🟡 AGUARDANDO MESA</span>`;
+                       else if (at.status_operacao === 'META_ATINGIDA') tagStatus = `<span style="background:#17a2b8; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">💤 META DO DIA BATIDA</span>`;
+          @@ -2689,7 +2799,14 @@
+                       } else if (cf.trailing_stop) {
+                           trailingHTML = `<div style="font-size:10px; color:#ffc107; margin-top:2px;">↳ Trailing habilitado, mas ainda sem recuo configurado.</div>`;
+                       }
+          -            let camuflagemHTML = (cf.modo_camuflagem === 'PULOS') ? `<span style="display:inline-block; margin-top:5px; background:#111; padding:4px 8px; border-radius:4px; border:1px solid #333; font-size:11px;">🕵️ Camuflagem: Pulará <strong>${at.pulos_restantes}</strong> ordens.</span>` : '';
+          +            const estadoCiclo = String(at.estado_ciclo || 'DORMINDO') === 'ONDA_ATIVA' ? 'ONDA_ATIVA' : 'DORMINDO';
+          +            const gatilhoVirtual = Math.max(0, Number(cf.gatilho_reds_virtuais) || 0);
+          +            const sinaisOnda = Math.max(0, Number(cf.sinais_por_onda) || 0);
+          +            const limiteCiclos = Math.max(0, Number(cf.limite_ciclos) || 0);
+          +            const aleatoriedade = String(cf.tipo_aleatoriedade || 'NENHUMA');
+          +            const gatilhoTexto = gatilhoVirtual > 0 ? `${Math.max(0, Number(at.reds_virtuais_observados) || 0)}/${gatilhoVirtual}` : 'imediato';
+          +            const ondaTexto = `${Math.max(0, Number(at.sinais_operados_onda) || 0)}/${sinaisOnda > 0 ? sinaisOnda : '∞'}`;
+          +            const ciclosTexto = `${Math.max(0, Number(at.ciclos_concluidos) || 0)}/${limiteCiclos > 0 ? limiteCiclos : '∞'}`;
+          +            let cicloHTML = `<div style="margin-top:6px; background:#111; padding:6px 8px; border-radius:4px; border:1px solid #333; font-size:10px; color:#aaa;">🎛️ <strong style="color:${estadoCiclo === 'ONDA_ATIVA' ? '#28a745' : '#ffc107'};">${estadoCiclo === 'ONDA_ATIVA' ? 'ONDA ATIVA' : 'DORMINDO'}</strong> | REDs gatilho: ${gatilhoTexto} | Onda: ${ondaTexto} | Ciclos: ${ciclosTexto} | Aleatoriedade: ${aleatoriedade}${aleatoriedade === 'PULOS' ? ` (${Math.max(0, Number(at.pulos_restantes) || 0)} pulo(s) restante(s))` : ''}</div>`;
+                       let strFontes = (cf.fontes_sinal || []).map(f => {
+                           const rotulo = rotuloFonteAutoTrader(f);
+                           const fonteRobo = /^(?:ROBO|AUTO_PILOT_IA):/i.test(String(f || '')) || rotulo.includes('[AUTO]');
+          @@ -2725,7 +2842,7 @@
+                           </div>
+                       </div>
+                       <div style="margin-top:20px; border-top:1px dashed #333; padding-top:15px; display:flex; justify-content:space-between; align-items:flex-end; flex-wrap:wrap; gap:10px;">
+          -                <div><div style="font-size:12px; margin-bottom:5px;">📊 Volume: <strong>${at.entradas_feitas} / ${cf.limite_entradas||'∞'} Execuções</strong></div><div style="margin-bottom:5px;">📡 Escutando: ${strFontes || '<span style="color:#666; font-size:11px;">Sem robôs vinculados</span>'}</div>${camuflagemHTML}</div>
+          +                <div><div style="font-size:12px; margin-bottom:5px;">📊 Volume: <strong>${at.entradas_feitas} / ${cf.limite_entradas||'∞'} Execuções</strong></div><div style="margin-bottom:5px;">📡 Escutando: ${strFontes || '<span style="color:#666; font-size:11px;">Sem robôs vinculados</span>'}</div>${cicloHTML}</div>
+                           <button class="btn" style="background:#fff; color:#000; box-shadow: 0 4px 10px rgba(255,255,255,0.2);" onclick="gerarRelatorioPDF(${at.id})">📄 Gerar Auditoria PDF</button>
+                       </div>
+                   </div>
+          PATCH
+          sed -i 's/^          //' /tmp/auto-trader-native.patch
+          git apply --check /tmp/auto-trader-native.patch
+          git apply /tmp/auto-trader-native.patch
+
+      - name: Validate native implementation
+        run: |
+          cd robo-bacbo
+          node --check auto_trader.js
+          node --check bot2_coletor.js
+          node --test test/auto_trader.test.js
+          node - <<'NODE'
+          const fs = require('fs');
+          const vm = require('vm');
+          const html = fs.readFileSync('public/dashboard-app.html', 'utf8');
+          const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);
+          const principal = scripts.find(codigo => codigo.includes('const socketWeb = io();'));
+          if (!principal) throw new Error('Script principal do dashboard não encontrado');
+          new vm.Script(principal, { filename: 'dashboard-inline.js' });
+          for (const marcador of [
+            'at-gatilho-reds-virtuais',
+            'at-sinais-por-onda',
+            'at-tipo-aleatoriedade',
+            'at-chance-entrada-pct',
+            'at-limite-ciclos',
+            'at-faixas-horario'
+          ]) {
+            if (!html.includes(marcador)) throw new Error(`Campo UI ausente: ${marcador}`);
+          }
+          NODE
+          if grep -R -E "modo_camuflagem|camuflagem_pulos_min|camuflagem_pulos_max|at-camuflagem|at-hora-inicio|at-hora-fim" public/dashboard-app.html; then
+            echo "Legacy UI/config writers remain in dashboard"
+            exit 1
+          fi
+          if grep -E "function horarioParaMinutos|cf\.hora_inicio|cf\.hora_fim|cf\.modo_camuflagem" bot2_coletor.js; then
+            echo "Legacy Auto-Trader execution logic remains in backend"
+            exit 1
+          fi
+          cd ..
+          git diff --check
+
+      - name: Commit native source
+        run: |
+          rm -f .github/workflows/materialize-auto-trader-state-machine.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A -- robo-bacbo .github/workflows/materialize-auto-trader-state-machine.yml
+          git diff --cached --check
+          git commit -m "refactor(auto-trader): state-machine cycles and multi-window schedules [auto-trader-materialized]"
+          git push origin HEAD:agent/auto-trader-state-machine-schedules
