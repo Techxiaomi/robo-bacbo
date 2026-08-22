@@ -1,0 +1,1 @@
+Trigger de validação da materialização nativa do Auto-Trader.
