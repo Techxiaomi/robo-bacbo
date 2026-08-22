@@ -142,3 +142,5 @@ test('fecha onda, incrementa ciclos e aciona auto-stop no limite', () => {
     assert.equal(resultado.estado.ciclos_concluidos, 2);
     assert.equal(resultado.estado.pulos_restantes, 0);
 });
+
+// Trigger de materialização nativa do módulo Auto-Trader.
