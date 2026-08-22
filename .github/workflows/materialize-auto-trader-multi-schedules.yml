@@ -1,0 +1,265 @@
+name: Materialize Auto-Trader multiple schedules
+
+on:
+  pull_request:
+    branches:
+      - agent/auto-trader-multi-schedules
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/auto-trader-multi-schedules
+          fetch-depth: 0
+
+      - name: Apply native source edits
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          def replace_once(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: esperado 1 ocorrência, encontrado {count}')
+              return text.replace(old, new, 1)
+
+          def edit_section(text, start_marker, end_marker, editor, label):
+              start = text.find(start_marker)
+              if start < 0:
+                  raise SystemExit(f'{label}: início não encontrado')
+              end = text.find(end_marker, start + len(start_marker))
+              if end < 0:
+                  raise SystemExit(f'{label}: fim não encontrado')
+              section = text[start:end]
+              edited = editor(section)
+              if edited == section:
+                  raise SystemExit(f'{label}: nenhuma alteração aplicada')
+              return text[:start] + edited + text[end:]
+
+          # Backend / motor
+          backend_path = Path('robo-bacbo/bot2_coletor.js')
+          backend = backend_path.read_text(encoding='utf-8')
+
+          import_anchor = 'const { criarIntegracaoContadorDiario } = require("./bug051b_integration");\n'
+          import_block = import_anchor + '''const {\n    normalizarConfigHorariosAutoTrader,\n    traderDentroHorarioExecucao,\n    formatarFaixasHorario\n} = require("./auto_trader");\n'''
+          backend = replace_once(backend, import_anchor, import_block, 'import auto_trader')
+
+          def edit_get(section):
+              old = '            let confObj = {}; try { confObj = JSON.parse(at.config_json); } catch(e) {}\n'
+              new = old + '            confObj = normalizarConfigHorariosAutoTrader(confObj);\n'
+              return replace_once(section, old, new, 'GET normalização de horários')
+
+          backend = edit_section(
+              backend,
+              'app.get("/api/auto-traders", async (req, res) => {',
+              'app.post("/api/auto-trader", async (req, res) => {',
+              edit_get,
+              'GET /api/auto-traders'
+          )
+
+          def edit_post(section):
+              old = '        const configJson = JSON.stringify(config || {});\n'
+              new = '        const configNormalizada = normalizarConfigHorariosAutoTrader(config || {});\n        const configJson = JSON.stringify(configNormalizada);\n'
+              return replace_once(section, old, new, 'POST persistência de horários')
+
+          backend = edit_section(
+              backend,
+              'app.post("/api/auto-trader", async (req, res) => {',
+              'app.put("/api/auto-trader/:id", async (req, res) => {',
+              edit_post,
+              'POST /api/auto-trader'
+          )
+
+          def edit_put(section):
+              old = '        const configJson = JSON.stringify(config || {});\n'
+              new = '        const configNormalizada = normalizarConfigHorariosAutoTrader(config || {});\n        const configJson = JSON.stringify(configNormalizada);\n'
+              return replace_once(section, old, new, 'PUT persistência de horários')
+
+          backend = edit_section(
+              backend,
+              'app.put("/api/auto-trader/:id", async (req, res) => {',
+              'app.delete("/api/auto-trader/:id", async (req, res) => {',
+              edit_put,
+              'PUT /api/auto-trader/:id'
+          )
+
+          legacy_functions = re.compile(
+              r'\nfunction horarioParaMinutos\(valor, padrao\) \{.*?\n\}\n\n'
+              r'function traderDentroHorarioExecucao\(config, agora = new Date\(\)\) \{.*?\n\}\n\n'
+              r'(?=function avaliarStopRedsAutoTrader)',
+              re.S
+          )
+          backend, removed = legacy_functions.subn('\n', backend, count=1)
+          if removed != 1:
+              raise SystemExit(f'funções legadas de horário: esperado remover 1 bloco, removidos {removed}')
+
+          old_log = "                                        console.log(`Trader ${trader.id} fora da janela de execucao (${cf.hora_inicio || '00:00'}-${cf.hora_fim || '23:59'}). Nova entrada ignorada.`);"
+          new_log = "                                        console.log(`Trader ${trader.id} fora das faixas de execução (${formatarFaixasHorario(cf)}). Nova entrada ignorada.`);"
+          backend = replace_once(backend, old_log, new_log, 'log de múltiplas faixas')
+          backend_path.write_text(backend, encoding='utf-8')
+
+          # Frontend do modal
+          html_path = Path('robo-bacbo/public/dashboard-app.html')
+          html = html_path.read_text(encoding='utf-8')
+
+          old_schedule_html = '''                    <div style="background:#1a1a1a; padding:15px; border-radius:8px; border:1px solid #333; margin-bottom:15px;">\n                        <h4 style="margin:0 0 10px 0; font-size:12px; color:#aaa; text-transform:uppercase;">Horário de Execução</h4>\n                        <div style="display:flex; gap:15px;"><div class="form-group" style="flex:1;"><label>Ligar motor às:</label><input type="time" id="at-hora-inicio" value="00:00"></div><div class="form-group" style="flex:1;"><label>Desligar motor às:</label><input type="time" id="at-hora-fim" value="23:59"></div></div>\n                    </div>'''
+          new_schedule_html = '''                    <div style="background:#1a1a1a; padding:15px; border-radius:8px; border:1px solid #333; margin-bottom:15px;">\n                        <h4 style="margin:0 0 8px 0; font-size:12px; color:#aaa; text-transform:uppercase;">Horário de Execução</h4>\n                        <p style="font-size:10px; color:#777; margin:0 0 10px 0;">O motor opera quando o horário atual estiver dentro de qualquer uma das faixas configuradas.</p>\n                        <div id="at-faixas-horario" style="display:flex; flex-direction:column; gap:8px;"></div>\n                        <button type="button" class="btn" style="margin-top:10px; background:#17a2b8; height:32px; font-size:11px;" onclick="adicionarFaixaHorarioAutoTrader()">+ Adicionar Faixa</button>\n                    </div>'''
+          html = replace_once(html, old_schedule_html, new_schedule_html, 'UI Horário de Execução')
+
+          helper_marker = '        function abrirFormularioAutoTrader() {'
+          helpers = r'''        function horarioAutoTraderValido(valor) {
+            return /^([01]\d|2[0-3]):([0-5]\d)$/.test(String(valor || '').trim());
+        }
+
+        function normalizarFaixasHorarioAutoTraderUI(config) {
+            const cf = config || {};
+            const faixas = Array.isArray(cf.faixas_horario)
+                ? cf.faixas_horario
+                    .map(faixa => ({
+                        inicio: String(faixa?.inicio || '').trim(),
+                        fim: String(faixa?.fim || '').trim()
+                    }))
+                    .filter(faixa => horarioAutoTraderValido(faixa.inicio) && horarioAutoTraderValido(faixa.fim))
+                : [];
+
+            if (faixas.length > 0) return faixas;
+            return [{
+                inicio: horarioAutoTraderValido(cf.hora_inicio) ? String(cf.hora_inicio).trim() : '00:00',
+                fim: horarioAutoTraderValido(cf.hora_fim) ? String(cf.hora_fim).trim() : '23:59'
+            }];
+        }
+
+        function adicionarFaixaHorarioAutoTrader(inicio = '00:00', fim = '23:59') {
+            const container = document.getElementById('at-faixas-horario');
+            if (!container) return;
+
+            const linha = document.createElement('div');
+            linha.className = 'at-faixa-horario';
+            linha.style.cssText = 'display:flex; gap:10px; align-items:flex-end; padding:10px; background:#111; border:1px solid #333; border-radius:6px; flex-wrap:wrap;';
+            linha.innerHTML = `
+                <div class="form-group" style="flex:1; min-width:150px;">
+                    <label>Início:</label>
+                    <input type="time" class="at-faixa-inicio">
+                </div>
+                <div class="form-group" style="flex:1; min-width:150px;">
+                    <label>Fim:</label>
+                    <input type="time" class="at-faixa-fim">
+                </div>
+                <button type="button" class="btn" style="background:#6c3434; height:34px; font-size:11px;" onclick="removerFaixaHorarioAutoTrader(this)">Remover</button>`;
+
+            linha.querySelector('.at-faixa-inicio').value = horarioAutoTraderValido(inicio) ? inicio : '00:00';
+            linha.querySelector('.at-faixa-fim').value = horarioAutoTraderValido(fim) ? fim : '23:59';
+            container.appendChild(linha);
+        }
+
+        function removerFaixaHorarioAutoTrader(botao) {
+            const linha = botao?.closest?.('.at-faixa-horario');
+            if (linha) linha.remove();
+        }
+
+        function renderizarFaixasHorarioAutoTrader(faixas) {
+            const container = document.getElementById('at-faixas-horario');
+            if (!container) return;
+            container.innerHTML = '';
+            const lista = Array.isArray(faixas) && faixas.length > 0
+                ? faixas
+                : [{ inicio: '00:00', fim: '23:59' }];
+            lista.forEach(faixa => adicionarFaixaHorarioAutoTrader(faixa.inicio, faixa.fim));
+        }
+
+        function coletarFaixasHorarioAutoTrader() {
+            const linhas = Array.from(document.querySelectorAll('#at-faixas-horario .at-faixa-horario'));
+            if (linhas.length === 0) return null;
+
+            const faixas = linhas.map(linha => ({
+                inicio: String(linha.querySelector('.at-faixa-inicio')?.value || '').trim(),
+                fim: String(linha.querySelector('.at-faixa-fim')?.value || '').trim()
+            }));
+
+            if (faixas.some(faixa => !horarioAutoTraderValido(faixa.inicio) || !horarioAutoTraderValido(faixa.fim))) {
+                return null;
+            }
+            return faixas;
+        }
+
+'''
+          html = replace_once(html, helper_marker, helpers + helper_marker, 'helpers UI de faixas')
+
+          old_open = "document.getElementById('at-stop-loss').value = \"250.00\"; document.getElementById('at-hora-inicio').value = \"00:00\"; document.getElementById('at-hora-fim').value = \"23:59\";"
+          new_open = "document.getElementById('at-stop-loss').value = \"250.00\"; renderizarFaixasHorarioAutoTrader([{ inicio: '00:00', fim: '23:59' }]);"
+          html = replace_once(html, old_open, new_open, 'defaults do cadastro')
+
+          old_edit = "document.getElementById('at-stop-loss').value = (cf.stop_loss || 250).toFixed(2); document.getElementById('at-hora-inicio').value = cf.hora_inicio || \"00:00\"; document.getElementById('at-hora-fim').value = cf.hora_fim || \"23:59\";"
+          new_edit = "document.getElementById('at-stop-loss').value = (cf.stop_loss || 250).toFixed(2); renderizarFaixasHorarioAutoTrader(normalizarFaixasHorarioAutoTraderUI(cf));"
+          html = replace_once(html, old_edit, new_edit, 'edição com fallback legado')
+
+          def edit_submit(section):
+              anchor = "            const tieValor = Number(document.getElementById('at-tie-valor').value) || 0;\n"
+              insert = anchor + "            const faixasHorario = coletarFaixasHorarioAutoTrader();\n            if (!faixasHorario) return alert('Adicione ao menos uma faixa de horário válida.');\n"
+              section = replace_once(section, anchor, insert, 'coleta das faixas no submit')
+              old_fields = "                    hora_inicio: document.getElementById('at-hora-inicio').value,\n                    hora_fim: document.getElementById('at-hora-fim').value,\n"
+              new_fields = "                    faixas_horario: faixasHorario,\n"
+              return replace_once(section, old_fields, new_fields, 'payload com array de faixas')
+
+          html = edit_section(
+              html,
+              '        async function salvarAutoTrader() {',
+              '        async function excluirAutoTrader(',
+              edit_submit,
+              'salvarAutoTrader'
+          )
+
+          html_path.write_text(html, encoding='utf-8')
+          PY
+
+      - name: Validate focused Auto-Trader changes
+        run: |
+          cd robo-bacbo
+          node --check auto_trader.js
+          node --check bot2_coletor.js
+          node --test test/auto_trader_schedules.test.js
+          node --test test/dashboard-ui-contract.test.js
+          node - <<'NODE'
+          const fs = require('fs');
+          const vm = require('vm');
+          const html = fs.readFileSync('public/dashboard-app.html', 'utf8');
+          const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);
+          const principal = scripts.find(code => code.includes('const socketWeb = io();'));
+          if (!principal) throw new Error('script principal não encontrado');
+          new vm.Script(principal, { filename: 'dashboard-inline.js' });
+          if (!html.includes('id="at-faixas-horario"')) throw new Error('container de faixas ausente');
+          if (!html.includes('+ Adicionar Faixa')) throw new Error('botão adicionar faixa ausente');
+          if (!html.includes('faixas_horario: faixasHorario')) throw new Error('payload de faixas ausente');
+          if (html.includes('id="at-hora-inicio"') || html.includes('id="at-hora-fim"')) throw new Error('campos únicos antigos ainda presentes');
+          NODE
+          if grep -q "function traderDentroHorarioExecucao" bot2_coletor.js; then
+            echo "Verificação legada de horário ainda está no coletor"
+            exit 1
+          fi
+          if grep -q "cf.hora_inicio.*cf.hora_fim" bot2_coletor.js; then
+            echo "Log/execução do Auto-Trader ainda depende de faixa única"
+            exit 1
+          fi
+          git diff --check
+
+      - name: Squash into one native commit
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git reset --mixed origin/main
+          rm -f .github/workflows/materialize-auto-trader-multi-schedules.yml
+          git add -- \
+            robo-bacbo/auto_trader.js \
+            robo-bacbo/test/auto_trader_schedules.test.js \
+            robo-bacbo/bot2_coletor.js \
+            robo-bacbo/public/dashboard-app.html
+          git diff --cached --check
+          git commit -m "refactor(auto-trader): support multiple execution schedules"
+          git push --force-with-lease origin HEAD:agent/auto-trader-multi-schedules
