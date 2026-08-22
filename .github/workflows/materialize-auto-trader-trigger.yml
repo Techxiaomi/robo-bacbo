@@ -20,22 +20,13 @@ jobs:
 
       - name: Materialize native source
         run: |
-          python - <<'PY'
-          from pathlib import Path
-          source = Path('.github/workflows/materialize-auto-trader-state-machine.yml').read_text(encoding='utf-8')
-          start_marker = "          cat > /tmp/auto-trader-native.patch <<'PATCH'\n"
-          end_marker = "\n          PATCH\n"
-          start = source.index(start_marker) + len(start_marker)
-          end = source.index(end_marker, start)
-          patch = source[start:end]
-          prefix = '          '
-          lines = [line[len(prefix):] if line.startswith(prefix) else line for line in patch.splitlines()]
-          Path('/tmp/auto-trader-native.patch').write_text('\n'.join(lines) + '\n', encoding='utf-8')
-          PY
-          git apply --check /tmp/auto-trader-native.patch
-          git apply /tmp/auto-trader-native.patch
+          git apply --check .github/auto-trader-materialization/bot2_coletor.patch
+          git apply .github/auto-trader-materialization/bot2_coletor.patch
+          git apply --check .github/auto-trader-materialization/dashboard.patch
+          git apply .github/auto-trader-materialization/dashboard.patch
+          sed -i '/Trigger de materialização nativa do módulo Auto-Trader\./d' robo-bacbo/test/auto_trader.test.js
 
-      - name: Validate
+      - name: Validate native implementation
         run: |
           cd robo-bacbo
           node --check auto_trader.js
@@ -47,19 +38,48 @@ jobs:
           const html = fs.readFileSync('public/dashboard-app.html', 'utf8');
           const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);
           const principal = scripts.find(codigo => codigo.includes('const socketWeb = io();'));
-          if (!principal) throw new Error('Script principal não encontrado');
+          if (!principal) throw new Error('Script principal do dashboard não encontrado');
           new vm.Script(principal, { filename: 'dashboard-inline.js' });
+          for (const marcador of [
+            'at-gatilho-reds-virtuais',
+            'at-sinais-por-onda',
+            'at-tipo-aleatoriedade',
+            'at-chance-entrada-pct',
+            'at-limite-ciclos',
+            'at-faixas-horario'
+          ]) {
+            if (!html.includes(marcador)) throw new Error(`Campo UI ausente: ${marcador}`);
+          }
+          for (const legado of ['id="at-camuflagem"', 'id="at-hora-inicio"', 'id="at-hora-fim"']) {
+            if (html.includes(legado)) throw new Error(`Controle legado ainda presente: ${legado}`);
+          }
           NODE
+          if grep -E "function horarioParaMinutos|cf\.hora_inicio|cf\.hora_fim|cf\.modo_camuflagem" bot2_coletor.js; then
+            echo "Legacy Auto-Trader execution logic remains in backend"
+            exit 1
+          fi
           cd ..
           git diff --check
 
       - name: Commit native implementation
         run: |
-          rm -f .github/workflows/materialize-auto-trader-state-machine.yml .github/workflows/materialize-auto-trader-trigger.yml
+          rm -f \
+            .github/workflows/materialize-auto-trader-state-machine.yml \
+            .github/workflows/materialize-auto-trader-trigger.yml \
+            .github/auto-trader-materialization/bot2_coletor.patch \
+            .github/auto-trader-materialization/dashboard.patch
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -- robo-bacbo/auto_trader.js robo-bacbo/test/auto_trader.test.js robo-bacbo/bot2_coletor.js robo-bacbo/public/dashboard-app.html
-          git add -u -- .github/workflows/materialize-auto-trader-state-machine.yml .github/workflows/materialize-auto-trader-trigger.yml
+          git add -- \
+            robo-bacbo/auto_trader.js \
+            robo-bacbo/test/auto_trader.test.js \
+            robo-bacbo/bot2_coletor.js \
+            robo-bacbo/public/dashboard-app.html
+          git add -u -- \
+            .github/workflows/materialize-auto-trader-state-machine.yml \
+            .github/workflows/materialize-auto-trader-trigger.yml \
+            .github/auto-trader-materialization/bot2_coletor.patch \
+            .github/auto-trader-materialization/dashboard.patch
           git diff --cached --check
           git commit -m "refactor(auto-trader): state-machine cycles and multi-window schedules [auto-trader-materialized]"
           git push origin HEAD:agent/auto-trader-state-machine-schedules
