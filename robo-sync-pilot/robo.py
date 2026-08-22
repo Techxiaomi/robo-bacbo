@@ -3,7 +3,6 @@ from flask import Flask, request, jsonify
 import threading
 import queue
 import time
-import random
 import re
 import json
 import requests
@@ -113,11 +112,11 @@ except ValueError:
 
 try:
     WEBSOCKET_RECONNECT_GRACE_SECONDS = max(
-        25.0,
-        min(30.0, float(os.getenv("WEBSOCKET_RECONNECT_GRACE_SECONDS", "25")))
+        1.0,
+        min(5.0, float(os.getenv("WEBSOCKET_RECONNECT_GRACE_SECONDS", "5")))
     )
 except ValueError:
-    WEBSOCKET_RECONNECT_GRACE_SECONDS = 25.0
+    WEBSOCKET_RECONNECT_GRACE_SECONDS = 5.0
 
 try:
     ROADMAP_RECONCILIATION_MIN_RESULTS = max(
@@ -890,50 +889,6 @@ def frame_evolution_relevante(frame):
         return False
     return "evolution" in url or "evocdn" in url or "game" in url
 
-
-def interagir_keepalive_evolution(page):
-    """Gera movimento real do ponteiro sobre uma superfície neutra/visual da mesa."""
-    seletores_neutros = (
-        "canvas",
-        "[data-roadmap]",
-        "[data-history]",
-        "[data-results]",
-        "[class*='roadmap' i]",
-        "[class*='bead' i]",
-        "[class*='history' i]",
-        "[class*='road' i]",
-        "body",
-    )
-
-    for frame in list(getattr(page, "frames", []) or []):
-        if not frame_evolution_relevante(frame):
-            continue
-        for seletor in seletores_neutros:
-            try:
-                candidatos = frame.locator(seletor)
-                quantidade = min(max(0, int(candidatos.count())), 6)
-            except Exception:
-                continue
-
-            for indice in range(quantidade):
-                try:
-                    elemento = candidatos.nth(indice)
-                    if not elemento.is_visible(timeout=100):
-                        continue
-                    caixa = elemento.bounding_box(timeout=200)
-                    if not caixa or caixa.get("width", 0) < 8 or caixa.get("height", 0) < 8:
-                        continue
-                    largura = float(caixa["width"])
-                    altura = float(caixa["height"])
-                    x = max(3.0, min(largura - 3.0, largura * random.uniform(0.35, 0.65)))
-                    y = max(3.0, min(altura - 3.0, altura * random.uniform(0.35, 0.65)))
-                    # Locator.hover usa o dispositivo de ponteiro do Playwright e produz
-                    # pointer/mouse events reais no elemento, ao contrário de dispatchEvent.
-                    elemento.hover(position={"x": x, "y": y}, force=True, timeout=400)
-                    return True
-                except Exception:
-                    continue
-    return False
 
 
 def fechar_popups(page):
@@ -2367,6 +2322,7 @@ def iniciar_robo_blindado():
             "ws_oficial": None,
             "ultimo_player_state_monotonic": 0.0,
             "reconexao_pendente": None,
+            "pagina_recarregada": False,
         }
         estado_saldo = {
             "ultima_tentativa": 0.0,
@@ -2389,17 +2345,20 @@ def iniciar_robo_blindado():
                     executor_pronto.clear()
                     if status_conexao.get("reconexao_pendente") is not None:
                         return
+                    inicio_reconexao = time.monotonic()
                     status_conexao.update({
                         "ws_conectado": False,
                         "ws_oficial": None,
                         "reconexao_pendente": {
-                            "iniciada_monotonic": time.monotonic(),
+                            "iniciada_monotonic": inicio_reconexao,
                             "estado_anterior": snapshot_estado_mesa(),
+                            "proxima_varredura_monotonic": inicio_reconexao,
+                            "varreduras_dom": 0,
                         },
                     })
                     print(
                         "🔄 WebSocket oficial da mesa foi fechado; novas apostas estão bloqueadas enquanto "
-                        f"a continuidade é verificada por até {WEBSOCKET_RECONNECT_GRACE_SECONDS:g}s."
+                        f"a continuidade é verificada ativamente por até {WEBSOCKET_RECONNECT_GRACE_SECONDS:g}s."
                     )
 
                 ws.on("close", websocket_fechado)
@@ -2506,11 +2465,18 @@ def iniciar_robo_blindado():
         while True:
             try:
                 executor_pronto.clear()
-                status_conexao["ws_conectado"] = False
-                status_conexao["ws_oficial"] = None
-                status_conexao["ultimo_player_state_monotonic"] = 0.0
-                status_conexao["reconexao_pendente"] = None
-                page.goto(URL_CASSINO, wait_until="domcontentloaded", timeout=60000)
+                reaproveitar_reload = bool(status_conexao.get("pagina_recarregada"))
+                status_conexao["pagina_recarregada"] = False
+                status_conexao["ativa"] = True
+                if reaproveitar_reload:
+                    status_conexao["reconexao_pendente"] = None
+                    print("♻️ Reload defensivo concluído; reaproveitando a página sem segunda navegação.")
+                else:
+                    status_conexao["ws_conectado"] = False
+                    status_conexao["ws_oficial"] = None
+                    status_conexao["ultimo_player_state_monotonic"] = 0.0
+                    status_conexao["reconexao_pendente"] = None
+                    page.goto(URL_CASSINO, wait_until="domcontentloaded", timeout=60000)
                 fechar_popups(page)
                 
                 sucesso_login = False
@@ -2532,8 +2498,6 @@ def iniciar_robo_blindado():
                 fechar_popups(page)
                 executor_pronto.set()
                 print("✅ Acesso validado! Executor liberado para novas ordens.")
-                ultima_interacao_keepalive = time.time()
-                intervalo_keepalive = random.uniform(30.0, 45.0)
                 
                 # Mantém a sessão saudável indefinidamente. A navegação é reiniciada
                 # somente por evidência operacional (WebSocket/stale/login/Playwright),
@@ -2546,25 +2510,68 @@ def iniciar_robo_blindado():
                         if not fila_apostas.empty():
                             ordem = fila_apostas.get()
                             processar_ordem_executor(page, ordem)
-                            ultima_interacao_keepalive = time.time()
-                            intervalo_keepalive = random.uniform(30.0, 45.0)
                         # 500ms de polling consumiam uma fração grande da janela
                         # real de aposta. Mantém o event loop responsivo sem busy-wait.
                         page.wait_for_timeout(50)
 
                         reconexao = status_conexao.get("reconexao_pendente")
                         if isinstance(reconexao, dict):
+                            agora_reconexao = time.monotonic()
+                            proxima_varredura = float(reconexao.get("proxima_varredura_monotonic") or 0.0)
+                            if agora_reconexao >= proxima_varredura:
+                                reconexao["proxima_varredura_monotonic"] = agora_reconexao + 0.5
+                                reconexao["varreduras_dom"] = int(reconexao.get("varreduras_dom") or 0) + 1
+                                fechar_popups(page)
+                                for frame in list(getattr(page, "frames", []) or []):
+                                    if not frame_evolution_relevante(frame):
+                                        continue
+                                    try:
+                                        btn = frame.get_by_text(
+                                            re.compile(r"continuar|continue|inativ|inactiv|pausado|paused", re.IGNORECASE)
+                                        )
+                                        if btn.count() > 0 and btn.first.is_visible(timeout=100):
+                                            btn.first.click(force=True, timeout=300)
+                                            print("▶️ ANTI-IDLE | modal Evolution acionado durante o polling de reconexão.")
+                                            break
+                                    except Exception:
+                                        pass
+
+                            # Um playerState válido pode ter sido processado enquanto o Playwright
+                            # executava a varredura DOM. Nesse caso, não deixa o snapshot local
+                            # disparar um timeout obsoleto.
+                            if status_conexao.get("reconexao_pendente") is not reconexao:
+                                continue
+
                             decorrido_reconexao = time.monotonic() - float(reconexao.get("iniciada_monotonic") or 0.0)
-                            if decorrido_reconexao > WEBSOCKET_RECONNECT_GRACE_SECONDS:
+                            if decorrido_reconexao >= WEBSOCKET_RECONNECT_GRACE_SECONDS:
                                 status_conexao["reconexao_pendente"] = None
                                 status_conexao["ativa"] = False
                                 motivo = "WEBSOCKET_RECONEXAO_TIMEOUT"
                                 if marcar_interrupcao_fluxo(motivo):
                                     print(
-                                        "🚨 WebSocket oficial não foi restabelecido com evidência segura; "
+                                        "🚨 WebSocket oficial não foi restabelecido com evidência segura após polling ativo; "
                                         "sinais pendentes serão invalidados."
                                     )
                                     notificar_interrupcao_node(motivo)
+
+                                # O reload só acontece depois de todo o grace de 5 s ter sido
+                                # usado para varrer/clicar o modal. O próximo ciclo reaproveita
+                                # esta mesma página recarregada, evitando uma segunda navegação.
+                                status_conexao["ws_oficial"] = None
+                                status_conexao["ws_conectado"] = False
+                                status_conexao["ultimo_player_state_monotonic"] = 0.0
+                                try:
+                                    page.reload(wait_until="domcontentloaded", timeout=60000)
+                                    fechar_popups(page)
+                                    status_conexao["pagina_recarregada"] = True
+                                except Exception as erro_reload:
+                                    status_conexao["pagina_recarregada"] = False
+                                    registrar_erro_limitado(
+                                        "reload_reconexao_timeout",
+                                        f"⚠️ Reload defensivo após timeout de reconexão falhou: {type(erro_reload).__name__}: {erro_reload}",
+                                        30,
+                                    )
+                                status_conexao["ativa"] = False
                                 break
                             continue
 
@@ -2580,21 +2587,6 @@ def iniciar_robo_blindado():
                                 notificar_interrupcao_node("PLAYER_STATE_STALE")
                             break
 
-                        agora_keepalive = time.time()
-                        if agora_keepalive - ultima_interacao_keepalive >= intervalo_keepalive:
-                            if interagir_keepalive_evolution(page):
-                                ultima_interacao_keepalive = agora_keepalive
-                                intervalo_keepalive = random.uniform(30.0, 45.0)
-                            else:
-                                # Não mascara falha do keep-alive por mais 30-45 s.
-                                # Tenta novamente em breve sem transformar o loop em busy-wait.
-                                ultima_interacao_keepalive = agora_keepalive
-                                intervalo_keepalive = 5.0
-                                registrar_erro_limitado(
-                                    "keepalive_evolution_indisponivel",
-                                    "⚠️ Keep-Alive Evolution não encontrou superfície neutra visível; nova tentativa em 5s.",
-                                    30,
-                                )
 
                     if not status_conexao["ativa"]:
                         break
@@ -2608,8 +2600,6 @@ def iniciar_robo_blindado():
                                 )
                                 if btn.count() > 0 and btn.first.is_visible(timeout=100):
                                     btn.first.click(force=True, timeout=300)
-                                    ultima_interacao_keepalive = time.time()
-                                    intervalo_keepalive = random.uniform(30.0, 45.0)
                             except Exception:
                                 pass
                     
