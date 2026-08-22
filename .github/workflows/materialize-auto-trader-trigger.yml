@@ -23,10 +23,10 @@ jobs:
 
       - name: Materialize native source
         run: |
-          git apply --check .github/auto-trader-materialization/bot2_coletor.patch
-          git apply .github/auto-trader-materialization/bot2_coletor.patch
-          git apply --check .github/auto-trader-materialization/dashboard.patch
-          git apply .github/auto-trader-materialization/dashboard.patch
+          git apply --recount --check .github/auto-trader-materialization/bot2_coletor.patch
+          git apply --recount .github/auto-trader-materialization/bot2_coletor.patch
+          git apply --recount --check .github/auto-trader-materialization/dashboard.patch
+          git apply --recount .github/auto-trader-materialization/dashboard.patch
           sed -i '/Trigger de materialização nativa do módulo Auto-Trader\./d' robo-bacbo/test/auto_trader.test.js
 
       - name: Validate native implementation
