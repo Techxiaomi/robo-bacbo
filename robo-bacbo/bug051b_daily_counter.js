@@ -1,5 +1,11 @@
 'use strict';
 
+const {
+    normalizarConfigHorarios,
+    dentroDeAlgumaFaixa,
+    descreverFaixasHorario
+} = require('./auto_trader_schedule');
+
 const DEFAULT_OPERATIONAL_TIMEZONE = 'America/Sao_Paulo';
 
 function criarControleDiarioAutoTrader({ dbPool, timezone }) {
@@ -29,9 +35,40 @@ function criarControleDiarioAutoTrader({ dbPool, timezone }) {
         return `${partes.year}-${partes.month}-${partes.day}`;
     }
 
+    async function normalizarHorariosPersistidos(trader) {
+        const normalizacao = normalizarConfigHorarios(trader?.config || {});
+        if (!normalizacao.validacao.ok) {
+            throw new Error(
+                `Configuracao de horario invalida (${normalizacao.validacao.campo || 'faixas_horario'}): `
+                + `${normalizacao.validacao.motivo || 'formato invalido'}`
+            );
+        }
+
+        if (!normalizacao.alterado) return false;
+
+        await dbPool.query(
+            'UPDATE auto_traders SET config_json=? WHERE id=?',
+            [JSON.stringify(normalizacao.config), trader.id]
+        );
+        trader.config = normalizacao.config;
+        return true;
+    }
+
     async function garantirDataOperacional(trader, agora = Date.now()) {
         if (!trader || trader.id === undefined || trader.id === null) {
             throw new Error('Auto-Trader invalido para controle diario');
+        }
+
+        await normalizarHorariosPersistidos(trader);
+
+        // O fluxo de autorização de uma nova entrada chama esta função sem timestamp
+        // explícito. A virada diária administrativa informa o timestamp e não deve ser
+        // impedida por uma janela de atividade fechada.
+        const validarHorarioDaEntrada = arguments.length < 2;
+        if (validarHorarioDaEntrada && !dentroDeAlgumaFaixa(trader.config, new Date())) {
+            throw new Error(
+                `fora das faixas de atividade configuradas (${descreverFaixasHorario(trader.config)})`
+            );
         }
 
         const hoje = dataOperacional(agora);

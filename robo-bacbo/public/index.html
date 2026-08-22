@@ -12,6 +12,7 @@
     <script src="/dom-ui2-transform.js"></script>
     <script src="/backtest-ui3-transform.js"></script>
     <script src="/resources-ui4.js"></script>
+    <script src="/activity-schedule-ui.js"></script>
 
     <style>
         html, body {
@@ -52,6 +53,9 @@
                 if (window.__resourceUi4Ready !== true || typeof window.otimizarScriptPrincipalUI4 !== 'function') {
                     throw new Error('Otimizações de recursos UI-4 não carregadas');
                 }
+                if (window.__activityScheduleUiReady !== true || typeof window.configurarFaixasHorarioAutoTrader !== 'function') {
+                    throw new Error('Controlador de faixas de horário do Auto-Trader não carregado');
+                }
 
                 const response = await fetch('/dashboard-app.html?_t=' + Date.now(), {
                     cache: 'no-store',
@@ -91,6 +95,7 @@
                 const script = document.createElement('script');
                 script.textContent = scriptPrincipalOtimizado;
                 document.body.appendChild(script);
+                window.configurarFaixasHorarioAutoTrader();
 
                 const finalizarInicializacao = () => {
                     // O HTML-base foi montado depois do DOMContentLoaded original do loader.

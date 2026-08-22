@@ -1,5 +1,7 @@
 'use strict';
 
+const { validarFaixasHorarioConfiguracao } = require('./auto_trader_schedule');
+
 const LIMITE_DECIMAL_DINHEIRO = 9_999_999_999.99;
 const LIMITE_MULTIPLICADOR_GALE = 1000;
 const LIMITE_PULOS = 1000;
@@ -19,11 +21,6 @@ function inteiroEstrito(valor) {
 function multiploDeCinco(valor) {
     return numeroEstrito(valor)
         && Math.abs((valor / 5) - Math.round(valor / 5)) < 1e-9;
-}
-
-function horarioValido(valor) {
-    return typeof valor === 'string'
-        && /^([01]\d|2[0-3]):[0-5]\d$/.test(valor);
 }
 
 function validarConfiguracaoAutoTrader(config) {
@@ -173,11 +170,9 @@ function validarConfiguracaoAutoTrader(config) {
         }
     }
 
-    if (!horarioValido(config.hora_inicio)) {
-        return falha('hora_inicio', 'deve usar o formato HH:MM entre 00:00 e 23:59');
-    }
-    if (!horarioValido(config.hora_fim)) {
-        return falha('hora_fim', 'deve usar o formato HH:MM entre 00:00 e 23:59');
+    const horario = validarFaixasHorarioConfiguracao(config);
+    if (!horario.ok) {
+        return falha(horario.campo || 'faixas_horario', horario.motivo || 'configuração de horário inválida');
     }
 
     if (!Array.isArray(config.fontes_sinal)) {
