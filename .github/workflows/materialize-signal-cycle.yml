@@ -7,13 +7,16 @@ on:
     paths:
       - .github/workflows/materialize-signal-cycle.yml
       - robo-bacbo/generate_native_signal_cycle.js
+  pull_request:
+    branches:
+      - agent/signal-cycle-phase3
 
 permissions:
   contents: write
 
 jobs:
   materialize:
-    if: ${{ !contains(github.event.head_commit.message, '[native-materialized]') }}
+    if: ${{ github.event_name == 'pull_request' || !contains(github.event.head_commit.message, '[native-materialized]') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
