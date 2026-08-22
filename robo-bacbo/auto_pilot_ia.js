@@ -40,6 +40,7 @@ function normalizarConfigAutoTuning(config = {}) {
         shadow_live_ocorrencias: inteiroLimitado(config.shadow_live_ocorrencias, 0, 0, 100),
         shadow_live_max_candidatos: inteiroLimitado(config.shadow_live_max_candidatos, 10, 1, 50),
         max_padroes: inteiroLimitado(config.max_padroes, 4, 1, 100),
+        max_red_streak_historico: inteiroLimitado(config.max_red_streak_historico, 0, 0, 100000),
         drop_reds: inteiroLimitado(config.drop_reds, 2, 0, 100),
         drop_assert: numeroLimitado(config.drop_assert, 85, 0, 100),
         ttl_horas: numeroLimitado(config.ttl_horas, 4, 0.25, 720),
@@ -122,6 +123,7 @@ function ocorrenciasPadrao(dados, padrao, alvo, config, inicioIndice = 0, fimInd
     const alvoNormalizado = String(alvo || '');
     const gales = Math.max(0, Math.trunc(Number(config?.gales) || 0));
     const protegerEmpate = config?.proteger_empate !== false;
+    const limiteRedStreakHistorico = Math.max(0, Math.trunc(Number(config?.max_red_streak_historico) || 0));
     const inicio = Math.max(0, Math.trunc(Number(inicioIndice) || 0));
     const fim = Math.min(
         arr.length,
@@ -131,7 +133,17 @@ function ocorrenciasPadrao(dados, padrao, alvo, config, inicioIndice = 0, fimInd
     );
 
     if (seq.length === 0 || !ALVOS.includes(alvoNormalizado)) {
-        return { ocorrencias: 0, greens: 0, reds: 0, ties: 0, assertividade: 0, recente_assertividade: 0, resultados: [] };
+        return {
+            ocorrencias: 0,
+            greens: 0,
+            reds: 0,
+            ties: 0,
+            assertividade: 0,
+            recente_assertividade: 0,
+            max_red_streak: 0,
+            violou_max_red_streak_historico: false,
+            resultados: []
+        };
     }
 
     const resultados = [];
@@ -183,6 +195,18 @@ function ocorrenciasPadrao(dados, padrao, alvo, config, inicioIndice = 0, fimInd
     const vitorias = greens + ties;
     const janelaRecente = resultados.slice(-Math.max(3, Math.ceil(ocorrencias * 0.30)));
     const recentesWin = janelaRecente.filter(r => r.tipo === 'GREEN' || r.tipo === 'TIE').length;
+    let redStreakAtual = 0;
+    let maxRedStreak = 0;
+    for (const desfecho of resultados) {
+        if (desfecho.tipo === 'RED') {
+            redStreakAtual++;
+            if (redStreakAtual > maxRedStreak) maxRedStreak = redStreakAtual;
+        } else {
+            redStreakAtual = 0;
+        }
+    }
+    const violouMaxRedStreakHistorico = limiteRedStreakHistorico > 0
+        && maxRedStreak >= limiteRedStreakHistorico;
 
     return {
         ocorrencias,
@@ -191,6 +215,8 @@ function ocorrenciasPadrao(dados, padrao, alvo, config, inicioIndice = 0, fimInd
         ties,
         assertividade: ocorrencias > 0 ? (vitorias / ocorrencias) * 100 : 0,
         recente_assertividade: janelaRecente.length > 0 ? (recentesWin / janelaRecente.length) * 100 : 0,
+        max_red_streak: maxRedStreak,
+        violou_max_red_streak_historico: violouMaxRedStreakHistorico,
         resultados
     };
 }
@@ -352,6 +378,7 @@ function minerarCandidatos(dados, configBruta = {}, opcoes = {}) {
         shadow_historico: shadow,
         padroes_unicos: padroes.length,
         combinacoes_avaliadas: padroes.length * ALVOS.length,
+        reprovados_red_streak_historico: 0,
         reprovados_ocorrencias: 0,
         reprovados_assertividade: 0,
         reprovados_shadow_historico: 0,
@@ -362,6 +389,10 @@ function minerarCandidatos(dados, configBruta = {}, opcoes = {}) {
         for (const entrada of ALVOS) {
             const id = idCandidato(opcoes.robo_id || 0, padrao, entrada, config);
             const treino = ocorrenciasPadrao(arr, padrao, entrada, config, 0, limiteTreino);
+            if (treino.violou_max_red_streak_historico) {
+                diagnostico.reprovados_red_streak_historico++;
+                continue;
+            }
             if (treino.ocorrencias < config.ocorr_min) { diagnostico.reprovados_ocorrencias++; continue; }
             if (treino.assertividade < config.assert_min) { diagnostico.reprovados_assertividade++; continue; }
 
@@ -411,6 +442,7 @@ function minerarCandidatos(dados, configBruta = {}, opcoes = {}) {
                 greens: treino.greens,
                 ties: treino.ties,
                 reds: treino.reds,
+                max_red_streak: treino.max_red_streak,
                 assertividade: treino.assertividade,
                 recente_assertividade: treino.recente_assertividade,
                 wilson: scoreBase.wilson,
@@ -647,7 +679,7 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
             `🧠 AUTO PILOT IA ${robo.id} — ${String(motivo || 'mineração').toUpperCase()}`,
             `   Janela: ${d.janela ?? '?'} | treino: ${d.treino ?? '?'} | validação histórica: ${d.shadow_historico ?? 0}`,
             `   Padrões únicos: ${d.padroes_unicos ?? '?'} | combinações avaliadas: ${d.combinacoes_avaliadas ?? '?'}`,
-            `   Reprovados: ocorrências=${d.reprovados_ocorrencias ?? 0}, assertividade=${d.reprovados_assertividade ?? 0}, shadow histórico=${d.reprovados_shadow_historico ?? 0}`,
+            `   Reprovados: red-streak histórico=${d.reprovados_red_streak_historico ?? 0}, ocorrências=${d.reprovados_ocorrencias ?? 0}, assertividade=${d.reprovados_assertividade ?? 0}, shadow histórico=${d.reprovados_shadow_historico ?? 0}`,
             `   Blacklist configurada: ${d.blacklist_configurados ?? 0}`,
             `   Pool: ${resumo.ativos.length}/${config.max_padroes} ativos | ${resumo.reservas} reservas | ${resumo.shadow_historico || 0} shadow histórico | ${resumo.shadow_live || 0} shadow live | ${resumo.rejeitados_shadow_live || 0} rejeitados live | ${resumo.fora_pool || 0} fora do pool`
         ];
