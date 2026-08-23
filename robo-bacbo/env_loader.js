@@ -40,12 +40,6 @@ function loadEnvFile(filePath) {
     // Instrumenta HTTP inbound e fetch outbound antes do app.listen(), sem tocar no motor principal.
     const { instalarMetricasOperacionais } = require("./operations_metrics");
     instalarMetricasOperacionais({ baseDir });
-
-    // O executor Python nao expoe mais Flask. O transporte legado fetch() do motor
-    // e redirecionado localmente para Redis Pub/Sub, preservando o processamento
-    // existente de sinais/webhooks e o callback financeiro do Node.
-    const { instalarRedisExecutorBridge } = require("./redis_executor_bridge");
-    instalarRedisExecutorBridge();
 }
 
 module.exports = { loadEnvFile };
