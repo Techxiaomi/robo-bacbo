@@ -638,6 +638,28 @@ const BALANCE_SYNC_MAX_AGE_MS = (
         ? balanceSyncMaxAgeSecondsConfig
         : 90
 ) * 1000;
+const REDIS_URL = String(process.env.REDIS_URL || 'redis://127.0.0.1:6379').trim() || 'redis://127.0.0.1:6379';
+const redisConnectTimeoutConfig = Number(process.env.REDIS_CONNECT_TIMEOUT_MS || 3000);
+const REDIS_CONNECT_TIMEOUT_MS = (
+    Number.isFinite(redisConnectTimeoutConfig)
+    && redisConnectTimeoutConfig >= 500
+    && redisConnectTimeoutConfig <= 15000
+        ? redisConnectTimeoutConfig
+        : 3000
+);
+const balanceSyncResponseTimeoutConfig = Number(process.env.BALANCE_SYNC_RESPONSE_TIMEOUT_MS || 8000);
+const BALANCE_SYNC_RESPONSE_TIMEOUT_MS = (
+    Number.isFinite(balanceSyncResponseTimeoutConfig)
+    && balanceSyncResponseTimeoutConfig >= 1000
+    && balanceSyncResponseTimeoutConfig <= 30000
+        ? balanceSyncResponseTimeoutConfig
+        : 8000
+);
+let redisClient = null;
+let redisSubscriber = null;
+let redisSaldoAssinado = false;
+let redisSaldoInicializacaoPromise = null;
+const ESPERAS_ATUALIZACAO_SALDO_REDIS = new Set();
 
 function snapshotSaldoGlobal(agora = Date.now()) {
     const saldoValido = Number.isFinite(saldoGlobalCorretora) && saldoGlobalCorretora >= 0;
@@ -658,6 +680,183 @@ function snapshotSaldoGlobal(agora = Date.now()) {
 function obterSaldoGlobalFresco(agora = Date.now()) {
     const snapshot = snapshotSaldoGlobal(agora);
     return snapshot.fresco ? snapshot.saldo_atual : null;
+}
+
+function criarClientesRedisSaldo() {
+    if (redisClient && redisSubscriber) return;
+
+    const { createClient } = require('redis');
+    redisClient = createClient({
+        url: REDIS_URL,
+        socket: {
+            connectTimeout: REDIS_CONNECT_TIMEOUT_MS,
+            reconnectStrategy: () => false
+        }
+    });
+    redisSubscriber = redisClient.duplicate();
+
+    redisClient.on('error', erro => {
+        console.error('⚠️ Redis publisher do saldo:', erro.message);
+    });
+    redisSubscriber.on('error', erro => {
+        console.error('⚠️ Redis subscriber do saldo:', erro.message);
+    });
+    redisSubscriber.on('end', () => {
+        redisSaldoAssinado = false;
+    });
+}
+
+function criarEsperaAtualizacaoSaldoRedis() {
+    let ativa = true;
+    let resolverPromessa = null;
+    let rejeitarPromessa = null;
+    let timeoutId = null;
+
+    const promessa = new Promise((resolve, reject) => {
+        resolverPromessa = resolve;
+        rejeitarPromessa = reject;
+    });
+
+    const espera = {
+        resolver(snapshot) {
+            if (!ativa) return false;
+            ativa = false;
+            if (timeoutId) clearTimeout(timeoutId);
+            ESPERAS_ATUALIZACAO_SALDO_REDIS.delete(espera);
+            resolverPromessa(snapshot);
+            return true;
+        },
+        cancelar() {
+            if (!ativa) return false;
+            ativa = false;
+            if (timeoutId) clearTimeout(timeoutId);
+            ESPERAS_ATUALIZACAO_SALDO_REDIS.delete(espera);
+            return true;
+        }
+    };
+
+    timeoutId = setTimeout(() => {
+        if (!ativa) return;
+        ativa = false;
+        ESPERAS_ATUALIZACAO_SALDO_REDIS.delete(espera);
+        rejeitarPromessa(new Error(`Sem balance_update via Redis em ${BALANCE_SYNC_RESPONSE_TIMEOUT_MS}ms`));
+    }, BALANCE_SYNC_RESPONSE_TIMEOUT_MS);
+    if (timeoutId && typeof timeoutId.unref === 'function') timeoutId.unref();
+
+    ESPERAS_ATUALIZACAO_SALDO_REDIS.add(espera);
+    return { promessa, cancelar: espera.cancelar };
+}
+
+function resolverEsperasAtualizacaoSaldoRedis(snapshot) {
+    for (const espera of [...ESPERAS_ATUALIZACAO_SALDO_REDIS]) {
+        espera.resolver(snapshot);
+    }
+}
+
+async function aplicarSaldoGlobalRecebido(saldo, atualizadoEm = Date.now()) {
+    const saldoNumero = Number(saldo);
+    const timestampNumero = Number(atualizadoEm);
+    if (!Number.isFinite(saldoNumero) || saldoNumero < 0) {
+        throw new Error('balance_update invalido recebido via Redis');
+    }
+    if (!Number.isFinite(timestampNumero) || timestampNumero <= 0) {
+        throw new Error('timestamp de balance_update invalido');
+    }
+
+    const timestampConfirmado = Math.trunc(timestampNumero);
+    await dbPool.query(
+        'UPDATE auto_traders SET saldo_atual=? WHERE ativo=true',
+        [saldoNumero]
+    );
+
+    saldoGlobalCorretora = saldoNumero;
+    saldoGlobalAtualizadoEm = timestampConfirmado;
+    await confirmarSaldosPosLiquidacao(saldoNumero, timestampConfirmado);
+
+    for (const trader of AUTO_TRADERS_MEMORIA) {
+        if (trader.ativo) trader.saldo_atual = saldoNumero;
+    }
+
+    const snapshot = snapshotSaldoGlobal(timestampConfirmado);
+    ioServer.emit('atualizar_interface');
+    return snapshot;
+}
+
+async function processarRespostaSaldoRedis(mensagem) {
+    let dados = null;
+    try {
+        dados = JSON.parse(String(mensagem || ''));
+    } catch (e) {
+        console.warn('⚠️ Resposta Redis de saldo ignorada: JSON invalido.');
+        return false;
+    }
+
+    if (!dados || dados.action !== 'balance_update') return false;
+
+    const saldo = Number(dados.balance);
+    if (!Number.isFinite(saldo) || saldo < 0) {
+        console.warn('⚠️ Resposta Redis balance_update ignorada: balance invalido.');
+        return false;
+    }
+
+    const snapshot = await aplicarSaldoGlobalRecebido(saldo, Date.now());
+    resolverEsperasAtualizacaoSaldoRedis(snapshot);
+    console.log(`💰 Saldo real atualizado via Redis: R$ ${saldo.toFixed(2)}.`);
+    return true;
+}
+
+async function garantirRedisSaldoPronto() {
+    if (
+        redisClient?.isReady === true
+        && redisSubscriber?.isReady === true
+        && redisSaldoAssinado
+    ) {
+        return true;
+    }
+
+    if (redisSaldoInicializacaoPromise) {
+        await redisSaldoInicializacaoPromise;
+        return true;
+    }
+
+    redisSaldoInicializacaoPromise = (async () => {
+        criarClientesRedisSaldo();
+
+        if (!redisClient.isOpen) {
+            await redisClient.connect();
+        }
+        if (!redisSubscriber.isOpen) {
+            await redisSubscriber.connect();
+        }
+        if (!redisSaldoAssinado) {
+            await redisSubscriber.subscribe('auto_trader_responses', mensagem => {
+                void processarRespostaSaldoRedis(mensagem).catch(erro => {
+                    console.error('⚠️ Falha ao processar balance_update recebido via Redis:', erro.message);
+                });
+            });
+            redisSaldoAssinado = true;
+        }
+    })();
+
+    try {
+        await redisSaldoInicializacaoPromise;
+        return true;
+    } finally {
+        redisSaldoInicializacaoPromise = null;
+    }
+}
+
+async function solicitarSincronizacaoSaldoRedis() {
+    await garantirRedisSaldoPronto();
+    const espera = criarEsperaAtualizacaoSaldoRedis();
+
+    try {
+        await redisClient.publish('auto_trader_commands', JSON.stringify({action: 'sync_balance'}));
+        return await espera.promessa;
+    } catch (e) {
+        espera.cancelar();
+        throw e;
+    }
 }
 
 function normalizarInterrupcaoColetorId(dados) {
@@ -1274,8 +1473,17 @@ async function carregarHistoricoGirosAnalitico() {
 // ==========================================
 // 5. ROTAS DE API
 // ==========================================
-app.get("/api/saldo-global", (req, res) => {
-    res.json(snapshotSaldoGlobal());
+app.get("/api/saldo-global", async (req, res) => {
+    try {
+        const snapshot = await solicitarSincronizacaoSaldoRedis();
+        return res.json(snapshot);
+    } catch (e) {
+        console.error('⚠️ GET /api/saldo-global: sincronização sob demanda via Redis falhou:', e.message);
+        return res.status(503).json({
+            ...snapshotSaldoGlobal(),
+            erro: 'sincronizacao_saldo_indisponivel'
+        });
+    }
 });
 
 app.get("/api/estrategias", async (req, res) => {
