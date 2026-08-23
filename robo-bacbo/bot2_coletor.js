@@ -358,6 +358,227 @@ let estadoContinuidadeRecepcao = {
 let caudaProcessamentoResultados = Promise.resolve();
 let resultadosAguardandoProcessamento = 0;
 
+const ORIENTACAO_ROAD_NATIVA = Object.freeze({
+    OLD_TO_NEW: 'OLD_TO_NEW',
+    NEW_TO_OLD: 'NEW_TO_OLD'
+});
+const LIMITE_HISTORY_ROAD_NATIVA = 1000;
+const estadoRoadNativo = {
+    pronto: false,
+    orientacao: null,
+    history: [],
+    coletor_sessao: null,
+    aguardando_snapshot: true,
+    hard_reset_em: 0,
+    orientacao_preservada: null,
+    sessao_preservada: null,
+    atualizado_em: null
+};
+
+function resultadoRoadNativo(valor) {
+    const normalizado = String(valor || '').trim().toLowerCase();
+    if (normalizado === 'player' || normalizado === 'playerwon') return 'Player';
+    if (normalizado === 'banker' || normalizado === 'bankerwon') return 'Banker';
+    if (normalizado === 'tie') return 'Tie';
+    return '';
+}
+
+function numeroRoadNativo(valor) {
+    if (valor === null || valor === undefined || typeof valor === 'boolean') return null;
+    const numero = Number(valor);
+    if (!Number.isFinite(numero)) return null;
+    return Math.trunc(numero);
+}
+
+function scoreRoadDoResultado(dados, lado) {
+    const direto = numeroRoadNativo(dados?.[lado === 'player' ? 'playerScore' : 'bankerScore']);
+    if (direto !== null) return direto;
+
+    const pontos = numeroRoadNativo(dados?.[lado === 'player' ? 'pontos_jogador' : 'pontos_banca']);
+    if (pontos !== null) return pontos;
+
+    const dadosLado = lado === 'player' ? dados?.dados_jogador : dados?.dados_banca;
+    if (!Array.isArray(dadosLado) || dadosLado.length === 0) return null;
+    let total = 0;
+    for (const valor of dadosLado) {
+        const numero = numeroRoadNativo(valor);
+        if (numero === null) return null;
+        total += numero;
+    }
+    return total;
+}
+
+function normalizarGiroRoadNativo(dados, coletorSessaoFallback = '') {
+    const resultado = resultadoRoadNativo(
+        dados?.winner || dados?.vencedor || dados?.resultado
+    );
+    const playerScore = scoreRoadDoResultado(dados, 'player');
+    const bankerScore = scoreRoadDoResultado(dados, 'banker');
+    if (!resultado || playerScore === null || bankerScore === null) return null;
+    if (playerScore < 0 || playerScore > 12 || bankerScore < 0 || bankerScore > 12) return null;
+
+    const sessao = String(dados?.coletor_sessao || coletorSessaoFallback || '').trim();
+    const timestamp = numeroRoadNativo(dados?.timestamp_ms ?? dados?.timestamp_coleta ?? dados?.timestamp);
+    const seq = numeroRoadNativo(dados?.coletor_seq ?? dados?.coletorSeq);
+    return {
+        resultado,
+        winner: resultado,
+        playerScore,
+        bankerScore,
+        round_id: String(dados?.round_id || dados?.roundId || '').trim() || null,
+        coletor_seq: seq !== null && seq > 0 ? seq : null,
+        timestamp_ms: timestamp !== null && timestamp > 0 ? timestamp : 0,
+        id_sessao: sessao || 'EVOLUTION_CANONICA'
+    };
+}
+
+function mesmoGiroRoadNativo(a, b) {
+    if (!a || !b) return false;
+    const roundA = String(a.round_id || '').trim();
+    const roundB = String(b.round_id || '').trim();
+    if (roundA && roundB) return roundA === roundB;
+    return a.resultado === b.resultado
+        && Number(a.playerScore) === Number(b.playerScore)
+        && Number(a.bankerScore) === Number(b.bankerScore);
+}
+
+function hardResetSnapshotRoad(motivo) {
+    const orientacaoAnterior = estadoRoadNativo.orientacao;
+    const sessaoAnterior = estadoRoadNativo.coletor_sessao;
+    estadoRoadNativo.history = [];
+    estadoRoadNativo.pronto = false;
+    estadoRoadNativo.orientacao = null;
+    estadoRoadNativo.aguardando_snapshot = true;
+    estadoRoadNativo.hard_reset_em = Date.now();
+    estadoRoadNativo.orientacao_preservada = orientacaoAnterior;
+    estadoRoadNativo.sessao_preservada = sessaoAnterior;
+    estadoRoadNativo.atualizado_em = estadoRoadNativo.hard_reset_em;
+    console.warn(
+        `🧹 ROAD HARD RESET | memória zerada após ${String(motivo || 'QUEBRA_CONTINUIDADE')}; `
+        + 'gatilho live bloqueado até snapshot fresco substituir 100% do estado.'
+    );
+}
+
+function substituirRoadPorSnapshotFresco(dados, recebidoEm = Date.now()) {
+    const history = Array.isArray(dados?.history) ? dados.history : [];
+    const sessao = String(dados?.coletor_sessao || '').trim();
+    if (!sessao || history.length === 0) return false;
+    if (estadoRoadNativo.hard_reset_em > 0 && recebidoEm < estadoRoadNativo.hard_reset_em) {
+        return false;
+    }
+
+    const normalizados = history.map(item => normalizarGiroRoadNativo(item, sessao));
+    if (normalizados.some(item => item === null)) return false;
+
+    const mesmaSessaoAtual = sessao === String(estadoRoadNativo.coletor_sessao || '');
+    const mesmaSessaoPreservada = sessao === String(estadoRoadNativo.sessao_preservada || '');
+    const orientacao = estadoRoadNativo.aguardando_snapshot && mesmaSessaoPreservada
+        ? estadoRoadNativo.orientacao_preservada
+        : (mesmaSessaoAtual
+            ? estadoRoadNativo.orientacao
+            : (mesmaSessaoPreservada ? estadoRoadNativo.orientacao_preservada : null));
+
+    estadoRoadNativo.history = normalizados;
+    estadoRoadNativo.coletor_sessao = sessao;
+    estadoRoadNativo.orientacao = orientacao;
+    estadoRoadNativo.pronto = orientacao === ORIENTACAO_ROAD_NATIVA.OLD_TO_NEW
+        || orientacao === ORIENTACAO_ROAD_NATIVA.NEW_TO_OLD;
+    estadoRoadNativo.aguardando_snapshot = false;
+    estadoRoadNativo.hard_reset_em = 0;
+    estadoRoadNativo.orientacao_preservada = null;
+    estadoRoadNativo.sessao_preservada = null;
+    estadoRoadNativo.atualizado_em = recebidoEm;
+
+    console.log(
+        `♻️ ROAD SNAPSHOT | memória substituída integralmente por ${estadoRoadNativo.history.length} giro(s); `
+        + `${estadoRoadNativo.pronto ? 'gatilho live liberado' : 'aguardando orientação segura no próximo incremental'}.`
+    );
+    return true;
+}
+
+function atualizarRoadNativoComIncremental(dados) {
+    if (estadoRoadNativo.aguardando_snapshot || estadoRoadNativo.history.length === 0) return false;
+
+    const sessaoRecebida = String(dados?.coletor_sessao || '').trim();
+    if (
+        sessaoRecebida
+        && estadoRoadNativo.coletor_sessao
+        && sessaoRecebida !== estadoRoadNativo.coletor_sessao
+    ) {
+        hardResetSnapshotRoad('SESSAO_ROAD_DIVERGENTE');
+        return false;
+    }
+
+    const giro = normalizarGiroRoadNativo(dados, estadoRoadNativo.coletor_sessao);
+    if (!giro) return false;
+
+    if (!estadoRoadNativo.orientacao) {
+        const primeiro = estadoRoadNativo.history[0];
+        const ultimo = estadoRoadNativo.history[estadoRoadNativo.history.length - 1];
+        const casaPrimeiro = mesmoGiroRoadNativo(giro, primeiro);
+        const casaUltimo = mesmoGiroRoadNativo(giro, ultimo);
+        if (casaPrimeiro === casaUltimo) return false;
+        estadoRoadNativo.orientacao = casaPrimeiro
+            ? ORIENTACAO_ROAD_NATIVA.NEW_TO_OLD
+            : ORIENTACAO_ROAD_NATIVA.OLD_TO_NEW;
+        estadoRoadNativo.pronto = true;
+        estadoRoadNativo.atualizado_em = Date.now();
+        return true;
+    }
+
+    const pontaNova = estadoRoadNativo.orientacao === ORIENTACAO_ROAD_NATIVA.NEW_TO_OLD
+        ? estadoRoadNativo.history[0]
+        : estadoRoadNativo.history[estadoRoadNativo.history.length - 1];
+    if (mesmoGiroRoadNativo(giro, pontaNova)) {
+        estadoRoadNativo.atualizado_em = Date.now();
+        return false;
+    }
+
+    if (estadoRoadNativo.orientacao === ORIENTACAO_ROAD_NATIVA.NEW_TO_OLD) {
+        estadoRoadNativo.history.unshift(giro);
+        if (estadoRoadNativo.history.length > LIMITE_HISTORY_ROAD_NATIVA) {
+            estadoRoadNativo.history.pop();
+        }
+    } else {
+        estadoRoadNativo.history.push(giro);
+        if (estadoRoadNativo.history.length > LIMITE_HISTORY_ROAD_NATIVA) {
+            estadoRoadNativo.history.shift();
+        }
+    }
+    estadoRoadNativo.pronto = true;
+    estadoRoadNativo.atualizado_em = Date.now();
+    return true;
+}
+
+function obterHistoricoRoadNativo() {
+    const orientacaoValida = estadoRoadNativo.orientacao === ORIENTACAO_ROAD_NATIVA.OLD_TO_NEW
+        || estadoRoadNativo.orientacao === ORIENTACAO_ROAD_NATIVA.NEW_TO_OLD;
+    if (
+        estadoRoadNativo.aguardando_snapshot
+        || estadoRoadNativo.pronto !== true
+        || !orientacaoValida
+        || estadoRoadNativo.history.length === 0
+    ) {
+        return {
+            pronto: false,
+            orientacao: estadoRoadNativo.orientacao,
+            history: [],
+            coletor_sessao: estadoRoadNativo.coletor_sessao
+        };
+    }
+
+    const cronologico = estadoRoadNativo.orientacao === ORIENTACAO_ROAD_NATIVA.NEW_TO_OLD
+        ? [...estadoRoadNativo.history].reverse()
+        : [...estadoRoadNativo.history];
+    return {
+        pronto: true,
+        orientacao: estadoRoadNativo.orientacao,
+        history: cronologico.slice(-LIMITE_HISTORY_ROAD_NATIVA),
+        coletor_sessao: estadoRoadNativo.coletor_sessao,
+        atualizado_em: estadoRoadNativo.atualizado_em
+    };
+}
+
 function aguardarTurnoProcessamentoResultado() {
     resultadosAguardandoProcessamento++;
     const turnoAnterior = caudaProcessamentoResultados;
@@ -502,6 +723,21 @@ app.use((req, res, next) => {
 
     if (!hostPermitido || !origemPermitida) {
         return res.status(403).json({ erro: 'Origem ou host nao permitido' });
+    }
+    next();
+});
+app.use((req, res, next) => {
+    const roadSnapshot = req.method === 'POST' && req.path === '/collector-road';
+    const recebidoEm = Date.now();
+    if (roadSnapshot) {
+        res.once('finish', () => {
+            if (res.statusCode < 200 || res.statusCode >= 300) return;
+            try {
+                substituirRoadPorSnapshotFresco(req.body || {}, recebidoEm);
+            } catch (e) {
+                console.error('⚠️ ROAD SNAPSHOT: falha ao substituir memória nativa:', e.message);
+            }
+        });
     }
     next();
 });
@@ -3616,6 +3852,7 @@ app.post("/collector-health", async (req, res) => {
                 traders_bloqueados: 0
             });
         }
+        hardResetSnapshotRoad(motivo);
         liberarTurnoResultado = await aguardarTurnoProcessamentoResultado();
         try {
             const resumo = await invalidarSequenciasAposBuracoDados(motivo);
@@ -3657,6 +3894,16 @@ app.post("/receber-sinal", async (req, res) => {
         // Reserva a continuidade antes de qualquer await (inclusive persistência de saldo).
         // O processamento financeiro continua abaixo, serializado após o ACK.
         const continuidade = vencedor ? reservarContinuidadeResultado(dados) : null;
+
+        if (
+            continuidade?.interrupcao
+            && !interrupcaoColetorJaAplicada(dados)
+        ) {
+            const motivoRoad = String(
+                dados.motivo_interrupcao || continuidade.motivo || 'INTERRUPCAO_PYTHON'
+            ).trim().slice(0, 120) || 'INTERRUPCAO_PYTHON';
+            hardResetSnapshotRoad(motivoRoad);
+        }
 
         const temSaldo = dados.saldo_atual !== undefined && dados.saldo_atual !== null;
 
@@ -3726,6 +3973,7 @@ app.post("/receber-sinal", async (req, res) => {
 
         // Só avança a continuidade depois que qualquer interrupção foi tratada em modo fail-closed.
         estadoContinuidadeColetor = continuidade.estado;
+        atualizarRoadNativoComIncremental(dados);
 
         try {
             await rearmarAutoTradersStopRedsPausados();
@@ -4104,13 +4352,7 @@ app.post("/receber-sinal", async (req, res) => {
 
         if (sinalFinalizadoAgora) return;
 
-        const maiorPadraoLive = ESTRATEGIAS_MEMORIA.reduce((maior, est) => {
-            const tamanho = Array.isArray(est?.padrao) ? est.padrao.length : 0;
-            return Math.max(maior, tamanho);
-        }, 0);
-        const estadoLiveCanonico = integracaoContadorDiario.obterHistoricoCanonicoLive(
-            Math.max(1, maiorPadraoLive)
-        );
+        const estadoLiveCanonico = obterHistoricoRoadNativo();
         if (estadoLiveCanonico.pronto !== true) {
             return;
         }
