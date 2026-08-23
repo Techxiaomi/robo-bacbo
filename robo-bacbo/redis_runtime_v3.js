@@ -2,6 +2,7 @@
 
 const {
     parseMensagem,
+    extrairPayloadLive,
     normalizarTipoBacbo,
     validarLiveRound
 } = require('./bacbo_payload_schema');
@@ -195,16 +196,42 @@ async function persistirRetencaoRedis(round) {
     } catch (_) { }
 }
 
+function resumoLiveRecebido(raiz) {
+    const payload = extrairPayloadLive(raiz) || {};
+    return {
+        uuid: String(payload.uuid ?? '').trim() || 'n/a',
+        type: payload.type ?? 'n/a',
+        result: payload.result ?? 'n/a'
+    };
+}
+
 async function processarLiveRound(raiz) {
+    const recebido = resumoLiveRecebido(raiz);
     const validacao = validarLiveRound(raiz);
     if (!validacao.ok) {
-        console.warn(`⚠️ bacbo_events live_round rejeitado | motivo=${validacao.erro}.`);
+        console.warn(
+            `⚠️ Rodada recebida mas ignorada | motivo=${validacao.erro} | `
+            + `uuid=${recebido.uuid} | type=${String(recebido.type)} | result=${String(recebido.result)}.`
+        );
         return false;
     }
 
     const round = validacao.round;
+    if (!round.winner || !round.winner_symbol || !['P', 'B', 'T'].includes(round.winner_symbol)) {
+        console.warn(
+            `⚠️ Rodada recebida mas ignorada | motivo=falha_mapeamento_ia | `
+            + `uuid=${round.uuid} | type=${round.type} | winner=${String(round.winner)}.`
+        );
+        return false;
+    }
+
+    console.log(
+        `🔄 Mapeamento BacBo -> IA | uuid=${round.uuid} | type=${round.type} -> `
+        + `interno=${round.winner} | simbolo=${round.winner_symbol} | soma=${round.result}`
+    );
+
     if (rodadaJaProcessada(round.uuid)) {
-        console.log(`↩️ bacbo_events live_round duplicado ignorado | uuid=${round.uuid}.`);
+        console.warn(`⚠️ Rodada recebida mas ignorada | motivo=uuid_duplicado | uuid=${round.uuid}.`);
         return false;
     }
 
@@ -217,11 +244,17 @@ async function processarLiveRound(raiz) {
 
     const payload = payloadNode(round);
     const entregue = await postNode('/receber-sinal', payload, `LIVE ${round.uuid}`);
-    if (!entregue) return false;
+    if (!entregue) {
+        console.warn(`⚠️ Rodada recebida mas ignorada | motivo=falha_entrega_node | uuid=${round.uuid}.`);
+        return false;
+    }
 
     marcarRodadaProcessada(round.uuid);
     await persistirRetencaoRedis(round);
-    console.log(`📡 TipMiner LIVE -> Node | uuid=${round.uuid} | vencedor=${round.winner} | soma=${round.result}`);
+    console.log(
+        `✅ Nova rodada processada pela IA -> Vencedor: ${round.winner_symbol} `
+        + `(${round.winner}) | Soma: ${round.result} | UUID: ${round.uuid}`
+    );
     return true;
 }
 
@@ -264,18 +297,20 @@ async function processarBacbo(mensagem) {
     }
 
     const acao = acaoEvento(raiz);
-    const payloadPossivelmenteLive = objeto(raiz.data) || raiz;
+    const payloadPossivelmenteLive = extrairPayloadLive(raiz) || raiz;
     const possuiSchemaLive = payloadPossivelmenteLive
         && payloadPossivelmenteLive.uuid !== undefined
         && payloadPossivelmenteLive.type !== undefined
         && payloadPossivelmenteLive.result !== undefined;
 
-    if (acao === 'live_round' || (!acao && possuiSchemaLive)) {
+    if (acao === 'live_round' || possuiSchemaLive) {
         return processarLiveRound(raiz);
     }
 
     const history = extrairHistory(raiz);
     if (history) return processarHistorico(raiz, history);
+
+    console.warn(`⚠️ bacbo_events recebido mas ignorado | motivo=evento_nao_reconhecido | action=${acao || 'n/a'}.`);
     return false;
 }
 
