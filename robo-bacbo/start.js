@@ -3,5 +3,5 @@
 const path = require('path');
 
 require('./env_loader').loadEnvFile(path.join(__dirname, '..', '.env'));
-require('./redis_executor_bridge').instalarRedisExecutorBridge();
+require('./redis_runtime').instalarRedisRuntime();
 require('./bot2_coletor');
