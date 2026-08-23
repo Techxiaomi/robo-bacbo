@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "test": "node --test",
-    "start": "node bot2_coletor.js"
+    "start": "node start.js"
   },
   "keywords": [],
   "author": "",
