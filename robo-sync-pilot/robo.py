@@ -10,6 +10,9 @@ import logging
 import os
 import hmac
 import uuid
+import socket
+import ssl
+from urllib.parse import urlparse, unquote
 from env_loader import load_env_file
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -44,6 +47,10 @@ INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN", "").strip()
 EXECUTOR_HOST = os.getenv("EXECUTOR_HOST", "127.0.0.1").strip() or "127.0.0.1"
 EXECUTOR_PORT = int(os.getenv("EXECUTOR_PORT", "5000"))
 CASINO_BALANCE_SELECTOR = os.getenv("CASINO_BALANCE_SELECTOR", "").strip()
+REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379").strip() or "redis://127.0.0.1:6379"
+REDIS_COMMAND_CHANNEL = "auto_trader_commands"
+REDIS_RESPONSE_CHANNEL = "auto_trader_responses"
+BROWSER_IDLE_TIMEOUT_SECONDS = 300.0
 EXECUTOR_ORDER_JOURNAL_DEFAULT = os.path.join(BASE_DIR, "runtime", "executor_order_ids.json")
 EXECUTOR_ORDER_JOURNAL_FILE = (
     os.getenv("EXECUTOR_ORDER_JOURNAL_FILE", EXECUTOR_ORDER_JOURNAL_DEFAULT).strip()
@@ -133,9 +140,15 @@ if not INTERNAL_API_TOKEN:
 # SERVIDOR FLASK (O "Ouvido" do Robô para receber ordens do Node.js)
 # ====================================================================
 fila_apostas = queue.Queue()
+fila_comandos_redis = queue.Queue()
 ordens_executor_recebidas = {}
 ordens_executor_lock = threading.Lock()
 executor_pronto = threading.Event()
+auto_trader_operando = threading.Event()
+navegador_aberto = threading.Event()
+navegador_solicitado = threading.Event()
+atividade_node_lock = threading.Lock()
+ultima_atividade_node_monotonic = time.monotonic()
 estado_mesa_lock = threading.Lock()
 estado_mesa = {
     "stage": "",
@@ -154,6 +167,219 @@ log.setLevel(logging.ERROR) # Oculta os logs técnicos do Flask no terminal
 def requisicao_interna_autorizada():
     token_recebido = request.headers.get("X-Internal-Token", "")
     return hmac.compare_digest(token_recebido, INTERNAL_API_TOKEN)
+
+
+def registrar_atividade_node(solicitar_navegador=False):
+    global ultima_atividade_node_monotonic
+    with atividade_node_lock:
+        ultima_atividade_node_monotonic = time.monotonic()
+    if solicitar_navegador and not navegador_aberto.is_set():
+        navegador_solicitado.set()
+
+
+def segundos_inatividade_node():
+    with atividade_node_lock:
+        ultima = float(ultima_atividade_node_monotonic)
+    return max(0.0, time.monotonic() - ultima)
+
+
+def auto_trader_em_operacao():
+    return auto_trader_operando.is_set() or not fila_apostas.empty()
+
+
+def deve_encerrar_navegador_por_inatividade():
+    return (
+        navegador_aberto.is_set()
+        and not auto_trader_em_operacao()
+        and segundos_inatividade_node() >= BROWSER_IDLE_TIMEOUT_SECONDS
+    )
+
+
+def _texto_redis(valor):
+    if isinstance(valor, bytes):
+        return valor.decode("utf-8", errors="replace")
+    return str(valor)
+
+
+def _configuracao_redis():
+    parsed = urlparse(REDIS_URL)
+    if parsed.scheme not in {"redis", "rediss"}:
+        raise ValueError("REDIS_URL deve usar redis:// ou rediss://")
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or 6379
+    caminho = (parsed.path or "").lstrip("/")
+    db = int(caminho) if caminho else 0
+    return {
+        "host": host,
+        "port": int(port),
+        "db": db,
+        "username": unquote(parsed.username or ""),
+        "password": unquote(parsed.password or ""),
+        "tls": parsed.scheme == "rediss",
+    }
+
+
+def _codificar_comando_redis(*partes):
+    dados = []
+    for parte in partes:
+        bruto = parte if isinstance(parte, bytes) else str(parte).encode("utf-8")
+        dados.append(b"$" + str(len(bruto)).encode("ascii") + b"\r\n" + bruto + b"\r\n")
+    return b"*" + str(len(dados)).encode("ascii") + b"\r\n" + b"".join(dados)
+
+
+def _ler_exato_redis(stream, tamanho):
+    partes = []
+    restante = int(tamanho)
+    while restante > 0:
+        bloco = stream.read(restante)
+        if not bloco:
+            raise ConnectionError("Conexão Redis encerrada durante leitura")
+        partes.append(bloco)
+        restante -= len(bloco)
+    return b"".join(partes)
+
+
+def _ler_resposta_redis(stream):
+    prefixo = stream.read(1)
+    if not prefixo:
+        raise ConnectionError("Conexão Redis encerrada")
+    linha = stream.readline()
+    if not linha.endswith(b"\r\n"):
+        raise ConnectionError("Resposta Redis truncada")
+    corpo = linha[:-2]
+
+    if prefixo == b"+":
+        return corpo.decode("utf-8", errors="replace")
+    if prefixo == b"-":
+        raise RuntimeError(corpo.decode("utf-8", errors="replace"))
+    if prefixo == b":":
+        return int(corpo)
+    if prefixo == b"$":
+        tamanho = int(corpo)
+        if tamanho < 0:
+            return None
+        dados = _ler_exato_redis(stream, tamanho)
+        if _ler_exato_redis(stream, 2) != b"\r\n":
+            raise ConnectionError("Bulk string Redis sem terminador")
+        return dados
+    if prefixo == b"*":
+        quantidade = int(corpo)
+        if quantidade < 0:
+            return None
+        return [_ler_resposta_redis(stream) for _ in range(quantidade)]
+    raise RuntimeError(f"Tipo de resposta Redis não suportado: {prefixo!r}")
+
+
+def _enviar_comando_redis(sock, stream, *partes):
+    sock.sendall(_codificar_comando_redis(*partes))
+    return _ler_resposta_redis(stream)
+
+
+def _abrir_conexao_redis(bloqueante=False):
+    cfg = _configuracao_redis()
+    sock = socket.create_connection((cfg["host"], cfg["port"]), timeout=3.0)
+    if cfg["tls"]:
+        contexto_tls = ssl.create_default_context()
+        sock = contexto_tls.wrap_socket(sock, server_hostname=cfg["host"])
+    sock.settimeout(3.0)
+    stream = sock.makefile("rb")
+    try:
+        if cfg["password"]:
+            if cfg["username"]:
+                resposta = _enviar_comando_redis(sock, stream, "AUTH", cfg["username"], cfg["password"])
+            else:
+                resposta = _enviar_comando_redis(sock, stream, "AUTH", cfg["password"])
+            if str(resposta).upper() != "OK":
+                raise RuntimeError("Redis rejeitou autenticação")
+        if cfg["db"]:
+            resposta = _enviar_comando_redis(sock, stream, "SELECT", cfg["db"])
+            if str(resposta).upper() != "OK":
+                raise RuntimeError("Redis rejeitou seleção do banco")
+        if bloqueante:
+            sock.settimeout(None)
+        return sock, stream
+    except Exception:
+        try:
+            stream.close()
+        finally:
+            sock.close()
+        raise
+
+
+def publicar_saldo_redis(saldo):
+    valor = round(float(saldo), 2)
+    mensagem = json.dumps(
+        {"action": "balance_update", "balance": valor},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    sock = None
+    stream = None
+    try:
+        sock, stream = _abrir_conexao_redis(bloqueante=False)
+        _enviar_comando_redis(sock, stream, "PUBLISH", REDIS_RESPONSE_CHANNEL, mensagem)
+        return True
+    finally:
+        if stream is not None:
+            try:
+                stream.close()
+            except Exception:
+                pass
+        if sock is not None:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+
+def ouvir_comandos_redis():
+    while True:
+        sock = None
+        stream = None
+        try:
+            sock, stream = _abrir_conexao_redis(bloqueante=True)
+            confirmacao = _enviar_comando_redis(sock, stream, "SUBSCRIBE", REDIS_COMMAND_CHANNEL)
+            if not isinstance(confirmacao, list) or len(confirmacao) < 3 or _texto_redis(confirmacao[0]).lower() != "subscribe":
+                raise RuntimeError("Redis não confirmou assinatura de auto_trader_commands")
+
+            while True:
+                resposta = _ler_resposta_redis(stream)
+                if not isinstance(resposta, list) or len(resposta) < 3:
+                    continue
+                if _texto_redis(resposta[0]).lower() != "message":
+                    continue
+                if _texto_redis(resposta[1]) != REDIS_COMMAND_CHANNEL:
+                    continue
+
+                try:
+                    dados = json.loads(_texto_redis(resposta[2]))
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(dados, dict):
+                    continue
+
+                acao = str(dados.get("action") or "").strip()
+                registrar_atividade_node(solicitar_navegador=(acao == "sync_balance"))
+                if acao == "sync_balance":
+                    fila_comandos_redis.put(dados)
+        except Exception as e:
+            registrar_erro_limitado(
+                "redis_auto_trader_commands",
+                f"⚠️ Redis auto_trader_commands indisponível: {type(e).__name__}: {e}",
+                30,
+            )
+            time.sleep(2)
+        finally:
+            if stream is not None:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+            if sock is not None:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
 
 def persistir_ordens_executor(estado=None):
     estado_atual = ordens_executor_recebidas if estado is None else estado
@@ -331,6 +557,7 @@ def receber_aposta():
     if not requisicao_interna_autorizada():
         return jsonify({"erro": "Nao autorizado"}), 401
 
+    registrar_atividade_node(solicitar_navegador=True)
     dados = request.get_json(silent=True)
     if not isinstance(dados, dict):
         return jsonify({"erro": "Payload JSON invalido"}), 400
@@ -424,29 +651,33 @@ def reportar_status_execucao_node(ordem, resultado):
 
 
 def processar_ordem_executor(page, ordem):
-    if ordem_executor_expirada(ordem):
-        resultado = {
-            "status": "EXPIRADA",
-            "motivo": f"Ordem excedeu TTL de {EXECUTOR_ORDER_TTL_SECONDS:g}s antes da interação DOM",
-            "cliques_alvo": 0
-        }
-    elif not executor_pronto.is_set():
-        resultado = {
-            "status": "FALHOU",
-            "motivo": "Executor ficou indisponivel antes da interação DOM",
-            "cliques_alvo": 0
-        }
-    else:
-        resultado = executar_aposta_na_tela(page, ordem)
-        if not isinstance(resultado, dict) or resultado.get("status") not in {"EXECUTADA", "FALHOU", "EXPIRADA", "AMBIGUA"}:
+    auto_trader_operando.set()
+    try:
+        if ordem_executor_expirada(ordem):
             resultado = {
-                "status": "AMBIGUA",
-                "motivo": "Resultado local da tentativa DOM ficou indeterminado",
+                "status": "EXPIRADA",
+                "motivo": f"Ordem excedeu TTL de {EXECUTOR_ORDER_TTL_SECONDS:g}s antes da interação DOM",
                 "cliques_alvo": 0
             }
+        elif not executor_pronto.is_set():
+            resultado = {
+                "status": "FALHOU",
+                "motivo": "Executor ficou indisponivel antes da interação DOM",
+                "cliques_alvo": 0
+            }
+        else:
+            resultado = executar_aposta_na_tela(page, ordem)
+            if not isinstance(resultado, dict) or resultado.get("status") not in {"EXECUTADA", "FALHOU", "EXPIRADA", "AMBIGUA"}:
+                resultado = {
+                    "status": "AMBIGUA",
+                    "motivo": "Resultado local da tentativa DOM ficou indeterminado",
+                    "cliques_alvo": 0
+                }
 
-    reportar_status_execucao_node(ordem, resultado)
-    return resultado
+        reportar_status_execucao_node(ordem, resultado)
+        return resultado
+    finally:
+        auto_trader_operando.clear()
 
 
 ultimo_tempo_rodada = 0
@@ -777,7 +1008,7 @@ def extrair_trilhas_roadmap_dom(page):
     script = """() => {
         const seletorRaizes = [
             '[data-roadmap]', '[data-history]', '[data-results]',
-            '[class*="road" i]', '[class*="bead" i]', '[class*="history" i]', '[class*="result" i]'
+            '[class*=\"road\" i]', '[class*=\"bead\" i]', '[class*=\"history\" i]', '[class*=\"result\" i]'
         ].join(',');
         const seletorItens = '[data-result],[data-outcome],[data-winner],[data-role],[aria-label],[title],[class]';
         const bruto = Array.from(document.querySelectorAll(seletorRaizes));
@@ -2102,6 +2333,35 @@ def ler_saldo_atual(page):
     return None
 
 
+def processar_comandos_redis_saldo(page, limite=20):
+    processados = 0
+    while processados < limite:
+        try:
+            comando = fila_comandos_redis.get_nowait()
+        except queue.Empty:
+            break
+        processados += 1
+        if not isinstance(comando, dict) or str(comando.get("action") or "").strip() != "sync_balance":
+            continue
+
+        saldo = ler_saldo_atual(page)
+        if saldo is None:
+            registrar_erro_limitado(
+                "saldo_redis_nao_localizado",
+                "⚠️ sync_balance recebido, mas o Saldo Real não pôde ser lido na interface.",
+                10,
+            )
+            continue
+        try:
+            publicar_saldo_redis(saldo)
+        except Exception as e:
+            registrar_erro_limitado(
+                "saldo_redis_publicacao",
+                f"⚠️ Falha ao publicar balance_update no Redis: {type(e).__name__}: {e}",
+                10,
+            )
+
+
 def sincronizar_saldo_com_node(page, estado_saldo):
     if not CASINO_BALANCE_SELECTOR:
         return
@@ -2264,6 +2524,9 @@ def iniciar_robo_blindado():
 
         # Modo de operação: Invisível
         browser = p.chromium.launch(headless=True, args=args_camuflagem)
+        navegador_aberto.set()
+        navegador_solicitado.clear()
+        browser.on("disconnected", lambda _browser: navegador_aberto.clear())
         
         if os.path.exists(ARQUIVO_SESSAO):
             context = browser.new_context(
@@ -2285,6 +2548,7 @@ def iniciar_robo_blindado():
             "ws_oficial": None,
             "ultimo_player_state_monotonic": 0.0,
             "reconexao_pendente": None,
+            "encerramento_intencional": False,
         }
         estado_saldo = {
             "ultima_tentativa": 0.0,
@@ -2302,6 +2566,13 @@ def iniciar_robo_blindado():
                 ws.on("framereceived", lambda texto: capturar_frame(ws, texto))
 
                 def websocket_fechado(_ws):
+                    if status_conexao.get("encerramento_intencional"):
+                        status_conexao.update({
+                            "ws_conectado": False,
+                            "ws_oficial": None,
+                            "reconexao_pendente": None,
+                        })
+                        return
                     if status_conexao.get("ws_oficial") is not ws:
                         return
                     executor_pronto.clear()
@@ -2428,6 +2699,7 @@ def iniciar_robo_blindado():
                 status_conexao["ws_oficial"] = None
                 status_conexao["ultimo_player_state_monotonic"] = 0.0
                 status_conexao["reconexao_pendente"] = None
+                status_conexao["encerramento_intencional"] = False
                 page.goto(URL_CASSINO, wait_until="domcontentloaded", timeout=60000)
                 fechar_popups(page)
                 
@@ -2455,6 +2727,7 @@ def iniciar_robo_blindado():
                     
                     # CÉREBRO DE EXECUÇÃO: Checa a fila de apostas frequentemente
                     for _ in range(20):
+                        processar_comandos_redis_saldo(page)
                         sincronizar_saldo_com_node(page, estado_saldo)
                         if not fila_apostas.empty():
                             ordem = fila_apostas.get()
@@ -2491,6 +2764,29 @@ def iniciar_robo_blindado():
                                 notificar_interrupcao_node("PLAYER_STATE_STALE")
                             break
 
+                        if deve_encerrar_navegador_por_inatividade():
+                            navegador_aberto.clear()
+                            if (
+                                segundos_inatividade_node() < BROWSER_IDLE_TIMEOUT_SECONDS
+                                or auto_trader_em_operacao()
+                            ):
+                                navegador_aberto.set()
+                                continue
+
+                            executor_pronto.clear()
+                            status_conexao["encerramento_intencional"] = True
+                            try:
+                                browser.close()
+                            finally:
+                                navegador_aberto.clear()
+                            print(
+                                f"💤 Navegador fechado após {int(BROWSER_IDLE_TIMEOUT_SECONDS)}s sem comandos do Node; "
+                                "executor Python permanece aguardando novas ordens."
+                            )
+                            navegador_solicitado.wait()
+                            navegador_solicitado.clear()
+                            return
+
                     if not status_conexao["ativa"]:
                         break
                     
@@ -2522,15 +2818,18 @@ def iniciar_robo_blindado():
                 time.sleep(15)
 
 if __name__ == "__main__":
+    threading.Thread(target=ouvir_comandos_redis, daemon=True, name="redis-auto-trader-commands").start()
     exibir_painel_versao()
     while True:
         try:
             iniciar_robo_blindado()
         except KeyboardInterrupt:
             executor_pronto.clear()
+            navegador_aberto.clear()
             print("\n👋 Robô desligado com sucesso.")
             break
         except Exception as e:
             executor_pronto.clear()
+            navegador_aberto.clear()
             print(f"🔥 Executor reiniciando após falha não tratada: {type(e).__name__}: {e}")
             time.sleep(15)
