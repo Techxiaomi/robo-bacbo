@@ -17,8 +17,8 @@ load_env_file(os.path.join(PROJECT_ROOT, ".env"))
 # ====================================================================
 # CONFIGURACAO REDIS-ONLY DO EXECUTOR
 # ====================================================================
-VERSAO_ROBO = "v1.6.17"
-NOME_ATUALIZACAO = "Mesa Destino Final + Idle Pos-Tarefa"
+VERSAO_ROBO = "v1.6.18"
+NOME_ATUALIZACAO = "Place Bet Redis + Confirmacao Financeira"
 
 URL_CASSINO = os.getenv("CASINO_GAME_URL", "")
 URL_HOME_CASSINO = os.getenv("CASINO_HOME_URL", "")
@@ -64,6 +64,12 @@ navegador_aberto = threading.Event()
 atividade_node_lock = threading.Lock()
 ultima_atividade_node_monotonic = time.monotonic()
 avisos_erro_limitados = {}
+
+
+class ErroExecucaoAposta(RuntimeError):
+    def __init__(self, mensagem, ambigua=False):
+        super().__init__(mensagem)
+        self.execucao_ambigua = bool(ambigua)
 
 
 def registrar_erro_limitado(chave, mensagem, intervalo_segundos=30):
@@ -232,6 +238,18 @@ def publicar_saldo_redis(saldo):
         "action": "balance_update",
         "balance": round(float(saldo), 2),
     })
+
+
+def publicar_resultado_aposta_redis(order_id, status, motivo="", confirmacao=None):
+    payload = {
+        "action": "bet_result",
+        "order_id": str(order_id or "").strip().lower(),
+        "status": str(status or "").strip().upper(),
+        "motivo": str(motivo or "")[:300],
+    }
+    if confirmacao is not None:
+        payload["confirmacao"] = confirmacao
+    return publicar_redis(payload)
 
 
 def ouvir_comandos_redis():
@@ -769,45 +787,66 @@ def executar_place_bet(page, dados):
     planos = montar_planos_aposta(dados)
     saldo_antes = ler_saldo_atual(page, aguardar_ms=2500)
     if saldo_antes is None:
-        raise RuntimeError("Saldo real indisponivel antes da aposta")
+        raise ErroExecucaoAposta("Saldo real indisponivel antes da aposta", ambigua=False)
 
     frame = localizar_frame_aposta(page, planos)
     if frame is None:
-        raise RuntimeError("Elementos da mesa nao estao disponiveis para a ordem")
+        raise ErroExecucaoAposta("Elementos da mesa nao estao disponiveis para a ordem", ambigua=False)
 
     ficha_corrente = None
     cliques_alvo = 0
-    for plano in planos:
-        alvo = primeiro_elemento_dom_visivel(frame.locator(f"[data-role='{plano['seletor_alvo']}']"))
-        if alvo is None:
-            raise RuntimeError(f"Alvo {plano['alvo']} indisponivel")
+    try:
+        for plano in planos:
+            alvo = primeiro_elemento_dom_visivel(frame.locator(f"[data-role='{plano['seletor_alvo']}']"))
+            if alvo is None:
+                raise RuntimeError(f"Alvo {plano['alvo']} indisponivel")
 
-        for ficha, qtd in plano["cliques_necessarios"]:
-            ficha_elemento = localizar_ficha(frame, ficha)
-            if ficha_elemento is None:
-                raise RuntimeError(f"Ficha R$ {ficha} indisponivel")
-            if ficha_corrente != int(ficha):
-                ficha_elemento.click(force=True, timeout=2000)
-                page.wait_for_timeout(120)
-                ficha_corrente = int(ficha)
+            for ficha, qtd in plano["cliques_necessarios"]:
+                ficha_elemento = localizar_ficha(frame, ficha)
+                if ficha_elemento is None:
+                    raise RuntimeError(f"Ficha R$ {ficha} indisponivel")
+                if ficha_corrente != int(ficha):
+                    ficha_elemento.click(force=True, timeout=2000)
+                    page.wait_for_timeout(120)
+                    ficha_corrente = int(ficha)
 
-            for _ in range(int(qtd)):
-                if not clicar_alvo_financeiro(alvo):
-                    raise RuntimeError(f"Clique financeiro em {plano['alvo']} nao autorizado pelo hit-test")
-                cliques_alvo += 1
-                page.wait_for_timeout(120)
+                for _ in range(int(qtd)):
+                    if not clicar_alvo_financeiro(alvo):
+                        raise RuntimeError(f"Clique financeiro em {plano['alvo']} nao autorizado pelo hit-test")
+                    cliques_alvo += 1
+                    page.wait_for_timeout(120)
 
-    exposicao = float(sum(plano["valor"] for plano in planos))
-    confirmado, saldo_depois = confirmar_debito_saldo(page, saldo_antes, exposicao)
-    if not confirmado:
-        raise RuntimeError(
-            f"Debito financeiro nao confirmado; saldo_antes={saldo_antes}, saldo_depois={saldo_depois}, exposicao={exposicao}"
+        exposicao = float(sum(plano["valor"] for plano in planos))
+        confirmado, saldo_depois = confirmar_debito_saldo(page, saldo_antes, exposicao)
+        if not confirmado:
+            raise ErroExecucaoAposta(
+                f"Debito financeiro nao confirmado; saldo_antes={saldo_antes}, saldo_depois={saldo_depois}, exposicao={exposicao}",
+                ambigua=True,
+            )
+
+        debito_observado = round(float(saldo_antes) - float(saldo_depois), 2)
+        confirmada_em = int(time.time() * 1000)
+        confirmacao = {
+            "confirmada": True,
+            "metodo": "SALDO_DEBITADO",
+            "saldo_antes": round(float(saldo_antes), 2),
+            "saldo_depois": round(float(saldo_depois), 2),
+            "exposicao_esperada": round(float(exposicao), 2),
+            "debito_observado": debito_observado,
+            "confirmada_em": confirmada_em,
+        }
+
+        print(
+            f"✅ Ordem Redis executada: {cliques_alvo} clique(s) financeiro(s); "
+            f"saldo R$ {float(saldo_antes):.2f} -> R$ {float(saldo_depois):.2f}."
         )
-
-    print(
-        f"✅ Ordem Redis executada: {cliques_alvo} clique(s) financeiro(s); "
-        f"saldo R$ {float(saldo_antes):.2f} -> R$ {float(saldo_depois):.2f}."
-    )
+        return confirmacao
+    except ErroExecucaoAposta:
+        raise
+    except Exception as e:
+        if erro_driver_playwright(e):
+            raise
+        raise ErroExecucaoAposta(str(e), ambigua=(cliques_alvo > 0)) from e
 
 
 def garantir_mesa_pronta(page, context):
@@ -956,12 +995,36 @@ def processar_comando_playwright(p, sessao, comando):
         return
 
     if acao == "place_bet":
+        order_id = str(comando.get("order_id") or "").strip().lower()
+        if not order_id:
+            raise ValueError("place_bet recebido sem order_id")
+
         auto_trader_operando.set()
         try:
-            executar_place_bet(page, comando)
+            confirmacao = executar_place_bet(page, comando)
+            garantir_destino_final_mesa(page, context)
+            publicar_resultado_aposta_redis(
+                order_id,
+                "EXECUTADA",
+                confirmacao=confirmacao,
+            )
+            return
+        except Exception as e:
+            status = "AMBIGUA" if (
+                erro_driver_playwright(e)
+                or getattr(e, "execucao_ambigua", False) is True
+            ) else "FALHOU"
+            try:
+                publicar_resultado_aposta_redis(order_id, status, motivo=str(e))
+            except Exception as erro_redis:
+                registrar_erro_limitado(
+                    "redis_bet_result",
+                    f"⚠️ Falha ao publicar bet_result {status} de {order_id}: {type(erro_redis).__name__}: {erro_redis}",
+                    10,
+                )
+            raise
         finally:
             auto_trader_operando.clear()
-        garantir_destino_final_mesa(page, context)
 
 
 def executar_manutencao_se_devida(p, sessao, forcar_abertura=False):
