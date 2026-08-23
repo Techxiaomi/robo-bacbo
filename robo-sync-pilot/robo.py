@@ -17,8 +17,8 @@ load_env_file(os.path.join(PROJECT_ROOT, ".env"))
 # ====================================================================
 # CONFIGURACAO REDIS-ONLY DO EXECUTOR
 # ====================================================================
-VERSAO_ROBO = "v1.6.14"
-NOME_ATUALIZACAO = "Executor Redis-Only + Idle Timeout"
+VERSAO_ROBO = "v1.6.15"
+NOME_ATUALIZACAO = "Browser Keep-Alive + Idle Inteligente"
 
 URL_CASSINO = os.getenv("CASINO_GAME_URL", "")
 URL_HOME_CASSINO = os.getenv("CASINO_HOME_URL", "")
@@ -30,8 +30,17 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379").strip() or "redis:/
 REDIS_COMMAND_CHANNEL = "auto_trader_commands"
 REDIS_RESPONSE_CHANNEL = "auto_trader_responses"
 BROWSER_IDLE_TIMEOUT_SECONDS = 300.0
+BROWSER_KEEP_ALIVE_INTERVAL_SECONDS = 15.0
 EXECUTOR_BET_ACCEPTANCE_TIMEOUT_SECONDS = 8.0
 EXECUTOR_BET_ACCEPTANCE_TOLERANCE = 0.10
+
+
+def _env_bool(nome, padrao=False):
+    bruto = str(os.getenv(nome, "1" if padrao else "0") or "").strip().lower()
+    return bruto in {"1", "true", "yes", "on", "sim"}
+
+
+AUTO_TRADER_ENABLED = _env_bool("AUTO_TRADER_ENABLED", False)
 
 fila_comandos_redis = queue.Queue()
 auto_trader_operando = threading.Event()
@@ -59,6 +68,10 @@ def segundos_inatividade_node():
     with atividade_node_lock:
         ultima = float(ultima_atividade_node_monotonic)
     return max(0.0, time.monotonic() - ultima)
+
+
+def auto_trader_habilitado():
+    return AUTO_TRADER_ENABLED is True
 
 
 # ====================================================================
@@ -252,7 +265,7 @@ def ouvir_comandos_redis():
 
 
 # ====================================================================
-# PLAYWRIGHT: SOMENTE LOGIN, SALDO E EXECUCAO DE ORDEM
+# PLAYWRIGHT: LOGIN, MANUTENCAO, SALDO E EXECUCAO CEGA DE ORDEM
 # ====================================================================
 def aplicar_stealth(page):
     try:
@@ -286,6 +299,43 @@ def fechar_popups(page):
         pass
 
 
+def fechar_popup_inatividade(page):
+    padrao = re.compile(
+        r"^(continuar|continue|retomar|resume|voltar ao jogo|back to game|reconectar|reconnect)$",
+        re.IGNORECASE,
+    )
+    contextos = [page] + list(page.frames)
+    for contexto in contextos:
+        try:
+            candidatos = contexto.get_by_text(padrao)
+            for indice in range(min(candidatos.count(), 12)):
+                elemento = candidatos.nth(indice)
+                if elemento.is_visible():
+                    elemento.click(force=True, timeout=1500)
+                    page.wait_for_timeout(500)
+                    return True
+        except Exception:
+            continue
+    return False
+
+
+def pagina_indica_conexao_caida(page):
+    padrao = re.compile(
+        r"conex[aã]o perdida|connection lost|reconectando|reconnecting|erro de conex[aã]o|connection error|network error|tente novamente|try again",
+        re.IGNORECASE,
+    )
+    contextos = [page] + list(page.frames)
+    for contexto in contextos:
+        try:
+            candidatos = contexto.get_by_text(padrao)
+            for indice in range(min(candidatos.count(), 8)):
+                if candidatos.nth(indice).is_visible():
+                    return True
+        except Exception:
+            continue
+    return False
+
+
 def renovar_sessao_automaticamente(page, context):
     if not URL_HOME_CASSINO:
         return False
@@ -301,7 +351,7 @@ def renovar_sessao_automaticamente(page, context):
                 continue
             try:
                 btn.click(force=True)
-                page.wait_for_timeout(1500)
+                page.wait_for_timeout(2500)
                 email = page.locator("input[name='email']")
                 if email.count() > 0 and email.first.is_visible():
                     login_aberto = True
@@ -316,7 +366,9 @@ def renovar_sessao_automaticamente(page, context):
             return False
 
         page.locator("input[name='email']").fill(USUARIO_CASSINO)
+        page.wait_for_timeout(500)
         page.locator("input[name='password']").fill(SENHA_CASSINO)
+        page.wait_for_timeout(500)
 
         botao_confirmar = page.locator("button#legitimuz-action-send-analisys")
         if botao_confirmar.count() > 0 and botao_confirmar.first.is_visible():
@@ -324,7 +376,7 @@ def renovar_sessao_automaticamente(page, context):
         else:
             page.locator("input[name='password']").press("Enter")
 
-        page.wait_for_timeout(5000)
+        page.wait_for_timeout(6000)
         context.storage_state(path=ARQUIVO_SESSAO)
         return True
     except Exception as e:
@@ -400,6 +452,60 @@ def primeiro_elemento_dom_visivel(locator, limite=32):
         except Exception:
             continue
     return None
+
+
+def _frame_evolution_pronto(frame):
+    try:
+        url = str(frame.url or "").lower()
+    except Exception:
+        url = ""
+
+    try:
+        if frame.locator("[data-role='chip'][data-value]").count() > 0:
+            return True
+    except Exception:
+        pass
+
+    try:
+        if frame.locator("[data-role^='bacbo-bet-spot-']").count() > 0:
+            return True
+    except Exception:
+        pass
+
+    if any(marca in url for marca in ("evolution", "evocdn", "game")):
+        try:
+            if frame.locator("canvas").count() > 0:
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def mesa_evolution_pronta(page):
+    try:
+        frames = list(page.frames)
+    except Exception:
+        return False
+
+    for frame in frames:
+        if _frame_evolution_pronto(frame):
+            return True
+
+    try:
+        if page.locator("iframe[src*='evolution' i], iframe[src*='evocdn' i], iframe[src*='game' i]").count() > 0:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def aguardar_mesa_evolution(page, timeout_ms=30000):
+    prazo = time.monotonic() + max(1.0, float(timeout_ms) / 1000.0)
+    while time.monotonic() < prazo:
+        if mesa_evolution_pronta(page):
+            return True
+        page.wait_for_timeout(500)
+    return mesa_evolution_pronta(page)
 
 
 def localizar_ficha(frame, valor_ficha):
@@ -588,26 +694,16 @@ def executar_place_bet(page, dados):
     )
 
 
-def _pagina_tem_interface_util(page):
-    if CASINO_BALANCE_SELECTOR and ler_saldo_atual(page) is not None:
-        return True
-    for frame in list(page.frames):
-        try:
-            if frame.locator("[data-role='chip'][data-value]").count() > 0:
-                return True
-        except Exception:
-            continue
-    return False
-
-
 def garantir_mesa_pronta(page, context):
-    if _pagina_tem_interface_util(page):
+    if mesa_evolution_pronta(page):
         return True
+
+    if not URL_CASSINO:
+        return False
 
     page.goto(URL_CASSINO, wait_until="domcontentloaded", timeout=60000)
     fechar_popups(page)
-    page.wait_for_timeout(2500)
-    if _pagina_tem_interface_util(page):
+    if aguardar_mesa_evolution(page, 30000):
         return True
 
     if not renovar_sessao_automaticamente(page, context):
@@ -615,8 +711,35 @@ def garantir_mesa_pronta(page, context):
 
     page.goto(URL_CASSINO, wait_until="domcontentloaded", timeout=60000)
     fechar_popups(page)
-    page.wait_for_timeout(2500)
-    return _pagina_tem_interface_util(page)
+    return aguardar_mesa_evolution(page, 30000)
+
+
+def manter_mesa_viva(page, context):
+    if page is None or page.is_closed():
+        return False
+
+    fechar_popups(page)
+    fechar_popup_inatividade(page)
+
+    conexao_caida = pagina_indica_conexao_caida(page)
+    mesa_presente = mesa_evolution_pronta(page)
+    if mesa_presente and not conexao_caida:
+        return True
+
+    registrar_erro_limitado(
+        "keep_alive_reload",
+        "🔄 Mesa sem interface Evolution saudavel; recarregando pagina sem monitorar resultados.",
+        15,
+    )
+    try:
+        page.reload(wait_until="domcontentloaded", timeout=60000)
+        fechar_popups(page)
+        if aguardar_mesa_evolution(page, 20000):
+            return True
+    except Exception:
+        pass
+
+    return garantir_mesa_pronta(page, context)
 
 
 def abrir_navegador(p):
@@ -645,7 +768,7 @@ def abrir_navegador(p):
 def fechar_navegador(sessao):
     context = sessao.get("context")
     browser = sessao.get("browser")
-    sessao.update({"browser": None, "context": None, "page": None})
+    sessao.update({"browser": None, "context": None, "page": None, "ultima_manutencao": 0.0})
     navegador_aberto.clear()
     try:
         if context is not None:
@@ -670,7 +793,7 @@ def garantir_navegador(p, sessao):
         fechar_navegador(sessao)
 
     browser, context, page = abrir_navegador(p)
-    sessao.update({"browser": browser, "context": context, "page": page})
+    sessao.update({"browser": browser, "context": context, "page": page, "ultima_manutencao": 0.0})
     return page, context
 
 
@@ -696,25 +819,70 @@ def processar_comando_playwright(p, sessao, comando):
             auto_trader_operando.clear()
 
 
+def executar_manutencao_se_devida(p, sessao, forcar_abertura=False):
+    agora = time.monotonic()
+    page = sessao.get("page")
+
+    if page is None and not forcar_abertura:
+        return
+
+    if page is None:
+        page, context = garantir_navegador(p, sessao)
+        if not garantir_mesa_pronta(page, context):
+            raise RuntimeError("Nao foi possivel autenticar e abrir a mesa")
+        sessao["ultima_manutencao"] = agora
+        return
+
+    if agora - float(sessao.get("ultima_manutencao") or 0.0) < BROWSER_KEEP_ALIVE_INTERVAL_SECONDS:
+        return
+
+    context = sessao.get("context")
+    if not manter_mesa_viva(page, context):
+        raise RuntimeError("Keep-alive nao conseguiu restaurar a mesa")
+    sessao["ultima_manutencao"] = agora
+
+
 def worker_playwright():
-    sessao = {"browser": None, "context": None, "page": None}
+    sessao = {"browser": None, "context": None, "page": None, "ultima_manutencao": 0.0}
     with sync_playwright() as p:
         while True:
             try:
                 comando = fila_comandos_redis.get(timeout=1.0)
             except queue.Empty:
-                if (
-                    navegador_aberto.is_set()
-                    and not auto_trader_operando.is_set()
-                    and fila_comandos_redis.empty()
-                    and segundos_inatividade_node() >= BROWSER_IDLE_TIMEOUT_SECONDS
-                ):
-                    print("🛌 5 minutos sem comandos: fechando navegador e mantendo Redis ativo.")
-                    fechar_navegador(sessao)
+                try:
+                    if auto_trader_habilitado():
+                        executar_manutencao_se_devida(p, sessao, forcar_abertura=True)
+                        continue
+
+                    if (
+                        navegador_aberto.is_set()
+                        and not auto_trader_operando.is_set()
+                        and fila_comandos_redis.empty()
+                        and segundos_inatividade_node() >= BROWSER_IDLE_TIMEOUT_SECONDS
+                    ):
+                        print("🛌 Auto Trader desligado e 5 minutos sem comandos: fechando navegador e mantendo Redis ativo.")
+                        fechar_navegador(sessao)
+                        continue
+
+                    if navegador_aberto.is_set():
+                        executar_manutencao_se_devida(p, sessao, forcar_abertura=False)
+                except PlaywrightTimeoutError as e:
+                    registrar_erro_limitado(
+                        "playwright_keep_alive_timeout",
+                        f"⚠️ Timeout no keep-alive do Playwright: {e}",
+                        15,
+                    )
+                except Exception as e:
+                    registrar_erro_limitado(
+                        "playwright_keep_alive",
+                        f"⚠️ Falha no keep-alive do Playwright: {type(e).__name__}: {e}",
+                        15,
+                    )
                 continue
 
             try:
                 processar_comando_playwright(p, sessao, comando)
+                sessao["ultima_manutencao"] = time.monotonic()
             except PlaywrightTimeoutError as e:
                 registrar_erro_limitado(
                     "playwright_timeout_comando",
@@ -734,6 +902,7 @@ def exibir_painel_versao():
     print("🤖 ROBO BAC BO EVOLUTION - EXECUTOR REDIS-ONLY")
     print(f"🏷️ VERSAO: {VERSAO_ROBO} | {NOME_ATUALIZACAO}")
     print(f"🎧 Canal de comandos: {REDIS_COMMAND_CHANNEL}")
+    print(f"⚙️ AUTO_TRADER_ENABLED={AUTO_TRADER_ENABLED}")
     print("🧠 Sem Flask, sem WebSocket da mesa e sem captura de resultados.")
     print("=" * 60)
 
