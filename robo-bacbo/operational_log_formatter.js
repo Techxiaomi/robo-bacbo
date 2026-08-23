@@ -22,6 +22,11 @@ function formatarTexto(valor) {
         return null;
     }
 
+    // O history_sync é consumido pelo adaptador dedicado; o consumidor genérico pode ignorá-lo sem alarme.
+    if (/^⚠️ bacbo_events recebido mas ignorado \| motivo=evento_nao_reconhecido \| action=history_sync\.$/i.test(texto)) {
+        return null;
+    }
+
     // Nomes de fornecedor não fazem parte do log operacional.
     texto = texto.replace(/TIPMINER/gi, 'BAC BO');
     texto = texto.replace(/TipMiner/g, 'Bac Bo');
@@ -53,10 +58,9 @@ function formatarTexto(valor) {
         return '🎧 Sincronização de histórico ativa | Redis -> Runtime V3.';
     }
 
-    match = texto.match(/^♻️ Bac Bo HISTORY_SYNC -> Node \| (\d+) giro\(s\).*?(?:origem=([^.|]+))?\.?$/i);
+    match = texto.match(/^♻️ Bac Bo HISTORY_SYNC -> Node \| (\d+) giro\(s\).*$/i);
     if (match) {
-        const origem = match[2] ? ` | origem=${String(match[2]).trim()}` : '';
-        return `♻️ Histórico inicial carregado | ${match[1]} giro(s)${origem}.`;
+        return `♻️ Histórico inicial carregado | ${match[1]} giro(s).`;
     }
 
     match = texto.match(/^🧠 Bac Bo HISTORY schema novo persistido \| (\d+) rodada\(s\)\.$/i);
