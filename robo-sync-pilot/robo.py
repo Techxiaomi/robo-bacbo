@@ -17,8 +17,8 @@ load_env_file(os.path.join(PROJECT_ROOT, ".env"))
 # ====================================================================
 # CONFIGURACAO REDIS-ONLY DO EXECUTOR
 # ====================================================================
-VERSAO_ROBO = "v1.6.15"
-NOME_ATUALIZACAO = "Browser Keep-Alive + Idle Inteligente"
+VERSAO_ROBO = "v1.6.16"
+NOME_ATUALIZACAO = "Iframe Saldo + Recuperacao Driver"
 
 URL_CASSINO = os.getenv("CASINO_GAME_URL", "")
 URL_HOME_CASSINO = os.getenv("CASINO_HOME_URL", "")
@@ -31,8 +31,24 @@ REDIS_COMMAND_CHANNEL = "auto_trader_commands"
 REDIS_RESPONSE_CHANNEL = "auto_trader_responses"
 BROWSER_IDLE_TIMEOUT_SECONDS = 300.0
 BROWSER_KEEP_ALIVE_INTERVAL_SECONDS = 15.0
+DRIVER_RECOVERY_DELAY_SECONDS = 2.0
 EXECUTOR_BET_ACCEPTANCE_TIMEOUT_SECONDS = 8.0
 EXECUTOR_BET_ACCEPTANCE_TOLERANCE = 0.10
+
+PLAYWRIGHT_DRIVER_FATAL_MARKERS = (
+    "socket.send",
+    "connection closed while reading from the driver",
+    "connection closed while reading from driver",
+    "playwright connection closed",
+    "target page, context or browser has been closed",
+    "page has been closed",
+    "context has been closed",
+    "browser has been closed",
+    "browser closed",
+    "broken pipe",
+    "pipe closed",
+    "eof",
+)
 
 
 def _env_bool(nome, padrao=False):
@@ -56,6 +72,11 @@ def registrar_erro_limitado(chave, mensagem, intervalo_segundos=30):
     if agora - ultimo >= intervalo_segundos:
         print(mensagem)
         avisos_erro_limitados[chave] = agora
+
+
+def erro_driver_playwright(exc):
+    texto = f"{type(exc).__name__}: {exc}".lower()
+    return any(marcador in texto for marcador in PLAYWRIGHT_DRIVER_FATAL_MARKERS)
 
 
 def registrar_atividade_node():
@@ -271,7 +292,9 @@ def aplicar_stealth(page):
     try:
         from playwright_stealth import stealth_sync
         stealth_sync(page)
-    except Exception:
+    except Exception as e:
+        if erro_driver_playwright(e):
+            raise
         page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         page.add_init_script("window.navigator.chrome = { runtime: {} };")
 
@@ -284,8 +307,9 @@ def fechar_popups(page):
                 btn_cookie.nth(i).click(force=True)
                 page.wait_for_timeout(500)
                 break
-    except Exception:
-        pass
+    except Exception as e:
+        if erro_driver_playwright(e):
+            raise
     try:
         btn_sim = page.locator("button", has_text=re.compile(r"^Sim$", re.IGNORECASE))
         if btn_sim.count() == 0:
@@ -295,8 +319,9 @@ def fechar_popups(page):
                 btn_sim.nth(i).click(force=True)
                 page.wait_for_timeout(500)
                 break
-    except Exception:
-        pass
+    except Exception as e:
+        if erro_driver_playwright(e):
+            raise
 
 
 def fechar_popup_inatividade(page):
@@ -304,7 +329,13 @@ def fechar_popup_inatividade(page):
         r"^(continuar|continue|retomar|resume|voltar ao jogo|back to game|reconectar|reconnect)$",
         re.IGNORECASE,
     )
-    contextos = [page] + list(page.frames)
+    try:
+        contextos = [page] + list(page.frames)
+    except Exception as e:
+        if erro_driver_playwright(e):
+            raise
+        return False
+
     for contexto in contextos:
         try:
             candidatos = contexto.get_by_text(padrao)
@@ -314,7 +345,9 @@ def fechar_popup_inatividade(page):
                     elemento.click(force=True, timeout=1500)
                     page.wait_for_timeout(500)
                     return True
-        except Exception:
+        except Exception as e:
+            if erro_driver_playwright(e):
+                raise
             continue
     return False
 
@@ -324,14 +357,22 @@ def pagina_indica_conexao_caida(page):
         r"conex[aã]o perdida|connection lost|reconectando|reconnecting|erro de conex[aã]o|connection error|network error|tente novamente|try again",
         re.IGNORECASE,
     )
-    contextos = [page] + list(page.frames)
+    try:
+        contextos = [page] + list(page.frames)
+    except Exception as e:
+        if erro_driver_playwright(e):
+            raise
+        return False
+
     for contexto in contextos:
         try:
             candidatos = contexto.get_by_text(padrao)
             for indice in range(min(candidatos.count(), 8)):
                 if candidatos.nth(indice).is_visible():
                     return True
-        except Exception:
+        except Exception as e:
+            if erro_driver_playwright(e):
+                raise
             continue
     return False
 
@@ -356,7 +397,9 @@ def renovar_sessao_automaticamente(page, context):
                 if email.count() > 0 and email.first.is_visible():
                     login_aberto = True
                     break
-            except Exception:
+            except Exception as e:
+                if erro_driver_playwright(e):
+                    raise
                 continue
 
         if not login_aberto:
@@ -380,6 +423,8 @@ def renovar_sessao_automaticamente(page, context):
         context.storage_state(path=ARQUIVO_SESSAO)
         return True
     except Exception as e:
+        if erro_driver_playwright(e):
+            raise
         registrar_erro_limitado(
             "auto_login",
             f"⚠️ Auto-Login falhou: {type(e).__name__}: {e}",
@@ -413,41 +458,70 @@ def parsear_valor_monetario(texto):
     return round(valor, 2)
 
 
-def ler_saldo_atual(page):
+def localizar_frame_saldo(page):
     try:
+        frame_principal = page.main_frame
         frames = list(page.frames)
-    except Exception:
+    except Exception as e:
+        if erro_driver_playwright(e):
+            raise
         return None
 
     for frame in frames:
+        if frame == frame_principal:
+            continue
         try:
-            localizador = frame.locator(CASINO_BALANCE_SELECTOR)
-            for indice in range(min(localizador.count(), 10)):
-                elemento = localizador.nth(indice)
-                if not elemento.is_visible():
-                    continue
-                texto = elemento.get_attribute("data-balance-visible")
-                if not texto:
-                    texto = elemento.inner_text(timeout=700)
-                saldo = parsear_valor_monetario(texto)
-                if saldo is not None:
-                    return saldo
-        except Exception:
+            if frame.locator(CASINO_BALANCE_SELECTOR).count() > 0:
+                return frame
+        except Exception as e:
+            if erro_driver_playwright(e):
+                raise
             continue
     return None
+
+
+def ler_saldo_atual(page, aguardar_ms=0):
+    prazo = time.monotonic() + max(0.0, float(aguardar_ms) / 1000.0)
+
+    while True:
+        frame = localizar_frame_saldo(page)
+        if frame is not None:
+            try:
+                localizador = frame.locator(CASINO_BALANCE_SELECTOR)
+                for indice in range(min(localizador.count(), 10)):
+                    elemento = localizador.nth(indice)
+                    if not elemento.is_visible():
+                        continue
+                    texto = elemento.get_attribute("data-balance-visible")
+                    if not texto:
+                        texto = elemento.inner_text(timeout=700)
+                    saldo = parsear_valor_monetario(texto)
+                    if saldo is not None:
+                        return saldo
+            except Exception as e:
+                if erro_driver_playwright(e):
+                    raise
+
+        if time.monotonic() >= prazo:
+            return None
+        page.wait_for_timeout(250)
 
 
 def primeiro_elemento_dom_visivel(locator, limite=32):
     try:
         quantidade = min(max(0, int(locator.count())), max(1, int(limite)))
-    except Exception:
+    except Exception as e:
+        if erro_driver_playwright(e):
+            raise
         return None
     for indice in range(quantidade):
         try:
             elemento = locator.nth(indice)
             if elemento.is_visible():
                 return elemento
-        except Exception:
+        except Exception as e:
+            if erro_driver_playwright(e):
+                raise
             continue
     return None
 
@@ -455,34 +529,41 @@ def primeiro_elemento_dom_visivel(locator, limite=32):
 def _frame_evolution_pronto(frame):
     try:
         url = str(frame.url or "").lower()
-    except Exception:
+    except Exception as e:
+        if erro_driver_playwright(e):
+            raise
         url = ""
 
     try:
         if frame.locator("[data-role='chip'][data-value]").count() > 0:
             return True
-    except Exception:
-        pass
+    except Exception as e:
+        if erro_driver_playwright(e):
+            raise
 
     try:
         if frame.locator("[data-role^='bacbo-bet-spot-']").count() > 0:
             return True
-    except Exception:
-        pass
+    except Exception as e:
+        if erro_driver_playwright(e):
+            raise
 
     if any(marca in url for marca in ("evolution", "evocdn", "game")):
         try:
             if frame.locator("canvas").count() > 0:
                 return True
-        except Exception:
-            pass
+        except Exception as e:
+            if erro_driver_playwright(e):
+                raise
     return False
 
 
 def mesa_evolution_pronta(page):
     try:
         frames = list(page.frames)
-    except Exception:
+    except Exception as e:
+        if erro_driver_playwright(e):
+            raise
         return False
 
     for frame in frames:
@@ -492,8 +573,9 @@ def mesa_evolution_pronta(page):
     try:
         if page.locator("iframe[src*='evolution' i], iframe[src*='evocdn' i], iframe[src*='game' i]").count() > 0:
             return True
-    except Exception:
-        pass
+    except Exception as e:
+        if erro_driver_playwright(e):
+            raise
     return False
 
 
@@ -510,7 +592,9 @@ def localizar_ficha(frame, valor_ficha):
     candidatos = frame.locator("[data-role='chip'][data-value]")
     try:
         quantidade = min(max(0, int(candidatos.count())), 64)
-    except Exception:
+    except Exception as e:
+        if erro_driver_playwright(e):
+            raise
         return None
 
     for indice in range(quantidade):
@@ -521,13 +605,22 @@ def localizar_ficha(frame, valor_ficha):
             if abs(valor - float(valor_ficha)) >= 0.001 or not candidato.is_visible():
                 continue
             return candidato
-        except Exception:
+        except Exception as e:
+            if erro_driver_playwright(e):
+                raise
             continue
     return None
 
 
 def localizar_frame_aposta(page, planos):
-    for frame in list(page.frames):
+    try:
+        frames = list(page.frames)
+    except Exception as e:
+        if erro_driver_playwright(e):
+            raise
+        return None
+
+    for frame in frames:
         completo = True
         for plano in planos:
             if primeiro_elemento_dom_visivel(frame.locator(f"[data-role='{plano['seletor_alvo']}']")) is None:
@@ -560,7 +653,9 @@ def resolver_ponto_seguro_alvo(elemento):
                 return {ok:false};
             }"""
         )
-    except Exception:
+    except Exception as e:
+        if erro_driver_playwright(e):
+            raise
         return {"ok": False}
 
 
@@ -649,7 +744,7 @@ def confirmar_debito_saldo(page, saldo_antes, exposicao):
 
 def executar_place_bet(page, dados):
     planos = montar_planos_aposta(dados)
-    saldo_antes = ler_saldo_atual(page)
+    saldo_antes = ler_saldo_atual(page, aguardar_ms=2500)
     if saldo_antes is None:
         raise RuntimeError("Saldo real indisponivel antes da aposta")
 
@@ -713,31 +808,39 @@ def garantir_mesa_pronta(page, context):
 
 
 def manter_mesa_viva(page, context):
-    if page is None or page.is_closed():
+    if page is None:
         return False
-
-    fechar_popups(page)
-    fechar_popup_inatividade(page)
-
-    conexao_caida = pagina_indica_conexao_caida(page)
-    mesa_presente = mesa_evolution_pronta(page)
-    if mesa_presente and not conexao_caida:
-        return True
-
-    registrar_erro_limitado(
-        "keep_alive_reload",
-        "🔄 Mesa sem interface Evolution saudavel; recarregando pagina sem monitorar resultados.",
-        15,
-    )
     try:
-        page.reload(wait_until="domcontentloaded", timeout=60000)
-        fechar_popups(page)
-        if aguardar_mesa_evolution(page, 20000):
-            return True
-    except Exception:
-        pass
+        if page.is_closed():
+            return False
 
-    return garantir_mesa_pronta(page, context)
+        fechar_popups(page)
+        fechar_popup_inatividade(page)
+
+        conexao_caida = pagina_indica_conexao_caida(page)
+        mesa_presente = mesa_evolution_pronta(page)
+        if mesa_presente and not conexao_caida:
+            return True
+
+        registrar_erro_limitado(
+            "keep_alive_reload",
+            "🔄 Mesa sem interface Evolution saudavel; recarregando pagina sem monitorar resultados.",
+            15,
+        )
+        try:
+            page.reload(wait_until="domcontentloaded", timeout=60000)
+            fechar_popups(page)
+            if aguardar_mesa_evolution(page, 20000):
+                return True
+        except Exception as e:
+            if erro_driver_playwright(e):
+                raise
+
+        return garantir_mesa_pronta(page, context)
+    except Exception as e:
+        if erro_driver_playwright(e):
+            raise
+        return False
 
 
 def abrir_navegador(p):
@@ -763,11 +866,20 @@ def abrir_navegador(p):
     return browser, context, page
 
 
-def fechar_navegador(sessao):
+def fechar_navegador(sessao, corrompido=False):
     context = sessao.get("context")
     browser = sessao.get("browser")
     sessao.update({"browser": None, "context": None, "page": None, "ultima_manutencao": 0.0})
     navegador_aberto.clear()
+
+    if corrompido:
+        try:
+            if browser is not None and browser.is_connected():
+                browser.close()
+        except Exception:
+            pass
+        return
+
     try:
         if context is not None:
             context.close()
@@ -786,8 +898,9 @@ def garantir_navegador(p, sessao):
         try:
             if not page.is_closed():
                 return page, sessao.get("context")
-        except Exception:
-            pass
+        except Exception as e:
+            if erro_driver_playwright(e):
+                raise
         fechar_navegador(sessao)
 
     browser, context, page = abrir_navegador(p)
@@ -802,9 +915,9 @@ def processar_comando_playwright(p, sessao, comando):
         raise RuntimeError("Nao foi possivel autenticar e abrir a mesa")
 
     if acao == "sync_balance":
-        saldo = ler_saldo_atual(page)
+        saldo = ler_saldo_atual(page, aguardar_ms=5000)
         if saldo is None:
-            raise RuntimeError("Saldo real nao localizado na interface")
+            raise RuntimeError("Saldo real nao localizado no iframe da Evolution")
         publicar_saldo_redis(saldo)
         print(f"💰 Saldo real publicado via Redis: R$ {saldo:.2f}")
         return
@@ -840,59 +953,118 @@ def executar_manutencao_se_devida(p, sessao, forcar_abertura=False):
     sessao["ultima_manutencao"] = agora
 
 
-def worker_playwright():
-    sessao = {"browser": None, "context": None, "page": None, "ultima_manutencao": 0.0}
-    with sync_playwright() as p:
-        while True:
+def ciclo_playwright(p, sessao):
+    while True:
+        try:
+            comando = fila_comandos_redis.get(timeout=1.0)
+        except queue.Empty:
             try:
-                comando = fila_comandos_redis.get(timeout=1.0)
-            except queue.Empty:
-                try:
-                    if auto_trader_habilitado():
-                        executar_manutencao_se_devida(p, sessao, forcar_abertura=True)
-                        continue
+                if auto_trader_habilitado():
+                    executar_manutencao_se_devida(p, sessao, forcar_abertura=True)
+                    continue
 
-                    if (
-                        navegador_aberto.is_set()
-                        and not auto_trader_operando.is_set()
-                        and fila_comandos_redis.empty()
-                        and segundos_inatividade_node() >= BROWSER_IDLE_TIMEOUT_SECONDS
-                    ):
-                        print("🛌 Auto Trader desligado e 5 minutos sem comandos: fechando navegador e mantendo Redis ativo.")
-                        fechar_navegador(sessao)
-                        continue
+                if (
+                    navegador_aberto.is_set()
+                    and not auto_trader_operando.is_set()
+                    and fila_comandos_redis.empty()
+                    and segundos_inatividade_node() >= BROWSER_IDLE_TIMEOUT_SECONDS
+                ):
+                    print("🛌 Auto Trader desligado e 5 minutos sem comandos: fechando navegador e mantendo Redis ativo.")
+                    fechar_navegador(sessao)
+                    continue
 
-                    if navegador_aberto.is_set():
-                        executar_manutencao_se_devida(p, sessao, forcar_abertura=False)
-                except PlaywrightTimeoutError as e:
+                if navegador_aberto.is_set():
+                    executar_manutencao_se_devida(p, sessao, forcar_abertura=False)
+            except Exception as e:
+                if erro_driver_playwright(e):
+                    registrar_erro_limitado(
+                        "playwright_driver_corrompido",
+                        f"♻️ Driver Playwright corrompido no keep-alive; reiniciando do zero: {type(e).__name__}: {e}",
+                        5,
+                    )
+                    fechar_navegador(sessao, corrompido=True)
+                    raise
+                if isinstance(e, PlaywrightTimeoutError):
                     registrar_erro_limitado(
                         "playwright_keep_alive_timeout",
                         f"⚠️ Timeout no keep-alive do Playwright: {e}",
                         15,
                     )
-                except Exception as e:
+                else:
                     registrar_erro_limitado(
                         "playwright_keep_alive",
                         f"⚠️ Falha no keep-alive do Playwright: {type(e).__name__}: {e}",
                         15,
                     )
-                continue
+            continue
 
-            try:
-                processar_comando_playwright(p, sessao, comando)
-                sessao["ultima_manutencao"] = time.monotonic()
-            except PlaywrightTimeoutError as e:
+        try:
+            processar_comando_playwright(p, sessao, comando)
+            sessao["ultima_manutencao"] = time.monotonic()
+        except Exception as e:
+            if erro_driver_playwright(e):
+                registrar_erro_limitado(
+                    "playwright_driver_corrompido",
+                    f"♻️ Driver Playwright corrompido durante comando Redis; reiniciando do zero: {type(e).__name__}: {e}",
+                    5,
+                )
+                fechar_navegador(sessao, corrompido=True)
+                raise
+            if isinstance(e, PlaywrightTimeoutError):
                 registrar_erro_limitado(
                     "playwright_timeout_comando",
                     f"⚠️ Timeout ao processar comando Redis: {e}",
                     10,
                 )
-            except Exception as e:
+            else:
                 registrar_erro_limitado(
                     "playwright_comando",
                     f"❌ Falha ao processar comando Redis {comando.get('action')}: {type(e).__name__}: {e}",
                     10,
                 )
+
+
+def worker_playwright():
+    reabrir_apos_falha_driver = False
+
+    while True:
+        sessao = {"browser": None, "context": None, "page": None, "ultima_manutencao": 0.0}
+        try:
+            with sync_playwright() as p:
+                if reabrir_apos_falha_driver:
+                    try:
+                        page, context = garantir_navegador(p, sessao)
+                        if not garantir_mesa_pronta(page, context):
+                            raise RuntimeError("Nao foi possivel restaurar a mesa apos reinicio do driver")
+                        sessao["ultima_manutencao"] = time.monotonic()
+                        reabrir_apos_falha_driver = False
+                        print("✅ Playwright reinicializado do zero e mesa restaurada.")
+                    except Exception as e:
+                        if erro_driver_playwright(e):
+                            fechar_navegador(sessao, corrompido=True)
+                            raise
+                        registrar_erro_limitado(
+                            "playwright_reabertura",
+                            f"⚠️ Driver reiniciado, mas a mesa ainda nao abriu: {type(e).__name__}: {e}",
+                            15,
+                        )
+                        fechar_navegador(sessao)
+                        reabrir_apos_falha_driver = False
+
+                ciclo_playwright(p, sessao)
+        except Exception as e:
+            if erro_driver_playwright(e):
+                reabrir_apos_falha_driver = True
+                time.sleep(DRIVER_RECOVERY_DELAY_SECONDS)
+                continue
+
+            registrar_erro_limitado(
+                "playwright_worker",
+                f"⚠️ Worker Playwright reiniciado apos falha inesperada: {type(e).__name__}: {e}",
+                15,
+            )
+            fechar_navegador(sessao)
+            time.sleep(DRIVER_RECOVERY_DELAY_SECONDS)
 
 
 def exibir_painel_versao():
