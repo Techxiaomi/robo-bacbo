@@ -363,15 +363,29 @@ const ORIENTACAO_ROAD_NATIVA = Object.freeze({
     NEW_TO_OLD: 'NEW_TO_OLD'
 });
 const LIMITE_HISTORY_ROAD_NATIVA = 1000;
+const roadInactivityTimeoutConfig = Number(process.env.ROAD_INACTIVITY_TIMEOUT_MS || 120000);
+const ROAD_INACTIVITY_TIMEOUT_MS = (
+    Number.isFinite(roadInactivityTimeoutConfig)
+    && roadInactivityTimeoutConfig >= 30000
+    && roadInactivityTimeoutConfig <= 600000
+        ? Math.trunc(roadInactivityTimeoutConfig)
+        : 120000
+);
 const estadoRoadNativo = {
     pronto: false,
     orientacao: null,
     history: [],
     coletor_sessao: null,
+    sessao_ingestao: null,
     aguardando_snapshot: true,
+    em_sincronizacao: true,
     hard_reset_em: 0,
+    snapshot_alocado_em: 0,
+    ultimo_pacote_em: 0,
+    ultimo_incremental_legitimo_em: 0,
     orientacao_preservada: null,
     sessao_preservada: null,
+    sessao_snapshot_esperada: null,
     atualizado_em: null
 };
 
@@ -388,6 +402,16 @@ function numeroRoadNativo(valor) {
     const numero = Number(valor);
     if (!Number.isFinite(numero)) return null;
     return Math.trunc(numero);
+}
+
+function sessaoIngestaoRoad(dados) {
+    const candidatos = [dados?.id_sessao, dados?.coletor_sessao];
+    for (const candidato of candidatos) {
+        if (candidato === null || candidato === undefined) continue;
+        const valor = String(candidato).trim();
+        if (valor && valor.length <= 128) return valor;
+    }
+    return '';
 }
 
 function scoreRoadDoResultado(dados, lado) {
@@ -417,7 +441,7 @@ function normalizarGiroRoadNativo(dados, coletorSessaoFallback = '') {
     if (!resultado || playerScore === null || bankerScore === null) return null;
     if (playerScore < 0 || playerScore > 12 || bankerScore < 0 || bankerScore > 12) return null;
 
-    const sessao = String(dados?.coletor_sessao || coletorSessaoFallback || '').trim();
+    const sessao = sessaoIngestaoRoad(dados) || String(coletorSessaoFallback || '').trim();
     const timestamp = numeroRoadNativo(dados?.timestamp_ms ?? dados?.timestamp_coleta ?? dados?.timestamp);
     const seq = numeroRoadNativo(dados?.coletor_seq ?? dados?.coletorSeq);
     return {
@@ -442,27 +466,102 @@ function mesmoGiroRoadNativo(a, b) {
         && Number(a.bankerScore) === Number(b.bankerScore);
 }
 
-function hardResetSnapshotRoad(motivo) {
-    const orientacaoAnterior = estadoRoadNativo.orientacao;
-    const sessaoAnterior = estadoRoadNativo.coletor_sessao;
+function avaliarGatilhoHardResetRoad(dados, recebidoEm = Date.now(), { registrarPacote = false } = {}) {
+    const agora = Number.isFinite(Number(recebidoEm)) ? Math.trunc(Number(recebidoEm)) : Date.now();
+    const sessaoRecebida = sessaoIngestaoRoad(dados);
+    const sessaoAnterior = String(
+        estadoRoadNativo.sessao_ingestao || estadoRoadNativo.coletor_sessao || ''
+    ).trim();
+    const ultimoPacoteEm = Number(estadoRoadNativo.ultimo_pacote_em) || 0;
+    const idadePacoteMs = ultimoPacoteEm > 0 ? Math.max(0, agora - ultimoPacoteEm) : null;
+    const mudouSessao = Boolean(
+        sessaoRecebida
+        && sessaoAnterior
+        && sessaoRecebida !== sessaoAnterior
+    );
+    const timeoutConfirmado = idadePacoteMs !== null
+        && idadePacoteMs >= ROAD_INACTIVITY_TIMEOUT_MS;
+
+    if (registrarPacote) {
+        if (sessaoRecebida) estadoRoadNativo.sessao_ingestao = sessaoRecebida;
+        estadoRoadNativo.ultimo_pacote_em = agora;
+    }
+
+    if (mudouSessao) {
+        return {
+            reset: true,
+            motivo: 'MUDANCA_ID_SESSAO_INGESTAO',
+            sessao_esperada: sessaoRecebida,
+            idade_pacote_ms: idadePacoteMs
+        };
+    }
+
+    if (timeoutConfirmado) {
+        return {
+            reset: true,
+            motivo: `TIMEOUT_INATIVIDADE_ROAD_${idadePacoteMs}MS`,
+            sessao_esperada: sessaoRecebida || sessaoAnterior,
+            idade_pacote_ms: idadePacoteMs
+        };
+    }
+
+    return {
+        reset: false,
+        motivo: null,
+        sessao_esperada: sessaoRecebida || sessaoAnterior,
+        idade_pacote_ms: idadePacoteMs
+    };
+}
+
+function hardResetSnapshotRoad(motivo, sessaoEsperada = '') {
+    const sessaoEsperadaNormalizada = String(sessaoEsperada || '').trim();
+    const sessaoEsperadaAtual = String(estadoRoadNativo.sessao_snapshot_esperada || '').trim();
+
+    if (
+        estadoRoadNativo.aguardando_snapshot
+        && estadoRoadNativo.hard_reset_em > 0
+        && (!sessaoEsperadaNormalizada || sessaoEsperadaNormalizada === sessaoEsperadaAtual)
+    ) {
+        return false;
+    }
+
+    const orientacaoAnterior = estadoRoadNativo.orientacao || estadoRoadNativo.orientacao_preservada;
+    const sessaoAnterior = estadoRoadNativo.coletor_sessao || estadoRoadNativo.sessao_preservada;
     estadoRoadNativo.history = [];
     estadoRoadNativo.pronto = false;
     estadoRoadNativo.orientacao = null;
     estadoRoadNativo.aguardando_snapshot = true;
+    estadoRoadNativo.em_sincronizacao = true;
     estadoRoadNativo.hard_reset_em = Date.now();
-    estadoRoadNativo.orientacao_preservada = orientacaoAnterior;
-    estadoRoadNativo.sessao_preservada = sessaoAnterior;
+    estadoRoadNativo.snapshot_alocado_em = 0;
+    estadoRoadNativo.ultimo_incremental_legitimo_em = 0;
+    estadoRoadNativo.orientacao_preservada = orientacaoAnterior || null;
+    estadoRoadNativo.sessao_preservada = sessaoAnterior || null;
+    estadoRoadNativo.sessao_snapshot_esperada = sessaoEsperadaNormalizada
+        || String(estadoRoadNativo.sessao_ingestao || '').trim()
+        || null;
     estadoRoadNativo.atualizado_em = estadoRoadNativo.hard_reset_em;
     console.warn(
         `🧹 ROAD HARD RESET | memória zerada após ${String(motivo || 'QUEBRA_CONTINUIDADE')}; `
-        + 'gatilho live bloqueado até snapshot fresco substituir 100% do estado.'
+        + 'motor de padrões em sincronização até snapshot fresco + rodada incremental legítima.'
     );
+    return true;
 }
 
 function substituirRoadPorSnapshotFresco(dados, recebidoEm = Date.now()) {
+    if (!estadoRoadNativo.aguardando_snapshot) {
+        return false;
+    }
+
     const history = Array.isArray(dados?.history) ? dados.history : [];
-    const sessao = String(dados?.coletor_sessao || '').trim();
+    const sessao = sessaoIngestaoRoad(dados);
     if (!sessao || history.length === 0) return false;
+
+    const esperado = String(estadoRoadNativo.sessao_snapshot_esperada || '').trim();
+    if (esperado && sessao !== esperado) {
+        return false;
+    }
+
     if (estadoRoadNativo.hard_reset_em > 0 && recebidoEm < estadoRoadNativo.hard_reset_em) {
         return false;
     }
@@ -470,67 +569,92 @@ function substituirRoadPorSnapshotFresco(dados, recebidoEm = Date.now()) {
     const normalizados = history.map(item => normalizarGiroRoadNativo(item, sessao));
     if (normalizados.some(item => item === null)) return false;
 
-    const mesmaSessaoAtual = sessao === String(estadoRoadNativo.coletor_sessao || '');
-    const mesmaSessaoPreservada = sessao === String(estadoRoadNativo.sessao_preservada || '');
-    const orientacao = estadoRoadNativo.aguardando_snapshot && mesmaSessaoPreservada
-        ? estadoRoadNativo.orientacao_preservada
-        : (mesmaSessaoAtual
-            ? estadoRoadNativo.orientacao
-            : (mesmaSessaoPreservada ? estadoRoadNativo.orientacao_preservada : null));
+    const orientacaoPreservada = estadoRoadNativo.orientacao_preservada;
+    const orientacao = orientacaoPreservada === ORIENTACAO_ROAD_NATIVA.OLD_TO_NEW
+        || orientacaoPreservada === ORIENTACAO_ROAD_NATIVA.NEW_TO_OLD
+        ? orientacaoPreservada
+        : null;
+    const alocadoEm = Date.now();
 
     estadoRoadNativo.history = normalizados;
     estadoRoadNativo.coletor_sessao = sessao;
+    estadoRoadNativo.sessao_ingestao = sessao;
     estadoRoadNativo.orientacao = orientacao;
-    estadoRoadNativo.pronto = orientacao === ORIENTACAO_ROAD_NATIVA.OLD_TO_NEW
-        || orientacao === ORIENTACAO_ROAD_NATIVA.NEW_TO_OLD;
+    estadoRoadNativo.pronto = false;
     estadoRoadNativo.aguardando_snapshot = false;
+    estadoRoadNativo.em_sincronizacao = true;
     estadoRoadNativo.hard_reset_em = 0;
+    estadoRoadNativo.snapshot_alocado_em = alocadoEm;
+    estadoRoadNativo.ultimo_incremental_legitimo_em = 0;
     estadoRoadNativo.orientacao_preservada = null;
     estadoRoadNativo.sessao_preservada = null;
-    estadoRoadNativo.atualizado_em = recebidoEm;
+    estadoRoadNativo.sessao_snapshot_esperada = null;
+    estadoRoadNativo.atualizado_em = alocadoEm;
 
     console.log(
         `♻️ ROAD SNAPSHOT | memória substituída integralmente por ${estadoRoadNativo.history.length} giro(s); `
-        + `${estadoRoadNativo.pronto ? 'gatilho live liberado' : 'aguardando orientação segura no próximo incremental'}.`
+        + 'motor em sincronização, gatilhos bloqueados até a primeira rodada incremental legítima pós-snapshot.'
     );
     return true;
 }
 
-function atualizarRoadNativoComIncremental(dados) {
+function atualizarRoadNativoComIncremental(dados, recebidoEm = Date.now()) {
     if (estadoRoadNativo.aguardando_snapshot || estadoRoadNativo.history.length === 0) return false;
 
-    const sessaoRecebida = String(dados?.coletor_sessao || '').trim();
+    const recebidoEmNumero = Number(recebidoEm);
+    const instanteRecebimento = Number.isFinite(recebidoEmNumero)
+        ? Math.trunc(recebidoEmNumero)
+        : Date.now();
+    if (
+        estadoRoadNativo.em_sincronizacao
+        && estadoRoadNativo.snapshot_alocado_em > 0
+        && instanteRecebimento <= estadoRoadNativo.snapshot_alocado_em
+    ) {
+        return false;
+    }
+
+    const sessaoRecebida = sessaoIngestaoRoad(dados);
     if (
         sessaoRecebida
         && estadoRoadNativo.coletor_sessao
         && sessaoRecebida !== estadoRoadNativo.coletor_sessao
     ) {
-        hardResetSnapshotRoad('SESSAO_ROAD_DIVERGENTE');
+        hardResetSnapshotRoad('MUDANCA_ID_SESSAO_INGESTAO', sessaoRecebida);
         return false;
     }
 
     const giro = normalizarGiroRoadNativo(dados, estadoRoadNativo.coletor_sessao);
     if (!giro) return false;
 
+    const primeiro = estadoRoadNativo.history[0];
+    const ultimo = estadoRoadNativo.history[estadoRoadNativo.history.length - 1];
+    const casaPrimeiro = mesmoGiroRoadNativo(giro, primeiro);
+    const casaUltimo = mesmoGiroRoadNativo(giro, ultimo);
+
+    if (estadoRoadNativo.em_sincronizacao && casaPrimeiro !== casaUltimo) {
+        estadoRoadNativo.orientacao = casaPrimeiro
+            ? ORIENTACAO_ROAD_NATIVA.NEW_TO_OLD
+            : ORIENTACAO_ROAD_NATIVA.OLD_TO_NEW;
+        estadoRoadNativo.pronto = false;
+        estadoRoadNativo.atualizado_em = instanteRecebimento;
+        return false;
+    }
+
     if (!estadoRoadNativo.orientacao) {
-        const primeiro = estadoRoadNativo.history[0];
-        const ultimo = estadoRoadNativo.history[estadoRoadNativo.history.length - 1];
-        const casaPrimeiro = mesmoGiroRoadNativo(giro, primeiro);
-        const casaUltimo = mesmoGiroRoadNativo(giro, ultimo);
         if (casaPrimeiro === casaUltimo) return false;
         estadoRoadNativo.orientacao = casaPrimeiro
             ? ORIENTACAO_ROAD_NATIVA.NEW_TO_OLD
             : ORIENTACAO_ROAD_NATIVA.OLD_TO_NEW;
-        estadoRoadNativo.pronto = true;
-        estadoRoadNativo.atualizado_em = Date.now();
-        return true;
+        estadoRoadNativo.pronto = false;
+        estadoRoadNativo.atualizado_em = instanteRecebimento;
+        return false;
     }
 
     const pontaNova = estadoRoadNativo.orientacao === ORIENTACAO_ROAD_NATIVA.NEW_TO_OLD
         ? estadoRoadNativo.history[0]
         : estadoRoadNativo.history[estadoRoadNativo.history.length - 1];
     if (mesmoGiroRoadNativo(giro, pontaNova)) {
-        estadoRoadNativo.atualizado_em = Date.now();
+        estadoRoadNativo.atualizado_em = instanteRecebimento;
         return false;
     }
 
@@ -545,8 +669,18 @@ function atualizarRoadNativoComIncremental(dados) {
             estadoRoadNativo.history.shift();
         }
     }
+
+    const estavaSincronizando = estadoRoadNativo.em_sincronizacao;
+    estadoRoadNativo.em_sincronizacao = false;
     estadoRoadNativo.pronto = true;
-    estadoRoadNativo.atualizado_em = Date.now();
+    estadoRoadNativo.ultimo_incremental_legitimo_em = instanteRecebimento;
+    estadoRoadNativo.atualizado_em = instanteRecebimento;
+
+    if (estavaSincronizando) {
+        console.log(
+            '✅ ROAD LIVE | primeira rodada incremental legítima pós-snapshot recebida; gatilhos ao vivo liberados.'
+        );
+    }
     return true;
 }
 
@@ -555,12 +689,14 @@ function obterHistoricoRoadNativo() {
         || estadoRoadNativo.orientacao === ORIENTACAO_ROAD_NATIVA.NEW_TO_OLD;
     if (
         estadoRoadNativo.aguardando_snapshot
+        || estadoRoadNativo.em_sincronizacao
         || estadoRoadNativo.pronto !== true
         || !orientacaoValida
         || estadoRoadNativo.history.length === 0
     ) {
         return {
             pronto: false,
+            em_sincronizacao: estadoRoadNativo.em_sincronizacao,
             orientacao: estadoRoadNativo.orientacao,
             history: [],
             coletor_sessao: estadoRoadNativo.coletor_sessao
@@ -572,6 +708,7 @@ function obterHistoricoRoadNativo() {
         : [...estadoRoadNativo.history];
     return {
         pronto: true,
+        em_sincronizacao: false,
         orientacao: estadoRoadNativo.orientacao,
         history: cronologico.slice(-LIMITE_HISTORY_ROAD_NATIVA),
         coletor_sessao: estadoRoadNativo.coletor_sessao,
@@ -3852,7 +3989,12 @@ app.post("/collector-health", async (req, res) => {
                 traders_bloqueados: 0
             });
         }
-        hardResetSnapshotRoad(motivo);
+
+        const gatilhoRoad = avaliarGatilhoHardResetRoad(dados, Date.now(), { registrarPacote: false });
+        if (gatilhoRoad.reset) {
+            hardResetSnapshotRoad(gatilhoRoad.motivo, gatilhoRoad.sessao_esperada);
+        }
+
         liberarTurnoResultado = await aguardarTurnoProcessamentoResultado();
         try {
             const resumo = await invalidarSequenciasAposBuracoDados(motivo);
@@ -3862,6 +4004,7 @@ app.post("/collector-health", async (req, res) => {
                 continuidade: 'INVALIDADA',
                 idempotente: false,
                 interrupcao_id: reservaInterrupcao.id || null,
+                road_reset: gatilhoRoad.reset,
                 ...resumo
             });
         } catch (e) {
@@ -3891,19 +4034,17 @@ app.post("/receber-sinal", async (req, res) => {
         else if (rawVenc.includes("BANKER") || rawVenc === "B" || rawVenc === "VERMELHO") vencedor = "Banker";
         else if (rawVenc.includes("TIE") || rawVenc === "T" || rawVenc === "EMPATE") vencedor = "Tie";
 
+        const recebidoEmRoad = Date.now();
+        const gatilhoRoad = vencedor
+            ? avaliarGatilhoHardResetRoad(dados, recebidoEmRoad, { registrarPacote: true })
+            : null;
+        if (gatilhoRoad?.reset) {
+            hardResetSnapshotRoad(gatilhoRoad.motivo, gatilhoRoad.sessao_esperada);
+        }
+
         // Reserva a continuidade antes de qualquer await (inclusive persistência de saldo).
         // O processamento financeiro continua abaixo, serializado após o ACK.
         const continuidade = vencedor ? reservarContinuidadeResultado(dados) : null;
-
-        if (
-            continuidade?.interrupcao
-            && !interrupcaoColetorJaAplicada(dados)
-        ) {
-            const motivoRoad = String(
-                dados.motivo_interrupcao || continuidade.motivo || 'INTERRUPCAO_PYTHON'
-            ).trim().slice(0, 120) || 'INTERRUPCAO_PYTHON';
-            hardResetSnapshotRoad(motivoRoad);
-        }
 
         const temSaldo = dados.saldo_atual !== undefined && dados.saldo_atual !== null;
 
@@ -3973,7 +4114,7 @@ app.post("/receber-sinal", async (req, res) => {
 
         // Só avança a continuidade depois que qualquer interrupção foi tratada em modo fail-closed.
         estadoContinuidadeColetor = continuidade.estado;
-        atualizarRoadNativoComIncremental(dados);
+        atualizarRoadNativoComIncremental(dados, recebidoEmRoad);
 
         try {
             await rearmarAutoTradersStopRedsPausados();
