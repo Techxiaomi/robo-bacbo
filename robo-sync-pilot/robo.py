@@ -17,8 +17,8 @@ load_env_file(os.path.join(PROJECT_ROOT, ".env"))
 # ====================================================================
 # CONFIGURACAO REDIS-ONLY DO EXECUTOR
 # ====================================================================
-VERSAO_ROBO = "v1.6.16"
-NOME_ATUALIZACAO = "Iframe Saldo + Recuperacao Driver"
+VERSAO_ROBO = "v1.6.17"
+NOME_ATUALIZACAO = "Mesa Destino Final + Idle Pos-Tarefa"
 
 URL_CASSINO = os.getenv("CASINO_GAME_URL", "")
 URL_HOME_CASSINO = os.getenv("CASINO_HOME_URL", "")
@@ -588,6 +588,29 @@ def aguardar_mesa_evolution(page, timeout_ms=30000):
     return mesa_evolution_pronta(page)
 
 
+def _rota_url(url):
+    try:
+        parsed = urlparse(str(url or ""))
+        return (
+            (parsed.scheme or "").lower(),
+            (parsed.netloc or "").lower(),
+            (parsed.path or "/").rstrip("/") or "/",
+        )
+    except Exception:
+        return ("", "", "")
+
+
+def pagina_na_rota_da_mesa(page):
+    if not URL_CASSINO:
+        return False
+    try:
+        return _rota_url(page.url) == _rota_url(URL_CASSINO)
+    except Exception as e:
+        if erro_driver_playwright(e):
+            raise
+        return False
+
+
 def localizar_ficha(frame, valor_ficha):
     candidatos = frame.locator("[data-role='chip'][data-value]")
     try:
@@ -788,7 +811,7 @@ def executar_place_bet(page, dados):
 
 
 def garantir_mesa_pronta(page, context):
-    if mesa_evolution_pronta(page):
+    if pagina_na_rota_da_mesa(page) and mesa_evolution_pronta(page):
         return True
 
     if not URL_CASSINO:
@@ -802,9 +825,16 @@ def garantir_mesa_pronta(page, context):
     if not renovar_sessao_automaticamente(page, context):
         return False
 
+    # O login acontece no lobby, mas o destino final e sempre a mesa.
     page.goto(URL_CASSINO, wait_until="domcontentloaded", timeout=60000)
     fechar_popups(page)
     return aguardar_mesa_evolution(page, 30000)
+
+
+def garantir_destino_final_mesa(page, context):
+    if garantir_mesa_pronta(page, context):
+        return True
+    raise RuntimeError("Nao foi possivel manter a Evolution como destino final da navegacao")
 
 
 def manter_mesa_viva(page, context):
@@ -818,17 +848,20 @@ def manter_mesa_viva(page, context):
         fechar_popup_inatividade(page)
 
         conexao_caida = pagina_indica_conexao_caida(page)
-        mesa_presente = mesa_evolution_pronta(page)
+        mesa_presente = pagina_na_rota_da_mesa(page) and mesa_evolution_pronta(page)
         if mesa_presente and not conexao_caida:
             return True
 
         registrar_erro_limitado(
             "keep_alive_reload",
-            "🔄 Mesa sem interface Evolution saudavel; recarregando pagina sem monitorar resultados.",
+            "🔄 Mesa fora da rota/sem interface Evolution saudavel; restaurando URL da mesa sem monitorar resultados.",
             15,
         )
         try:
-            page.reload(wait_until="domcontentloaded", timeout=60000)
+            if pagina_na_rota_da_mesa(page):
+                page.reload(wait_until="domcontentloaded", timeout=60000)
+            else:
+                page.goto(URL_CASSINO, wait_until="domcontentloaded", timeout=60000)
             fechar_popups(page)
             if aguardar_mesa_evolution(page, 20000):
                 return True
@@ -911,15 +944,15 @@ def garantir_navegador(p, sessao):
 def processar_comando_playwright(p, sessao, comando):
     acao = str(comando.get("action") or "").strip()
     page, context = garantir_navegador(p, sessao)
-    if not garantir_mesa_pronta(page, context):
-        raise RuntimeError("Nao foi possivel autenticar e abrir a mesa")
+    garantir_destino_final_mesa(page, context)
 
     if acao == "sync_balance":
         saldo = ler_saldo_atual(page, aguardar_ms=5000)
         if saldo is None:
             raise RuntimeError("Saldo real nao localizado no iframe da Evolution")
         publicar_saldo_redis(saldo)
-        print(f"💰 Saldo real publicado via Redis: R$ {saldo:.2f}")
+        garantir_destino_final_mesa(page, context)
+        print(f"💰 Saldo real publicado via Redis: R$ {saldo:.2f}; mesa mantida pronta.")
         return
 
     if acao == "place_bet":
@@ -928,6 +961,7 @@ def processar_comando_playwright(p, sessao, comando):
             executar_place_bet(page, comando)
         finally:
             auto_trader_operando.clear()
+        garantir_destino_final_mesa(page, context)
 
 
 def executar_manutencao_se_devida(p, sessao, forcar_abertura=False):
@@ -939,8 +973,7 @@ def executar_manutencao_se_devida(p, sessao, forcar_abertura=False):
 
     if page is None:
         page, context = garantir_navegador(p, sessao)
-        if not garantir_mesa_pronta(page, context):
-            raise RuntimeError("Nao foi possivel autenticar e abrir a mesa")
+        garantir_destino_final_mesa(page, context)
         sessao["ultima_manutencao"] = agora
         return
 
@@ -969,7 +1002,7 @@ def ciclo_playwright(p, sessao):
                     and fila_comandos_redis.empty()
                     and segundos_inatividade_node() >= BROWSER_IDLE_TIMEOUT_SECONDS
                 ):
-                    print("🛌 Auto Trader desligado e 5 minutos sem comandos: fechando navegador e mantendo Redis ativo.")
+                    print("🛌 Auto Trader desligado e 5 minutos apos a ultima tarefa/comando: fechando navegador e mantendo Redis ativo.")
                     fechar_navegador(sessao)
                     continue
 
@@ -1022,6 +1055,9 @@ def ciclo_playwright(p, sessao):
                     f"❌ Falha ao processar comando Redis {comando.get('action')}: {type(e).__name__}: {e}",
                     10,
                 )
+        finally:
+            # O timeout de 5 minutos passa a contar da conclusao real da tarefa.
+            registrar_atividade_node()
 
 
 def worker_playwright():
@@ -1034,8 +1070,7 @@ def worker_playwright():
                 if reabrir_apos_falha_driver:
                     try:
                         page, context = garantir_navegador(p, sessao)
-                        if not garantir_mesa_pronta(page, context):
-                            raise RuntimeError("Nao foi possivel restaurar a mesa apos reinicio do driver")
+                        garantir_destino_final_mesa(page, context)
                         sessao["ultima_manutencao"] = time.monotonic()
                         reabrir_apos_falha_driver = False
                         print("✅ Playwright reinicializado do zero e mesa restaurada.")
