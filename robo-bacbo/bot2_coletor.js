@@ -390,11 +390,30 @@ const estadoRoadNativo = {
 };
 
 function resultadoRoadNativo(valor) {
-    const normalizado = String(valor || '').trim().toLowerCase();
-    if (normalizado === 'player' || normalizado === 'playerwon') return 'Player';
-    if (normalizado === 'banker' || normalizado === 'bankerwon') return 'Banker';
-    if (normalizado === 'tie') return 'Tie';
+    const bruto = String(valor ?? '').trim().toLowerCase().normalize('NFD');
+    let compacto = '';
+    for (const caractere of bruto) {
+        const codigo = caractere.charCodeAt(0);
+        const letraAscii = codigo >= 97 && codigo <= 122;
+        const digitoAscii = codigo >= 48 && codigo <= 57;
+        if (letraAscii || digitoAscii) compacto += caractere;
+    }
+
+    if (['p', 'player', 'playerwon', 'jogador', 'azul'].includes(compacto)) return 'Player';
+    if (['b', 'banker', 'bankerwon', 'banca', 'vermelho'].includes(compacto)) return 'Banker';
+    if (['t', 'tie', 'tiewon', 'empate', 'draw'].includes(compacto)) return 'Tie';
     return '';
+}
+
+function normalizarPadraoRoadNativo(padrao) {
+    let itens = padrao;
+    if (!Array.isArray(itens) && typeof itens === 'string') {
+        try { itens = JSON.parse(itens); } catch (e) { return null; }
+    }
+    if (!Array.isArray(itens) || itens.length === 0) return null;
+
+    const normalizados = itens.map(resultadoRoadNativo);
+    return normalizados.some(item => !item) ? null : normalizados;
 }
 
 function numeroRoadNativo(valor) {
@@ -461,9 +480,25 @@ function mesmoGiroRoadNativo(a, b) {
     const roundA = String(a.round_id || '').trim();
     const roundB = String(b.round_id || '').trim();
     if (roundA && roundB) return roundA === roundB;
-    return a.resultado === b.resultado
+    return resultadoRoadNativo(a.resultado || a.winner) === resultadoRoadNativo(b.resultado || b.winner)
         && Number(a.playerScore) === Number(b.playerScore)
         && Number(a.bankerScore) === Number(b.bankerScore);
+}
+
+function orientacaoRoadDoCoreCanonico(sessaoEsperada = '') {
+    try {
+        const estadoCore = integracaoContadorDiario.obterHistoricoCanonicoLive();
+        const orientacao = estadoCore?.orientacao;
+        const sessaoCore = String(estadoCore?.coletor_sessao || '').trim();
+        const sessao = String(sessaoEsperada || estadoRoadNativo.coletor_sessao || '').trim();
+        const orientacaoValida = orientacao === ORIENTACAO_ROAD_NATIVA.OLD_TO_NEW
+            || orientacao === ORIENTACAO_ROAD_NATIVA.NEW_TO_OLD;
+        if (estadoCore?.pronto !== true || !orientacaoValida) return null;
+        if (sessao && sessaoCore && sessao !== sessaoCore) return null;
+        return orientacao;
+    } catch (e) {
+        return null;
+    }
 }
 
 function avaliarGatilhoHardResetRoad(dados, recebidoEm = Date.now(), { registrarPacote = false } = {}) {
@@ -573,7 +608,7 @@ function substituirRoadPorSnapshotFresco(dados, recebidoEm = Date.now()) {
     const orientacao = orientacaoPreservada === ORIENTACAO_ROAD_NATIVA.OLD_TO_NEW
         || orientacaoPreservada === ORIENTACAO_ROAD_NATIVA.NEW_TO_OLD
         ? orientacaoPreservada
-        : null;
+        : orientacaoRoadDoCoreCanonico(sessao);
     const alocadoEm = Date.now();
 
     estadoRoadNativo.history = normalizados;
@@ -631,23 +666,19 @@ function atualizarRoadNativoComIncremental(dados, recebidoEm = Date.now()) {
     const casaPrimeiro = mesmoGiroRoadNativo(giro, primeiro);
     const casaUltimo = mesmoGiroRoadNativo(giro, ultimo);
 
-    if (estadoRoadNativo.em_sincronizacao && casaPrimeiro !== casaUltimo) {
-        estadoRoadNativo.orientacao = casaPrimeiro
-            ? ORIENTACAO_ROAD_NATIVA.NEW_TO_OLD
-            : ORIENTACAO_ROAD_NATIVA.OLD_TO_NEW;
-        estadoRoadNativo.pronto = false;
-        estadoRoadNativo.atualizado_em = instanteRecebimento;
-        return false;
-    }
-
     if (!estadoRoadNativo.orientacao) {
-        if (casaPrimeiro === casaUltimo) return false;
-        estadoRoadNativo.orientacao = casaPrimeiro
-            ? ORIENTACAO_ROAD_NATIVA.NEW_TO_OLD
-            : ORIENTACAO_ROAD_NATIVA.OLD_TO_NEW;
-        estadoRoadNativo.pronto = false;
-        estadoRoadNativo.atualizado_em = instanteRecebimento;
-        return false;
+        const orientacaoCore = orientacaoRoadDoCoreCanonico(
+            sessaoRecebida || estadoRoadNativo.coletor_sessao
+        );
+        if (orientacaoCore) {
+            estadoRoadNativo.orientacao = orientacaoCore;
+        } else if (casaPrimeiro !== casaUltimo) {
+            estadoRoadNativo.orientacao = casaPrimeiro
+                ? ORIENTACAO_ROAD_NATIVA.NEW_TO_OLD
+                : ORIENTACAO_ROAD_NATIVA.OLD_TO_NEW;
+        } else {
+            return false;
+        }
     }
 
     const pontaNova = estadoRoadNativo.orientacao === ORIENTACAO_ROAD_NATIVA.NEW_TO_OLD
@@ -714,6 +745,17 @@ function obterHistoricoRoadNativo() {
         coletor_sessao: estadoRoadNativo.coletor_sessao,
         atualizado_em: estadoRoadNativo.atualizado_em
     };
+}
+
+function estrategiaCombinaFimRoadNativo(est, historico) {
+    const padrao = normalizarPadraoRoadNativo(est?.padrao);
+    const road = Array.isArray(historico) ? historico : [];
+    if (!padrao || road.length < padrao.length) return false;
+
+    const fim = road.slice(-padrao.length);
+    return fim.every((giro, indice) => (
+        resultadoRoadNativo(giro?.resultado || giro?.winner) === padrao[indice]
+    ));
 }
 
 function aguardarTurnoProcessamentoResultado() {
@@ -3858,6 +3900,8 @@ async function carregarSistemasParaMemoria() {
 
         linhasEst.forEach(db => {
             let padraoParsed = []; try { padraoParsed = JSON.parse(db.padrao); } catch(e) {}
+            const padraoCanonico = normalizarPadraoRoadNativo(padraoParsed);
+            if (padraoCanonico) padraoParsed = padraoCanonico;
             let tiesParsed = { direto:{}, gale1:{}, gale2:{} }; if (db.ties_json) { try { tiesParsed = JSON.parse(db.ties_json); } catch(e) {} }
 
             let est = {
@@ -4029,10 +4073,7 @@ app.post("/receber-sinal", async (req, res) => {
         const dados = req.body || {};
 
         let rawVenc = String(dados.vencedor || dados.resultado || dados.winner || "").toUpperCase().trim();
-        let vencedor = "";
-        if (rawVenc.includes("PLAYER") || rawVenc === "P" || rawVenc === "AZUL") vencedor = "Player";
-        else if (rawVenc.includes("BANKER") || rawVenc === "B" || rawVenc === "VERMELHO") vencedor = "Banker";
-        else if (rawVenc.includes("TIE") || rawVenc === "T" || rawVenc === "EMPATE") vencedor = "Tie";
+        let vencedor = resultadoRoadNativo(rawVenc);
 
         const recebidoEmRoad = Date.now();
         const gatilhoRoad = vencedor
@@ -4114,7 +4155,7 @@ app.post("/receber-sinal", async (req, res) => {
 
         // Só avança a continuidade depois que qualquer interrupção foi tratada em modo fail-closed.
         estadoContinuidadeColetor = continuidade.estado;
-        atualizarRoadNativoComIncremental(dados, recebidoEmRoad);
+        const incrementalRoadAplicado = atualizarRoadNativoComIncremental(dados, recebidoEmRoad);
 
         try {
             await rearmarAutoTradersStopRedsPausados();
@@ -4491,7 +4532,7 @@ app.post("/receber-sinal", async (req, res) => {
             }
         }
 
-        if (sinalFinalizadoAgora) return;
+        if (sinalFinalizadoAgora || !incrementalRoadAplicado) return;
 
         const estadoLiveCanonico = obterHistoricoRoadNativo();
         if (estadoLiveCanonico.pronto !== true) {
@@ -4503,198 +4544,193 @@ app.post("/receber-sinal", async (req, res) => {
         if (!ocupado) {
             for (let est of ESTRATEGIAS_MEMORIA) {
                 if (!est.ativo) continue;
-                if (historicoLiveCanonico.length >= est.padrao.length) {
-                    let ult = historicoLiveCanonico.slice(-est.padrao.length);
-                    let matchCores = ult.every((val, i) => val.resultado === est.padrao[i]);
+                if (estrategiaCombinaFimRoadNativo(est, historicoLiveCanonico)) {
+                    let selecaoRobos = { web: [], telegram: [], assertividade: 0 };
+                    try {
+                        selecaoRobos = await selecionarRobosParaEstrategia(est, historicoLiveCanonico);
+                    } catch (e) {
+                        console.error(`Falha ao selecionar robos para estrategia ${est.id}:`, e.message);
+                    }
 
-                    if (matchCores) {
-                        let selecaoRobos = { web: [], telegram: [], assertividade: 0 };
-                        try {
-                            selecaoRobos = await selecionarRobosParaEstrategia(est, historicoLiveCanonico);
-                        } catch (e) {
-                            console.error(`Falha ao selecionar robos para estrategia ${est.id}:`, e.message);
-                        }
+                    if (!Array.isArray(selecaoRobos.todos) || selecaoRobos.todos.length === 0) {
+                        const bloqueios = (Array.isArray(selecaoRobos.bloqueados) ? selecaoRobos.bloqueados : [])
+                            .map(item => `${item.id}:${item.nome} em ${item.estrategia_id} (${item.gale_atual > 0 ? `GALE ${item.gale_atual}` : 'DIRETO'})`)
+                            .join(', ');
+                        console.log(
+                            `🔒 Sinal ${est.id} suprimido: nenhum robô livre para novo ciclo.`
+                            + `${bloqueios ? ` Ocupados: ${bloqueios}.` : ''}`
+                        );
+                        continue;
+                    }
 
-                        if (!Array.isArray(selecaoRobos.todos) || selecaoRobos.todos.length === 0) {
-                            const bloqueios = (Array.isArray(selecaoRobos.bloqueados) ? selecaoRobos.bloqueados : [])
-                                .map(item => `${item.id}:${item.nome} em ${item.estrategia_id} (${item.gale_atual > 0 ? `GALE ${item.gale_atual}` : 'DIRETO'})`)
-                                .join(', ');
-                            console.log(
-                                `🔒 Sinal ${est.id} suprimido: nenhum robô livre para novo ciclo.`
-                                + `${bloqueios ? ` Ocupados: ${bloqueios}.` : ''}`
-                            );
-                            continue;
-                        }
+                    estadoApostas[est.id] = {
+                        aguardandoResultado: true,
+                        galeAtual: 0,
+                        robosCiclo: unirRobosInscritos(selecaoRobos.todos),
+                        robosWebInscritos: selecaoRobos.web,
+                        robosTelegramInscritos: [],
+                        robosInscritos: unirRobosInscritos(selecaoRobos.todos),
+                        assertividadeSinal: selecaoRobos.assertividade,
+                        mensagensEntrada: [],
+                        mensagensGale: []
+                    };
 
-                        estadoApostas[est.id] = {
-                            aguardandoResultado: true,
-                            galeAtual: 0,
-                            robosCiclo: unirRobosInscritos(selecaoRobos.todos),
-                            robosWebInscritos: selecaoRobos.web,
-                            robosTelegramInscritos: [],
-                            robosInscritos: unirRobosInscritos(selecaoRobos.todos),
-                            assertividadeSinal: selecaoRobos.assertividade,
-                            mensagensEntrada: [],
-                            mensagensGale: []
-                        };
+                    const estadoSinal = estadoApostas[est.id];
+                    emitirAlertaWebRobo('ENTRADA', est, estadoSinal);
+                    estadoSinal.telegramEntradaPromise = inscreverRobosTelegramEntrada(est, estadoSinal, selecaoRobos.telegram);
 
-                        const estadoSinal = estadoApostas[est.id];
-                        emitirAlertaWebRobo('ENTRADA', est, estadoSinal);
-                        estadoSinal.telegramEntradaPromise = inscreverRobosTelegramEntrada(est, estadoSinal, selecaoRobos.telegram);
+                    if (est.quarentena_restante <= 0) {
+                        for (let trader of AUTO_TRADERS_MEMORIA) {
+                            let cf = trader.config;
+                            if (trader.ativo && trader.status_operacao === 'OPERANDO' && autoTraderAutorizaEstrategia(cf, est, ROBOS_MEMORIA)) {
 
-                        if (est.quarentena_restante <= 0) {
-                            for (let trader of AUTO_TRADERS_MEMORIA) {
-                                let cf = trader.config;
-                                if (trader.ativo && trader.status_operacao === 'OPERANDO' && autoTraderAutorizaEstrategia(cf, est, ROBOS_MEMORIA)) {
+                                const robosAutorizadores = robosAutoTraderAutorizadores(cf, est, ROBOS_MEMORIA);
+                                const descricaoAutorizadores = robosAutorizadores.length > 0
+                                    ? robosAutorizadores.map(robo => `${robo.id}:${robo.nome}`).join(', ')
+                                    : `configuração legada:${String(est.origem || '').trim()}`;
 
-                                    const robosAutorizadores = robosAutoTraderAutorizadores(cf, est, ROBOS_MEMORIA);
-                                    const descricaoAutorizadores = robosAutorizadores.length > 0
-                                        ? robosAutorizadores.map(robo => `${robo.id}:${robo.nome}`).join(', ')
-                                        : `configuração legada:${String(est.origem || '').trim()}`;
+                                console.log(
+                                    `🎯 Auto-Trader ${trader.id} (${trader.nome}) autorizado para o sinal `
+                                    + `${est.id} pelo(s) robô(s) ativo(s) ${descricaoAutorizadores}.`
+                                );
 
-                                    console.log(
-                                        `🎯 Auto-Trader ${trader.id} (${trader.nome}) autorizado para o sinal `
-                                        + `${est.id} pelo(s) robô(s) ativo(s) ${descricaoAutorizadores}.`
-                                    );
+                                if (!traderDentroHorarioExecucao(cf)) {
+                                    console.log(`Trader ${trader.id} fora da janela de execucao (${cf.hora_inicio || '00:00'}-${cf.hora_fim || '23:59'}). Nova entrada ignorada.`);
+                                    continue;
+                                }
 
-                                    if (!traderDentroHorarioExecucao(cf)) {
-                                        console.log(`Trader ${trader.id} fora da janela de execucao (${cf.hora_inicio || '00:00'}-${cf.hora_fim || '23:59'}). Nova entrada ignorada.`);
-                                        continue;
-                                    }
+                                if (!(await autorizarNovaEntradaFinanceiraTrader(trader))) {
+                                    continue;
+                                }
 
-                                    if (!(await autorizarNovaEntradaFinanceiraTrader(trader))) {
-                                        continue;
-                                    }
-
-                                    if (cf.limite_entradas && trader.entradas_feitas >= cf.limite_entradas) {
-                                        trader.status_operacao = 'META_ATINGIDA';
-                                        try {
-                                            await dbPool.query('UPDATE auto_traders SET status_operacao=? WHERE id=?', ['META_ATINGIDA', trader.id]);
-                                        } catch(e) {
-                                            console.error(`❌ Falha ao persistir META_ATINGIDA do trader ${trader.id}:`, e.message);
-                                        }
-                                        continue;
-                                    }
-
-                                    if (cf.modo_camuflagem === 'PULOS') {
-                                        if (trader.pulos_restantes > 0) {
-                                            trader.pulos_restantes--;
-                                            try { await dbPool.query('UPDATE auto_traders SET pulos_restantes=? WHERE id=?', [trader.pulos_restantes, trader.id]); } catch(e) { console.error(`❌ Falha ao persistir pulos_restantes do trader ${trader.id}:`, e.message); }
-                                            continue;
-                                        } else {
-                                            let pMin = cf.camuflagem_pulos_min || 1;
-                                            let pMax = cf.camuflagem_pulos_max || 3;
-                                            trader.pulos_restantes = Math.floor(Math.random() * (pMax - pMin + 1)) + pMin;
-                                            try { await dbPool.query('UPDATE auto_traders SET pulos_restantes=? WHERE id=?', [trader.pulos_restantes, trader.id]); } catch(e) { console.error(`❌ Falha ao persistir novo ciclo de pulos do trader ${trader.id}:`, e.message); }
-                                        }
-                                    }
-
-                                    const planoDireto = calcularPlanoAposta(cf, est, 0);
-                                    if (!planoDireto.ok) {
-                                        console.error(`❌ Entrada do trader ${trader.id} bloqueada: ${planoDireto.motivo}`);
-                                        continue;
-                                    }
-                                    let valorArredondado = planoDireto.valor_principal;
-                                    let valorEmpateDireto = planoDireto.valor_empate;
-                                    let alvoPython = planoDireto.apostas[0].alvo;
-
-                                    const ordemExecutorIdDireto = crypto.randomUUID();
-                                    let intencaoDireto = null;
+                                if (cf.limite_entradas && trader.entradas_feitas >= cf.limite_entradas) {
+                                    trader.status_operacao = 'META_ATINGIDA';
                                     try {
-                                        intencaoDireto = await criarIntencaoOrdem(dbPool, {
-                                            trader_id: trader.id,
-                                            estrategia_nome: est.nome,
-                                            fonte_sinal: est.origem,
-                                            alvo: alvoPython,
-                                            nivel: 'DIRETO',
-                                            risco_total: planoDireto.exposicao_etapa,
-                                            valor_entrada: valorArredondado,
-                                            valor_empate: valorEmpateDireto,
-                                            order_id: ordemExecutorIdDireto
-                                        });
+                                        await dbPool.query('UPDATE auto_traders SET status_operacao=? WHERE id=?', ['META_ATINGIDA', trader.id]);
                                     } catch(e) {
+                                        console.error(`❌ Falha ao persistir META_ATINGIDA do trader ${trader.id}:`, e.message);
+                                    }
+                                    continue;
+                                }
+
+                                if (cf.modo_camuflagem === 'PULOS') {
+                                    if (trader.pulos_restantes > 0) {
+                                        trader.pulos_restantes--;
+                                        try { await dbPool.query('UPDATE auto_traders SET pulos_restantes=? WHERE id=?', [trader.pulos_restantes, trader.id]); } catch(e) { console.error(`❌ Falha ao persistir pulos_restantes do trader ${trader.id}:`, e.message); }
+                                        continue;
+                                    } else {
+                                        let pMin = cf.camuflagem_pulos_min || 1;
+                                        let pMax = cf.camuflagem_pulos_max || 3;
+                                        trader.pulos_restantes = Math.floor(Math.random() * (pMax - pMin + 1)) + pMin;
+                                        try { await dbPool.query('UPDATE auto_traders SET pulos_restantes=? WHERE id=?', [trader.pulos_restantes, trader.id]); } catch(e) { console.error(`❌ Falha ao persistir novo ciclo de pulos do trader ${trader.id}:`, e.message); }
+                                    }
+                                }
+
+                                const planoDireto = calcularPlanoAposta(cf, est, 0);
+                                if (!planoDireto.ok) {
+                                    console.error(`❌ Entrada do trader ${trader.id} bloqueada: ${planoDireto.motivo}`);
+                                    continue;
+                                }
+                                let valorArredondado = planoDireto.valor_principal;
+                                let valorEmpateDireto = planoDireto.valor_empate;
+                                let alvoPython = planoDireto.apostas[0].alvo;
+
+                                const ordemExecutorIdDireto = crypto.randomUUID();
+                                let intencaoDireto = null;
+                                try {
+                                    intencaoDireto = await criarIntencaoOrdem(dbPool, {
+                                        trader_id: trader.id,
+                                        estrategia_nome: est.nome,
+                                        fonte_sinal: est.origem,
+                                        alvo: alvoPython,
+                                        nivel: 'DIRETO',
+                                        risco_total: planoDireto.exposicao_etapa,
+                                        valor_entrada: valorArredondado,
+                                        valor_empate: valorEmpateDireto,
+                                        order_id: ordemExecutorIdDireto
+                                    });
+                                } catch(e) {
+                                    console.error(
+                                        `❌ Ordem DIRETO do trader ${trader.id} bloqueada: `
+                                        + `falha ao persistir intenção PREPARANDO antes do executor:`,
+                                        e.message
+                                    );
+                                    continue;
+                                }
+
+                                let executorConfirmouDireto = false;
+                                try {
+                                    const confirmacaoExecutorDireto = await enviarOrdemAoExecutor(
+                                        alvoPython,
+                                        valorArredondado,
+                                        ordemExecutorIdDireto,
+                                        planoDireto.apostas
+                                    );
+                                    executorConfirmouDireto = true;
+                                    const evidenciaDireto = confirmacaoExecutorDireto.execucao.confirmacao;
+
+                                    const conexao = await dbPool.getConnection();
+                                    try {
+                                        await conexao.beginTransaction();
+                                        const novasEntradas = trader.entradas_feitas + 1;
+                                        await conexao.query('UPDATE auto_traders SET entradas_feitas=? WHERE id=?', [novasEntradas, trader.id]);
+                                        const [auditoriaAtualizada] = await conexao.query(
+                                            `UPDATE auditoria_ordens
+                                             SET status_ordem='PENDENTE', executor_confirmacao_metodo=?,
+                                                 executor_saldo_antes=?, executor_saldo_depois=?,
+                                                 executor_debito_observado=?, execucao_confirmada_em=?
+                                             WHERE id=? AND executor_order_id=? AND status_ordem='PREPARANDO'`,
+                                            [
+                                                evidenciaDireto.metodo,
+                                                evidenciaDireto.saldo_antes,
+                                                evidenciaDireto.saldo_depois,
+                                                evidenciaDireto.debito_observado,
+                                                evidenciaDireto.confirmada_em,
+                                                intencaoDireto.auditoria_id,
+                                                ordemExecutorIdDireto
+                                            ]
+                                        );
+                                        if (Number(auditoriaAtualizada.affectedRows) !== 1) {
+                                            throw new Error('Intenção PREPARANDO DIRETO não encontrada após ACK do executor');
+                                        }
+                                        await conexao.commit();
+                                        trader.entradas_feitas = novasEntradas;
+                                    } catch(e) {
+                                        try { await conexao.rollback(); } catch(rollbackError) { console.error(`❌ Rollback falhou para o trader ${trader.id}:`, rollbackError.message); }
+                                        throw e;
+                                    } finally {
+                                        conexao.release();
+                                    }
+                                } catch(e) {
+                                    if (executorConfirmouDireto) {
                                         console.error(
-                                            `❌ Ordem DIRETO do trader ${trader.id} bloqueada: `
-                                            + `falha ao persistir intenção PREPARANDO antes do executor:`,
+                                            `⚠️ Ordem DIRETO confirmada pelo executor (${ordemExecutorIdDireto}), `
+                                            + `mas a intenção ${intencaoDireto.auditoria_id} não avançou para PENDENTE; `
+                                            + `PREPARANDO foi preservado para reconciliação:`,
                                             e.message
                                         );
-                                        continue;
-                                    }
-
-                                    let executorConfirmouDireto = false;
-                                    try {
-                                        const confirmacaoExecutorDireto = await enviarOrdemAoExecutor(
-                                            alvoPython,
-                                            valorArredondado,
-                                            ordemExecutorIdDireto,
-                                            planoDireto.apostas
+                                    } else {
+                                        const statusFalha = await marcarIntencaoAposFalhaEnvio(
+                                            intencaoDireto.auditoria_id,
+                                            e,
+                                            `DIRETO do trader ${trader.id}`
                                         );
-                                        executorConfirmouDireto = true;
-                                        const evidenciaDireto = confirmacaoExecutorDireto.execucao.confirmacao;
-
-                                        const conexao = await dbPool.getConnection();
-                                        try {
-                                            await conexao.beginTransaction();
-                                            const novasEntradas = trader.entradas_feitas + 1;
-                                            await conexao.query('UPDATE auto_traders SET entradas_feitas=? WHERE id=?', [novasEntradas, trader.id]);
-                                            const [auditoriaAtualizada] = await conexao.query(
-                                                `UPDATE auditoria_ordens
-                                                 SET status_ordem='PENDENTE', executor_confirmacao_metodo=?,
-                                                     executor_saldo_antes=?, executor_saldo_depois=?,
-                                                     executor_debito_observado=?, execucao_confirmada_em=?
-                                                 WHERE id=? AND executor_order_id=? AND status_ordem='PREPARANDO'`,
-                                                [
-                                                    evidenciaDireto.metodo,
-                                                    evidenciaDireto.saldo_antes,
-                                                    evidenciaDireto.saldo_depois,
-                                                    evidenciaDireto.debito_observado,
-                                                    evidenciaDireto.confirmada_em,
-                                                    intencaoDireto.auditoria_id,
-                                                    ordemExecutorIdDireto
-                                                ]
-                                            );
-                                            if (Number(auditoriaAtualizada.affectedRows) !== 1) {
-                                                throw new Error('Intenção PREPARANDO DIRETO não encontrada após ACK do executor');
-                                            }
-                                            await conexao.commit();
-                                            trader.entradas_feitas = novasEntradas;
-                                        } catch(e) {
-                                            try { await conexao.rollback(); } catch(rollbackError) { console.error(`❌ Rollback falhou para o trader ${trader.id}:`, rollbackError.message); }
-                                            throw e;
-                                        } finally {
-                                            conexao.release();
-                                        }
-                                    } catch(e) {
-                                        if (executorConfirmouDireto) {
-                                            console.error(
-                                                `⚠️ Ordem DIRETO confirmada pelo executor (${ordemExecutorIdDireto}), `
-                                                + `mas a intenção ${intencaoDireto.auditoria_id} não avançou para PENDENTE; `
-                                                + `PREPARANDO foi preservado para reconciliação:`,
-                                                e.message
-                                            );
-                                        } else {
-                                            const statusFalha = await marcarIntencaoAposFalhaEnvio(
-                                                intencaoDireto.auditoria_id,
-                                                e,
-                                                `DIRETO do trader ${trader.id}`
-                                            );
-                                            await bloquearTraderAposExecucaoAmbigua(
-                                                trader,
-                                                statusFalha,
-                                                'DIRETO'
-                                            );
-                                            console.error(
-                                                `❌ Ordem DIRETO não confirmada para o trader ${trader.id}; `
-                                                + `intenção ${intencaoDireto.auditoria_id} marcada ${statusFalha}:`,
-                                                e.message
-                                            );
-                                        }
+                                        await bloquearTraderAposExecucaoAmbigua(
+                                            trader,
+                                            statusFalha,
+                                            'DIRETO'
+                                        );
+                                        console.error(
+                                            `❌ Ordem DIRETO não confirmada para o trader ${trader.id}; `
+                                            + `intenção ${intencaoDireto.auditoria_id} marcada ${statusFalha}:`,
+                                            e.message
+                                        );
                                     }
                                 }
                             }
                         }
-                        break;
                     }
+                    break;
                 }
             }
         }
