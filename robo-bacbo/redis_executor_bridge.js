@@ -3,6 +3,7 @@ const crypto = require('crypto');
 let instalado = false;
 let publisher = null;
 let subscriber = null;
+let tipMinerSubscriber = null;
 let inicializacaoRedis = null;
 let fetchOriginal = null;
 let timerReconexaoRedis = null;
@@ -341,6 +342,55 @@ function processarMensagemTipMiner(mensagem) {
     return enfileirarTipMiner(payload);
 }
 
+function clienteRedisPronto(cliente) {
+    if (!cliente) return false;
+    if (cliente.isReady === true) return true;
+    if (cliente.ready === true) return true;
+    if (cliente.connected === true) return true;
+    return false;
+}
+
+async function conectarClienteRedis(cliente) {
+    if (!cliente || typeof cliente.connect !== 'function') return;
+    if (cliente.isOpen === true || clienteRedisPronto(cliente)) return;
+    await cliente.connect();
+}
+
+function mensagemTipMinerDoCallback(...args) {
+    const primeiro = args[0];
+    const segundo = args[1];
+
+    // node-redis legado: subscribe(canal, callback) usa callback(err, count).
+    if (primeiro instanceof Error) {
+        console.error('⚠️ bacbo_events: falha na assinatura Redis:', primeiro.message);
+        return;
+    }
+    if ((primeiro === null || primeiro === undefined) && Number.isFinite(Number(segundo))) {
+        console.log(`🎧 bacbo_events: assinatura confirmada (${Number(segundo)} canal(is)).`);
+        return;
+    }
+
+    // node-redis moderno: subscribe(canal, listener) entrega (message, channel).
+    const canal = typeof segundo === 'string' && segundo
+        ? segundo
+        : TIPMINER_REDIS_CHANNEL;
+    if (canal !== TIPMINER_REDIS_CHANNEL) return;
+    if (typeof primeiro !== 'string' && !Buffer.isBuffer(primeiro)) return;
+    processarMensagemTipMiner(Buffer.isBuffer(primeiro) ? primeiro.toString('utf8') : primeiro);
+}
+
+function instalarEventoMessageTipMiner(cliente) {
+    if (!cliente || cliente.__bacboEventsMessageHandlerInstalled) return;
+    if (typeof cliente.on !== 'function') return;
+
+    cliente.on('message', (channel, message) => {
+        if (String(channel || '') !== TIPMINER_REDIS_CHANNEL) return;
+        if (typeof message !== 'string' && !Buffer.isBuffer(message)) return;
+        processarMensagemTipMiner(Buffer.isBuffer(message) ? message.toString('utf8') : message);
+    });
+    cliente.__bacboEventsMessageHandlerInstalled = true;
+}
+
 function agendarReconexaoRedis() {
     if (!instalado || timerReconexaoRedis) return;
 
@@ -359,7 +409,15 @@ function agendarReconexaoRedis() {
 }
 
 async function garantirRedisPronto() {
-    if (publisher?.isReady === true && subscriber?.isReady === true) return true;
+    if (
+        clienteRedisPronto(publisher)
+        && clienteRedisPronto(subscriber)
+        && clienteRedisPronto(tipMinerSubscriber)
+        && subscriber.__bacboBetResultSubscribed
+        && tipMinerSubscriber.__bacboEventsSubscribed
+    ) {
+        return true;
+    }
     if (inicializacaoRedis) return inicializacaoRedis;
 
     inicializacaoRedis = (async () => {
@@ -392,13 +450,29 @@ async function garantirRedisPronto() {
             });
             subscriber.on('end', () => {
                 subscriber.__bacboBetResultSubscribed = false;
-                subscriber.__bacboEventsSubscribed = false;
                 agendarReconexaoRedis();
             });
         }
 
-        if (!publisher.isOpen) await publisher.connect();
-        if (!subscriber.isOpen) await subscriber.connect();
+        if (!tipMinerSubscriber) {
+            tipMinerSubscriber = publisher.duplicate();
+            tipMinerSubscriber.on('error', erro => {
+                console.error('⚠️ bacbo_events subscriber:', erro.message);
+            });
+            tipMinerSubscriber.on('end', () => {
+                tipMinerSubscriber.__bacboEventsSubscribed = false;
+                agendarReconexaoRedis();
+            });
+            tipMinerSubscriber.on('close', () => {
+                tipMinerSubscriber.__bacboEventsSubscribed = false;
+                agendarReconexaoRedis();
+            });
+            instalarEventoMessageTipMiner(tipMinerSubscriber);
+        }
+
+        await conectarClienteRedis(publisher);
+        await conectarClienteRedis(subscriber);
+        await conectarClienteRedis(tipMinerSubscriber);
 
         if (!subscriber.__bacboBetResultSubscribed) {
             await subscriber.subscribe(REDIS_RESPONSE_CHANNEL, mensagem => {
@@ -414,12 +488,14 @@ async function garantirRedisPronto() {
             subscriber.__bacboBetResultSubscribed = true;
         }
 
-        if (!subscriber.__bacboEventsSubscribed) {
-            await subscriber.subscribe(TIPMINER_REDIS_CHANNEL, mensagem => {
-                processarMensagemTipMiner(mensagem);
-            });
-            subscriber.__bacboEventsSubscribed = true;
-            console.log(`🎧 TipMiner Redis: inscrito persistentemente em ${TIPMINER_REDIS_CHANNEL}.`);
+        if (!tipMinerSubscriber.__bacboEventsSubscribed) {
+            const retorno = tipMinerSubscriber.subscribe(
+                TIPMINER_REDIS_CHANNEL,
+                (...args) => mensagemTipMinerDoCallback(...args)
+            );
+            if (retorno && typeof retorno.then === 'function') await retorno;
+            tipMinerSubscriber.__bacboEventsSubscribed = true;
+            console.log(`🎧 TipMiner Redis: subscriber dedicado ativo em ${TIPMINER_REDIS_CHANNEL}.`);
         }
 
         return true;
