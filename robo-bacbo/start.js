@@ -3,6 +3,7 @@
 const path = require('path');
 
 require('./env_loader').loadEnvFile(path.join(__dirname, '..', '.env'));
+require('./operational_log_formatter').instalarLogOperacional();
 const redisRuntime = require('./redis_runtime_v3');
 redisRuntime.instalarRedisRuntimeV3();
 void require('./tipminer_history_sync')
