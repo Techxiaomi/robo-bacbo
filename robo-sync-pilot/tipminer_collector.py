@@ -128,7 +128,7 @@ class TipMinerCollector:
             return payload
 
         if not isinstance(payload, dict):
-            raise ValueError("historico TipMiner nao retornou JSON em lista/objeto")
+            raise ValueError("historico Bac Bo nao retornou JSON em lista/objeto")
 
         for key in ("data", "history", "rounds", "results", "items"):
             value = payload.get(key)
@@ -172,6 +172,14 @@ class TipMinerCollector:
             indexed.sort(key=lambda pair: (sort_values[pair[0]], pair[0]))
             return [item for _, item in indexed]
         return list(rounds)
+
+    @staticmethod
+    def _winner_label(round_type):
+        return {
+            "PLAYER": "🔵 JOGADOR",
+            "BANKER": "🔴 BANCA",
+            "TIE": "🟡 EMPATE",
+        }.get(str(round_type or "").upper(), "RESULTADO")
 
     def _publish_history_sync(self):
         serialized_history = self._json_dumps(self.history)
@@ -220,7 +228,7 @@ class TipMinerCollector:
         payload = response.json()
         raw_items = self._extract_history_items(payload)
         if not raw_items:
-            raise ValueError("historico TipMiner retornou zero giros")
+            raise ValueError("historico Bac Bo retornou zero giros")
 
         normalized = [self._normalize_round(item) for item in raw_items]
         normalized = self._chronological_history(normalized)
@@ -230,10 +238,7 @@ class TipMinerCollector:
 
         self.history = normalized
         self._publish_history_sync()
-        print(
-            f"♻️ TIPMINER HISTORY | {len(self.history)} giro(s) sincronizados em "
-            f"Redis key={REDIS_HISTORY_KEY}."
-        )
+        print(f"♻️ BAC BO | HISTÓRICO | {len(self.history)} giro(s) sincronizados.")
 
     def listen_live(self):
         response = self.http.get(
@@ -251,10 +256,10 @@ class TipMinerCollector:
         if "text/event-stream" not in content_type:
             response.close()
             raise RuntimeError(
-                f"TipMiner Live respondeu Content-Type inesperado: {content_type or 'ausente'}"
+                f"Fluxo Bac Bo respondeu Content-Type inesperado: {content_type or 'ausente'}"
             )
 
-        print(f"🎧 TIPMINER LIVE | SSE conectado; publicando em Redis channel={REDIS_EVENTS_CHANNEL}.")
+        print(f"🎧 BAC BO | LIVE | conectado | Redis={REDIS_EVENTS_CHANNEL}.")
 
         client = SSEClient(response)
         try:
@@ -269,25 +274,24 @@ class TipMinerCollector:
                 try:
                     payload = json.loads(raw_data)
                 except json.JSONDecodeError as exc:
-                    raise ValueError("evento SSE TipMiner nao contem JSON valido") from exc
+                    raise ValueError("evento SSE Bac Bo nao contem JSON valido") from exc
 
                 round_data = self._normalize_round(payload)
                 self._publish_live_round(round_data)
                 print(
-                    "🔥 TIPMINER LIVE | "
-                    f"uuid={round_data['uuid']} | type={round_data['type']} | "
-                    f"result={round_data['result']} | instant={round_data['instant']}"
+                    f"🎲 BAC BO | {self._winner_label(round_data['type'])} | "
+                    f"Soma: {round_data['result']}"
                 )
         finally:
             response.close()
 
-        raise ConnectionError("stream SSE TipMiner encerrou sem excecao")
+        raise ConnectionError("stream SSE Bac Bo encerrou sem excecao")
 
     def run_forever(self):
         print("============================================================")
-        print("📡 COLETOR BAC BO | TIPMINER API -> REDIS")
-        print(f"🧠 Redis history key: {REDIS_HISTORY_KEY}")
-        print(f"📣 Redis events channel: {REDIS_EVENTS_CHANNEL}")
+        print("📡 COLETOR BAC BO | API -> REDIS")
+        print(f"🧠 Histórico Redis: {REDIS_HISTORY_KEY}")
+        print(f"📣 Canal Redis: {REDIS_EVENTS_CHANNEL}")
         print("============================================================")
 
         while True:
@@ -296,12 +300,12 @@ class TipMinerCollector:
                 self.sync_history()
                 self.listen_live()
             except KeyboardInterrupt:
-                print("\n👋 Coletor TipMiner encerrado pelo operador.")
+                print("\n👋 Coletor Bac Bo encerrado pelo operador.")
                 return
             except Exception as exc:
                 print(
-                    "⚠️ TIPMINER/REDIS | fluxo interrompido; "
-                    f"novo history_sync em {RECONNECT_DELAY_SECONDS}s | "
+                    "⚠️ BAC BO/REDIS | fluxo interrompido; "
+                    f"nova sincronização em {RECONNECT_DELAY_SECONDS}s | "
                     f"{type(exc).__name__}: {exc}"
                 )
                 time.sleep(RECONNECT_DELAY_SECONDS)
