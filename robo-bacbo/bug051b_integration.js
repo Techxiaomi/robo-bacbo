@@ -3,8 +3,8 @@
 const crypto = require('crypto');
 const express = require('express');
 
-// Mantém toda a integração financeira/ledger existente em um módulo legado imutável.
-// Este arquivo passa a ser exclusivamente a autoridade da RAM canônica ROAD usada pelo detector live.
+// Mantém a integração financeira/ledger existente e concentra aqui a autoridade
+// da RAM canônica ROAD consumida pelo detector live.
 const expressJsonNativo = express.json;
 const integracaoLegada = require('./bug051b_integration_legacy');
 const expressJsonLegado = express.json;
@@ -16,6 +16,7 @@ const ORIENTACAO_ROAD = Object.freeze({
 });
 const LIMITE_HISTORY_CANONICO = 1000;
 const MOTIVO_FALHA_ENVIO_RESULTADO_NODE = 'FALHA_ENVIO_RESULTADO_NODE';
+const MOTIVO_SOBREPOSICAO_AMBIGUA = 'SOBREPOSICAO_AMBIGUA';
 
 const estadoRoadCanonico = {
     pronto: false,
@@ -29,7 +30,7 @@ const estadoRoadCanonico = {
     hard_reset_pendente: false,
     hard_reset_motivo: null,
     hard_reset_desde: null,
-    snapshot_aguardando_orientacao: false
+    snapshot_pendente: null
 };
 
 function tokenInternoValidoRoad(req) {
@@ -165,6 +166,22 @@ function normalizarOrientacaoDeclaradaRoad(dados) {
     return null;
 }
 
+function inferirOrientacaoPorSequenciaRoad(history) {
+    const itens = Array.isArray(history) ? history : [];
+    if (itens.length < 2) return null;
+    const sequencias = itens.map(item => sequenciaColetorRoad(item?.coletorSeq));
+    if (sequencias.some(seq => seq === null)) return null;
+
+    let crescente = true;
+    let decrescente = true;
+    for (let i = 1; i < sequencias.length; i++) {
+        if (sequencias[i] <= sequencias[i - 1]) crescente = false;
+        if (sequencias[i] >= sequencias[i - 1]) decrescente = false;
+    }
+    if (crescente === decrescente) return null;
+    return crescente ? ORIENTACAO_ROAD.OLD_TO_NEW : ORIENTACAO_ROAD.NEW_TO_OLD;
+}
+
 function historyCronologicoRoad(history, orientacao) {
     const itens = Array.isArray(history) ? history : [];
     if (orientacao === ORIENTACAO_ROAD.OLD_TO_NEW) return [...itens];
@@ -219,14 +236,14 @@ function iniciarHardResetRoad(motivo, sessao = null) {
     estadoRoadCanonico.hard_reset_pendente = true;
     estadoRoadCanonico.hard_reset_motivo = String(motivo || 'CONTINUIDADE_INDETERMINADA').slice(0, 160);
     estadoRoadCanonico.hard_reset_desde = Date.now();
-    estadoRoadCanonico.snapshot_aguardando_orientacao = false;
+    estadoRoadCanonico.snapshot_pendente = null;
     if (sessao !== null && String(sessao).trim()) {
         estadoRoadCanonico.coletor_sessao = String(sessao).trim();
     }
 
     console.warn(
         `🧹 CORE ROAD | HARD RESET | ${estadoRoadCanonico.hard_reset_motivo} | `
-        + 'RAM canônica zerada; incrementais bloqueados até snapshot completo.'
+        + 'RAM canônica zerada; incrementais bloqueados até snapshot completo validado.'
     );
 }
 
@@ -234,67 +251,82 @@ function substituirPorSnapshotCompleto(dados, historyNormalizado) {
     const sessao = String(dados?.coletor_sessao || '').trim();
     const timestamp = Number(dados?.timestamp_coleta);
     const orientacaoDeclarada = normalizarOrientacaoDeclaradaRoad(dados);
-    const mesmaSessao = Boolean(
-        estadoRoadCanonico.coletor_sessao
-        && estadoRoadCanonico.coletor_sessao === sessao
-    );
-    const orientacaoAnterior = mesmaSessao && orientacaoRoadValida(estadoRoadCanonico.orientacao)
-        ? estadoRoadCanonico.orientacao
+    const orientacaoPorSequencia = inferirOrientacaoPorSequenciaRoad(historyNormalizado);
+    const orientacaoConhecida = orientacaoRoadValida(estadoRoadCanonico.orientacao_conhecida)
+        ? estadoRoadCanonico.orientacao_conhecida
         : null;
-    const orientacaoSegura = orientacaoDeclarada
-        || orientacaoAnterior
-        || (orientacaoRoadValida(estadoRoadCanonico.orientacao_conhecida)
-            ? estadoRoadCanonico.orientacao_conhecida
-            : null);
-
-    // Substituição atômica: o snapshot novo nunca é concatenado ao array anterior.
-    estadoRoadCanonico.pronto = false;
-    estadoRoadCanonico.orientacao = null;
-    estadoRoadCanonico.history = historyNormalizado.map(item => ({ ...item }));
-    estadoRoadCanonico.coletor_sessao = sessao;
-    estadoRoadCanonico.snapshot_timestamp = Math.trunc(timestamp);
-    estadoRoadCanonico.atualizado_em = Date.now();
-    estadoRoadCanonico.ultimo_coletor_seq = sequenciaColetorRoad(dados?.coletor_seq);
-    estadoRoadCanonico.snapshot_aguardando_orientacao = true;
+    const orientacaoSegura = orientacaoDeclarada || orientacaoPorSequencia || orientacaoConhecida;
+    const hardResetAtivo = estadoRoadCanonico.hard_reset_pendente === true;
 
     if (!orientacaoRoadValida(orientacaoSegura)) {
+        estadoRoadCanonico.pronto = false;
+        estadoRoadCanonico.orientacao = null;
+        estadoRoadCanonico.history = [];
+        estadoRoadCanonico.snapshot_timestamp = null;
+        estadoRoadCanonico.atualizado_em = Date.now();
+        estadoRoadCanonico.ultimo_coletor_seq = null;
+
+        if (hardResetAtivo) {
+            estadoRoadCanonico.snapshot_pendente = null;
+            console.warn(
+                '⛔ CORE ROAD | hard reset recebeu snapshot sem orientação verificável; '
+                + 'RAM continua vazia e incrementais permanecem proibidos até outro snapshot completo.'
+            );
+            return { pronto: false, orientacao: null, pendente_orientacao: true };
+        }
+
+        estadoRoadCanonico.snapshot_pendente = {
+            dados: { ...dados },
+            history: historyNormalizado.map(item => ({ ...item }))
+        };
         console.warn(
-            '⛔ CORE ROAD | snapshot íntegro substituiu a RAM, porém a orientação ainda é ambígua; '
-            + 'detector permanece bloqueado e nenhum incremental será concatenado.'
+            '⏳ CORE ROAD | inicialização aguardando confirmação de orientação do snapshot; '
+            + 'nenhum item foi publicado na RAM canônica.'
         );
         return { pronto: false, orientacao: null, pendente_orientacao: true };
     }
 
-    if (!snapshotTemSequenciaCronologicaValida(estadoRoadCanonico.history, orientacaoSegura)) {
+    if (!snapshotTemSequenciaCronologicaValida(historyNormalizado, orientacaoSegura)) {
         iniciarHardResetRoad('snapshot rejeitado por sequência cronológica inconsistente', sessao);
         return { pronto: false, orientacao: null, pendente_orientacao: true };
     }
 
+    // Commit atômico do snapshot: somente depois de todas as validações o array
+    // canônico recebe a nova fotografia. Nada do histórico anterior é preservado.
+    const snapshotNovo = historyNormalizado.map(item => ({ ...item }));
+    estadoRoadCanonico.pronto = false;
     estadoRoadCanonico.orientacao = orientacaoSegura;
+    estadoRoadCanonico.history = snapshotNovo;
+    estadoRoadCanonico.coletor_sessao = sessao;
+    estadoRoadCanonico.snapshot_timestamp = Math.trunc(timestamp);
+    estadoRoadCanonico.atualizado_em = Date.now();
+    estadoRoadCanonico.ultimo_coletor_seq = sequenciaColetorRoad(dados?.coletor_seq);
     estadoRoadCanonico.orientacao_conhecida = orientacaoSegura;
-    estadoRoadCanonico.pronto = true;
+    estadoRoadCanonico.snapshot_pendente = null;
     estadoRoadCanonico.hard_reset_pendente = false;
     estadoRoadCanonico.hard_reset_motivo = null;
     estadoRoadCanonico.hard_reset_desde = null;
-    estadoRoadCanonico.snapshot_aguardando_orientacao = false;
-    logRoadReady('snapshot-hard-reset');
+    estadoRoadCanonico.pronto = true;
+    logRoadReady(hardResetAtivo ? 'snapshot-hard-reset' : 'snapshot');
     return { pronto: true, orientacao: orientacaoSegura, pendente_orientacao: false };
 }
 
-function confirmarOrientacaoSnapshotComIncremental(dados, giro) {
-    if (!giro || estadoRoadCanonico.history.length === 0) return false;
-    const primeiro = estadoRoadCanonico.history[0];
-    const ultimo = estadoRoadCanonico.history[estadoRoadCanonico.history.length - 1];
+function confirmarOrientacaoInicialComIncremental(dados, giro) {
+    const pendente = estadoRoadCanonico.snapshot_pendente;
+    if (!pendente || !giro || estadoRoadCanonico.hard_reset_pendente) return false;
+    const history = pendente.history;
+    if (!Array.isArray(history) || history.length === 0) return false;
+
+    const primeiro = history[0];
+    const ultimo = history[history.length - 1];
     const batePrimeiro = mesmoGiroRoad(giro, primeiro);
     const bateUltimo = mesmoGiroRoad(giro, ultimo);
 
     if (batePrimeiro === bateUltimo) {
         if (batePrimeiro) {
-            estadoRoadCanonico.hard_reset_pendente = true;
-            estadoRoadCanonico.hard_reset_motivo = 'SOBREPOSICAO_AMBIGUA';
-            console.warn(
-                '🧹 CORE ROAD | sobreposição/orientação ambígua após snapshot; '
-                + 'incremental descartado e detector segue bloqueado até novo snapshot completo.'
+            iniciarHardResetRoad(
+                MOTIVO_SOBREPOSICAO_AMBIGUA,
+                String(dados?.coletor_sessao || '').trim() || estadoRoadCanonico.coletor_sessao
             );
         }
         return false;
@@ -303,22 +335,23 @@ function confirmarOrientacaoSnapshotComIncremental(dados, giro) {
     const orientacao = batePrimeiro
         ? ORIENTACAO_ROAD.NEW_TO_OLD
         : ORIENTACAO_ROAD.OLD_TO_NEW;
-    if (!snapshotTemSequenciaCronologicaValida(estadoRoadCanonico.history, orientacao)) {
-        iniciarHardResetRoad('snapshot rejeitado após confirmação de orientação', dados?.coletor_sessao);
+    if (!snapshotTemSequenciaCronologicaValida(history, orientacao)) {
+        iniciarHardResetRoad('snapshot inicial rejeitado após confirmação de orientação', dados?.coletor_sessao);
         return false;
     }
 
-    // O incremental é usado apenas como prova da ponta do snapshot e NÃO é anexado.
+    const dadosSnapshot = pendente.dados || {};
+    const snapshotNovo = history.map(item => ({ ...item }));
     estadoRoadCanonico.orientacao = orientacao;
     estadoRoadCanonico.orientacao_conhecida = orientacao;
-    estadoRoadCanonico.pronto = true;
-    estadoRoadCanonico.snapshot_aguardando_orientacao = false;
-    estadoRoadCanonico.hard_reset_pendente = false;
-    estadoRoadCanonico.hard_reset_motivo = null;
-    estadoRoadCanonico.hard_reset_desde = null;
-    estadoRoadCanonico.ultimo_coletor_seq = sequenciaColetorRoad(dados?.coletor_seq);
+    estadoRoadCanonico.history = snapshotNovo;
+    estadoRoadCanonico.coletor_sessao = String(dadosSnapshot.coletor_sessao || dados?.coletor_sessao || '').trim();
+    estadoRoadCanonico.snapshot_timestamp = Math.trunc(Number(dadosSnapshot.timestamp_coleta) || Date.now());
     estadoRoadCanonico.atualizado_em = Date.now();
-    logRoadReady('orientação-confirmada');
+    estadoRoadCanonico.ultimo_coletor_seq = sequenciaColetorRoad(dadosSnapshot.coletor_seq);
+    estadoRoadCanonico.snapshot_pendente = null;
+    estadoRoadCanonico.pronto = true;
+    logRoadReady('orientação-inicial-confirmada');
     return true;
 }
 
@@ -326,6 +359,17 @@ function processarIncrementalCanonico(req) {
     if (req.method !== 'POST' || req.path !== '/receber-sinal') return false;
     if (!tokenInternoValidoRoad(req)) return false;
     const dados = req.body && typeof req.body === 'object' ? req.body : {};
+
+    const interrupcaoFluxo = dados.interrupcao_fluxo === true || dados.interrupcao_fluxo === 1;
+    const motivoInterrupcao = String(dados.motivo_interrupcao || '').trim().toUpperCase();
+    if (interrupcaoFluxo && motivoInterrupcao === MOTIVO_FALHA_ENVIO_RESULTADO_NODE) {
+        iniciarHardResetRoad(
+            MOTIVO_FALHA_ENVIO_RESULTADO_NODE,
+            String(dados.coletor_sessao || '').trim() || estadoRoadCanonico.coletor_sessao
+        );
+        return false;
+    }
+
     const giro = normalizarGiroIncrementalRoad(dados);
     if (!giro) return false;
 
@@ -339,13 +383,14 @@ function processarIncrementalCanonico(req) {
         return false;
     }
 
-    if (estadoRoadCanonico.history.length === 0) return false;
+    // Regra crítica: depois de FALHA_ENVIO_RESULTADO_NODE, sobreposição ambígua,
+    // salto de sequência ou troca de sessão, nenhum incremental pode orientar,
+    // completar ou anexar qualquer coisa ao ROAD. Somente /collector-road libera.
+    if (estadoRoadCanonico.hard_reset_pendente) return false;
 
     if (estadoRoadCanonico.pronto !== true || !orientacaoRoadValida(estadoRoadCanonico.orientacao)) {
-        return confirmarOrientacaoSnapshotComIncremental(dados, giro);
+        return confirmarOrientacaoInicialComIncremental(dados, giro);
     }
-
-    if (estadoRoadCanonico.hard_reset_pendente) return false;
 
     const seqRecebida = sequenciaColetorRoad(dados.coletor_seq);
     const seqAnterior = estadoRoadCanonico.ultimo_coletor_seq;
@@ -392,9 +437,9 @@ function processarCollectorHealthCanonico(req) {
     const motivo = String(dados.motivo || '').trim().toUpperCase();
     if (evento !== 'INTERRUPCAO') return false;
 
-    if (motivo === MOTIVO_FALHA_ENVIO_RESULTADO_NODE) {
+    if (motivo === MOTIVO_FALHA_ENVIO_RESULTADO_NODE || motivo === MOTIVO_SOBREPOSICAO_AMBIGUA) {
         iniciarHardResetRoad(
-            MOTIVO_FALHA_ENVIO_RESULTADO_NODE,
+            motivo,
             String(dados.coletor_sessao || '').trim() || estadoRoadCanonico.coletor_sessao
         );
         return true;
@@ -559,8 +604,6 @@ function instalarRoadHardResetExpress() {
                     );
                 }
 
-                // Mantém integralmente as garantias legadas de contexto/ledger/config
-                // para todas as rotas que não são o snapshot ROAD.
                 return middlewareLegado(req, res, next);
             });
         };
