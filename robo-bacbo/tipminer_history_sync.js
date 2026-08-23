@@ -7,6 +7,7 @@ let instalado = false;
 let subscriber = null;
 let reader = null;
 let ultimaAssinatura = null;
+let filaSincronizacao = Promise.resolve();
 
 function objeto(valor) {
     return valor && typeof valor === 'object' && !Array.isArray(valor) ? valor : null;
@@ -106,6 +107,12 @@ async function entregarHistory(processarBacbo, origem) {
     return Boolean(aceito);
 }
 
+function enfileirarHistory(processarBacbo, origem) {
+    const executar = () => entregarHistory(processarBacbo, origem);
+    filaSincronizacao = filaSincronizacao.then(executar, executar);
+    return filaSincronizacao;
+}
+
 async function instalarTipMinerHistorySync(processarBacbo) {
     if (instalado) return true;
     if (typeof processarBacbo !== 'function') {
@@ -131,7 +138,7 @@ async function instalarTipMinerHistorySync(processarBacbo) {
         try { evento = JSON.parse(String(mensagem || '')); } catch (_) { return; }
         const action = String(objeto(evento)?.action || '').trim().toLowerCase();
         if (action !== 'history_sync') return;
-        void entregarHistory(processarBacbo, 'history_sync').catch(erro => {
+        void enfileirarHistory(processarBacbo, 'history_sync').catch(erro => {
             console.error('⚠️ TipMiner HISTORY_SYNC falhou:', erro.message);
         });
     });
@@ -140,7 +147,7 @@ async function instalarTipMinerHistorySync(processarBacbo) {
     console.log(`🎧 Adaptador TipMiner HISTORY_SYNC ativo: ${TIPMINER_HISTORY_KEY} -> Runtime V3.`);
 
     // Recupera o snapshot já retido mesmo se o evento history_sync ocorreu antes do Node subir.
-    void entregarHistory(processarBacbo, 'startup').catch(erro => {
+    void enfileirarHistory(processarBacbo, 'startup').catch(erro => {
         console.error('⚠️ TipMiner HISTORY startup falhou:', erro.message);
     });
     return true;
