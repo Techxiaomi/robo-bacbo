@@ -3,5 +3,9 @@
 const path = require('path');
 
 require('./env_loader').loadEnvFile(path.join(__dirname, '..', '.env'));
-require('./redis_runtime_v3').instalarRedisRuntimeV3();
+const redisRuntime = require('./redis_runtime_v3');
+redisRuntime.instalarRedisRuntimeV3();
+void require('./tipminer_history_sync')
+    .instalarTipMinerHistorySync(redisRuntime.processarBacbo)
+    .catch(erro => console.error(`⚠️ Adaptador TipMiner HISTORY_SYNC não iniciou: ${erro.message}`));
 require('./bot2_coletor');
