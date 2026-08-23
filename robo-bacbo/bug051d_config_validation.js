@@ -1,10 +1,10 @@
 'use strict';
 
 const { validarFaixasHorarioConfiguracao } = require('./auto_trader_schedule');
+const { validarConfiguracaoEstrategiaExecucao } = require('./auto_trader_execution_cycle');
 
 const LIMITE_DECIMAL_DINHEIRO = 9_999_999_999.99;
 const LIMITE_MULTIPLICADOR_GALE = 1000;
-const LIMITE_PULOS = 1000;
 
 function falha(campo, motivo) {
     return { ok: false, campo, motivo: `${campo}: ${motivo}` };
@@ -91,21 +91,12 @@ function validarConfiguracaoAutoTrader(config) {
         }
     }
 
-    if (config.modo_camuflagem !== 'TODAS' && config.modo_camuflagem !== 'PULOS') {
-        return falha('modo_camuflagem', 'deve ser TODAS ou PULOS');
-    }
-    if (config.modo_camuflagem === 'PULOS') {
-        const minimo = config.camuflagem_pulos_min;
-        const maximo = config.camuflagem_pulos_max;
-        if (!inteiroEstrito(minimo) || minimo < 1 || minimo > LIMITE_PULOS) {
-            return falha('camuflagem_pulos_min', 'deve ser inteiro entre 1 e 1000');
-        }
-        if (!inteiroEstrito(maximo) || maximo < minimo || maximo > LIMITE_PULOS) {
-            return falha(
-                'camuflagem_pulos_max',
-                'deve ser inteiro maior ou igual ao mínimo e menor ou igual a 1000'
-            );
-        }
+    const estrategiaExecucao = validarConfiguracaoEstrategiaExecucao(config);
+    if (!estrategiaExecucao.ok) {
+        return falha(
+            estrategiaExecucao.campo || 'estrategia_execucao',
+            estrategiaExecucao.motivo || 'configuração inválida'
+        );
     }
 
     if (!inteiroEstrito(config.limite_entradas) || config.limite_entradas < 1) {
