@@ -25,7 +25,7 @@ URL_HOME_CASSINO = os.getenv("CASINO_HOME_URL", "")
 ARQUIVO_SESSAO = os.getenv("SESSION_STATE_FILE", os.path.join(BASE_DIR, "sessao_salva.json"))
 USUARIO_CASSINO = os.getenv("CASINO_USER", "")
 SENHA_CASSINO = os.getenv("CASINO_PASSWORD", "")
-CASINO_BALANCE_SELECTOR = os.getenv("CASINO_BALANCE_SELECTOR", "").strip()
+CASINO_BALANCE_SELECTOR = '[data-role="balance-label-value"]'
 REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379").strip() or "redis://127.0.0.1:6379"
 REDIS_COMMAND_CHANNEL = "auto_trader_commands"
 REDIS_RESPONSE_CHANNEL = "auto_trader_responses"
@@ -391,47 +391,45 @@ def renovar_sessao_automaticamente(page, context):
 def parsear_valor_monetario(texto):
     if texto is None:
         return None
-    match = re.search(r"-?\d[\d\s.,]*", str(texto).replace("\xa0", " "))
-    if not match:
+
+    limpo = re.sub(r"[^\d,]", "", str(texto).replace("\xa0", ""))
+    if not limpo:
         return None
 
-    bruto = re.sub(r"\s+", "", match.group(0))
-    negativo = bruto.startswith("-")
-    bruto = bruto.lstrip("-")
-
-    if "," in bruto and "." in bruto:
-        if bruto.rfind(",") > bruto.rfind("."):
-            bruto = bruto.replace(".", "").replace(",", ".")
-        else:
-            bruto = bruto.replace(",", "")
-    elif "," in bruto:
-        esquerda, direita = bruto.rsplit(",", 1)
-        bruto = esquerda.replace(",", "") + "." + direita if len(direita) in (1, 2) else bruto.replace(",", "")
-    elif "." in bruto:
-        esquerda, direita = bruto.rsplit(".", 1)
-        bruto = esquerda.replace(".", "") + "." + direita if len(direita) in (1, 2) else bruto.replace(".", "")
+    if "," in limpo:
+        inteiro, decimal = limpo.rsplit(",", 1)
+        if not inteiro:
+            inteiro = "0"
+        bruto = inteiro + ("." + decimal if decimal else "")
+    else:
+        bruto = limpo
 
     try:
         valor = float(bruto)
     except ValueError:
         return None
-    if negativo or valor < 0:
+    if valor < 0:
         return None
     return round(valor, 2)
 
 
 def ler_saldo_atual(page):
-    if not CASINO_BALANCE_SELECTOR:
+    try:
+        frames = list(page.frames)
+    except Exception:
         return None
-    contextos = [page] + list(page.frames)
-    for contexto in contextos:
+
+    for frame in frames:
         try:
-            localizador = contexto.locator(CASINO_BALANCE_SELECTOR)
+            localizador = frame.locator(CASINO_BALANCE_SELECTOR)
             for indice in range(min(localizador.count(), 10)):
                 elemento = localizador.nth(indice)
                 if not elemento.is_visible():
                     continue
-                saldo = parsear_valor_monetario(elemento.inner_text(timeout=700))
+                texto = elemento.get_attribute("data-balance-visible")
+                if not texto:
+                    texto = elemento.inner_text(timeout=700)
+                saldo = parsear_valor_monetario(texto)
                 if saldo is not None:
                     return saldo
         except Exception:
