@@ -1,4 +1,5 @@
 import os
+import sys
 
 
 def load_env_file(file_path):
@@ -21,3 +22,12 @@ def load_env_file(file_path):
 
             if key and key not in os.environ:
                 os.environ[key] = value
+
+    # O executor Redis-only removeu a captura WebSocket da Evolution. Ao executar
+    # robo.py, reinstala o coletor ROAD/LIVE antes da criação da primeira página.
+    if os.path.basename(str(sys.argv[0] or "")).lower() == "robo.py":
+        try:
+            from bacbo_ws_collector import instalar_coletor_bacbo
+            instalar_coletor_bacbo()
+        except Exception as e:
+            print(f"⚠️ Falha ao instalar coletor BacBo WebSocket: {type(e).__name__}: {e}")
