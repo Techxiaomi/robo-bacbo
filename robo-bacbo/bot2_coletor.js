@@ -2,6 +2,7 @@ const mysql = require("mysql2/promise");
 const express = require("express");
 const path = require("path");
 const crypto = require("crypto");
+const { createClient } = require("redis");
 const {
     validarPoliticaProtecao,
     calcularPlanoAposta,
@@ -12,6 +13,16 @@ const { criarAutoPilotService } = require("./auto_pilot_ia");
 const { criarControleDiarioAutoTrader } = require("./bug051b_daily_counter");
 const { criarIntegracaoContadorDiario } = require("./bug051b_integration");
 require("./env_loader").loadEnvFile(path.join(__dirname, "..", ".env"));
+
+const REDIS_URL = String(process.env.REDIS_URL || "redis://127.0.0.1:6379/0").trim()
+    || "redis://127.0.0.1:6379/0";
+const REDIS_BACBO_HISTORY_KEY = String(
+    process.env.REDIS_BACBO_HISTORY_KEY || "bacbo_history"
+).trim() || "bacbo_history";
+const REDIS_BACBO_EVENTS_CHANNEL = String(
+    process.env.REDIS_BACBO_EVENTS_CHANNEL || "bacbo_events"
+).trim() || "bacbo_events";
+const LIMITE_UUIDS_TIPMINER_MEMORIA = 1000;
 
 // Erros globais realmente não tratados são fatais: continuar pode deixar estado financeiro incoerente.
 process.on('uncaughtException', (err) => {
@@ -222,7 +233,6 @@ async function prepararBancoDeDados() {
             )
         `);
 
-        // 🌟 NOVAS TABELAS DO MOTOR DE EXECUÇÃO (AUTO-TRADER)
         await dbPool.query(`
             CREATE TABLE IF NOT EXISTS auto_traders (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -312,16 +322,12 @@ async function prepararBancoDeDados() {
         await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN data_contador_entradas VARCHAR(10) DEFAULT NULL");
         await integracaoContadorDiario.inicializarDatasLegadas();
 
-        // Corrige estados legados impossíveis: um trader desligado manualmente não pode permanecer OPERANDO/STANDBY.
-        // Estados de parada explícita (STOP_WIN/STOP_LOSS/STOP_REDS/TRAILING_STOP) são preservados.
         await dbPool.query(
             `UPDATE auto_traders
              SET status_operacao='DESLIGADO'
              WHERE ativo=false AND status_operacao IN ('OPERANDO', 'STANDBY')`
         );
 
-        // BUG-012: padrões IA não podem sobreviver sem o Robô/Canal proprietário.
-        // A limpeza é idempotente e também corrige órfãos deixados por versões anteriores.
         await limparPadroesDinamicosOrfaos();
 
         console.log("\n========================================================");
@@ -348,8 +354,6 @@ let estadoContinuidadeColetor = {
     seq: null,
     timestamp_coleta: null
 };
-// BUG-014C: a admissão avança sincronamente no recebimento para que duas requisições
-// consecutivas nunca avaliem o mesmo estado enquanto a rodada anterior aguarda I/O.
 let estadoContinuidadeRecepcao = {
     sessao: null,
     seq: null,
@@ -357,6 +361,24 @@ let estadoContinuidadeRecepcao = {
 };
 let caudaProcessamentoResultados = Promise.resolve();
 let resultadosAguardandoProcessamento = 0;
+let caudaEventosRedisBacBo = Promise.resolve();
+const uuidsTipMinerRecentes = new Set();
+const estadoTipMinerRedis = {
+    sessao: null,
+    live_seq: 0,
+    ultimo_uuid: null,
+    sincronizado_em: 0
+};
+
+const redisBacBoClient = createClient({ url: REDIS_URL });
+const redisBacBoSubscriber = redisBacBoClient.duplicate();
+
+redisBacBoClient.on('error', erro => {
+    console.error('❌ REDIS BAC BO | cliente de dados:', erro.message);
+});
+redisBacBoSubscriber.on('error', erro => {
+    console.error('❌ REDIS BAC BO | subscriber:', erro.message);
+});
 
 const ORIENTACAO_ROAD_NATIVA = Object.freeze({
     OLD_TO_NEW: 'OLD_TO_NEW',
@@ -390,7 +412,10 @@ const estadoRoadNativo = {
 };
 
 function resultadoRoadNativo(valor) {
-    const bruto = String(valor ?? '').trim().toLowerCase().normalize('NFD');
+    const texto = String(valor ?? '').trim();
+    const indicePayload = texto.indexOf(':');
+    const token = indicePayload >= 0 ? texto.slice(0, indicePayload) : texto;
+    const bruto = token.toLowerCase().normalize('NFD');
     let compacto = '';
     for (const caractere of bruto) {
         const codigo = caractere.charCodeAt(0);
@@ -417,7 +442,7 @@ function normalizarPadraoRoadNativo(padrao) {
 }
 
 function numeroRoadNativo(valor) {
-    if (valor === null || valor === undefined || typeof valor === 'boolean') return null;
+    if (valor === null || valor === undefined || typeof valor === 'boolean' || valor === '') return null;
     const numero = Number(valor);
     if (!Number.isFinite(numero)) return null;
     return Math.trunc(numero);
@@ -455,34 +480,51 @@ function normalizarGiroRoadNativo(dados, coletorSessaoFallback = '') {
     const resultado = resultadoRoadNativo(
         dados?.winner || dados?.vencedor || dados?.resultado
     );
+    if (!resultado) return null;
+
     const playerScore = scoreRoadDoResultado(dados, 'player');
     const bankerScore = scoreRoadDoResultado(dados, 'banker');
-    if (!resultado || playerScore === null || bankerScore === null) return null;
-    if (playerScore < 0 || playerScore > 12 || bankerScore < 0 || bankerScore > 12) return null;
+    if (playerScore !== null && (playerScore < 0 || playerScore > 12)) return null;
+    if (bankerScore !== null && (bankerScore < 0 || bankerScore > 12)) return null;
 
     const sessao = sessaoIngestaoRoad(dados) || String(coletorSessaoFallback || '').trim();
     const timestamp = numeroRoadNativo(dados?.timestamp_ms ?? dados?.timestamp_coleta ?? dados?.timestamp);
     const seq = numeroRoadNativo(dados?.coletor_seq ?? dados?.coletorSeq);
+    const tipminerResult = numeroRoadNativo(dados?.tipminer_result ?? dados?.result_total);
     return {
         resultado,
         winner: resultado,
         playerScore,
         bankerScore,
-        round_id: String(dados?.round_id || dados?.roundId || '').trim() || null,
+        tipminerResult,
+        round_id: String(dados?.round_id || dados?.roundId || dados?.uuid || '').trim() || null,
         coletor_seq: seq !== null && seq > 0 ? seq : null,
         timestamp_ms: timestamp !== null && timestamp > 0 ? timestamp : 0,
-        id_sessao: sessao || 'EVOLUTION_CANONICA'
+        id_sessao: sessao || 'TIPMINER_CANONICA'
     };
 }
 
 function mesmoGiroRoadNativo(a, b) {
     if (!a || !b) return false;
-    const roundA = String(a.round_id || '').trim();
-    const roundB = String(b.round_id || '').trim();
+    const roundA = String(a.round_id || a.roundId || a.uuid || '').trim();
+    const roundB = String(b.round_id || b.roundId || b.uuid || '').trim();
     if (roundA && roundB) return roundA === roundB;
-    return resultadoRoadNativo(a.resultado || a.winner) === resultadoRoadNativo(b.resultado || b.winner)
-        && Number(a.playerScore) === Number(b.playerScore)
-        && Number(a.bankerScore) === Number(b.bankerScore);
+
+    if (resultadoRoadNativo(a.resultado || a.winner) !== resultadoRoadNativo(b.resultado || b.winner)) {
+        return false;
+    }
+
+    const playerA = numeroRoadNativo(a.playerScore);
+    const playerB = numeroRoadNativo(b.playerScore);
+    const bankerA = numeroRoadNativo(a.bankerScore);
+    const bankerB = numeroRoadNativo(b.bankerScore);
+    if (playerA !== null && playerB !== null && bankerA !== null && bankerB !== null) {
+        return playerA === playerB && bankerA === bankerB;
+    }
+
+    const totalA = numeroRoadNativo(a.tipminerResult ?? a.tipminer_result);
+    const totalB = numeroRoadNativo(b.tipminerResult ?? b.tipminer_result);
+    return totalA !== null && totalB !== null && totalA === totalB;
 }
 
 function orientacaoRoadDoCoreCanonico(sessaoEsperada = '') {
@@ -604,11 +646,18 @@ function substituirRoadPorSnapshotFresco(dados, recebidoEm = Date.now()) {
     const normalizados = history.map(item => normalizarGiroRoadNativo(item, sessao));
     if (normalizados.some(item => item === null)) return false;
 
+    const orientacaoDeclarada = String(dados?.orientacao || '').trim();
+    const orientacaoDeclaradaValida = orientacaoDeclarada === ORIENTACAO_ROAD_NATIVA.OLD_TO_NEW
+        || orientacaoDeclarada === ORIENTACAO_ROAD_NATIVA.NEW_TO_OLD;
     const orientacaoPreservada = estadoRoadNativo.orientacao_preservada;
-    const orientacao = orientacaoPreservada === ORIENTACAO_ROAD_NATIVA.OLD_TO_NEW
-        || orientacaoPreservada === ORIENTACAO_ROAD_NATIVA.NEW_TO_OLD
-        ? orientacaoPreservada
-        : orientacaoRoadDoCoreCanonico(sessao);
+    const orientacao = orientacaoDeclaradaValida
+        ? orientacaoDeclarada
+        : (
+            orientacaoPreservada === ORIENTACAO_ROAD_NATIVA.OLD_TO_NEW
+            || orientacaoPreservada === ORIENTACAO_ROAD_NATIVA.NEW_TO_OLD
+                ? orientacaoPreservada
+                : orientacaoRoadDoCoreCanonico(sessao)
+        );
     const alocadoEm = Date.now();
 
     estadoRoadNativo.history = normalizados;
@@ -620,6 +669,7 @@ function substituirRoadPorSnapshotFresco(dados, recebidoEm = Date.now()) {
     estadoRoadNativo.em_sincronizacao = true;
     estadoRoadNativo.hard_reset_em = 0;
     estadoRoadNativo.snapshot_alocado_em = alocadoEm;
+    estadoRoadNativo.ultimo_pacote_em = alocadoEm;
     estadoRoadNativo.ultimo_incremental_legitimo_em = 0;
     estadoRoadNativo.orientacao_preservada = null;
     estadoRoadNativo.sessao_preservada = null;
@@ -832,7 +882,6 @@ function origemCombinaComHost(origin, host) {
     }
 }
 
-// SEC003B-ADMIN-AUTH
 function compararTextoSeguro(recebido, esperado) {
     const recebidoBuffer = Buffer.from(String(recebido ?? ''), 'utf8');
     const esperadoBuffer = Buffer.from(String(esperado ?? ''), 'utf8');
@@ -960,8 +1009,7 @@ app.post('/auth/logout', (req, res) => {
 });
 
 app.use((req, res, next) => {
-    const rotaInterna = req.path === '/receber-sinal'
-        || req.path === '/executor-status'
+    const rotaInterna = req.path === '/executor-status'
         || req.path === '/collector-health';
     if (rotaInterna) return next();
     if (!ADMIN_AUTH_REQUIRED || sessaoAdminValidaCookie(req.get('Cookie'))) return next();
@@ -972,8 +1020,7 @@ app.use((req, res, next) => {
     return res.redirect('/login');
 });
 app.use((req, res, next) => {
-    const rotaDependeDeInicializacao = req.path === '/receber-sinal'
-        || req.path === '/executor-status'
+    const rotaDependeDeInicializacao = req.path === '/executor-status'
         || req.path === '/collector-health'
         || req.path.startsWith('/api/');
     if (rotaDependeDeInicializacao && !backendPronto) {
@@ -1035,8 +1082,6 @@ const EXECUTOR_MAX_ATTEMPTS = 2;
 const executorExecutionTimeoutConfig = Number(process.env.EXECUTOR_EXECUTION_TIMEOUT_MS || 210000);
 const EXECUTOR_EXECUTION_TIMEOUT_MS = (
     Number.isFinite(executorExecutionTimeoutConfig)
-    // O callback do Node precisa sobreviver ao fusível máximo de 180 s do
-    // executor Python; valores antigos de 30 s voltam ao default seguro.
     && executorExecutionTimeoutConfig >= 195000
     && executorExecutionTimeoutConfig <= 360000
         ? executorExecutionTimeoutConfig
@@ -1296,7 +1341,6 @@ async function enviarOrdemAoExecutor(alvo, valor, orderId = crypto.randomUUID(),
                     : e;
                 ultimoErro.envio_ambiguo = erroRepetivel;
 
-                // Um callback pode chegar mesmo quando a resposta HTTP do aceite se perdeu.
                 if (esperaExecucao.resultadoAtual()) break;
 
                 if (erroRepetivel && tentativa < EXECUTOR_MAX_ATTEMPTS) {
@@ -1461,7 +1505,7 @@ if (!hostNodeEhLoopback(NODE_HOST)) {
 const server = app.listen(PORTA, NODE_HOST, () => {
     const hostExibicao = NODE_HOST.includes(':') ? `[${NODE_HOST}]` : NODE_HOST;
     console.log(`🌐 Painel Web rodando em http://${hostExibicao}:${PORTA}`);
-    console.log(`📡 Webhook aguardando sinais em: http://${hostExibicao}:${PORTA}/receber-sinal`);
+    console.log(`📡 Ingestão Bac Bo via Redis Pub/Sub: ${REDIS_BACBO_EVENTS_CHANNEL}`);
 });
 
 const ioServer = new Server(server, {
@@ -1919,7 +1963,6 @@ app.get("/api/robos", async (req, res) => {
         const [destinatarios] = await dbPool.query('SELECT * FROM destinatarios_robo');
         const [countDinamicos] = await dbPool.query(`SELECT robo_dono_id, COUNT(id) AS qtd_total, SUM(ativo = true) AS qtd_ativos, SUM(ativo = false AND (ia_status='RESERVA' OR (ia_status IS NULL AND quarentena_restante=0))) AS qtd_reserva, SUM(ativo = false AND ia_status='SHADOW_HISTORICO') AS qtd_shadow_historico, SUM(ativo = false AND ia_status='SHADOW_LIVE') AS qtd_shadow_live, SUM(ativo = false AND (ia_status LIKE 'SHADOW_%' OR (ia_status IS NULL AND quarentena_restante>0))) AS qtd_sombra FROM estrategias WHERE is_dinamico = true GROUP BY robo_dono_id`);
 
-        // UX-002/003: estatísticas cronológicas dos robôs para os cards e máximas de sequência.
         const [historicoRobos] = await dbPool.query(`
             SELECT
                 id, robo_id, tipo_resultado, nivel, multiplicador,
@@ -2267,15 +2310,12 @@ app.delete("/api/robo/:id", async (req, res) => {
             padroesIaExcluidos = Math.max(0, Number(resultadoPadroes.affectedRows) || 0);
         }
 
-        // O histórico live de padrões expirados é preservado enquanto o robô existir.
-        // Na exclusão definitiva do proprietário, remove também IDs IA já arquivados pelo TTL.
         const prefixoHistoricoIa = `ia_${roboId}_`;
         await conexao.query(
             'DELETE FROM historico_resultados WHERE LEFT(estrategia_id, ?) = ?',
             [prefixoHistoricoIa.length, prefixoHistoricoIa]
         );
 
-        // Ao excluir o Robô/Canal, seu histórico de distribuição também deixa de ter proprietário.
         await conexao.query('DELETE FROM historico_shadow_ia WHERE robo_id=?', [roboId]);
         await conexao.query('DELETE FROM historico_disparos_robos WHERE robo_id=?', [roboId]);
         await conexao.query('DELETE FROM destinatarios_robo WHERE robo_id=?', [roboId]);
@@ -2474,7 +2514,7 @@ app.get("/api/auditoria-ordens/:trader_id", async (req, res) => {
 });
 
 // ==========================================
-// 7. MEMÓRIA E WEBHOOK TITÃ (COM LOGS COMPLETOS)
+// 7. MEMÓRIA, REDIS E FLUXO DE RESULTADOS
 // ==========================================
 
 async function ativarAutoTradersAguardandoMesa() {
@@ -2669,7 +2709,7 @@ function calcularAssertividadeLiveCanonica(est, historicoLiveCanonico) {
         .map(giro => ({
             resultado: String(giro?.resultado || ''),
             multiplicador: String(giro?.multiplicador || ''),
-            id_sessao: String(giro?.id_sessao || 'EVOLUTION_CANONICA'),
+            id_sessao: String(giro?.id_sessao || 'TIPMINER_CANONICA'),
             timestamp_ms: Number(giro?.timestamp_ms) || 0
         }));
 
@@ -2720,7 +2760,6 @@ function idsRobosSelecionadosAutoTrader(config, robos = []) {
             continue;
         }
 
-        // Migração defensiva de configurações anteriores ao BUG-033.
         match = /^AUTO_PILOT_IA:(\d+)$/i.exec(fonte);
         if (match) {
             ids.add(Number(match[1]));
@@ -2754,7 +2793,6 @@ function autoTraderAutorizaEstrategia(config, est, robos = []) {
         ? config.fontes_sinal.map(fonte => String(fonte || '').trim()).filter(Boolean)
         : [];
 
-    // Último fallback para motores antigos que gravavam uma origem manual.
     return !est.is_dinamico && fontes.includes(String(est.origem || '').trim());
 }
 
@@ -3953,7 +3991,6 @@ async function carregarSistemasParaMemoria() {
             };
         });
 
-        // 🌟 LOGS DETALHADOS RESTAURADOS NA INICIALIZAÇÃO
         console.log(`\n📂 MEMÓRIA ALOCADA COM SUCESSO:`);
         console.log(`   - Estratégias Ativas: ${ESTRATEGIAS_MEMORIA.length}`);
         console.log(`   - Robôs de Canal: ${ROBOS_MEMORIA.length}`);
@@ -4063,86 +4100,253 @@ app.post("/collector-health", async (req, res) => {
     }
 });
 
-app.post("/receber-sinal", async (req, res) => {
+function timestampTipMinerEmMs(valor) {
+    if (valor === null || valor === undefined || valor === '') return null;
+    const texto = String(valor).trim();
+    if (!texto) return null;
+
+    const numerico = Number(texto);
+    if (Number.isFinite(numerico) && numerico > 0) {
+        return Math.trunc(numerico < 100000000000 ? numerico * 1000 : numerico);
+    }
+
+    const parseado = Date.parse(texto);
+    return Number.isFinite(parseado) && parseado > 0 ? Math.trunc(parseado) : null;
+}
+
+function tokenResultadoTipMiner(tipo, resultado) {
+    const tipoNormalizado = String(tipo || '').trim().toUpperCase();
+    const numero = Number(resultado);
+    if (!Number.isFinite(numero) || !Number.isInteger(numero) || numero < 0) {
+        throw new Error('TipMiner result inválido');
+    }
+
+    if (tipoNormalizado === 'BANKER') return `BankerWon:${numero}`;
+    if (tipoNormalizado === 'PLAYER') return `PlayerWon:${numero}`;
+    if (tipoNormalizado === 'TIE') return `Tie:${numero}`;
+    throw new Error(`TipMiner type inválido: ${tipoNormalizado || 'vazio'}`);
+}
+
+function traduzirRoundTipMiner(round, { sessao, seq = null } = {}) {
+    if (!round || typeof round !== 'object') {
+        throw new Error('Round TipMiner inválido');
+    }
+
+    const uuid = String(round.uuid || '').trim();
+    if (!uuid || uuid.length > 128) {
+        throw new Error('Round TipMiner sem uuid válido');
+    }
+
+    const tipo = String(round.type || '').trim().toUpperCase();
+    const resultado = Number(round.result);
+    const instant = String(round.instant || '').trim();
+    const timestamp = timestampTipMinerEmMs(instant);
+    if (!timestamp) {
+        throw new Error(`Round TipMiner ${uuid} sem instant válido`);
+    }
+
+    const winnerToken = tokenResultadoTipMiner(tipo, resultado);
+    const sessaoNormalizada = String(sessao || estadoTipMinerRedis.sessao || '').trim();
+    if (!sessaoNormalizada) {
+        throw new Error('Sessão Redis TipMiner ainda não sincronizada');
+    }
+
+    const seqNumero = Number(seq);
+    const seqNormalizada = Number.isSafeInteger(seqNumero) && seqNumero > 0 ? seqNumero : null;
+
+    return {
+        winner: winnerToken,
+        vencedor: winnerToken,
+        resultado: winnerToken,
+        tipminer_type: tipo,
+        tipminer_result: resultado,
+        uuid,
+        round_id: uuid,
+        rodada_origem: uuid,
+        instant,
+        coletor_sessao: sessaoNormalizada,
+        id_sessao: sessaoNormalizada,
+        coletor_seq: seqNormalizada,
+        timestamp_coleta: timestamp,
+        timestamp_ms: timestamp,
+        fonte_dados: 'TIPMINER_REDIS'
+    };
+}
+
+function registrarUuidTipMiner(uuid) {
+    const id = String(uuid || '').trim();
+    if (!id) return false;
+    if (uuidsTipMinerRecentes.has(id)) return false;
+    uuidsTipMinerRecentes.add(id);
+    while (uuidsTipMinerRecentes.size > LIMITE_UUIDS_TIPMINER_MEMORIA) {
+        const maisAntigo = uuidsTipMinerRecentes.values().next().value;
+        uuidsTipMinerRecentes.delete(maisAntigo);
+    }
+    return true;
+}
+
+function criarSessaoTipMiner(history, agora = Date.now()) {
+    const lista = Array.isArray(history) ? history : [];
+    const ultimoUuid = String(lista[lista.length - 1]?.uuid || 'SEM_UUID').trim().slice(0, 64);
+    return `TIPMINER:${Math.trunc(agora)}:${ultimoUuid}`.slice(0, 128);
+}
+
+async function sincronizarHistoricoTipMinerDoRedis(motivo = 'history_sync', { obrigatorio = true } = {}) {
     let liberarTurnoResultado = null;
     try {
-        if (!requisicaoInternaAutorizada(req)) {
-            return res.status(401).json({ erro: "Nao autorizado" });
+        const serializado = await redisBacBoClient.get(REDIS_BACBO_HISTORY_KEY);
+        if (!serializado) {
+            if (obrigatorio) throw new Error(`Redis key ${REDIS_BACBO_HISTORY_KEY} ausente`);
+            console.warn(`⏳ REDIS BAC BO | aguardando ${REDIS_BACBO_HISTORY_KEY} para ROAD SNAPSHOT.`);
+            return false;
         }
 
-        const dados = req.body || {};
+        let bruto = null;
+        try {
+            bruto = JSON.parse(serializado);
+        } catch (e) {
+            throw new Error(`Redis key ${REDIS_BACBO_HISTORY_KEY} não contém JSON válido`);
+        }
+        if (!Array.isArray(bruto) || bruto.length === 0 || bruto.length > 200) {
+            throw new Error(`Histórico TipMiner inválido: ${Array.isArray(bruto) ? bruto.length : 'não-array'} giro(s)`);
+        }
 
-        let rawVenc = String(dados.vencedor || dados.resultado || dados.winner || "").toUpperCase().trim();
-        let vencedor = resultadoRoadNativo(rawVenc);
+        const agora = Date.now();
+        const sessao = criarSessaoTipMiner(bruto, agora);
+        const traduzidosComIndice = bruto.map((round, indice) => ({
+            indice,
+            dados: traduzirRoundTipMiner(round, { sessao, seq: indice + 1 })
+        }));
+        traduzidosComIndice.sort((a, b) => {
+            const diferenca = a.dados.timestamp_coleta - b.dados.timestamp_coleta;
+            return diferenca !== 0 ? diferenca : a.indice - b.indice;
+        });
+        const history = traduzidosComIndice.map(item => item.dados);
+
+        liberarTurnoResultado = await aguardarTurnoProcessamentoResultado();
+
+        if (estadoTipMinerRedis.sessao) {
+            await invalidarSequenciasAposBuracoDados(`TIPMINER_${String(motivo).toUpperCase()}`);
+        }
+
+        hardResetSnapshotRoad(`TIPMINER_${String(motivo).toUpperCase()}`, sessao);
+        const snapshotAplicado = substituirRoadPorSnapshotFresco({
+            history,
+            coletor_sessao: sessao,
+            id_sessao: sessao,
+            timestamp_coleta: agora,
+            orientacao: ORIENTACAO_ROAD_NATIVA.OLD_TO_NEW
+        }, agora);
+        if (!snapshotAplicado) {
+            throw new Error('ROAD SNAPSHOT TipMiner foi recusado pelo motor nativo');
+        }
+
+        uuidsTipMinerRecentes.clear();
+        for (const item of history) registrarUuidTipMiner(item.uuid);
+        estadoTipMinerRedis.sessao = sessao;
+        estadoTipMinerRedis.live_seq = 0;
+        estadoTipMinerRedis.ultimo_uuid = history[history.length - 1]?.uuid || null;
+        estadoTipMinerRedis.sincronizado_em = agora;
+        estadoContinuidadeRecepcao = {
+            sessao,
+            seq: null,
+            timestamp_coleta: agora
+        };
+        estadoContinuidadeColetor = { ...estadoContinuidadeRecepcao };
+        idSessaoContinua = Math.max(Date.now(), Number(idSessaoContinua) + 1 || Date.now());
+
+        console.log(
+            `♻️ REDIS BAC BO | ${history.length} giro(s) TipMiner sincronizados; `
+            + `sessão=${sessao}; gatilhos permanecem bloqueados até live_round incremental.`
+        );
+        return true;
+    } finally {
+        if (liberarTurnoResultado) liberarTurnoResultado();
+    }
+}
+
+function planoDadosMesa(dados, vencedor) {
+    const dadoNumero = valor => {
+        const numero = Number(valor);
+        return Number.isInteger(numero) && numero >= 0 ? numero : null;
+    };
+    const p1 = Array.isArray(dados.dados_jogador) ? dadoNumero(dados.dados_jogador[0]) : null;
+    const p2 = Array.isArray(dados.dados_jogador) ? dadoNumero(dados.dados_jogador[1]) : null;
+    const b1 = Array.isArray(dados.dados_banca) ? dadoNumero(dados.dados_banca[0]) : null;
+    const b2 = Array.isArray(dados.dados_banca) ? dadoNumero(dados.dados_banca[1]) : null;
+    const totalP = p1 !== null && p2 !== null ? p1 + p2 : null;
+    const totalB = b1 !== null && b2 !== null ? b1 + b2 : null;
+    const totalTipMiner = Number(dados.tipminer_result);
+    const tipminerValido = Number.isFinite(totalTipMiner) ? totalTipMiner : null;
+
+    let nEmp = 0;
+    let mult = '4x';
+    if (vencedor === 'Tie' && totalP !== null) {
+        nEmp = totalP;
+        if (nEmp === 2 || nEmp === 12) mult = '88x';
+        else if (nEmp === 3 || nEmp === 11) mult = '25x';
+        else if (nEmp === 4 || nEmp === 10) mult = '10x';
+        else if (nEmp === 5 || nEmp === 9) mult = '6x';
+    }
+
+    const placarMesa = totalP !== null && totalB !== null
+        ? `[P:${totalP} B:${totalB}]`
+        : `[TIPMINER:${String(dados.winner || dados.resultado || vencedor)}]`;
+
+    return {
+        p1,
+        p2,
+        b1,
+        b2,
+        totalP,
+        totalB,
+        totalTipMiner: tipminerValido,
+        nEmp,
+        mult,
+        placarMesa
+    };
+}
+
+async function processarRodadaIncremental(dados) {
+    let liberarTurnoResultado = null;
+    try {
+        const payload = dados && typeof dados === 'object' ? dados : {};
+        const rawVenc = String(payload.vencedor || payload.resultado || payload.winner || '').trim();
+        const vencedor = resultadoRoadNativo(rawVenc);
+        if (!vencedor) {
+            throw new Error('Rodada incremental sem vencedor reconhecido');
+        }
 
         const recebidoEmRoad = Date.now();
-        const gatilhoRoad = vencedor
-            ? avaliarGatilhoHardResetRoad(dados, recebidoEmRoad, { registrarPacote: true })
-            : null;
-        if (gatilhoRoad?.reset) {
+        const gatilhoRoad = avaliarGatilhoHardResetRoad(payload, recebidoEmRoad, { registrarPacote: true });
+        if (gatilhoRoad.reset) {
             hardResetSnapshotRoad(gatilhoRoad.motivo, gatilhoRoad.sessao_esperada);
         }
 
-        // Reserva a continuidade antes de qualquer await (inclusive persistência de saldo).
-        // O processamento financeiro continua abaixo, serializado após o ACK.
-        const continuidade = vencedor ? reservarContinuidadeResultado(dados) : null;
-
-        const temSaldo = dados.saldo_atual !== undefined && dados.saldo_atual !== null;
-
-        if (temSaldo) {
-            const saldoRecebido = Number(dados.saldo_atual);
-
-            if (!Number.isFinite(saldoRecebido) || saldoRecebido < 0) {
-                console.warn("⚠️ saldo_atual inválido recebido do executor; atualização ignorada.");
-                if (!vencedor) return res.status(400).json({ erro: "saldo_atual invalido" });
-            } else {
-                try {
-                    await dbPool.query(
-                        'UPDATE auto_traders SET saldo_atual=? WHERE ativo=true',
-                        [saldoRecebido]
-                    );
-
-                    saldoGlobalCorretora = saldoRecebido;
-                    saldoGlobalAtualizadoEm = Date.now();
-                    await confirmarSaldosPosLiquidacao(
-                        saldoRecebido,
-                        saldoGlobalAtualizadoEm
-                    );
-                    for (let trader of AUTO_TRADERS_MEMORIA) {
-                        if (trader.ativo) trader.saldo_atual = saldoRecebido;
-                    }
-                } catch (e) {
-                    console.error("⚠️ Falha ao persistir saldo sincronizado dos Auto-Traders:", e.message);
-                    if (!vencedor) return res.status(500).json({ erro: "falha ao persistir saldo" });
-                }
-            }
-        }
-
-        if (!vencedor) return res.json({ recebido: true, saldo_atual: saldoGlobalCorretora });
-
+        const continuidade = reservarContinuidadeResultado(payload);
         if (!continuidade || !continuidade.aceitar) {
-            console.warn(`⚠️ Resultado ${continuidade.motivo === 'DUPLICADO' ? 'duplicado' : 'fora de ordem'} ignorado pelo Node (sessão=${dados.coletor_sessao || 'n/a'}, seq=${dados.coletor_seq || 'n/a'}).`);
-            return res.json({ recebido: true, ignorado: true, motivo: continuidade.motivo });
+            console.warn(
+                `⚠️ Resultado ${continuidade?.motivo === 'DUPLICADO' ? 'duplicado' : 'fora de ordem'} `
+                + `ignorado pelo Node (sessão=${payload.coletor_sessao || 'n/a'}, seq=${payload.coletor_seq || 'n/a'}).`
+            );
+            return { ignorado: true, motivo: continuidade?.motivo || 'CONTINUIDADE_INVALIDA' };
         }
 
-        res.json({ recebido: true });
-
-        // ACK continua rápido; somente o trabalho pós-ACK espera sua vez FIFO.
         liberarTurnoResultado = await aguardarTurnoProcessamentoResultado();
 
         if (continuidade.interrupcao) {
             const motivoInterrupcao = String(
-                dados.motivo_interrupcao || continuidade.motivo || 'INTERRUPCAO_PYTHON'
-            ).trim().slice(0, 120) || 'INTERRUPCAO_PYTHON';
-            const dadosInterrupcao = { ...dados, interrupcao_fluxo: true, motivo_interrupcao: motivoInterrupcao };
+                payload.motivo_interrupcao || continuidade.motivo || 'INTERRUPCAO_REDIS'
+            ).trim().slice(0, 120) || 'INTERRUPCAO_REDIS';
+            const dadosInterrupcao = { ...payload, interrupcao_fluxo: true, motivo_interrupcao: motivoInterrupcao };
             rotacionarSessaoAposInterrupcao(dadosInterrupcao);
-            if (interrupcaoColetorJaAplicada(dados)) {
+            if (interrupcaoColetorJaAplicada(payload)) {
                 console.log(
-                    `♻️ Interrupção ${normalizarInterrupcaoColetorId(dados)} já aplicada via collector-health; `
-                    + 'o primeiro resultado apenas estabelece a nova fronteira estatística.'
+                    `♻️ Interrupção ${normalizarInterrupcaoColetorId(payload)} já aplicada; `
+                    + 'o resultado apenas estabelece a nova fronteira estatística.'
                 );
             } else {
-                const reservaInterrupcao = reservarInterrupcaoColetor(dados);
+                const reservaInterrupcao = reservarInterrupcaoColetor(payload);
                 try {
                     await invalidarSequenciasAposBuracoDados(motivoInterrupcao);
                     concluirInterrupcaoColetor(reservaInterrupcao.id, true);
@@ -4153,9 +4357,8 @@ app.post("/receber-sinal", async (req, res) => {
             }
         }
 
-        // Só avança a continuidade depois que qualquer interrupção foi tratada em modo fail-closed.
         estadoContinuidadeColetor = continuidade.estado;
-        const incrementalRoadAplicado = atualizarRoadNativoComIncremental(dados, recebidoEmRoad);
+        const incrementalRoadAplicado = atualizarRoadNativoComIncremental(payload, recebidoEmRoad);
 
         try {
             await rearmarAutoTradersStopRedsPausados();
@@ -4175,30 +4378,58 @@ app.post("/receber-sinal", async (req, res) => {
             console.error("⚠️ Falha ao promover Auto-Trader de STANDBY para OPERANDO:", e.message);
         }
 
-        let p1 = (dados.dados_jogador && dados.dados_jogador.length > 0) ? parseInt(dados.dados_jogador[0]) : 0;
-        let p2 = (dados.dados_jogador && dados.dados_jogador.length > 1) ? parseInt(dados.dados_jogador[1]) : 0;
-        let b1 = (dados.dados_banca && dados.dados_banca.length > 0) ? parseInt(dados.dados_banca[0]) : 0;
-        let b2 = (dados.dados_banca && dados.dados_banca.length > 1) ? parseInt(dados.dados_banca[1]) : 0;
-        let nEmp = 0; let mult = "4x";
+        const mesa = planoDadosMesa(payload, vencedor);
+        const { p1, p2, b1, b2, totalP, totalB, totalTipMiner, nEmp, mult, placarMesa } = mesa;
 
-        if (vencedor === "Tie") {
-            nEmp = parseInt(dados.pontos_jogador); if (isNaN(nEmp) || nEmp === 0) nEmp = p1 + p2;
-            if (nEmp === 2 || nEmp === 12) mult = "88x"; else if (nEmp === 3 || nEmp === 11) mult = "25x"; else if (nEmp === 4 || nEmp === 10) mult = "10x"; else if (nEmp === 5 || nEmp === 9) mult = "6x"; else mult = "4x";
+        const logNomeVencedor = vencedor === "Player"
+            ? "🔵 JOGADOR"
+            : (vencedor === "Banker" ? "🔴 BANCA" : `🟡 EMPATE (${mult})`);
+        if (totalP !== null && totalB !== null) {
+            console.log(
+                `\n====================================\n🔥 Vencedor: ${logNomeVencedor}`
+                + `\n🔵 Jogador : ${String(totalP).padStart(2, '0')} | 🔴 Banca: ${String(totalB).padStart(2, '0')}`
+                + `\n====================================\n`
+            );
+        } else {
+            console.log(
+                `\n====================================\n🔥 Vencedor: ${logNomeVencedor}`
+                + `\n📡 TipMiner: ${String(payload.winner || rawVenc)}`
+                + `${totalTipMiner !== null ? ` | soma=${totalTipMiner}` : ''}`
+                + `\n====================================\n`
+            );
         }
-
-        // 🌟 LOG DETALHADO DO VENCEDOR RESTAURADO NO TERMINAL
-        let logNomeVencedor = vencedor === "Player" ? "🔵 JOGADOR" : (vencedor === "Banker" ? "🔴 BANCA" : `🟡 EMPATE (${mult})`);
-        let totalP = (p1 + p2).toString().padStart(2, '0'); let totalB = (b1 + b2).toString().padStart(2, '0');
-        console.log(`\n====================================\n🔥 Vencedor: ${logNomeVencedor}\n🔵 Jogador : ${totalP} | 🔴 Banca: ${totalB}\n====================================\n`);
 
         let giroPersistidoParaIA = false;
         let giroIdPersistidoParaIA = 0;
         try {
-            const timestampColetaNumero = Number(dados.timestamp_coleta);
+            const timestampColetaNumero = Number(payload.timestamp_coleta);
             const timestampGiroAnalitico = Number.isFinite(timestampColetaNumero) && timestampColetaNumero > 0
                 ? timestampColetaNumero
                 : Date.now();
-            const [resultadoInsertGiro] = await dbPool.query('INSERT INTO giros_recentes (resultado, p_d1, p_d2, b_d1, b_d2, numero_empate, multiplicador, id_sessao, data_hora) VALUES (?,?,?,?,?,?,?,?,FROM_UNIXTIME(?))', [vencedor, p1, p2, b1, b2, nEmp, mult, idSessaoContinua, timestampGiroAnalitico / 1000]);
+            const [resultadoInsertGiro] = await dbPool.query(
+                `INSERT INTO giros_recentes
+                    (resultado, p_d1, p_d2, b_d1, b_d2, numero_empate, multiplicador,
+                     round_id, coletor_seq, coletor_sessao, id_sessao, origem,
+                     player_score_road, banker_score_road, data_hora)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,FROM_UNIXTIME(?))`,
+                [
+                    vencedor,
+                    p1,
+                    p2,
+                    b1,
+                    b2,
+                    nEmp,
+                    mult,
+                    String(payload.round_id || payload.uuid || '').trim() || null,
+                    Number.isSafeInteger(Number(payload.coletor_seq)) ? Number(payload.coletor_seq) : null,
+                    String(payload.coletor_sessao || '').trim() || null,
+                    idSessaoContinua,
+                    'LIVE',
+                    totalP,
+                    totalB,
+                    timestampGiroAnalitico / 1000
+                ]
+            );
             giroIdPersistidoParaIA = Number(resultadoInsertGiro.insertId) || 0;
             historicoGirosAnalitico.push({
                 id: giroIdPersistidoParaIA,
@@ -4226,18 +4457,21 @@ app.post("/receber-sinal", async (req, res) => {
             let st = estadoApostas[est.id];
             if (st && st.aguardandoResultado) {
                 let finalizar = false;
-                let isTie = (vencedor==='Tie');
+                let isTie = (vencedor === 'Tie');
 
                 if (vencedor === est.entrada || (isTie && est.protegerEmpate)) {
                     if (!isTie) {
-                        if (st.galeAtual===0) est.stats.greenDireto++; else if (st.galeAtual===1) est.stats.gale1++; else est.stats.gale2++;
+                        if (st.galeAtual === 0) est.stats.greenDireto++;
+                        else if (st.galeAtual === 1) est.stats.gale1++;
+                        else est.stats.gale2++;
                     } else {
-                        let tL = st.galeAtual===0?'direto':(st.galeAtual===1?'gale1':'gale2');
-                        if (!est.stats.ties[tL][mult]) est.stats.ties[tL][mult]=0; est.stats.ties[tL][mult]++;
+                        let tL = st.galeAtual === 0 ? 'direto' : (st.galeAtual === 1 ? 'gale1' : 'gale2');
+                        if (!est.stats.ties[tL][mult]) est.stats.ties[tL][mult] = 0;
+                        est.stats.ties[tL][mult]++;
                     }
 
                     try {
-                        await registrarHistoricoResultadoEstrategia(est, isTie ? 'TIE' : 'GREEN', st.galeAtual, isTie ? mult : '', dados.timestamp_coleta);
+                        await registrarHistoricoResultadoEstrategia(est, isTie ? 'TIE' : 'GREEN', st.galeAtual, isTie ? mult : '', payload.timestamp_coleta);
                     } catch (e) {
                         console.error(`Falha ao persistir historico da estrategia ${est.id}:`, e.message);
                     }
@@ -4245,13 +4479,13 @@ app.post("/receber-sinal", async (req, res) => {
                     await aguardarInscricaoTelegram(st);
 
                     try {
-                        await registrarHistoricoRobosInscritos(est, st, isTie ? 'TIE' : 'GREEN', st.galeAtual, isTie ? mult : '', dados.timestamp_coleta);
+                        await registrarHistoricoRobosInscritos(est, st, isTie ? 'TIE' : 'GREEN', st.galeAtual, isTie ? mult : '', payload.timestamp_coleta);
                     } catch (e) {
                         console.error(`Falha ao persistir historico dos robos para estrategia ${est.id}:`, e.message);
                     }
 
                     try {
-                        await processarResultadoProtecaoRobos(st, isTie ? 'TIE' : 'GREEN', dados.timestamp_coleta);
+                        await processarResultadoProtecaoRobos(st, isTie ? 'TIE' : 'GREEN', payload.timestamp_coleta);
                     } catch (e) {
                         console.error(`Falha ao atualizar proteção dos robôs da estratégia ${est.id}:`, e.message);
                     }
@@ -4292,14 +4526,14 @@ app.post("/receber-sinal", async (req, res) => {
                                                 isTie ? 'TIE' : 'WIN',
                                                 vLucro,
                                                 resultadoConfirmadoEm,
-                                                `[P:${p1+p2} B:${b1+b2}]`,
+                                                placarMesa,
                                                 pendentes[0].id
                                             ]
                                         );
                                         await processarResultadoStopRedsAutoTrader(
                                             trader,
                                             isTie ? 'TIE' : 'GREEN',
-                                            dados.timestamp_coleta
+                                            payload.timestamp_coleta
                                         );
                                     } catch(e) {
                                         console.error(`❌ Falha ao fechar ordem ${pendentes[0].id} como ${isTie ? 'TIE' : 'WIN'} do trader ${trader.id}:`, e.message);
@@ -4350,7 +4584,7 @@ app.post("/receber-sinal", async (req, res) => {
                                                 `UPDATE auditoria_ordens
                                                  SET status_ordem='LOSS', lucro_prejuizo=?, saldo_pos=?, placar_mesa=?
                                                  WHERE id=?`,
-                                                [pnlEtapaAnterior, trader.saldo_atual, `[P:${p1+p2} B:${b1+b2}]`, pendentes[0].id]
+                                                [pnlEtapaAnterior, trader.saldo_atual, placarMesa, pendentes[0].id]
                                             );
                                             intencaoGale = await criarIntencaoOrdem(conexaoGale, {
                                                 trader_id: trader.id,
@@ -4443,7 +4677,7 @@ app.post("/receber-sinal", async (req, res) => {
                         est.stats.red++;
 
                         try {
-                            await registrarHistoricoResultadoEstrategia(est, 'RED', st.galeAtual, '', dados.timestamp_coleta);
+                            await registrarHistoricoResultadoEstrategia(est, 'RED', st.galeAtual, '', payload.timestamp_coleta);
                         } catch (e) {
                             console.error(`Falha ao persistir historico da estrategia ${est.id}:`, e.message);
                         }
@@ -4451,14 +4685,14 @@ app.post("/receber-sinal", async (req, res) => {
                         await aguardarInscricaoTelegram(st);
 
                         try {
-                            await registrarHistoricoRobosInscritos(est, st, 'RED', st.galeAtual, '', dados.timestamp_coleta);
+                            await registrarHistoricoRobosInscritos(est, st, 'RED', st.galeAtual, '', payload.timestamp_coleta);
                         } catch (e) {
                             console.error(`Falha ao persistir historico dos robos para estrategia ${est.id}:`, e.message);
                         }
 
                         let avisosProtecao = [];
                         try {
-                            avisosProtecao = await processarResultadoProtecaoRobos(st, 'RED', dados.timestamp_coleta);
+                            avisosProtecao = await processarResultadoProtecaoRobos(st, 'RED', payload.timestamp_coleta);
                         } catch (e) {
                             console.error(`Falha ao atualizar proteção dos robôs da estratégia ${est.id}:`, e.message);
                         }
@@ -4495,14 +4729,14 @@ app.post("/receber-sinal", async (req, res) => {
                                                 [
                                                     prejuizo,
                                                     resultadoConfirmadoEm,
-                                                    `[P:${p1+p2} B:${b1+b2}]`,
+                                                    placarMesa,
                                                     pendentes[0].id
                                                 ]
                                             );
                                             await processarResultadoStopRedsAutoTrader(
                                                 trader,
                                                 'RED',
-                                                dados.timestamp_coleta
+                                                payload.timestamp_coleta
                                             );
                                         } catch(e) {
                                             console.error(`❌ Falha ao fechar ordem LOSS ${pendentes[0].id} do trader ${trader.id}:`, e.message);
@@ -4532,11 +4766,11 @@ app.post("/receber-sinal", async (req, res) => {
             }
         }
 
-        if (sinalFinalizadoAgora || !incrementalRoadAplicado) return;
+        if (sinalFinalizadoAgora || !incrementalRoadAplicado) return { processado: true, disparo_avaliado: false };
 
         const estadoLiveCanonico = obterHistoricoRoadNativo();
         if (estadoLiveCanonico.pronto !== true) {
-            return;
+            return { processado: true, disparo_avaliado: false };
         }
         const historicoLiveCanonico = estadoLiveCanonico.history;
 
@@ -4734,14 +4968,91 @@ app.post("/receber-sinal", async (req, res) => {
                 }
             }
         }
-    } catch(erroGeral) {
-        console.error('🔥 Falha no processamento de /receber-sinal após o ACK:', erroGeral);
+        return { processado: true, disparo_avaliado: true };
+    } catch (erroGeral) {
+        console.error('🔥 Falha no processamento de rodada Redis/TipMiner:', erroGeral);
+        throw erroGeral;
     } finally {
         if (liberarTurnoResultado) {
             liberarTurnoResultado();
         }
     }
-});
+}
+
+async function processarLiveRoundTipMiner(round) {
+    if (!estadoTipMinerRedis.sessao) {
+        throw new Error('live_round recebido antes de um ROAD SNAPSHOT TipMiner');
+    }
+
+    const uuid = String(round?.uuid || '').trim();
+    if (!uuid) throw new Error('live_round TipMiner sem uuid');
+    if (uuidsTipMinerRecentes.has(uuid)) {
+        console.log(`♻️ REDIS BAC BO | live_round duplicado ignorado | uuid=${uuid}`);
+        return false;
+    }
+
+    const seq = estadoTipMinerRedis.live_seq + 1;
+    const dados = traduzirRoundTipMiner(round, {
+        sessao: estadoTipMinerRedis.sessao,
+        seq
+    });
+
+    registrarUuidTipMiner(uuid);
+    estadoTipMinerRedis.live_seq = seq;
+    estadoTipMinerRedis.ultimo_uuid = uuid;
+    await processarRodadaIncremental(dados);
+    return true;
+}
+
+async function processarMensagemRedisBacBo(mensagem) {
+    let evento = null;
+    try {
+        evento = JSON.parse(String(mensagem || ''));
+    } catch (e) {
+        throw new Error('Mensagem bacbo_events não contém JSON válido');
+    }
+
+    if (!evento || typeof evento !== 'object') {
+        throw new Error('Mensagem bacbo_events inválida');
+    }
+
+    const action = String(evento.action || '').trim();
+    if (action === 'history_sync') {
+        await sincronizarHistoricoTipMinerDoRedis('HISTORY_SYNC');
+        return;
+    }
+    if (action === 'live_round') {
+        await processarLiveRoundTipMiner(evento.data);
+    }
+}
+
+function enfileirarMensagemRedisBacBo(mensagem) {
+    caudaEventosRedisBacBo = caudaEventosRedisBacBo
+        .then(() => processarMensagemRedisBacBo(mensagem))
+        .catch(async erro => {
+            console.error(`❌ REDIS BAC BO | evento falhou em modo fail-closed: ${erro.message}`);
+            hardResetSnapshotRoad('FALHA_EVENTO_REDIS', estadoTipMinerRedis.sessao || '');
+            try {
+                await sincronizarHistoricoTipMinerDoRedis('RECOVERY', { obrigatorio: false });
+            } catch (erroRecovery) {
+                console.error(`❌ REDIS BAC BO | recovery de histórico falhou: ${erroRecovery.message}`);
+            }
+        });
+}
+
+async function iniciarIngestaoRedisBacBo() {
+    await redisBacBoClient.connect();
+    await redisBacBoSubscriber.connect();
+    await redisBacBoSubscriber.subscribe(REDIS_BACBO_EVENTS_CHANNEL, mensagem => {
+        enfileirarMensagemRedisBacBo(mensagem);
+    });
+
+    console.log(
+        `✅ REDIS BAC BO | conectado | canal=${REDIS_BACBO_EVENTS_CHANNEL} | `
+        + `history=${REDIS_BACBO_HISTORY_KEY}`
+    );
+    await sincronizarHistoricoTipMinerDoRedis('STARTUP', { obrigatorio: false });
+}
 
 async function iniciarApp() {
     await prepararBancoDeDados();
@@ -4752,6 +5063,7 @@ async function iniciarApp() {
     } catch (e) {
         console.error('⚠️ Auto Pilot IA não conseguiu revalidar no startup; backend continuará com o estado persistido:', e.message);
     }
+    await iniciarIngestaoRedisBacBo();
     backendPronto = true;
     console.log("✅ Backend inicializado e pronto para atender APIs.");
 }
@@ -4759,6 +5071,18 @@ async function iniciarApp() {
 async function encerrarAposFalhaInicializacao(erro) {
     backendPronto = false;
     console.error("🔥 Inicialização do backend falhou; encerrando processo em modo seguro:", erro);
+
+    try {
+        if (redisBacBoSubscriber.isOpen) await redisBacBoSubscriber.quit();
+    } catch (e) {
+        console.error("⚠️ Falha ao fechar Redis subscriber após erro de inicialização:", e.message);
+    }
+
+    try {
+        if (redisBacBoClient.isOpen) await redisBacBoClient.quit();
+    } catch (e) {
+        console.error("⚠️ Falha ao fechar Redis de dados após erro de inicialização:", e.message);
+    }
 
     try {
         ioServer.close();
