@@ -1,12 +1,18 @@
 import json
 import os
 import time
+import uuid
 from datetime import datetime, timezone
 
 import redis
 import requests
 from sseclient import SSEClient
 
+from env_loader import load_env_file
+
+
+PROJECT_ENV_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env"))
+load_env_file(PROJECT_ENV_PATH)
 
 HISTORY_URL = (
     "https://api.core.public.tipminer.com/v1/bac-bo/rounds/"
@@ -25,10 +31,24 @@ REDIS_LATEST_ROUND_KEY = (
 )
 REDIS_EVENTS_CHANNEL = os.getenv("REDIS_BACBO_EVENTS_CHANNEL", "bacbo_events").strip() or "bacbo_events"
 
+NODE_HOST = os.getenv("NODE_HOST", "127.0.0.1").strip() or "127.0.0.1"
+if NODE_HOST in {"0.0.0.0", "::", "[::]"}:
+    NODE_HOST = "127.0.0.1"
+try:
+    NODE_PORT = int(os.getenv("NODE_PORT", "3000"))
+except (TypeError, ValueError):
+    NODE_PORT = 3000
+if NODE_PORT <= 0 or NODE_PORT > 65535:
+    NODE_PORT = 3000
+INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN", "").strip()
+NODE_HEALTH_URL = f"http://{NODE_HOST}:{NODE_PORT}/collector-health"
+
 HISTORY_LIMIT = 200
 RECONNECT_DELAY_SECONDS = 3
 HTTP_CONNECT_TIMEOUT_SECONDS = 10
 HTTP_READ_TIMEOUT_SECONDS = 90
+NODE_HEALTH_CONNECT_TIMEOUT_SECONDS = 1.5
+NODE_HEALTH_READ_TIMEOUT_SECONDS = 3
 
 BROWSER_HEADERS = {
     "User-Agent": (
@@ -50,6 +70,7 @@ class TipMinerCollector:
     def __init__(self):
         self.http = requests.Session()
         self.http.headers.update(BROWSER_HEADERS)
+        self.node_http = requests.Session()
         self.redis = redis.Redis.from_url(
             REDIS_URL,
             decode_responses=True,
@@ -58,6 +79,7 @@ class TipMinerCollector:
             health_check_interval=30,
         )
         self.history = []
+        self._interruption_notified = False
 
     @staticmethod
     def _json_dumps(value):
@@ -181,6 +203,68 @@ class TipMinerCollector:
             "TIE": "🟡 EMPATE",
         }.get(str(round_type or "").upper(), "RESULTADO")
 
+    def _notify_node_interruption(self, reason, force=False):
+        if self._interruption_notified and not force:
+            return False
+
+        self._interruption_notified = True
+        interruption_id = f"bacbo-{os.getpid()}-{uuid.uuid4().hex}"
+
+        if not INTERNAL_API_TOKEN:
+            print("⚠️ BAC BO | proteção de continuidade indisponível | INTERNAL_API_TOKEN ausente.")
+            return False
+
+        payload = {
+            "evento": "INTERRUPCAO",
+            "motivo": str(reason or "INTERRUPCAO_COLETOR")[:120],
+            "interrupcao_id": interruption_id,
+            "timestamp_coleta": int(time.time() * 1000),
+        }
+
+        try:
+            response = self.node_http.post(
+                NODE_HEALTH_URL,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Internal-Token": INTERNAL_API_TOKEN,
+                },
+                json=payload,
+                timeout=(NODE_HEALTH_CONNECT_TIMEOUT_SECONDS, NODE_HEALTH_READ_TIMEOUT_SECONDS),
+            )
+
+            body = {}
+            try:
+                body = response.json() if response.content else {}
+            except ValueError:
+                body = {}
+
+            if response.ok:
+                sinais = int(body.get("sinais_invalidados") or 0)
+                traders = int(body.get("traders_bloqueados") or 0)
+                print(
+                    "🛡️ BAC BO | continuidade protegida | "
+                    f"sinai(s) invalidado(s)={sinais} | trader(s) bloqueado(s)={traders}."
+                )
+                return True
+
+            if response.status_code == 503:
+                print("⚠️ BAC BO | continuidade | backend ainda inicializando; nenhuma sessão operacional antiga será reutilizada.")
+            else:
+                print(
+                    "⚠️ BAC BO | continuidade | Node recusou notificação "
+                    f"(HTTP {response.status_code})."
+                )
+            return False
+        except requests.RequestException as exc:
+            print(
+                "⚠️ BAC BO | continuidade | Node local indisponível para notificação | "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return False
+
+    def _mark_continuity_restored(self):
+        self._interruption_notified = False
+
     def _publish_history_sync(self):
         serialized_history = self._json_dumps(self.history)
         event = self._json_dumps({"action": "history_sync"})
@@ -278,6 +362,7 @@ class TipMinerCollector:
 
                 round_data = self._normalize_round(payload)
                 self._publish_live_round(round_data)
+                self._mark_continuity_restored()
                 print(
                     f"🎲 BAC BO | {self._winner_label(round_data['type'])} | "
                     f"Soma: {round_data['result']}"
@@ -294,15 +379,21 @@ class TipMinerCollector:
         print(f"📣 Canal Redis: {REDIS_EVENTS_CHANNEL}")
         print("============================================================")
 
+        # Um processo novo nunca herda a continuidade operacional do processo anterior.
+        # Se o encerramento anterior foi abrupto, esta notificação invalida qualquer sinal antigo.
+        self._notify_node_interruption("COLETOR_REINICIADO", force=True)
+
         while True:
             try:
                 self.redis.ping()
                 self.sync_history()
                 self.listen_live()
             except KeyboardInterrupt:
+                self._notify_node_interruption("MANUTENCAO_COLETOR", force=True)
                 print("\n👋 Coletor Bac Bo encerrado pelo operador.")
                 return
             except Exception as exc:
+                self._notify_node_interruption("FLUXO_COLETOR_INTERROMPIDO")
                 print(
                     "⚠️ BAC BO/REDIS | fluxo interrompido; "
                     f"nova sincronização em {RECONNECT_DELAY_SECONDS}s | "

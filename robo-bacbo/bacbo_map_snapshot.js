@@ -5,7 +5,10 @@ const path = require('path');
 const mysql = require('mysql2/promise');
 const { createClient } = require('redis');
 const { validarLiveRound } = require('./bacbo_payload_schema');
-const { publicarRodadaLive } = require('./bacbo_live_bus');
+const {
+    publicarRodadaLive,
+    publicarHistoricoRecuperado
+} = require('./bacbo_live_bus');
 
 const MAX_ROUNDS = 1000;
 const SNAPSHOT_PATH = path.join(__dirname, 'public', 'bacbo-map-snapshot.json');
@@ -15,9 +18,12 @@ const EVENTS_CHANNEL = 'bacbo_events';
 
 let instalado = false;
 let pool = null;
+let reader = null;
 let subscriber = null;
 let rodadas = [];
 let persistencia = Promise.resolve();
+let filaEventos = Promise.resolve();
+let recoveryAtivo = false;
 
 function dbPool() {
     if (pool) return pool;
@@ -63,22 +69,25 @@ function normalizarRound(item) {
     };
 }
 
+function chaveRound(round) {
+    return round.uuid || `${round.instant}|${round.winner}|${round.result}`;
+}
+
 function ordenarELimitar(lista) {
     const dedup = new Map();
     for (const item of lista) {
         const round = normalizarRound(item);
         if (!round) continue;
-        const chave = round.uuid || `${round.instant}|${round.winner}|${round.result}`;
-        dedup.set(chave, round);
+        dedup.set(chaveRound(round), round);
     }
     return [...dedup.values()]
-        .sort((a, b) => a.ms - b.ms)
+        .sort((a, b) => a.ms - b.ms || chaveRound(a).localeCompare(chaveRound(b)))
         .slice(-MAX_ROUNDS);
 }
 
 function snapshotPublico() {
     return {
-        version: 2,
+        version: 3,
         updated_at: new Date().toISOString(),
         rows: rodadas.map(({ uuid, winner: tipo, result, instant }) => ({
             uuid,
@@ -132,6 +141,16 @@ function extrairArrayHistorico(valor) {
     return [];
 }
 
+async function lerHistoricoRetido(cliente) {
+    if (!cliente) return [];
+    try {
+        const bruto = await cliente.get(HISTORY_KEY);
+        return extrairArrayHistorico(bruto);
+    } catch (_) {
+        return [];
+    }
+}
+
 async function hidratarRedis(cliente) {
     const acumulado = [];
     try {
@@ -142,10 +161,7 @@ async function hidratarRedis(cliente) {
         }
     } catch (_) {}
 
-    try {
-        const bruto = await cliente.get(HISTORY_KEY);
-        acumulado.push(...extrairArrayHistorico(bruto));
-    } catch (_) {}
+    acumulado.push(...await lerHistoricoRetido(cliente));
 
     if (acumulado.length > 0) {
         rodadas = ordenarELimitar([...rodadas, ...acumulado]);
@@ -183,11 +199,37 @@ function incorporarLive(payload) {
 
     rodadas = ordenarELimitar([...rodadas, round]);
 
-    // Caminho crítico visual: o navegador recebe a rodada antes de qualquer I/O em disco.
-    // O snapshot permanece apenas como recuperação para abertura/reconexão da página.
     publicarRodadaLive(round);
     void persistirSnapshot();
     return true;
+}
+
+async function incorporarHistoricoRetido() {
+    const historicoBruto = await lerHistoricoRetido(reader);
+    const historico = ordenarELimitar(historicoBruto);
+    if (historico.length === 0) return false;
+
+    const antes = new Map(rodadas.map(round => [chaveRound(round), round]));
+    const tinhaHistorico = antes.size > 0;
+    const sobreposicao = historico.some(round => antes.has(chaveRound(round)));
+    const recuperadas = historico.filter(round => !antes.has(chaveRound(round)));
+
+    rodadas = ordenarELimitar([...rodadas, ...historico]);
+    await persistirSnapshot();
+
+    if (recoveryAtivo && recuperadas.length > 0) {
+        publicarHistoricoRecuperado(recuperadas, {
+            continuidade: !tinhaHistorico || sobreposicao,
+            janela: historico.length
+        });
+    }
+    return true;
+}
+
+function enfileirarEvento(tarefa) {
+    const executar = async () => tarefa();
+    filaEventos = filaEventos.then(executar, executar);
+    return filaEventos;
 }
 
 async function conectarRedis() {
@@ -197,20 +239,46 @@ async function conectarRedis() {
         ? Math.max(500, Math.min(15000, timeoutBruto))
         : 3000;
 
-    subscriber = createClient({
+    reader = createClient({
         url: redisUrl,
         socket: { connectTimeout }
     });
+    subscriber = reader.duplicate();
+
+    reader.on('error', erro => {
+        console.warn(`⚠️ Mapa Bac Bo: Redis visual reader indisponível: ${erro.message}`);
+    });
     subscriber.on('error', erro => {
-        console.warn(`⚠️ Mapa Bac Bo: Redis visual indisponível: ${erro.message}`);
+        console.warn(`⚠️ Mapa Bac Bo: Redis visual subscriber indisponível: ${erro.message}`);
     });
+
+    await reader.connect();
     await subscriber.connect();
-    await hidratarRedis(subscriber);
+    await hidratarRedis(reader);
     await persistirSnapshot();
+
+    recoveryAtivo = true;
     await subscriber.subscribe(EVENTS_CHANNEL, mensagem => {
+        const raiz = parseJson(mensagem);
+        const acao = String(raiz?.action || '').toLowerCase();
+
+        if (acao === 'history_sync') {
+            void enfileirarEvento(() => incorporarHistoricoRetido()).catch(erro => {
+                console.warn(`⚠️ Mapa Bac Bo: recovery visual falhou: ${erro.message}`);
+            });
+            return;
+        }
+
         const live = payloadLive(mensagem);
-        if (live) incorporarLive(live);
+        if (live) {
+            void enfileirarEvento(() => incorporarLive(live)).catch(erro => {
+                console.warn(`⚠️ Mapa Bac Bo: rodada live visual falhou: ${erro.message}`);
+            });
+        }
     });
+
+    // Fecha a janela entre a leitura inicial do Redis e a efetivação da assinatura Pub/Sub.
+    await enfileirarEvento(() => incorporarHistoricoRetido());
 }
 
 async function instalarBacboMapSnapshot() {

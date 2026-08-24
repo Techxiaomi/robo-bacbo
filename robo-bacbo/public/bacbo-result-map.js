@@ -8,6 +8,7 @@
     const STORAGE_MODE = 'bacboMapMode';
     const STORAGE_LIMIT = 'bacboMapVisualLimit';
     const EVENTO_LIVE = 'bacbo_round_live';
+    const EVENTO_RECOVERY = 'bacbo_history_recovered';
 
     const state = {
         mode: localStorage.getItem(STORAGE_MODE) === 'numbers' ? 'numbers' : 'letters',
@@ -489,6 +490,24 @@
         return true;
     }
 
+    function receberHistoricoRecuperado(payload) {
+        const lista = Array.isArray(payload?.rounds) ? payload.rounds : [];
+        const novos = [];
+
+        for (const item of lista) {
+            const round = normalizarCanonico(item);
+            if (!round || !round.uuid || state.knownUuids.has(round.uuid)) continue;
+            novos.push(round);
+        }
+        if (novos.length === 0) return false;
+
+        mesclarCanonicos(novos);
+        if (document.getElementById('aba-backtest')?.classList.contains('visivel')) {
+            renderCurrent(true);
+        }
+        return true;
+    }
+
     function vincularSocket(socket) {
         if (!socket || typeof socket.on !== 'function') return false;
         if (socket.__bacboResultMapLiveBound === true) return true;
@@ -507,6 +526,7 @@
         let conectouUmaVez = socket.connected === true;
 
         socket.on(EVENTO_LIVE, receberRoundLive);
+        socket.on(EVENTO_RECOVERY, receberHistoricoRecuperado);
         socket.on('disconnect', () => {
             if (conectouUmaVez) state.needsResync = true;
         });
@@ -572,6 +592,7 @@
         render,
         refreshRealtime,
         scheduleRealtimeRefresh,
-        receberRoundLive
+        receberRoundLive,
+        receberHistoricoRecuperado
     };
 })();

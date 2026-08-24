@@ -1,9 +1,12 @@
 'use strict';
 
+const { onHistoricoRecuperado } = require('./bacbo_live_bus');
+
 let instalado = false;
 let sequenciaRodadas = 0;
 let ultimaSequenciaRodada = 0;
 let separarAntesProximaRodada = false;
+let ultimoRecoveryCompacto = { count: 0, em: 0 };
 
 const UUIDS_MAX = 5000;
 const uuidsRodadas = new Map();
@@ -29,6 +32,12 @@ function horaAtual() {
     try { return relogio.format(new Date()); } catch (_) { return new Date().toTimeString().slice(0, 8); }
 }
 
+function horaInstant(valor) {
+    const ms = valor ? Date.parse(String(valor)) : NaN;
+    if (!Number.isFinite(ms)) return '--:--:--';
+    try { return relogio.format(new Date(ms)); } catch (_) { return new Date(ms).toTimeString().slice(0, 8); }
+}
+
 function nomeResultado(valor) {
     const tipo = String(valor || '').trim().toUpperCase();
     if (tipo === 'PLAYER' || tipo === 'P' || tipo === 'PLAYERWON') return 'JOGADOR';
@@ -45,14 +54,18 @@ function simboloResultado(valor) {
     return '?';
 }
 
+function numeroFormatado(valor) {
+    return `#${String(Math.max(0, Number(valor) || 0)).padStart(5, '0')}`;
+}
+
 function numeroRodada() {
     sequenciaRodadas += 1;
     ultimaSequenciaRodada = sequenciaRodadas;
-    return `#${String(sequenciaRodadas).padStart(5, '0')}`;
+    return numeroFormatado(sequenciaRodadas);
 }
 
 function numeroUltimaRodada() {
-    return `#${String(Math.max(0, ultimaSequenciaRodada)).padStart(5, '0')}`;
+    return numeroFormatado(ultimaSequenciaRodada);
 }
 
 function linhaRodada(uuid, tipo, soma) {
@@ -64,6 +77,51 @@ function linhaRodada(uuid, tipo, soma) {
     const prefixo = separarAntesProximaRodada ? '\n' : '';
     separarAntesProximaRodada = false;
     return `${prefixo}🎲 ${numero} | ${horario} | ${resultado} | Soma: ${somaFmt}`;
+}
+
+function registrarRecoveryOperacional(payload) {
+    try {
+        const rounds = (Array.isArray(payload?.rounds) ? payload.rounds : [])
+            .filter(round => round && typeof round === 'object')
+            .sort((a, b) => Date.parse(String(a.instant || '')) - Date.parse(String(b.instant || '')));
+
+        const novos = [];
+        for (const round of rounds) {
+            if (!lembrarUuid(round.uuid)) continue;
+            novos.push(round);
+        }
+        if (novos.length === 0) return false;
+
+        const inicio = sequenciaRodadas + 1;
+        sequenciaRodadas += novos.length;
+        ultimaSequenciaRodada = sequenciaRodadas;
+
+        const primeiroNumero = numeroFormatado(inicio);
+        const ultimoNumero = numeroFormatado(sequenciaRodadas);
+        const primeiroHorario = horaInstant(novos[0].instant);
+        const ultimoHorario = horaInstant(novos[novos.length - 1].instant);
+        const faixa = `${primeiroNumero}…${ultimoNumero}`;
+        const prefixo = '\n';
+
+        ultimoRecoveryCompacto = { count: novos.length, em: Date.now() };
+        separarAntesProximaRodada = true;
+
+        if (payload?.continuity === false) {
+            console.warn(
+                `${prefixo}⚠️ RECOVERY | ${novos.length} rodadas disponíveis | `
+                + `${primeiroHorario} → ${ultimoHorario} | ${faixa} | sem âncora na janela; nova fronteira`
+            );
+            return true;
+        }
+
+        console.log(
+            `${prefixo}♻️ RECOVERY | ${novos.length} rodada(s) recuperada(s) | `
+            + `${primeiroHorario} → ${ultimoHorario} | ${faixa}`
+        );
+        return true;
+    } catch (_) {
+        return false;
+    }
 }
 
 function registrarSinalOperacional(payload) {
@@ -92,7 +150,6 @@ function registrarSinalOperacional(payload) {
 function formatarTexto(valor) {
     let texto = String(valor);
 
-    // O contrato atual não possui placares individuais. O bloco legado 00/00 é enganoso e deve sumir.
     if (
         texto.includes('🔥 Vencedor:')
         && texto.includes('🔵 Jogador :')
@@ -101,12 +158,10 @@ function formatarTexto(valor) {
         return null;
     }
 
-    // O history_sync é consumido pelo adaptador dedicado; o consumidor genérico pode ignorá-lo sem alarme.
     if (/^⚠️ bacbo_events recebido mas ignorado \| motivo=evento_nao_reconhecido \| action=history_sync\.$/i.test(texto)) {
         return null;
     }
 
-    // Resultado live: uma única linha operacional por UUID, com colunas de largura fixa.
     let match = texto.match(
         /^🔄 Mapeamento BacBo -> IA \| uuid=([0-9a-f-]{36}) \| type=(PLAYER|BANKER|TIE) -> interno=(Player|Banker|Tie) \| simbolo=([PBT]) \| soma=(.+)$/i
     );
@@ -114,23 +169,31 @@ function formatarTexto(valor) {
         return linhaRodada(match[1], match[2], match[5]);
     }
 
-    // Sucesso esperado da IA é ruído operacional; falhas continuam visíveis normalmente.
     if (/^✅ Nova rodada processada pela IA -> Vencedor:/i.test(texto)) return null;
     if (/^✅ IA atualizada \|/i.test(texto)) return null;
 
-    // Confirmação Telegram em formato operacional alinhado.
     match = texto.match(/^📨 Robô\s+(\d+):\s+Telegram confirmado em\s+(\d+)\/(\d+)\s+destino\(s\)\.$/i);
     if (match) {
         return `📨 TELEGRAM | Robô ${match[1]} | Confirmado     | Destinos: ${match[2]}/${match[3]}`;
     }
 
-    // Teste manual de Telegram não é um sinal; mantém identificação explícita.
     match = texto.match(/^📨 Robô\s+(\d+):\s+teste Telegram confirmado em\s+(\d+)\/(\d+)\s+destino\(s\)\.$/i);
     if (match) {
         return `📨 TESTE TG | Robô ${match[1]} | Confirmado     | Destinos: ${match[2]}/${match[3]}`;
     }
 
-    // Estados excepcionais ficam associados à última rodada observada.
+    match = texto.match(/^🧩 Recovery analítico \| (\d+) giro\(s\) recomposto\(s\) cronologicamente \| janela=(\d+)(.*)$/i);
+    if (match) {
+        const count = Number(match[1]) || 0;
+        if (count === ultimoRecoveryCompacto.count && Date.now() - ultimoRecoveryCompacto.em < 5000) return null;
+        return `🧩 ANALÍTICO | ${count} giro(s) recomposto(s) | Janela: ${match[2]}${match[3] || ''}`;
+    }
+
+    match = texto.match(/^⚠️ Continuidade de dados comprometida \(([^)]+)\): (\d+) sinal\(is\) pendente\(s\) invalidado\(s\), (\d+) Auto-Trader\(s\) com ordem pendente bloqueado\(s\)\.$/i);
+    if (match) {
+        return `🛡️ CONTINUIDADE | ${match[1]} | Sinais invalidados: ${match[2]} | Traders bloqueados: ${match[3]}`;
+    }
+
     if (/^⏳ Fila live aguardando o backend concluir a inicialização\.$/i.test(texto)) {
         return `⏳ FILA     | ${numeroUltimaRodada()} | Backend inicializando; rodada preservada.`;
     }
@@ -148,11 +211,9 @@ function formatarTexto(valor) {
         return `⚠️ ALERTA   | ${numeroUltimaRodada()} | Persistência canônica falhou${texto ? ` | ${texto}` : ''}`;
     }
 
-    // Nomes de fornecedor não fazem parte do log operacional.
     texto = texto.replace(/TIPMINER/gi, 'BAC BO');
     texto = texto.replace(/TipMiner/g, 'Bac Bo');
 
-    // UUID continua existindo internamente para deduplicação, mas não polui o terminal.
     texto = texto.replace(/\buuid=[0-9a-f-]{36}\s*\|\s*/gi, '');
     texto = texto.replace(/\s*\|\s*uuid=[0-9a-f-]{36}/gi, '');
     texto = texto.replace(/\s*\|\s*UUID:\s*[0-9a-f-]{36}/gi, '');
@@ -206,11 +267,13 @@ function instalarLogOperacional() {
         };
     }
 
+    onHistoricoRecuperado(registrarRecoveryOperacional);
     instalado = true;
 }
 
 module.exports = {
     instalarLogOperacional,
     formatarTexto,
-    registrarSinalOperacional
+    registrarSinalOperacional,
+    registrarRecoveryOperacional
 };
