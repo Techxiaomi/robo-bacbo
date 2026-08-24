@@ -4,6 +4,7 @@ const path = require('path');
 
 require('./env_loader').loadEnvFile(path.join(__dirname, '..', '.env'));
 require('./operational_log_formatter').instalarLogOperacional();
+require('./telegram_signal_lifecycle').instalarTelegramSignalLifecycle();
 
 async function iniciar() {
     const canonicalBridge = require('./bacbo_canonical_bridge');
