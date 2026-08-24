@@ -10,6 +10,7 @@
     <script src="/realtime-ui-scheduler.js"></script>
     <script src="/dashboard-ui.js"></script>
     <script src="/dom-ui2-transform.js"></script>
+    <script src="/bacbo-result-map.js"></script>
     <script src="/backtest-ui3-transform.js"></script>
     <script src="/resources-ui4.js"></script>
     <script src="/telegram-form-ui.js"></script>
@@ -46,6 +47,9 @@
                 }
                 if (window.__domUi2Ready !== true || typeof window.otimizarScriptPrincipalUI2 !== 'function') {
                     throw new Error('Transformador DOM UI-2 não carregado');
+                }
+                if (!window.__bacboResultMap?.render) {
+                    throw new Error('Componente Mapa Bac Bo não carregado');
                 }
                 if (window.__backtestUi3Ready !== true || typeof window.otimizarScriptPrincipalUI3 !== 'function') {
                     throw new Error('Transformador Backtest UI-3 não carregado');

@@ -25,13 +25,19 @@ async function iniciar() {
     }
 
     try {
+        await require('./bacbo_map_snapshot').instalarBacboMapSnapshot();
+    } catch (erro) {
+        console.warn(`⚠️ Mapa Bac Bo: snapshot visual não iniciou: ${erro.message}`);
+    }
+
+    try {
         await require('./telegram_signal_config').migrarConfiguracoesTelegram();
     } catch (erro) {
         console.warn(`⚠️ Telegram: preferências visuais não foram migradas no bootstrap: ${erro.message}`);
     }
 
     // O backend só é carregado depois da tentativa de hidratação/recovery inicial.
-    // Falha de Redis/Telegram continua fail-open para o painel/backend, como antes.
+    // Falhas auxiliares continuam fail-open para o painel/backend, como antes.
     require('./bot2_coletor');
 }
 
