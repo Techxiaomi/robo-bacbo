@@ -18,9 +18,9 @@ async function iniciar() {
     const redisRuntime = require('./redis_runtime_v3');
     redisRuntime.instalarRedisRuntimeV3();
 
+    const historySync = require('./tipminer_history_sync');
     try {
-        await require('./tipminer_history_sync')
-            .instalarTipMinerHistorySync(redisRuntime.processarBacbo);
+        await historySync.instalarTipMinerHistorySync(redisRuntime.processarBacbo);
     } catch (erro) {
         console.error(`⚠️ Sincronização inicial de histórico não iniciou: ${erro.message}`);
     }
@@ -37,8 +37,18 @@ async function iniciar() {
         console.warn(`⚠️ Telegram: preferências visuais não foram migradas no bootstrap: ${erro.message}`);
     }
 
-    // O backend só é carregado depois da tentativa de hidratação/recovery inicial.
-    // Falhas auxiliares continuam fail-open para o painel/backend, como antes.
+    // Barreira determinística: drena qualquer history_sync que tenha chegado durante o
+    // bootstrap antes de construir a memória analítica/IA do backend principal.
+    const estadoHistorico = await historySync.drenarHistoricoPendente('bootstrap_barrier');
+    if (estadoHistorico.assinatura_processada) {
+        console.log(`🔒 BOOTSTRAP | histórico consolidado | janela=${estadoHistorico.janela}.`);
+    }
+
+    // Registra a IA como consumidor crítico da barreira FINAL antes da criação do serviço.
+    // O coletor só recebe ACK final depois que essa revalidação termina.
+    require('./auto_pilot_history_barrier').instalarAutoPilotHistoryBarrier();
+
+    // O backend só é carregado depois da hidratação/recovery e da barreira inicial acima.
     require('./bot2_coletor');
 }
 

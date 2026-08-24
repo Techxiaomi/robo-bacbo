@@ -31,6 +31,10 @@ REDIS_LATEST_ROUND_KEY = (
     or "bacbo_latest_round"
 )
 REDIS_EVENTS_CHANNEL = os.getenv("REDIS_BACBO_EVENTS_CHANNEL", "bacbo_events").strip() or "bacbo_events"
+REDIS_HISTORY_ACK_KEY = (
+    os.getenv("REDIS_BACBO_HISTORY_ACK_KEY", "robo_bacbo:history_applied_signature").strip()
+    or "robo_bacbo:history_applied_signature"
+)
 
 NODE_HOST = os.getenv("NODE_HOST", "127.0.0.1").strip() or "127.0.0.1"
 if NODE_HOST in {"0.0.0.0", "::", "[::]"}:
@@ -52,7 +56,9 @@ NODE_HEALTH_CONNECT_TIMEOUT_SECONDS = 1.5
 NODE_HEALTH_READ_TIMEOUT_SECONDS = 3
 CONTINUITY_RETRY_MIN_SECONDS = 1.0
 CONTINUITY_RETRY_MAX_SECONDS = 3.0
-CONTINUITY_HISTORY_REFRESH_SECONDS = 5.0
+HISTORY_ACK_POLL_SECONDS = 0.25
+HISTORY_ACK_LOG_INTERVAL_SECONDS = 10.0
+HISTORY_BARRIER_REPUBLISH_SECONDS = 5.0
 
 BROWSER_HEADERS = {
     "User-Agent": (
@@ -89,6 +95,7 @@ class TipMinerCollector:
         )
         self.history = []
         self._pending_interruption = None
+        self._last_confirmed_interruption = None
 
     @staticmethod
     def _json_dumps(value):
@@ -206,8 +213,9 @@ class TipMinerCollector:
 
     @classmethod
     def _history_signature(cls, rounds):
+        ordered = cls._chronological_history(list(rounds or []))
         digest = hashlib.sha256()
-        for item in cls._chronological_history(list(rounds or [])):
+        for item in ordered:
             digest.update(str(item.get("uuid") or "").strip().lower().encode("utf-8"))
             digest.update(b"|")
             digest.update(str(item.get("type") or "").strip().upper().encode("utf-8"))
@@ -216,7 +224,7 @@ class TipMinerCollector:
             digest.update(b"|")
             digest.update(str(item.get("instant") or "").strip().encode("utf-8"))
             digest.update(b"\n")
-        return f"{len(rounds or [])}|{digest.hexdigest()}"
+        return f"{len(ordered)}|{digest.hexdigest()}"
 
     @classmethod
     def _history_from_redis_value(cls, raw_value):
@@ -277,6 +285,9 @@ class TipMinerCollector:
                 sinais = int(body.get("sinais_invalidados") or 0)
                 traders = int(body.get("traders_bloqueados") or 0)
                 motivo = str(pending.get("motivo") or "INTERRUPCAO_COLETOR")
+                confirmado = dict(pending)
+                confirmado["confirmed_at"] = int(time.time() * 1000)
+                self._last_confirmed_interruption = confirmado
                 self._pending_interruption = None
                 if emit_success:
                     print(
@@ -292,20 +303,15 @@ class TipMinerCollector:
             return False, f"node_indisponivel:{type(exc).__name__}"
 
     def _await_pending_interruption_ack(self):
-        if self._pending_interruption is None:
-            return True
-
         attempt = 0
-        last_history_refresh = time.monotonic()
         last_status = None
 
         while self._pending_interruption is not None:
             attempt += 1
             ok, status = self._try_notify_pending_interruption(emit_success=True)
             if ok:
-                return True
+                break
 
-            now = time.monotonic()
             if attempt == 1 or status != last_status or attempt % 10 == 0:
                 print(
                     "⏳ BAC BO | continuidade | aguardando confirmação do Node; "
@@ -313,23 +319,13 @@ class TipMinerCollector:
                 )
             last_status = status
 
-            if now - last_history_refresh >= CONTINUITY_HISTORY_REFRESH_SECONDS:
-                try:
-                    self.sync_history(quiet_if_unchanged=True)
-                except Exception as exc:
-                    print(
-                        "⚠️ BAC BO | continuidade | falha ao atualizar histórico durante espera | "
-                        f"{type(exc).__name__}: {exc}"
-                    )
-                last_history_refresh = time.monotonic()
-
             delay = min(
                 CONTINUITY_RETRY_MAX_SECONDS,
                 CONTINUITY_RETRY_MIN_SECONDS + ((attempt - 1) * 0.5),
             )
             time.sleep(delay)
 
-        return True
+        return self._last_confirmed_interruption
 
     def _notify_interruption_best_effort(self, reason, force=False):
         self._queue_interruption(reason, force=force)
@@ -341,27 +337,23 @@ class TipMinerCollector:
             )
         return ok
 
-    def _publish_history_sync(self):
+    def _publish_history_sync(self, signature, barrier_id=None):
         serialized_history = self._json_dumps(self.history)
-        event = self._json_dumps({"action": "history_sync"})
+        event = {
+            "action": "history_sync",
+            "signature": signature,
+        }
+        if barrier_id:
+            event["barrier_id"] = str(barrier_id)
 
         pipeline = self.redis.pipeline(transaction=True)
         pipeline.set(REDIS_HISTORY_KEY, serialized_history)
-        pipeline.publish(REDIS_EVENTS_CHANNEL, event)
+        pipeline.publish(REDIS_EVENTS_CHANNEL, self._json_dumps(event))
         pipeline.execute()
 
     def _publish_live_round(self, round_data):
-        existing_index = next(
-            (
-                index
-                for index, item in enumerate(self.history)
-                if str(item.get("uuid")) == round_data["uuid"]
-            ),
-            None,
-        )
-
-        if existing_index is not None:
-            self.history.pop(existing_index)
+        if any(str(item.get("uuid")) == round_data["uuid"] for item in self.history):
+            return False
 
         self.history.append(round_data)
         if len(self.history) > HISTORY_LIMIT:
@@ -376,8 +368,9 @@ class TipMinerCollector:
         pipeline.set(REDIS_HISTORY_KEY, serialized_history)
         pipeline.publish(REDIS_EVENTS_CHANNEL, event)
         pipeline.execute()
+        return True
 
-    def sync_history(self, quiet_if_unchanged=False):
+    def sync_history(self, quiet_if_unchanged=False, force_publish=False, barrier_id=None):
         response = self.http.get(
             HISTORY_URL,
             headers={"Accept": "application/json"},
@@ -403,18 +396,77 @@ class TipMinerCollector:
         changed = retained_signature != new_signature
 
         self.history = normalized
-        if changed:
-            self._publish_history_sync()
-            print(f"♻️ BAC BO | HISTÓRICO | {len(self.history)} giro(s) sincronizados.")
+        published_at = int(time.time() * 1000)
+        if changed or force_publish:
+            self._publish_history_sync(new_signature, barrier_id=barrier_id)
+            if changed:
+                print(f"♻️ BAC BO | HISTÓRICO | {len(self.history)} giro(s) sincronizados.")
+            elif not quiet_if_unchanged:
+                print(
+                    f"♻️ BAC BO | HISTÓRICO | {len(self.history)} giro(s) reconfirmados para barreira final."
+                )
         elif not quiet_if_unchanged:
             print(
                 f"♻️ BAC BO | HISTÓRICO | {len(self.history)} giro(s) confirmados; "
                 "sem alterações."
             )
 
-        return changed
+        return {
+            "changed": changed,
+            "published": changed or force_publish,
+            "published_at": published_at,
+            "signature": new_signature,
+            "window": len(self.history),
+            "barrier_id": str(barrier_id or ""),
+        }
 
-    def listen_live(self):
+    def _read_history_ack(self):
+        raw = self.redis.get(REDIS_HISTORY_ACK_KEY)
+        if not raw:
+            return None
+        try:
+            payload = json.loads(str(raw))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _await_history_application_ack(self, signature, barrier_id, min_applied_at):
+        last_log = 0.0
+        last_publish = time.monotonic()
+
+        while True:
+            ack = self._read_history_ack()
+            ack_signature = str((ack or {}).get("signature") or "")
+            ack_barrier = str((ack or {}).get("barrier_id") or "")
+            ack_applied_at = int((ack or {}).get("applied_at") or 0)
+
+            if (
+                ack_signature == signature
+                and ack_barrier == str(barrier_id)
+                and ack_applied_at >= int(min_applied_at)
+            ):
+                process_epoch = str((ack or {}).get("process_epoch") or "n/a")
+                print(
+                    "✅ BAC BO | histórico final confirmado pelo Node | "
+                    f"janela={len(self.history)} | epoch={process_epoch}."
+                )
+                return ack
+
+            now = time.monotonic()
+            if now - last_publish >= HISTORY_BARRIER_REPUBLISH_SECONDS:
+                # O mesmo barrier_id torna a repetição idempotente e permite sobreviver
+                # inclusive a um restart do Node durante o próprio handshake final.
+                self._publish_history_sync(signature, barrier_id=barrier_id)
+                last_publish = now
+
+            if now - last_log >= HISTORY_ACK_LOG_INTERVAL_SECONDS:
+                print(
+                    "⏳ BAC BO | histórico final | aguardando aplicação integral no Node; live bloqueado."
+                )
+                last_log = now
+            time.sleep(HISTORY_ACK_POLL_SECONDS)
+
+    def _open_live_stream(self):
         response = self.http.get(
             LIVE_URL,
             headers={
@@ -432,8 +484,10 @@ class TipMinerCollector:
             raise RuntimeError(
                 f"Fluxo Bac Bo respondeu Content-Type inesperado: {content_type or 'ausente'}"
             )
+        return response
 
-        print(f"🎧 BAC BO | LIVE | conectado | Redis={REDIS_EVENTS_CHANNEL}.")
+    def listen_live(self, response):
+        print(f"🎧 BAC BO | LIVE | conectado e liberado | Redis={REDIS_EVENTS_CHANNEL}.")
 
         client = SSEClient(response)
         try:
@@ -451,7 +505,9 @@ class TipMinerCollector:
                     raise ValueError("evento SSE Bac Bo nao contem JSON valido") from exc
 
                 round_data = self._normalize_round(payload)
-                self._publish_live_round(round_data)
+                if not self._publish_live_round(round_data):
+                    continue
+
                 print(
                     f"🎲 BAC BO | {self._winner_label(round_data['type'])} | "
                     f"Soma: {round_data['result']}"
@@ -468,27 +524,39 @@ class TipMinerCollector:
         print(f"📣 Canal Redis: {REDIS_EVENTS_CHANNEL}")
         print("============================================================")
 
-        # Um processo novo nunca herda a continuidade operacional do processo anterior.
-        # O mesmo interrupcao_id é mantido até o Node confirmar o recebimento.
         self._queue_interruption("COLETOR_REINICIADO", force=True)
 
         while True:
+            live_response = None
             try:
                 self.redis.ping()
 
-                # Se o Node já estiver disponível, invalida sinais antigos antes do backfill.
-                # Se ainda estiver iniciando, o histórico é atualizado primeiro para que o
-                # bootstrap do Node possa recuperar a janela mais recente.
+                # Abre o SSE antes do snapshot. Eventos posteriores ficam bufferizados no socket
+                # enquanto as barreiras são concluídas; nenhum intervalo fica sem cobertura.
+                live_response = self._open_live_stream()
+
+                # Se o Node já está pronto, invalida a continuidade antiga imediatamente.
+                # Se ainda está subindo, o snapshot abaixo alimenta o bootstrap primeiro.
                 self._try_notify_pending_interruption(emit_success=True)
                 self.sync_history()
-
-                # Fail-closed operacional: nenhum evento live é publicado enquanto o Node
-                # não reconhecer explicitamente a quebra de continuidade.
                 self._await_pending_interruption_ack()
 
-                # Fecha a janela criada enquanto aguardávamos o Node ficar pronto.
-                self.sync_history(quiet_if_unchanged=True)
-                self.listen_live()
+                # Barreira FINAL: ID único impede ACK antigo ou de outro processo Node de liberar live.
+                barrier_id = f"hist-{os.getpid()}-{uuid.uuid4().hex}"
+                final_sync = self.sync_history(
+                    quiet_if_unchanged=True,
+                    force_publish=True,
+                    barrier_id=barrier_id,
+                )
+                self._await_history_application_ack(
+                    final_sync["signature"],
+                    barrier_id,
+                    final_sync["published_at"],
+                )
+
+                # Só depois de interrupção + histórico + consumidores críticos confirmados
+                # o buffer SSE é drenado para Redis live.
+                self.listen_live(live_response)
             except KeyboardInterrupt:
                 self._notify_interruption_best_effort("MANUTENCAO_COLETOR", force=True)
                 print("\n👋 Coletor Bac Bo encerrado pelo operador.")
@@ -501,6 +569,12 @@ class TipMinerCollector:
                     f"{type(exc).__name__}: {exc}"
                 )
                 time.sleep(RECONNECT_DELAY_SECONDS)
+            finally:
+                if live_response is not None:
+                    try:
+                        live_response.close()
+                    except Exception:
+                        pass
 
 
 def main():
