@@ -146,10 +146,13 @@ async function instalarTipMinerHistorySync(processarBacbo) {
     instalado = true;
     console.log(`🎧 Adaptador TipMiner HISTORY_SYNC ativo: ${TIPMINER_HISTORY_KEY} -> Runtime V3.`);
 
-    // Recupera o snapshot já retido mesmo se o evento history_sync ocorreu antes do Node subir.
-    void enfileirarHistory(processarBacbo, 'startup').catch(erro => {
+    // O snapshot retido é concluído antes de liberar o bootstrap do backend.
+    // Assim banco canônico, recovery analítico e motor de sinais começam da mesma fronteira.
+    try {
+        await enfileirarHistory(processarBacbo, 'startup');
+    } catch (erro) {
         console.error('⚠️ TipMiner HISTORY startup falhou:', erro.message);
-    });
+    }
     return true;
 }
 

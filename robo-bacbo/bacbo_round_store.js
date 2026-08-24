@@ -1,6 +1,7 @@
 'use strict';
 
 const mysql = require('mysql2/promise');
+const canonicalBridge = require('./bacbo_canonical_bridge');
 
 let pool = null;
 let inicializacao = null;
@@ -44,6 +45,10 @@ async function garantirSchema() {
 }
 
 async function persistirRodadaBacbo(round) {
+    // O histórico usado para detectar sinais é independente da disponibilidade do MySQL.
+    // O Runtime V3 continua fail-open na persistência, mas nunca perde a rodada em memória.
+    canonicalBridge.registrarRodada(round);
+
     await garantirSchema();
     const db = criarPool();
     const timestampSegundos = Number(round.timestamp_ms) / 1000;
@@ -79,13 +84,22 @@ async function persistirHistoricoBacbo(rounds) {
             );
         }
         await conexao.commit();
-        return itens.length;
     } catch (erro) {
         try { await conexao.rollback(); } catch (_) { }
         throw erro;
     } finally {
         conexao.release();
     }
+
+    // O backfill é apenas estatístico: grava giros_recentes diretamente e nunca chama /receber-sinal.
+    // Falha de recovery não invalida a persistência canônica já confirmada acima.
+    try {
+        await canonicalBridge.sincronizarHistorico(itens);
+    } catch (erro) {
+        console.error('⚠️ Recovery analítico do histórico falhou sem afetar bacbo_rounds:', erro.message);
+    }
+
+    return itens.length;
 }
 
 module.exports = {
