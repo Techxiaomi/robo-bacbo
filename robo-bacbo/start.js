@@ -4,6 +4,7 @@ const path = require('path');
 
 require('./env_loader').loadEnvFile(path.join(__dirname, '..', '.env'));
 require('./operational_log_formatter').instalarLogOperacional();
+require('./telegram_signal_presenter').instalarTelegramSignalPresenter();
 require('./telegram_signal_lifecycle').instalarTelegramSignalLifecycle();
 
 async function iniciar() {
@@ -23,8 +24,14 @@ async function iniciar() {
         console.error(`⚠️ Sincronização inicial de histórico não iniciou: ${erro.message}`);
     }
 
+    try {
+        await require('./telegram_signal_config').migrarConfiguracoesTelegram();
+    } catch (erro) {
+        console.warn(`⚠️ Telegram: preferências visuais não foram migradas no bootstrap: ${erro.message}`);
+    }
+
     // O backend só é carregado depois da tentativa de hidratação/recovery inicial.
-    // Falha de Redis continua fail-open para o painel/backend, como antes.
+    // Falha de Redis/Telegram continua fail-open para o painel/backend, como antes.
     require('./bot2_coletor');
 }
 
