@@ -7,6 +7,7 @@ import json
 import os
 import socket
 import ssl
+from collections import OrderedDict
 from urllib.parse import urlparse, unquote
 from env_loader import load_env_file
 
@@ -36,6 +37,7 @@ EXECUTOR_BET_ACCEPTANCE_TIMEOUT_SECONDS = 8.0
 EXECUTOR_BET_ACCEPTANCE_TOLERANCE = 0.10
 BETTING_WINDOW_TIMEOUT_MS = 14000
 BETTING_CHIP_SELECTOR = "[data-role='chip'][data-value]"
+IDEMPOTENCY_CACHE_MAX = 100
 
 PLAYWRIGHT_DRIVER_FATAL_MARKERS = (
     "socket.send",
@@ -66,6 +68,9 @@ navegador_aberto = threading.Event()
 atividade_node_lock = threading.Lock()
 ultima_atividade_node_monotonic = time.monotonic()
 avisos_erro_limitados = {}
+ordens_idempotencia_lock = threading.Lock()
+ordens_em_processamento = set()
+resultados_ordens = OrderedDict()
 
 
 class ErroExecucaoAposta(RuntimeError):
@@ -246,7 +251,7 @@ def publicar_saldo_redis(saldo):
     })
 
 
-def publicar_resultado_aposta_redis(order_id, status, motivo="", confirmacao=None):
+def montar_resultado_aposta(order_id, status, motivo="", confirmacao=None):
     payload = {
         "action": "bet_result",
         "order_id": str(order_id or "").strip().lower(),
@@ -255,7 +260,82 @@ def publicar_resultado_aposta_redis(order_id, status, motivo="", confirmacao=Non
     }
     if confirmacao is not None:
         payload["confirmacao"] = confirmacao
-    return publicar_redis(payload)
+    return payload
+
+
+def publicar_resultado_aposta_redis(order_id, status, motivo="", confirmacao=None):
+    return publicar_redis(
+        montar_resultado_aposta(order_id, status, motivo, confirmacao)
+    )
+
+
+def consultar_order_id(order_id):
+    order_id = str(order_id or "").strip().lower()
+    with ordens_idempotencia_lock:
+        resultado = resultados_ordens.get(order_id)
+        if resultado is not None:
+            resultados_ordens.move_to_end(order_id)
+            return "FINALIZADA", dict(resultado)
+        if order_id in ordens_em_processamento:
+            return "EM_PROCESSAMENTO", None
+        return "NOVA", None
+
+
+def reservar_order_id(order_id):
+    order_id = str(order_id or "").strip().lower()
+    with ordens_idempotencia_lock:
+        resultado = resultados_ordens.get(order_id)
+        if resultado is not None:
+            resultados_ordens.move_to_end(order_id)
+            return "FINALIZADA", dict(resultado)
+        if order_id in ordens_em_processamento:
+            return "EM_PROCESSAMENTO", None
+        ordens_em_processamento.add(order_id)
+        return "NOVA", None
+
+
+def cachear_resultado_order_id(order_id, payload):
+    order_id = str(order_id or "").strip().lower()
+    resultado = dict(payload or {})
+    with ordens_idempotencia_lock:
+        ordens_em_processamento.discard(order_id)
+        resultados_ordens[order_id] = resultado
+        resultados_ordens.move_to_end(order_id)
+        while len(resultados_ordens) > IDEMPOTENCY_CACHE_MAX:
+            resultados_ordens.popitem(last=False)
+    return dict(resultado)
+
+
+def republicar_resultado_order_id(order_id, payload):
+    try:
+        publicar_redis(payload)
+        return True
+    except Exception as erro_redis:
+        registrar_erro_limitado(
+            f"redis_replay_{order_id}",
+            f"⚠️ Falha ao republicar resultado idempotente de {order_id}: {type(erro_redis).__name__}: {erro_redis}",
+            10,
+        )
+        return False
+
+
+def finalizar_order_id(order_id, status, motivo="", confirmacao=None):
+    payload = montar_resultado_aposta(order_id, status, motivo, confirmacao)
+
+    # O terminal financeiro e memorizado ANTES do publish. Se o Redis falhar depois
+    # do clique/debito, um retry com o mesmo order_id jamais executa fisicamente de novo.
+    cachear_resultado_order_id(order_id, payload)
+
+    try:
+        publicar_redis(payload)
+    except Exception as erro_redis:
+        registrar_erro_limitado(
+            f"redis_bet_result_{order_id}",
+            f"⚠️ Resultado {payload['status']} de {order_id} cacheado, mas publish Redis falhou: "
+            f"{type(erro_redis).__name__}: {erro_redis}",
+            10,
+        )
+    return payload
 
 
 def ouvir_comandos_redis():
@@ -287,8 +367,46 @@ def ouvir_comandos_redis():
 
                 registrar_atividade_node()
                 acao = str(dados.get("action") or "").strip()
-                if acao in {"sync_balance", "place_bet"}:
+
+                if acao == "sync_balance":
                     fila_comandos_redis.put(dados)
+                    continue
+
+                if acao != "place_bet":
+                    continue
+
+                order_id = str(dados.get("order_id") or "").strip().lower()
+                if not order_id:
+                    print("⚠️ place_bet rejeitado no listener: order_id ausente.")
+                    continue
+
+                estado_id, resultado_anterior = consultar_order_id(order_id)
+                if estado_id == "FINALIZADA":
+                    print(
+                        f"🛡️ IDEMPOTÊNCIA | duplicata bloqueada no listener | "
+                        f"order_id={order_id} | status={resultado_anterior.get('status')}"
+                    )
+                    republicar_resultado_order_id(order_id, resultado_anterior)
+                    continue
+
+                if estado_id == "EM_PROCESSAMENTO":
+                    print(
+                        f"🛡️ IDEMPOTÊNCIA | duplicata ainda em processamento bloqueada | order_id={order_id}"
+                    )
+                    continue
+
+                if not auto_trader_habilitado():
+                    finalizar_order_id(
+                        order_id,
+                        "FALHOU",
+                        motivo="AUTO_TRADER_DESLIGADO",
+                    )
+                    print(
+                        f"🛑 AUTO TRADER | ordem rejeitada pelo fusível | order_id={order_id}"
+                    )
+                    continue
+
+                fila_comandos_redis.put(dados)
         except Exception as e:
             registrar_erro_limitado(
                 "redis_auto_trader_commands",
@@ -1013,35 +1131,55 @@ def garantir_navegador(p, sessao):
 
 def processar_comando_playwright(p, sessao, comando):
     acao = str(comando.get("action") or "").strip()
-    page, context = garantir_navegador(p, sessao)
-    garantir_destino_final_mesa(page, context)
-
-    if acao == "sync_balance":
-        saldo = ler_saldo_atual(page, aguardar_ms=5000)
-        if saldo is None:
-            raise RuntimeError("Saldo real nao localizado no iframe da Evolution")
-        publicar_saldo_redis(saldo)
-        garantir_destino_final_mesa(page, context)
-        print(f"💰 Saldo real publicado via Redis: R$ {saldo:.2f}; mesa mantida pronta.")
-        return
 
     if acao == "place_bet":
         order_id = str(comando.get("order_id") or "").strip().lower()
         if not order_id:
             raise ValueError("place_bet recebido sem order_id")
 
+        # Defesa em profundidade: antes de qualquer browser/frame/saldo, o worker
+        # confirma idempotencia e o fusivel, mesmo que a fila seja alimentada por outro caminho no futuro.
+        estado_id, resultado_anterior = reservar_order_id(order_id)
+        if estado_id == "FINALIZADA":
+            print(
+                f"🛡️ IDEMPOTÊNCIA | ordem duplicada bloqueada no worker | "
+                f"order_id={order_id} | status_original={resultado_anterior.get('status')}"
+            )
+            republicar_resultado_order_id(order_id, resultado_anterior)
+            return
+
+        if estado_id == "EM_PROCESSAMENTO":
+            print(
+                f"🛡️ IDEMPOTÊNCIA | ordem duplicada em processamento bloqueada no worker | order_id={order_id}"
+            )
+            return
+
+        if not auto_trader_habilitado():
+            finalizar_order_id(
+                order_id,
+                "FALHOU",
+                motivo="AUTO_TRADER_DESLIGADO",
+            )
+            print(
+                f"🛑 AUTO TRADER | ordem rejeitada pelo fusível no worker | order_id={order_id}"
+            )
+            return
+
         auto_trader_operando.set()
         try:
+            page, context = garantir_navegador(p, sessao)
+            garantir_destino_final_mesa(page, context)
+
             confirmacao = executar_place_bet(page, comando)
             garantir_destino_final_mesa(page, context)
-            publicar_resultado_aposta_redis(
+            finalizar_order_id(
                 order_id,
                 "EXECUTADA",
                 confirmacao=confirmacao,
             )
             return
         except ErroJanelaApostasTimeout as e:
-            publicar_resultado_aposta_redis(
+            finalizar_order_id(
                 order_id,
                 "EXPIRADA",
                 motivo=str(e),
@@ -1056,17 +1194,21 @@ def processar_comando_playwright(p, sessao, comando):
                 erro_driver_playwright(e)
                 or getattr(e, "execucao_ambigua", False) is True
             ) else "FALHOU"
-            try:
-                publicar_resultado_aposta_redis(order_id, status, motivo=str(e))
-            except Exception as erro_redis:
-                registrar_erro_limitado(
-                    "redis_bet_result",
-                    f"⚠️ Falha ao publicar bet_result {status} de {order_id}: {type(erro_redis).__name__}: {erro_redis}",
-                    10,
-                )
+            finalizar_order_id(order_id, status, motivo=str(e))
             raise
         finally:
             auto_trader_operando.clear()
+
+    if acao == "sync_balance":
+        page, context = garantir_navegador(p, sessao)
+        garantir_destino_final_mesa(page, context)
+        saldo = ler_saldo_atual(page, aguardar_ms=5000)
+        if saldo is None:
+            raise RuntimeError("Saldo real nao localizado no iframe da Evolution")
+        publicar_saldo_redis(saldo)
+        garantir_destino_final_mesa(page, context)
+        print(f"💰 Saldo real publicado via Redis: R$ {saldo:.2f}; mesa mantida pronta.")
+        return
 
 
 def executar_manutencao_se_devida(p, sessao, forcar_abertura=False):
@@ -1213,6 +1355,7 @@ def exibir_painel_versao():
     print(f"🏷️ VERSAO: {VERSAO_ROBO} | {NOME_ATUALIZACAO}")
     print(f"🎧 Canal de comandos: {REDIS_COMMAND_CHANNEL}")
     print(f"⚙️ AUTO_TRADER_ENABLED={AUTO_TRADER_ENABLED}")
+    print(f"🛡️ Idempotência física: últimos {IDEMPOTENCY_CACHE_MAX} order_id(s) terminais em memória.")
     print("🧠 Sem Flask, sem WebSocket da mesa e sem captura de resultados.")
     print("=" * 60)
 
