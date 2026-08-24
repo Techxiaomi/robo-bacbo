@@ -1242,6 +1242,15 @@ function criarIntegracaoContadorDiario({ controleDiarioAutoTrader, dbPool, ioSer
     async function inicializarDatasLegadas() {
         estadoLedgerRoad.schemaPronto = false;
         await cicloFinanceiro.inicializarSchema();
+
+        const reconciliacao = await cicloFinanceiro.reconciliarRestart();
+        if (reconciliacao.ordens > 0) {
+            console.warn(
+                `🛡️ RESTART FINANCEIRO | ${reconciliacao.ordens} ordem(ns) interrompida(s) | `
+                + `${reconciliacao.traders} Auto-Trader(s) bloqueado(s).`
+            );
+        }
+
         await inicializarLedgerForense(dbPool);
         const hoje = controleDiarioAutoTrader.dataOperacional();
         await dbPool.query(
