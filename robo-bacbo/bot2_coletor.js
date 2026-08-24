@@ -11,6 +11,18 @@ const { Server } = require("socket.io");
 const { criarAutoPilotService } = require("./auto_pilot_ia");
 const { criarControleDiarioAutoTrader } = require("./bug051b_daily_counter");
 const { criarIntegracaoContadorDiario } = require("./bug051b_integration");
+const {
+    normalizarConfigAutoTrader,
+    traderDentroHorarioExecucao,
+    formatarFaixasHorario,
+    normalizarEstadoCiclo,
+    estadoInicialCiclo,
+    configuracaoCicloMudou,
+    processarResultadoDormindo,
+    avaliarSinalOnda,
+    avancarAposSinalOperado,
+    aplicarEstadoCiclo
+} = require("./auto_trader");
 require("./env_loader").loadEnvFile(path.join(__dirname, "..", ".env"));
 
 // Erros globais realmente não tratados são fatais: continuar pode deixar estado financeiro incoerente.
@@ -234,6 +246,10 @@ async function prepararBancoDeDados() {
                 status_operacao VARCHAR(50) DEFAULT 'STANDBY',
                 entradas_feitas INT DEFAULT 0,
                 pulos_restantes INT DEFAULT 0,
+                estado_ciclo VARCHAR(20) DEFAULT 'DORMINDO',
+                reds_virtuais_observados INT DEFAULT 0,
+                sinais_operados_onda INT DEFAULT 0,
+                ciclos_concluidos INT DEFAULT 0,
                 data_contador_entradas VARCHAR(10) DEFAULT NULL,
                 reds_consecutivos INT DEFAULT 0,
                 stop_reds_pausado_ate BIGINT DEFAULT 0,
@@ -310,6 +326,10 @@ async function prepararBancoDeDados() {
         await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN stop_reds_pausado_ate BIGINT DEFAULT 0");
         await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN trailing_pico_lucro DECIMAL(12,2) DEFAULT 0");
         await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN data_contador_entradas VARCHAR(10) DEFAULT NULL");
+        await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN estado_ciclo VARCHAR(20) DEFAULT 'DORMINDO'");
+        await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN reds_virtuais_observados INT DEFAULT 0");
+        await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN sinais_operados_onda INT DEFAULT 0");
+        await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN ciclos_concluidos INT DEFAULT 0");
         await integracaoContadorDiario.inicializarDatasLegadas();
 
         // Corrige estados legados impossíveis: um trader desligado manualmente não pode permanecer OPERANDO/STANDBY.
@@ -2108,6 +2128,8 @@ app.get("/api/auto-traders", async (req, res) => {
         const [linhas] = await dbPool.query('SELECT * FROM auto_traders ORDER BY id DESC');
         let sanitizados = linhas.map(at => {
             let confObj = {}; try { confObj = JSON.parse(at.config_json); } catch(e) {}
+            confObj = normalizarConfigAutoTrader(confObj);
+            const estadoCiclo = normalizarEstadoCiclo(at);
             return {
                 id: at.id,
                 nome: at.nome,
@@ -2117,7 +2139,11 @@ app.get("/api/auto-traders", async (req, res) => {
                 saldo_atual: parseFloat(at.saldo_atual),
                 status_operacao: at.status_operacao,
                 entradas_feitas: at.entradas_feitas,
-                pulos_restantes: at.pulos_restantes,
+                pulos_restantes: estadoCiclo.pulos_restantes,
+                estado_ciclo: estadoCiclo.estado_ciclo,
+                reds_virtuais_observados: estadoCiclo.reds_virtuais_observados,
+                sinais_operados_onda: estadoCiclo.sinais_operados_onda,
+                ciclos_concluidos: estadoCiclo.ciclos_concluidos,
                 data_contador_entradas: String(at.data_contador_entradas || ''),
                 reds_consecutivos: Math.max(0, Number(at.reds_consecutivos) || 0),
                 stop_reds_pausado_ate: Math.max(0, Number(at.stop_reds_pausado_ate) || 0),
@@ -2131,10 +2157,11 @@ app.get("/api/auto-traders", async (req, res) => {
 app.post("/api/auto-trader", async (req, res) => {
     try {
         const { nome, ativo, config } = req.body;
-        const configJson = JSON.stringify(config || {});
+        const configNormalizada = normalizarConfigAutoTrader(config || {});
+        const configJson = JSON.stringify(configNormalizada);
         const novoAtivo = ativo === true || ativo === 1;
         if (novoAtivo) {
-            const politicaEmpate = validarPoliticaProtecao(config || {});
+            const politicaEmpate = validarPoliticaProtecao(configNormalizada);
             if (!politicaEmpate.ok) {
                 return res.status(400).json({ sucesso: false, erro: 'protecao_empate_invalida', mensagem: politicaEmpate.motivo });
             }
@@ -2152,10 +2179,19 @@ app.post("/api/auto-trader", async (req, res) => {
         const saldoBaseline = novoAtivo ? saldoFresco : 0;
         const statusInicial = novoAtivo ? 'STANDBY' : 'DESLIGADO';
         const dataContadorEntradas = controleDiarioAutoTrader.dataOperacional();
+        const estadoCiclo = estadoInicialCiclo();
         await dbPool.query(
-            `INSERT INTO auto_traders (nome, ativo, config_json, saldo_inicial, saldo_atual, status_operacao, entradas_feitas, pulos_restantes, data_contador_entradas)
-             VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?)`,
-            [nome, novoAtivo ? 1 : 0, configJson, saldoBaseline, saldoBaseline, statusInicial, dataContadorEntradas]
+            `INSERT INTO auto_traders
+                (nome, ativo, config_json, saldo_inicial, saldo_atual, status_operacao,
+                 entradas_feitas, pulos_restantes, estado_ciclo, reds_virtuais_observados,
+                 sinais_operados_onda, ciclos_concluidos, data_contador_entradas)
+             VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
+            [
+                nome, novoAtivo ? 1 : 0, configJson, saldoBaseline, saldoBaseline, statusInicial,
+                estadoCiclo.pulos_restantes, estadoCiclo.estado_ciclo,
+                estadoCiclo.reds_virtuais_observados, estadoCiclo.sinais_operados_onda,
+                estadoCiclo.ciclos_concluidos, dataContadorEntradas
+            ]
         );
         await carregarSistemasParaMemoria();
         res.json({ sucesso: true, saldo_inicial: saldoBaseline });
@@ -2169,10 +2205,11 @@ app.put("/api/auto-trader/:id", async (req, res) => {
     try {
         const { id } = req.params;
         const { nome, ativo, config } = req.body;
-        const configJson = JSON.stringify(config || {});
+        const configNova = normalizarConfigAutoTrader(config || {});
+        const configJson = JSON.stringify(configNova);
         const novoAtivo = ativo === true || ativo === 1;
         if (novoAtivo) {
-            const politicaEmpate = validarPoliticaProtecao(config || {});
+            const politicaEmpate = validarPoliticaProtecao(configNova);
             if (!politicaEmpate.ok) {
                 return res.status(400).json({ sucesso: false, erro: 'protecao_empate_invalida', mensagem: politicaEmpate.motivo });
             }
@@ -2188,11 +2225,12 @@ app.put("/api/auto-trader/:id", async (req, res) => {
 
         let configAnterior = {};
         try { configAnterior = JSON.parse(existentes[0].config_json || '{}'); } catch(e) {}
-        const configNova = config || {};
+        configAnterior = normalizarConfigAutoTrader(configAnterior);
         const trailingAnteriorAtivo = configAnterior.trailing_stop === true;
         const trailingNovoAtivo = configNova.trailing_stop === true;
         const trailingAnteriorRecuo = Math.max(0, Number(configAnterior.trailing_recuo) || 0);
         const trailingNovoRecuo = Math.max(0, Number(configNova.trailing_recuo) || 0);
+        const cicloConfigMudou = configuracaoCicloMudou(configAnterior, configNova);
         const trailingConfigMudou =
             trailingAnteriorAtivo !== trailingNovoAtivo
             || trailingAnteriorRecuo !== trailingNovoRecuo;
@@ -2211,13 +2249,20 @@ app.put("/api/auto-trader/:id", async (req, res) => {
                 });
             }
 
+            const estadoCiclo = estadoInicialCiclo();
             await dbPool.query(
                 `UPDATE auto_traders
                  SET nome=?, ativo=true, config_json=?, saldo_inicial=?, saldo_atual=?,
                      status_operacao='STANDBY',
-                     reds_consecutivos=0, stop_reds_pausado_ate=0, trailing_pico_lucro=0
+                     reds_consecutivos=0, stop_reds_pausado_ate=0, trailing_pico_lucro=0,
+                     estado_ciclo=?, reds_virtuais_observados=?, sinais_operados_onda=?,
+                     ciclos_concluidos=?, pulos_restantes=?
                  WHERE id=?`,
-                [nome, configJson, saldoFresco, saldoFresco, id]
+                [
+                    nome, configJson, saldoFresco, saldoFresco, estadoCiclo.estado_ciclo,
+                    estadoCiclo.reds_virtuais_observados, estadoCiclo.sinais_operados_onda,
+                    estadoCiclo.ciclos_concluidos, estadoCiclo.pulos_restantes, id
+                ]
             );
         } else if (desligando) {
             if (trailingConfigMudou) {
@@ -2236,6 +2281,34 @@ app.put("/api/auto-trader/:id", async (req, res) => {
                     [nome, configJson, id]
                 );
             }
+        } else if (cicloConfigMudou) {
+            const estadoCiclo = estadoInicialCiclo();
+            if (trailingConfigMudou) {
+                await dbPool.query(
+                    `UPDATE auto_traders
+                     SET nome=?, ativo=?, config_json=?, trailing_pico_lucro=0,
+                         estado_ciclo=?, reds_virtuais_observados=?, sinais_operados_onda=?,
+                         ciclos_concluidos=?, pulos_restantes=?
+                     WHERE id=?`,
+                    [
+                        nome, novoAtivo ? 1 : 0, configJson, estadoCiclo.estado_ciclo,
+                        estadoCiclo.reds_virtuais_observados, estadoCiclo.sinais_operados_onda,
+                        estadoCiclo.ciclos_concluidos, estadoCiclo.pulos_restantes, id
+                    ]
+                );
+            } else {
+                await dbPool.query(
+                    `UPDATE auto_traders
+                     SET nome=?, ativo=?, config_json=?, estado_ciclo=?, reds_virtuais_observados=?,
+                         sinais_operados_onda=?, ciclos_concluidos=?, pulos_restantes=?
+                     WHERE id=?`,
+                    [
+                        nome, novoAtivo ? 1 : 0, configJson, estadoCiclo.estado_ciclo,
+                        estadoCiclo.reds_virtuais_observados, estadoCiclo.sinais_operados_onda,
+                        estadoCiclo.ciclos_concluidos, estadoCiclo.pulos_restantes, id
+                    ]
+                );
+            }
         } else {
             if (trailingConfigMudou) {
                 await dbPool.query(
@@ -2251,7 +2324,11 @@ app.put("/api/auto-trader/:id", async (req, res) => {
         }
 
         await carregarSistemasParaMemoria();
-        res.json({ sucesso: true, baseline_recapturado: reativando });
+        res.json({
+            sucesso: true,
+            baseline_recapturado: reativando,
+            ciclo_resetado: reativando || cicloConfigMudou
+        });
     } catch (e) {
         console.error(`❌ PUT /api/auto-trader/${req.params.id} falhou:`, e.message);
         res.status(500).json({ sucesso: false });
@@ -2549,6 +2626,141 @@ function autoTraderAutorizaEstrategia(config, est, robos = []) {
 
     // Último fallback para motores antigos que gravavam uma origem manual.
     return !est.is_dinamico && fontes.includes(String(est.origem || '').trim());
+}
+
+function autoTraderParticipouDoSinal(trader, est, estado) {
+    const idsSelecionados = idsRobosSelecionadosAutoTrader(trader && trader.config, ROBOS_MEMORIA);
+    const robosSinal = unirRobosInscritos(
+        Array.isArray(estado && estado.robosCiclo) ? estado.robosCiclo : [],
+        Array.isArray(estado && estado.robosInscritos) ? estado.robosInscritos : []
+    );
+    const idsSinal = robosSinal.map(robo => Number(robo.id)).filter(Number.isFinite);
+
+    if (idsSelecionados.size > 0 && idsSinal.length > 0) {
+        return idsSinal.some(id => idsSelecionados.has(id));
+    }
+
+    return autoTraderAutorizaEstrategia(trader && trader.config, est, ROBOS_MEMORIA);
+}
+
+async function persistirEstadoCicloAutoTrader(trader, estadoBruto, { autoStop = false } = {}) {
+    const estado = normalizarEstadoCiclo(estadoBruto || {});
+    const desligarPorCiclos = autoStop === true && trader && trader.ativo === true;
+
+    if (desligarPorCiclos) {
+        await dbPool.query(
+            `UPDATE auto_traders
+             SET ativo=false, status_operacao='LIMITE_CICLOS', estado_ciclo=?,
+                 reds_virtuais_observados=?, sinais_operados_onda=?, ciclos_concluidos=?, pulos_restantes=?
+             WHERE id=?`,
+            [
+                estado.estado_ciclo,
+                estado.reds_virtuais_observados,
+                estado.sinais_operados_onda,
+                estado.ciclos_concluidos,
+                estado.pulos_restantes,
+                trader.id
+            ]
+        );
+    } else {
+        await dbPool.query(
+            `UPDATE auto_traders
+             SET estado_ciclo=?, reds_virtuais_observados=?, sinais_operados_onda=?,
+                 ciclos_concluidos=?, pulos_restantes=?
+             WHERE id=?`,
+            [
+                estado.estado_ciclo,
+                estado.reds_virtuais_observados,
+                estado.sinais_operados_onda,
+                estado.ciclos_concluidos,
+                estado.pulos_restantes,
+                trader.id
+            ]
+        );
+    }
+
+    aplicarEstadoCiclo(trader, estado);
+    if (desligarPorCiclos) {
+        trader.ativo = false;
+        trader.status_operacao = 'LIMITE_CICLOS';
+    }
+    return estado;
+}
+
+async function processarResultadoVirtualAutoTraders(est, estado, tipoResultado) {
+    let alterados = 0;
+    for (const trader of AUTO_TRADERS_MEMORIA) {
+        if (!trader.ativo) continue;
+        if (!['OPERANDO', 'STANDBY'].includes(String(trader.status_operacao || ''))) continue;
+        if (!autoTraderParticipouDoSinal(trader, est, estado)) continue;
+
+        const avaliacao = processarResultadoDormindo(trader, tipoResultado);
+        if (!avaliacao.mudou) continue;
+
+        await persistirEstadoCicloAutoTrader(trader, avaliacao.estado);
+        alterados++;
+        if (avaliacao.acordou) {
+            console.log(
+                `🌊 Auto-Trader ${trader.id}: gatilho de REDs virtuais atingido; `
+                + `máquina avançou para ONDA_ATIVA.`
+            );
+        } else if (String(tipoResultado || '').toUpperCase() === 'RED') {
+            const gatilho = Math.max(0, Number(trader.config && trader.config.gatilho_reds_virtuais) || 0);
+            console.log(
+                `🌙 Auto-Trader ${trader.id}: RED virtual observado `
+                + `(${trader.reds_virtuais_observados}/${gatilho}).`
+            );
+        }
+    }
+
+    if (alterados > 0) ioServer.emit('atualizar_interface');
+    return alterados;
+}
+
+async function prepararEntradaCicloAutoTrader(trader) {
+    const decisao = avaliarSinalOnda(trader);
+    if (decisao.auto_stop) {
+        await persistirEstadoCicloAutoTrader(trader, decisao.estado, { autoStop: true });
+        console.log(`🔁 Auto-Trader ${trader.id}: limite de ciclos já atingido; motor desligado.`);
+        ioServer.emit('atualizar_interface');
+        return false;
+    }
+
+    if (decisao.persistir) {
+        await persistirEstadoCicloAutoTrader(trader, decisao.estado);
+    }
+
+    if (!decisao.permitido) return false;
+    return true;
+}
+
+async function concluirSinalOperadoAutoTrader(trader, tipoResultado) {
+    const progresso = avancarAposSinalOperado(trader);
+    if (progresso.mudou) {
+        const autoStopEfetivo = progresso.auto_stop === true && trader.ativo === true;
+        await persistirEstadoCicloAutoTrader(trader, progresso.estado, { autoStop: autoStopEfetivo });
+
+        if (progresso.ciclo_concluido) {
+            console.log(
+                `🌊 Auto-Trader ${trader.id}: onda concluída; `
+                + `ciclos=${progresso.estado.ciclos_concluidos}.`
+            );
+        }
+        if (autoStopEfetivo) {
+            console.log(
+                `🔁 Auto-Trader ${trader.id}: limite de ciclos concluídos atingido. `
+                + `Motor desligado até reativação manual.`
+            );
+            ioServer.emit('atualizar_interface');
+        }
+    }
+
+    console.log(
+        `Auto-Trader ${trader.id}: sinal operado encerrado como ${tipoResultado}. `
+        + `Estado=${trader.estado_ciclo}, sinais_onda=${trader.sinais_operados_onda}, `
+        + `ciclos=${trader.ciclos_concluidos}, pulos=${trader.pulos_restantes}.`
+    );
+    return progresso;
 }
 
 function avaliarStopRedsRobo(robo, tipoResultado) {
@@ -3244,26 +3456,6 @@ async function registrarHistoricoRobosInscritos(est, estado, tipoResultado, gale
     );
 }
 
-function horarioParaMinutos(valor, padrao) {
-    const texto = String(valor || padrao).trim();
-    const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(texto);
-    if (!match) return null;
-    return (Number(match[1]) * 60) + Number(match[2]);
-}
-
-function traderDentroHorarioExecucao(config, agora = new Date()) {
-    const cf = config || {};
-    const inicio = horarioParaMinutos(cf.hora_inicio, '00:00');
-    const fim = horarioParaMinutos(cf.hora_fim, '23:59');
-
-    if (inicio === null || fim === null) return false;
-    if (inicio === fim) return true;
-
-    const minutoAtual = (agora.getHours() * 60) + agora.getMinutes();
-    if (inicio < fim) return minutoAtual >= inicio && minutoAtual <= fim;
-    return minutoAtual >= inicio || minutoAtual <= fim;
-}
-
 function avaliarStopRedsAutoTrader(trader, tipoResultado, agora = Date.now()) {
     const cf = (trader && trader.config) || {};
     const limite = Math.max(0, Math.trunc(Number(cf.stop_reds_seguidos) || 0));
@@ -3732,11 +3924,17 @@ async function carregarSistemasParaMemoria() {
 
         const [linhasAT] = await dbPool.query('SELECT * FROM auto_traders');
         AUTO_TRADERS_MEMORIA = linhasAT.map(at => {
-            let cfg = {}; try { cfg = JSON.parse(at.config_json); } catch(e){}
+            let cfg = {}; try { cfg = JSON.parse(at.config_json); } catch(e) {}
+            cfg = normalizarConfigAutoTrader(cfg);
+            const estadoCiclo = normalizarEstadoCiclo(at);
             return {
                 id: at.id, nome: at.nome, ativo: at.ativo === 1, config: cfg,
                 saldo_inicial: parseFloat(at.saldo_inicial), saldo_atual: parseFloat(at.saldo_atual),
-                status_operacao: at.status_operacao, entradas_feitas: at.entradas_feitas, pulos_restantes: at.pulos_restantes,
+                status_operacao: at.status_operacao, entradas_feitas: at.entradas_feitas, pulos_restantes: estadoCiclo.pulos_restantes,
+                estado_ciclo: estadoCiclo.estado_ciclo,
+                reds_virtuais_observados: estadoCiclo.reds_virtuais_observados,
+                sinais_operados_onda: estadoCiclo.sinais_operados_onda,
+                ciclos_concluidos: estadoCiclo.ciclos_concluidos,
                 data_contador_entradas: String(at.data_contador_entradas || ''),
                 reds_consecutivos: Math.max(0, Number(at.reds_consecutivos) || 0),
                 stop_reds_pausado_ate: Math.max(0, Number(at.stop_reds_pausado_ate) || 0),
@@ -4043,6 +4241,12 @@ app.post("/receber-sinal", async (req, res) => {
                         console.error(`⚠️ Falha inesperada no envio Telegram GREEN da estratégia ${est.id}:`, e.message);
                     });
 
+                    try {
+                        await processarResultadoVirtualAutoTraders(est, st, isTie ? 'TIE' : 'GREEN');
+                    } catch (e) {
+                        console.error(`⚠️ Auto-Trader: falha ao processar resultado virtual ${isTie ? 'TIE' : 'GREEN'} de ${est.id}:`, e.message);
+                    }
+
                     if (est.quarentena_restante <= 0) {
                         for (let trader of AUTO_TRADERS_MEMORIA) {
                             let cf = trader.config;
@@ -4078,6 +4282,10 @@ app.post("/receber-sinal", async (req, res) => {
                                             trader,
                                             isTie ? 'TIE' : 'GREEN',
                                             dados.timestamp_coleta
+                                        );
+                                        await concluirSinalOperadoAutoTrader(
+                                            trader,
+                                            isTie ? 'TIE' : 'GREEN'
                                         );
                                     } catch(e) {
                                         console.error(`❌ Falha ao fechar ordem ${pendentes[0].id} como ${isTie ? 'TIE' : 'WIN'} do trader ${trader.id}:`, e.message);
@@ -4249,6 +4457,12 @@ app.post("/receber-sinal", async (req, res) => {
                             console.error(`⚠️ Falha inesperada no envio Telegram RED/proteção da estratégia ${est.id}:`, e.message);
                         });
 
+                        try {
+                            await processarResultadoVirtualAutoTraders(est, st, 'RED');
+                        } catch (e) {
+                            console.error(`⚠️ Auto-Trader: falha ao processar resultado virtual RED de ${est.id}:`, e.message);
+                        }
+
                         if (est.quarentena_restante <= 0) {
                             for (let trader of AUTO_TRADERS_MEMORIA) {
                                 let cf = trader.config;
@@ -4282,6 +4496,7 @@ app.post("/receber-sinal", async (req, res) => {
                                                 'RED',
                                                 dados.timestamp_coleta
                                             );
+                                            await concluirSinalOperadoAutoTrader(trader, 'RED');
                                         } catch(e) {
                                             console.error(`❌ Falha ao fechar ordem LOSS ${pendentes[0].id} do trader ${trader.id}:`, e.message);
                                         }
@@ -4383,11 +4598,10 @@ app.post("/receber-sinal", async (req, res) => {
                                     );
 
                                     if (!traderDentroHorarioExecucao(cf)) {
-                                        console.log(`Trader ${trader.id} fora da janela de execucao (${cf.hora_inicio || '00:00'}-${cf.hora_fim || '23:59'}). Nova entrada ignorada.`);
-                                        continue;
-                                    }
-
-                                    if (!(await autorizarNovaEntradaFinanceiraTrader(trader))) {
+                                        console.log(
+                                            `Trader ${trader.id} fora das faixas de execução `
+                                            + `(${formatarFaixasHorario(cf)}). Nova entrada ignorada.`
+                                        );
                                         continue;
                                     }
 
@@ -4401,17 +4615,15 @@ app.post("/receber-sinal", async (req, res) => {
                                         continue;
                                     }
 
-                                    if (cf.modo_camuflagem === 'PULOS') {
-                                        if (trader.pulos_restantes > 0) {
-                                            trader.pulos_restantes--;
-                                            try { await dbPool.query('UPDATE auto_traders SET pulos_restantes=? WHERE id=?', [trader.pulos_restantes, trader.id]); } catch(e) { console.error(`❌ Falha ao persistir pulos_restantes do trader ${trader.id}:`, e.message); }
-                                            continue;
-                                        } else {
-                                            let pMin = cf.camuflagem_pulos_min || 1;
-                                            let pMax = cf.camuflagem_pulos_max || 3;
-                                            trader.pulos_restantes = Math.floor(Math.random() * (pMax - pMin + 1)) + pMin;
-                                            try { await dbPool.query('UPDATE auto_traders SET pulos_restantes=? WHERE id=?', [trader.pulos_restantes, trader.id]); } catch(e) { console.error(`❌ Falha ao persistir novo ciclo de pulos do trader ${trader.id}:`, e.message); }
-                                        }
+                                    try {
+                                        if (!(await prepararEntradaCicloAutoTrader(trader))) continue;
+                                    } catch (e) {
+                                        console.error(`❌ Trader ${trader.id}: falha ao persistir máquina de estados; entrada bloqueada:`, e.message);
+                                        continue;
+                                    }
+
+                                    if (!(await autorizarNovaEntradaFinanceiraTrader(trader))) {
+                                        continue;
                                     }
 
                                     const planoDireto = calcularPlanoAposta(cf, est, 0);
