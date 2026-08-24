@@ -2,7 +2,6 @@
     'use strict';
 
     const TRECHO_RELOAD_REALTIME = " if (document.getElementById('aba-backtest').classList.contains('visivel')) carregarHistoricoMemoria(false);";
-    const TRECHO_REFRESH_MAPA = " if (document.getElementById('aba-backtest').classList.contains('visivel')) window.__bacboResultMap?.scheduleRealtimeRefresh?.();";
     const TRECHO_LIMIT_ANTIGO = "let limit = document.getElementById('bk-range') ? document.getElementById('bk-range').value : 10000;";
     const TRECHO_LIMIT_NOVO = "const selecionado = Number.parseInt(document.getElementById('bk-range')?.value || '10000', 10); const limit = [100, 500, 1000, 3000, 10000].includes(selecionado) ? selecionado : 10000;";
     const FETCH_ANTIGO = "fetch(`/api/historico-giros?limit=10000&_t=${Date.now()}`)";
@@ -42,10 +41,12 @@
             throw new Error('UI-3 requer o componente Mapa Bac Bo carregado.');
         }
 
+        // O mapa recebe deltas diretamente por Socket.IO. O evento geral da interface
+        // não dispara mais polling do histórico a cada rodada.
         let codigo = substituirUmaVez(
             codigoOriginal,
             TRECHO_RELOAD_REALTIME,
-            TRECHO_REFRESH_MAPA,
+            '',
             'o reload realtime do Backtest'
         );
         codigo = substituirUmaVez(

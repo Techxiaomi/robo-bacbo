@@ -4,6 +4,7 @@ const path = require('path');
 
 require('./env_loader').loadEnvFile(path.join(__dirname, '..', '.env'));
 require('./operational_log_formatter').instalarLogOperacional();
+require('./bacbo_live_socket_bridge').instalarBacboLiveSocketBridge();
 require('./telegram_signal_presenter').instalarTelegramSignalPresenter();
 require('./telegram_signal_lifecycle').instalarTelegramSignalLifecycle();
 

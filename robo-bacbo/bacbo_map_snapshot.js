@@ -4,6 +4,8 @@ const fs = require('fs/promises');
 const path = require('path');
 const mysql = require('mysql2/promise');
 const { createClient } = require('redis');
+const { validarLiveRound } = require('./bacbo_payload_schema');
+const { publicarRodadaLive } = require('./bacbo_live_bus');
 
 const MAX_ROUNDS = 1000;
 const SNAPSHOT_PATH = path.join(__dirname, 'public', 'bacbo-map-snapshot.json');
@@ -76,9 +78,10 @@ function ordenarELimitar(lista) {
 
 function snapshotPublico() {
     return {
-        version: 1,
+        version: 2,
         updated_at: new Date().toISOString(),
-        rows: rodadas.map(({ winner: tipo, result, instant }) => ({
+        rows: rodadas.map(({ uuid, winner: tipo, result, instant }) => ({
+            uuid,
             winner: tipo,
             result,
             instant
@@ -166,9 +169,23 @@ function payloadLive(mensagem) {
 }
 
 function incorporarLive(payload) {
-    const round = normalizarRound(payload);
-    if (!round) return false;
+    const validacao = validarLiveRound(payload);
+    if (!validacao.ok) return false;
+
+    const roundValidado = validacao.round;
+    const round = {
+        uuid: roundValidado.uuid,
+        winner: roundValidado.winner,
+        result: roundValidado.result,
+        instant: roundValidado.instant,
+        ms: roundValidado.timestamp_ms
+    };
+
     rodadas = ordenarELimitar([...rodadas, round]);
+
+    // Caminho crítico visual: o navegador recebe a rodada antes de qualquer I/O em disco.
+    // O snapshot permanece apenas como recuperação para abertura/reconexão da página.
+    publicarRodadaLive(round);
     void persistirSnapshot();
     return true;
 }
@@ -208,7 +225,7 @@ async function instalarBacboMapSnapshot() {
         console.warn(`⚠️ Mapa Bac Bo: atualização em tempo real não iniciou: ${erro.message}`);
     });
 
-    console.log(`🗺️ Mapa Bac Bo pronto | snapshot canônico de até ${MAX_ROUNDS} rodada(s).`);
+    console.log(`🗺️ Mapa Bac Bo pronto | snapshot/recovery de até ${MAX_ROUNDS} rodada(s).`);
     return true;
 }
 
