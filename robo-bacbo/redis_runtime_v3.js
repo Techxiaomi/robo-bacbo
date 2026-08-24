@@ -31,6 +31,7 @@ const DEDUP_MAX = 5000;
 const fingerprints = new Map();
 const ROAD_SNAPSHOT_KEY = 'robo_bacbo:last_road_snapshot';
 const RECENT_ROUNDS_KEY = 'robo_bacbo:recent_rounds_v3';
+const LIVE_DELIVERY_ATTEMPTS = Number.POSITIVE_INFINITY;
 
 function objeto(valor) {
     return valor && typeof valor === 'object' && !Array.isArray(valor) ? valor : null;
@@ -160,6 +161,7 @@ async function postNode(path, payload, descricao, tentativas = 60) {
     }
 
     let ultimoErro = null;
+    let aguardandoBackend = false;
     for (let tentativa = 1; tentativa <= tentativas; tentativa++) {
         try {
             const resposta = await fetchOriginal(urlNode(path), {
@@ -170,11 +172,24 @@ async function postNode(path, payload, descricao, tentativas = 60) {
                 },
                 body: JSON.stringify(payload)
             });
-            if (resposta.ok) return true;
+            if (resposta.ok) {
+                if (aguardandoBackend && path === '/receber-sinal') {
+                    console.log('✅ Fila live liberada | backend pronto; processamento retomado em ordem.');
+                }
+                return true;
+            }
             ultimoErro = new Error(`HTTP ${resposta.status}`);
             if (resposta.status !== 503) break;
+            if (!aguardandoBackend && path === '/receber-sinal') {
+                aguardandoBackend = true;
+                console.log('⏳ Fila live aguardando o backend concluir a inicialização.');
+            }
         } catch (erro) {
             ultimoErro = erro;
+            if (!aguardandoBackend && path === '/receber-sinal') {
+                aguardandoBackend = true;
+                console.log('⏳ Fila live aguardando o servidor local ficar disponível.');
+            }
         }
         if (tentativa < tentativas) await new Promise(resolve => setTimeout(resolve, 500));
     }
@@ -243,9 +258,12 @@ async function processarLiveRound(raiz) {
     }
 
     const payload = payloadNode(round);
-    const entregue = await postNode('/receber-sinal', payload, `LIVE ${round.uuid}`);
+    // O Runtime e o backend HTTP vivem no mesmo processo. Durante bootstrap, 503 significa apenas
+    // "ainda não pronto"; descartar a rodada aqui criaria um buraco artificial. Mantemos a fila FIFO
+    // bloqueada até o backend ficar pronto, preservando exatamente a ordem recebida.
+    const entregue = await postNode('/receber-sinal', payload, 'Rodada live', LIVE_DELIVERY_ATTEMPTS);
     if (!entregue) {
-        console.warn(`⚠️ Rodada recebida mas ignorada | motivo=falha_entrega_node | uuid=${round.uuid}.`);
+        console.warn('⚠️ Rodada live não entregue ao backend; fila preservada sem marcar como processada.');
         return false;
     }
 
