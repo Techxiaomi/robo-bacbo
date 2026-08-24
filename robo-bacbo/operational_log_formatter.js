@@ -1,13 +1,92 @@
 'use strict';
 
 let instalado = false;
+let sequenciaRodadas = 0;
+let ultimaSequenciaRodada = 0;
+let separarAntesProximaRodada = false;
+
+const UUIDS_MAX = 5000;
+const uuidsRodadas = new Map();
+const TIMEZONE = process.env.AUTO_TRADER_TIMEZONE || process.env.TZ || 'America/Sao_Paulo';
+const relogio = new Intl.DateTimeFormat('pt-BR', {
+    timeZone: TIMEZONE,
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+});
+
+function lembrarUuid(uuid) {
+    const chave = String(uuid || '').trim().toLowerCase();
+    if (!chave) return true;
+    if (uuidsRodadas.has(chave)) return false;
+    uuidsRodadas.set(chave, Date.now());
+    while (uuidsRodadas.size > UUIDS_MAX) uuidsRodadas.delete(uuidsRodadas.keys().next().value);
+    return true;
+}
+
+function horaAtual() {
+    try { return relogio.format(new Date()); } catch (_) { return new Date().toTimeString().slice(0, 8); }
+}
 
 function nomeResultado(valor) {
     const tipo = String(valor || '').trim().toUpperCase();
-    if (tipo === 'PLAYER' || tipo === 'P' || tipo === 'PLAYERWON' || tipo === 'PLAYER') return '🔵 JOGADOR';
-    if (tipo === 'BANKER' || tipo === 'B' || tipo === 'BANKERWON') return '🔴 BANCA';
-    if (tipo === 'TIE' || tipo === 'T' || tipo === 'TIEWON') return '🟡 EMPATE';
+    if (tipo === 'PLAYER' || tipo === 'P' || tipo === 'PLAYERWON') return 'JOGADOR';
+    if (tipo === 'BANKER' || tipo === 'B' || tipo === 'BANKERWON') return 'BANCA';
+    if (tipo === 'TIE' || tipo === 'T' || tipo === 'TIEWON') return 'EMPATE';
     return tipo || 'RESULTADO';
+}
+
+function simboloResultado(valor) {
+    const tipo = String(valor || '').trim().toUpperCase();
+    if (tipo === 'PLAYER' || tipo === 'P' || tipo === 'PLAYERWON') return 'P';
+    if (tipo === 'BANKER' || tipo === 'B' || tipo === 'BANKERWON') return 'B';
+    if (tipo === 'TIE' || tipo === 'T' || tipo === 'TIEWON') return 'T';
+    return '?';
+}
+
+function numeroRodada() {
+    sequenciaRodadas += 1;
+    ultimaSequenciaRodada = sequenciaRodadas;
+    return `#${String(sequenciaRodadas).padStart(5, '0')}`;
+}
+
+function numeroUltimaRodada() {
+    return `#${String(Math.max(0, ultimaSequenciaRodada)).padStart(5, '0')}`;
+}
+
+function linhaRodada(uuid, tipo, soma) {
+    if (!lembrarUuid(uuid)) return null;
+    const numero = numeroRodada();
+    const horario = horaAtual();
+    const resultado = nomeResultado(tipo).padEnd(7, ' ');
+    const somaFmt = String(soma).trim().padStart(2, ' ');
+    const prefixo = separarAntesProximaRodada ? '\n' : '';
+    separarAntesProximaRodada = false;
+    return `${prefixo}🎲 ${numero} | ${horario} | ${resultado} | Soma: ${somaFmt}`;
+}
+
+function registrarSinalOperacional(payload) {
+    if (!payload || String(payload.tipo || '').toUpperCase() !== 'ENTRADA') return false;
+    const robos = Array.isArray(payload.robosNotificados) ? payload.robosNotificados : [];
+    if (robos.length === 0) return false;
+
+    const padrao = (Array.isArray(payload.padrao) ? payload.padrao : [])
+        .map(simboloResultado)
+        .filter(simbolo => simbolo !== '?')
+        .join('-');
+    const entradaSimbolo = simboloResultado(payload.entrada);
+    const entradaNome = nomeResultado(payload.entrada);
+    const assinatura = `${padrao || '?'} → ${entradaSimbolo}`;
+
+    robos.forEach((robo, indice) => {
+        const id = robo?.id !== undefined && robo?.id !== null ? String(robo.id) : '?';
+        const prefixo = indice === 0 ? '\n' : '';
+        console.log(`${prefixo}🎯 SINAL    | Robô ${id} | ${assinatura} | Entrada: ${entradaNome}`);
+    });
+
+    separarAntesProximaRodada = true;
+    return true;
 }
 
 function formatarTexto(valor) {
@@ -27,6 +106,48 @@ function formatarTexto(valor) {
         return null;
     }
 
+    // Resultado live: uma única linha operacional por UUID, com colunas de largura fixa.
+    let match = texto.match(
+        /^🔄 Mapeamento BacBo -> IA \| uuid=([0-9a-f-]{36}) \| type=(PLAYER|BANKER|TIE) -> interno=(Player|Banker|Tie) \| simbolo=([PBT]) \| soma=(.+)$/i
+    );
+    if (match) {
+        return linhaRodada(match[1], match[2], match[5]);
+    }
+
+    // Sucesso esperado da IA é ruído operacional; falhas continuam visíveis normalmente.
+    if (/^✅ Nova rodada processada pela IA -> Vencedor:/i.test(texto)) return null;
+    if (/^✅ IA atualizada \|/i.test(texto)) return null;
+
+    // Confirmação Telegram em formato operacional alinhado.
+    match = texto.match(/^📨 Robô\s+(\d+):\s+Telegram confirmado em\s+(\d+)\/(\d+)\s+destino\(s\)\.$/i);
+    if (match) {
+        return `📨 TELEGRAM | Robô ${match[1]} | Confirmado     | Destinos: ${match[2]}/${match[3]}`;
+    }
+
+    // Teste manual de Telegram não é um sinal; mantém identificação explícita.
+    match = texto.match(/^📨 Robô\s+(\d+):\s+teste Telegram confirmado em\s+(\d+)\/(\d+)\s+destino\(s\)\.$/i);
+    if (match) {
+        return `📨 TESTE TG | Robô ${match[1]} | Confirmado     | Destinos: ${match[2]}/${match[3]}`;
+    }
+
+    // Estados excepcionais ficam associados à última rodada observada.
+    if (/^⏳ Fila live aguardando o backend concluir a inicialização\.$/i.test(texto)) {
+        return `⏳ FILA     | ${numeroUltimaRodada()} | Backend inicializando; rodada preservada.`;
+    }
+    if (/^⏳ Fila live aguardando o servidor local ficar disponível\.$/i.test(texto)) {
+        return `⏳ FILA     | ${numeroUltimaRodada()} | Servidor local indisponível; rodada preservada.`;
+    }
+    if (/^✅ Fila live liberada \| backend pronto; processamento retomado em ordem\.$/i.test(texto)) {
+        return `✅ FILA     | ${numeroUltimaRodada()} | Backend pronto; processamento retomado.`;
+    }
+    if (/^⚠️ Rodada live não entregue ao backend; fila preservada sem marcar como processada\.$/i.test(texto)) {
+        return `❌ ERRO     | ${numeroUltimaRodada()} | Rodada live não entregue; fila preservada.`;
+    }
+    if (/^⚠️ Persistencia bacbo_rounds falhou/i.test(texto)) {
+        texto = texto.replace(/^⚠️ Persistencia bacbo_rounds falhou[^:]*:\s*/i, '');
+        return `⚠️ ALERTA   | ${numeroUltimaRodada()} | Persistência canônica falhou${texto ? ` | ${texto}` : ''}`;
+    }
+
     // Nomes de fornecedor não fazem parte do log operacional.
     texto = texto.replace(/TIPMINER/gi, 'BAC BO');
     texto = texto.replace(/TipMiner/g, 'Bac Bo');
@@ -35,20 +156,6 @@ function formatarTexto(valor) {
     texto = texto.replace(/\buuid=[0-9a-f-]{36}\s*\|\s*/gi, '');
     texto = texto.replace(/\s*\|\s*uuid=[0-9a-f-]{36}/gi, '');
     texto = texto.replace(/\s*\|\s*UUID:\s*[0-9a-f-]{36}/gi, '');
-
-    let match = texto.match(
-        /^🔄 Mapeamento BacBo -> IA \| type=(PLAYER|BANKER|TIE) -> interno=(Player|Banker|Tie) \| simbolo=([PBT]) \| soma=(.+)$/
-    );
-    if (match) {
-        return `🎲 Rodada recebida | ${nomeResultado(match[1])} | Soma: ${match[4]}`;
-    }
-
-    match = texto.match(
-        /^✅ Nova rodada processada pela IA -> Vencedor: ([PBT]) \((Player|Banker|Tie)\) \| Soma: (.+)$/
-    );
-    if (match) {
-        return `✅ IA atualizada | ${nomeResultado(match[1])} | Soma: ${match[3]}`;
-    }
 
     if (/^🎧 Bac Bo Redis V3 ativo em bacbo_events:/i.test(texto)) {
         return '🎧 Redis Bac Bo ativo | canal=bacbo_events | contrato=type+result.';
@@ -104,5 +211,6 @@ function instalarLogOperacional() {
 
 module.exports = {
     instalarLogOperacional,
-    formatarTexto
+    formatarTexto,
+    registrarSinalOperacional
 };

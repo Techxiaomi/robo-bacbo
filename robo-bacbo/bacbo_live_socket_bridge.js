@@ -1,8 +1,28 @@
 'use strict';
 
 const liveBus = require('./bacbo_live_bus');
+const { registrarSinalOperacional } = require('./operational_log_formatter');
 
 let instalado = false;
+
+function vincularLogSinais(server) {
+    if (!server || typeof server.emit !== 'function' || server.__bacboOperationalSignalLog === true) return;
+
+    const emitOriginal = server.emit.bind(server);
+    server.emit = function emitComLogOperacional(evento, ...args) {
+        if (evento === 'alerta_painel') {
+            try { registrarSinalOperacional(args[0]); } catch (_) {}
+        }
+        return emitOriginal(evento, ...args);
+    };
+
+    Object.defineProperty(server, '__bacboOperationalSignalLog', {
+        value: true,
+        enumerable: false,
+        configurable: false,
+        writable: false
+    });
+}
 
 function instalarBacboLiveSocketBridge() {
     if (instalado) return true;
@@ -24,6 +44,7 @@ function instalarBacboLiveSocketBridge() {
     function attachComBacboLive(...args) {
         const retorno = attachOriginal.apply(this, args);
         liveBus.vincularSocketServer(this);
+        vincularLogSinais(this);
         return retorno;
     }
 
