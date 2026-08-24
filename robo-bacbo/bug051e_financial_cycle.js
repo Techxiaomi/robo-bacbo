@@ -344,8 +344,64 @@ function criarIntegracaoCicloFinanceiro({ dbPool }) {
         }
     }
 
+    async function reconciliarRestart() {
+        const conexao = await dbPool.getConnection();
+        try {
+            await conexao.beginTransaction();
+
+            const [orfas] = await conexao.query(
+                `SELECT id, trader_id, status_ordem, executor_order_id, nivel, ciclo_id
+                 FROM auditoria_ordens
+                 WHERE status_ordem IN ('PREPARANDO', 'PENDENTE')
+                 FOR UPDATE`
+            );
+
+            const traderIds = [
+                ...new Set(
+                    orfas
+                        .map(row => Number(row.trader_id))
+                        .filter(Number.isInteger)
+                )
+            ];
+
+            if (orfas.length > 0) {
+                await conexao.query(
+                    `UPDATE auditoria_ordens
+                     SET status_ordem='RESTART_INTERROMPIDO'
+                     WHERE status_ordem IN ('PREPARANDO', 'PENDENTE')`
+                );
+
+                if (traderIds.length > 0) {
+                    const placeholders = traderIds.map(() => '?').join(',');
+                    await conexao.query(
+                        `UPDATE auto_traders
+                         SET ativo=false, status_operacao='RESTART_INTERROMPIDO'
+                         WHERE id IN (${placeholders})`,
+                        traderIds
+                    );
+                }
+            }
+
+            await conexao.commit();
+
+            estado.ativosPorTrader.clear();
+            estado.ordensPorId.clear();
+
+            return {
+                ordens: orfas.length,
+                traders: traderIds.length
+            };
+        } catch (erro) {
+            try { await conexao.rollback(); } catch (rollbackErro) {}
+            throw erro;
+        } finally {
+            conexao.release();
+        }
+    }
+
     const api = {
         inicializarSchema,
+        reconciliarRestart,
         estado
     };
 
