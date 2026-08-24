@@ -211,6 +211,13 @@ function formatarTexto(valor) {
         return `⚠️ ALERTA   | ${numeroUltimaRodada()} | Persistência canônica falhou${texto ? ` | ${texto}` : ''}`;
     }
 
+    match = texto.match(/^♻️ TipMiner HISTORY atualizado \| janela=(\d+) \| novas=(\d+) \| origem=([^\.]+)\.$/i);
+    if (match) {
+        const novas = Math.max(0, Number(match[2]) || 0);
+        if (novas === 0) return null;
+        return `♻️ HISTÓRICO | ${novas} nova(s) detectada(s) | Janela: ${match[1]}.`;
+    }
+
     texto = texto.replace(/TIPMINER/gi, 'BAC BO');
     texto = texto.replace(/TipMiner/g, 'Bac Bo');
 
@@ -233,7 +240,9 @@ function formatarTexto(valor) {
 
     match = texto.match(/^🧠 Bac Bo HISTORY schema novo persistido \| (\d+) rodada\(s\)\.$/i);
     if (match) {
-        return `🧠 Histórico inicial persistido | ${match[1]} rodada(s).`;
+        const novas = Math.max(0, Number(match[1]) || 0);
+        if (novas === 0) return null;
+        return `🧠 Histórico canônico | ${novas} nova(s) persistida(s).`;
     }
 
     match = texto.match(/^✅ Bac Bo HISTORY sincronizado com Runtime V3 \| (\d+) giro\(s\)\.$/i);

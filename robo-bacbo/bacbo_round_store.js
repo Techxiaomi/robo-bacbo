@@ -64,26 +64,65 @@ async function persistirRodadaBacbo(round) {
     return true;
 }
 
+function roundsUnicos(rounds) {
+    const porUuid = new Map();
+    for (const round of Array.isArray(rounds) ? rounds : []) {
+        const uuid = String(round?.uuid || '').trim().toLowerCase();
+        if (!uuid) continue;
+        porUuid.set(uuid, round);
+    }
+    return [...porUuid.values()];
+}
+
+async function localizarUuidsExistentes(conexao, uuids) {
+    const existentes = new Set();
+    const lista = [...new Set((Array.isArray(uuids) ? uuids : []).map(String).filter(Boolean))];
+    const TAMANHO_LOTE = 100;
+
+    for (let inicio = 0; inicio < lista.length; inicio += TAMANHO_LOTE) {
+        const lote = lista.slice(inicio, inicio + TAMANHO_LOTE);
+        if (lote.length === 0) continue;
+        const placeholders = lote.map(() => '?').join(',');
+        const [linhas] = await conexao.query(
+            `SELECT uuid FROM bacbo_rounds WHERE uuid IN (${placeholders})`,
+            lote
+        );
+        for (const linha of linhas) existentes.add(String(linha.uuid || '').trim().toLowerCase());
+    }
+    return existentes;
+}
+
 async function persistirHistoricoBacbo(rounds) {
-    const itens = Array.isArray(rounds) ? rounds : [];
+    const itens = roundsUnicos(rounds);
     if (itens.length === 0) return 0;
+
     await garantirSchema();
     const db = criarPool();
     const conexao = await db.getConnection();
+    let novos = [];
+
     try {
-        await conexao.beginTransaction();
-        for (const round of itens) {
-            await conexao.query(
-                `INSERT INTO bacbo_rounds (uuid, instant, \`result\`, winner)
-                 VALUES (?, FROM_UNIXTIME(?), ?, ?)
-                 ON DUPLICATE KEY UPDATE
-                    instant = VALUES(instant),
-                    \`result\` = VALUES(\`result\`),
-                    winner = VALUES(winner)`,
-                [round.uuid, Number(round.timestamp_ms) / 1000, round.result, round.winner]
-            );
+        const existentes = await localizarUuidsExistentes(
+            conexao,
+            itens.map(round => round.uuid)
+        );
+        novos = itens.filter(round => !existentes.has(String(round.uuid || '').trim().toLowerCase()));
+
+        if (novos.length > 0) {
+            await conexao.beginTransaction();
+            for (const round of novos) {
+                await conexao.query(
+                    `INSERT INTO bacbo_rounds (uuid, instant, \`result\`, winner)
+                     VALUES (?, FROM_UNIXTIME(?), ?, ?)
+                     ON DUPLICATE KEY UPDATE
+                        instant = VALUES(instant),
+                        \`result\` = VALUES(\`result\`),
+                        winner = VALUES(winner)`,
+                    [round.uuid, Number(round.timestamp_ms) / 1000, round.result, round.winner]
+                );
+            }
+            await conexao.commit();
         }
-        await conexao.commit();
     } catch (erro) {
         try { await conexao.rollback(); } catch (_) { }
         throw erro;
@@ -91,15 +130,15 @@ async function persistirHistoricoBacbo(rounds) {
         conexao.release();
     }
 
-    // O backfill é apenas estatístico: grava giros_recentes diretamente e nunca chama /receber-sinal.
-    // Falha de recovery não invalida a persistência canônica já confirmada acima.
+    // A persistência canônica é incremental, mas o recovery analítico recebe a janela COMPLETA.
+    // A janela integral é necessária para localizar a âncora temporal sem inferir sequência.
     try {
         await canonicalBridge.sincronizarHistorico(itens);
     } catch (erro) {
         console.error('⚠️ Recovery analítico do histórico falhou sem afetar bacbo_rounds:', erro.message);
     }
 
-    return itens.length;
+    return novos.length;
 }
 
 module.exports = {

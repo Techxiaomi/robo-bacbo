@@ -1,5 +1,7 @@
 'use strict';
 
+const crypto = require('crypto');
+
 const BACBO_EVENTS_CHANNEL = 'bacbo_events';
 const TIPMINER_HISTORY_KEY = 'bacbo_history';
 
@@ -7,6 +9,7 @@ let instalado = false;
 let subscriber = null;
 let reader = null;
 let ultimaAssinatura = null;
+let ultimasChaves = new Set();
 let filaSincronizacao = Promise.resolve();
 
 function objeto(valor) {
@@ -41,16 +44,47 @@ function extrairHistory(valor) {
     return null;
 }
 
+function chaveHistoryItem(item, indice = 0) {
+    const valor = objeto(item) || {};
+    const uuid = String(valor.uuid || valor.id || '').trim();
+    if (uuid) return `uuid:${uuid.toLowerCase()}`;
+    return [
+        'fallback',
+        indice,
+        valor.instant || valor.data_hora || valor.timestamp || '',
+        valor.type || valor.winner || valor.resultado || '',
+        valor.result ?? valor.resultado_soma ?? ''
+    ].join('|');
+}
+
 function assinaturaHistory(history) {
     const itens = Array.isArray(history) ? history : [];
-    if (!itens.length) return '0';
-    const primeiro = objeto(itens[0]) || {};
-    const ultimo = objeto(itens[itens.length - 1]) || {};
-    return [
-        itens.length,
-        primeiro.uuid || primeiro.id || primeiro.instant || '',
-        ultimo.uuid || ultimo.id || ultimo.instant || ''
-    ].join('|');
+    const hash = crypto.createHash('sha256');
+    itens.forEach((item, indice) => {
+        const valor = objeto(item) || {};
+        hash.update(chaveHistoryItem(valor, indice));
+        hash.update('|');
+        hash.update(String(valor.type || valor.winner || valor.resultado || ''));
+        hash.update('|');
+        hash.update(String(valor.result ?? valor.resultado_soma ?? ''));
+        hash.update('|');
+        hash.update(String(valor.instant || valor.data_hora || valor.timestamp || ''));
+        hash.update('\n');
+    });
+    return `${itens.length}|${hash.digest('hex')}`;
+}
+
+function chavesHistory(history) {
+    return new Set((Array.isArray(history) ? history : []).map(chaveHistoryItem));
+}
+
+function contarNovos(history) {
+    if (ultimaAssinatura === null) return null;
+    let total = 0;
+    (Array.isArray(history) ? history : []).forEach((item, indice) => {
+        if (!ultimasChaves.has(chaveHistoryItem(item, indice))) total++;
+    });
+    return total;
 }
 
 async function lerHistoryRetido() {
@@ -90,21 +124,44 @@ async function entregarHistory(processarBacbo, origem) {
     const assinatura = assinaturaHistory(history);
     if (assinatura === ultimaAssinatura) return true;
 
-    console.log(`♻️ TipMiner HISTORY_SYNC -> Node | ${history.length} giro(s) lidos de Redis key=${TIPMINER_HISTORY_KEY} | origem=${origem}.`);
+    const primeiraSincronizacao = ultimaAssinatura === null;
+    const novosEstimados = contarNovos(history);
+
+    if (primeiraSincronizacao) {
+        console.log(
+            `♻️ TipMiner HISTORY_SYNC -> Node | ${history.length} giro(s) lidos de Redis `
+            + `key=${TIPMINER_HISTORY_KEY} | origem=${origem}.`
+        );
+    }
 
     const aceito = await processarBacbo(JSON.stringify({
         action: 'history_snapshot',
         source: 'tipminer_history_key',
+        history_meta: {
+            origem,
+            janela: history.length,
+            novos_estimados: novosEstimados
+        },
         history
     }));
 
-    if (aceito) {
-        ultimaAssinatura = assinatura;
+    if (!aceito) {
+        console.warn(`⚠️ TipMiner HISTORY lido (${history.length}), mas o Runtime V3 não concluiu o processamento.`);
+        return false;
+    }
+
+    ultimaAssinatura = assinatura;
+    ultimasChaves = chavesHistory(history);
+
+    if (primeiraSincronizacao) {
         console.log(`✅ TipMiner HISTORY sincronizado com Runtime V3 | ${history.length} giro(s).`);
     } else {
-        console.warn(`⚠️ TipMiner HISTORY lido (${history.length}), mas o Runtime V3 não concluiu o processamento.`);
+        console.log(
+            `♻️ TipMiner HISTORY atualizado | janela=${history.length} | `
+            + `novas=${Math.max(0, Number(novosEstimados) || 0)} | origem=${origem}.`
+        );
     }
-    return Boolean(aceito);
+    return true;
 }
 
 function enfileirarHistory(processarBacbo, origem) {

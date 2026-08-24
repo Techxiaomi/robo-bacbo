@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import time
@@ -49,6 +50,9 @@ HTTP_CONNECT_TIMEOUT_SECONDS = 10
 HTTP_READ_TIMEOUT_SECONDS = 90
 NODE_HEALTH_CONNECT_TIMEOUT_SECONDS = 1.5
 NODE_HEALTH_READ_TIMEOUT_SECONDS = 3
+CONTINUITY_RETRY_MIN_SECONDS = 1.0
+CONTINUITY_RETRY_MAX_SECONDS = 3.0
+CONTINUITY_HISTORY_REFRESH_SECONDS = 5.0
 
 BROWSER_HEADERS = {
     "User-Agent": (
@@ -68,6 +72,11 @@ VALID_TYPES = {"BANKER", "PLAYER", "TIE"}
 
 class TipMinerCollector:
     def __init__(self):
+        if not INTERNAL_API_TOKEN:
+            raise RuntimeError(
+                "INTERNAL_API_TOKEN ausente; o coletor nao pode operar live sem o handshake de continuidade"
+            )
+
         self.http = requests.Session()
         self.http.headers.update(BROWSER_HEADERS)
         self.node_http = requests.Session()
@@ -79,7 +88,7 @@ class TipMinerCollector:
             health_check_interval=30,
         )
         self.history = []
-        self._interruption_notified = False
+        self._pending_interruption = None
 
     @staticmethod
     def _json_dumps(value):
@@ -195,6 +204,33 @@ class TipMinerCollector:
             return [item for _, item in indexed]
         return list(rounds)
 
+    @classmethod
+    def _history_signature(cls, rounds):
+        digest = hashlib.sha256()
+        for item in cls._chronological_history(list(rounds or [])):
+            digest.update(str(item.get("uuid") or "").strip().lower().encode("utf-8"))
+            digest.update(b"|")
+            digest.update(str(item.get("type") or "").strip().upper().encode("utf-8"))
+            digest.update(b"|")
+            digest.update(str(item.get("result")).encode("utf-8"))
+            digest.update(b"|")
+            digest.update(str(item.get("instant") or "").strip().encode("utf-8"))
+            digest.update(b"\n")
+        return f"{len(rounds or [])}|{digest.hexdigest()}"
+
+    @classmethod
+    def _history_from_redis_value(cls, raw_value):
+        if raw_value is None:
+            return []
+        try:
+            payload = json.loads(str(raw_value))
+            items = cls._extract_history_items(payload)
+            normalized = [cls._normalize_round(item) for item in items]
+            normalized = cls._chronological_history(normalized)
+            return normalized[-HISTORY_LIMIT:]
+        except (ValueError, TypeError, json.JSONDecodeError):
+            return []
+
     @staticmethod
     def _winner_label(round_type):
         return {
@@ -203,23 +239,22 @@ class TipMinerCollector:
             "TIE": "🟡 EMPATE",
         }.get(str(round_type or "").upper(), "RESULTADO")
 
-    def _notify_node_interruption(self, reason, force=False):
-        if self._interruption_notified and not force:
-            return False
+    def _queue_interruption(self, reason, force=False):
+        if self._pending_interruption is not None and not force:
+            return self._pending_interruption
 
-        self._interruption_notified = True
-        interruption_id = f"bacbo-{os.getpid()}-{uuid.uuid4().hex}"
-
-        if not INTERNAL_API_TOKEN:
-            print("⚠️ BAC BO | proteção de continuidade indisponível | INTERNAL_API_TOKEN ausente.")
-            return False
-
-        payload = {
+        self._pending_interruption = {
             "evento": "INTERRUPCAO",
             "motivo": str(reason or "INTERRUPCAO_COLETOR")[:120],
-            "interrupcao_id": interruption_id,
+            "interrupcao_id": f"bacbo-{os.getpid()}-{uuid.uuid4().hex}",
             "timestamp_coleta": int(time.time() * 1000),
         }
+        return self._pending_interruption
+
+    def _try_notify_pending_interruption(self, emit_success=True):
+        pending = self._pending_interruption
+        if pending is None:
+            return True, "sem_pendencia"
 
         try:
             response = self.node_http.post(
@@ -228,7 +263,7 @@ class TipMinerCollector:
                     "Content-Type": "application/json",
                     "X-Internal-Token": INTERNAL_API_TOKEN,
                 },
-                json=payload,
+                json=pending,
                 timeout=(NODE_HEALTH_CONNECT_TIMEOUT_SECONDS, NODE_HEALTH_READ_TIMEOUT_SECONDS),
             )
 
@@ -241,29 +276,70 @@ class TipMinerCollector:
             if response.ok:
                 sinais = int(body.get("sinais_invalidados") or 0)
                 traders = int(body.get("traders_bloqueados") or 0)
-                print(
-                    "🛡️ BAC BO | continuidade protegida | "
-                    f"sinai(s) invalidado(s)={sinais} | trader(s) bloqueado(s)={traders}."
-                )
-                return True
+                motivo = str(pending.get("motivo") or "INTERRUPCAO_COLETOR")
+                self._pending_interruption = None
+                if emit_success:
+                    print(
+                        "🛡️ BAC BO | continuidade confirmada pelo Node | "
+                        f"motivo={motivo} | sinais={sinais} | traders={traders}."
+                    )
+                return True, "confirmada"
 
             if response.status_code == 503:
-                print("⚠️ BAC BO | continuidade | backend ainda inicializando; nenhuma sessão operacional antiga será reutilizada.")
-            else:
-                print(
-                    "⚠️ BAC BO | continuidade | Node recusou notificação "
-                    f"(HTTP {response.status_code})."
-                )
-            return False
+                return False, "backend_inicializando"
+            return False, f"http_{response.status_code}"
         except requests.RequestException as exc:
-            print(
-                "⚠️ BAC BO | continuidade | Node local indisponível para notificação | "
-                f"{type(exc).__name__}: {exc}"
-            )
-            return False
+            return False, f"node_indisponivel:{type(exc).__name__}"
 
-    def _mark_continuity_restored(self):
-        self._interruption_notified = False
+    def _await_pending_interruption_ack(self):
+        if self._pending_interruption is None:
+            return True
+
+        attempt = 0
+        last_history_refresh = time.monotonic()
+        last_status = None
+
+        while self._pending_interruption is not None:
+            attempt += 1
+            ok, status = self._try_notify_pending_interruption(emit_success=True)
+            if ok:
+                return True
+
+            now = time.monotonic()
+            if attempt == 1 or status != last_status or attempt % 10 == 0:
+                print(
+                    "⏳ BAC BO | continuidade | aguardando confirmação do Node; "
+                    f"live bloqueado | estado={status}."
+                )
+            last_status = status
+
+            if now - last_history_refresh >= CONTINUITY_HISTORY_REFRESH_SECONDS:
+                try:
+                    self.sync_history(quiet_if_unchanged=True)
+                except Exception as exc:
+                    print(
+                        "⚠️ BAC BO | continuidade | falha ao atualizar histórico durante espera | "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                last_history_refresh = time.monotonic()
+
+            delay = min(
+                CONTINUITY_RETRY_MAX_SECONDS,
+                CONTINUITY_RETRY_MIN_SECONDS + ((attempt - 1) * 0.5),
+            )
+            time.sleep(delay)
+
+        return True
+
+    def _notify_interruption_best_effort(self, reason, force=False):
+        self._queue_interruption(reason, force=force)
+        ok, status = self._try_notify_pending_interruption(emit_success=True)
+        if not ok:
+            print(
+                "⚠️ BAC BO | continuidade | notificação pendente; "
+                f"será reenviada com o mesmo ID | estado={status}."
+            )
+        return ok
 
     def _publish_history_sync(self):
         serialized_history = self._json_dumps(self.history)
@@ -301,7 +377,7 @@ class TipMinerCollector:
         pipeline.publish(REDIS_EVENTS_CHANNEL, event)
         pipeline.execute()
 
-    def sync_history(self):
+    def sync_history(self, quiet_if_unchanged=False):
         response = self.http.get(
             HISTORY_URL,
             headers={"Accept": "application/json"},
@@ -320,9 +396,23 @@ class TipMinerCollector:
         if len(normalized) > HISTORY_LIMIT:
             normalized = normalized[-HISTORY_LIMIT:]
 
+        retained_raw = self.redis.get(REDIS_HISTORY_KEY)
+        retained_history = self._history_from_redis_value(retained_raw)
+        retained_signature = self._history_signature(retained_history) if retained_history else None
+        new_signature = self._history_signature(normalized)
+        changed = retained_signature != new_signature
+
         self.history = normalized
-        self._publish_history_sync()
-        print(f"♻️ BAC BO | HISTÓRICO | {len(self.history)} giro(s) sincronizados.")
+        if changed:
+            self._publish_history_sync()
+            print(f"♻️ BAC BO | HISTÓRICO | {len(self.history)} giro(s) sincronizados.")
+        elif not quiet_if_unchanged:
+            print(
+                f"♻️ BAC BO | HISTÓRICO | {len(self.history)} giro(s) confirmados; "
+                "sem alterações."
+            )
+
+        return changed
 
     def listen_live(self):
         response = self.http.get(
@@ -362,7 +452,6 @@ class TipMinerCollector:
 
                 round_data = self._normalize_round(payload)
                 self._publish_live_round(round_data)
-                self._mark_continuity_restored()
                 print(
                     f"🎲 BAC BO | {self._winner_label(round_data['type'])} | "
                     f"Soma: {round_data['result']}"
@@ -380,20 +469,32 @@ class TipMinerCollector:
         print("============================================================")
 
         # Um processo novo nunca herda a continuidade operacional do processo anterior.
-        # Se o encerramento anterior foi abrupto, esta notificação invalida qualquer sinal antigo.
-        self._notify_node_interruption("COLETOR_REINICIADO", force=True)
+        # O mesmo interrupcao_id é mantido até o Node confirmar o recebimento.
+        self._queue_interruption("COLETOR_REINICIADO", force=True)
 
         while True:
             try:
                 self.redis.ping()
+
+                # Se o Node já estiver disponível, invalida sinais antigos antes do backfill.
+                # Se ainda estiver iniciando, o histórico é atualizado primeiro para que o
+                # bootstrap do Node possa recuperar a janela mais recente.
+                self._try_notify_pending_interruption(emit_success=True)
                 self.sync_history()
+
+                # Fail-closed operacional: nenhum evento live é publicado enquanto o Node
+                # não reconhecer explicitamente a quebra de continuidade.
+                self._await_pending_interruption_ack()
+
+                # Fecha a janela criada enquanto aguardávamos o Node ficar pronto.
+                self.sync_history(quiet_if_unchanged=True)
                 self.listen_live()
             except KeyboardInterrupt:
-                self._notify_node_interruption("MANUTENCAO_COLETOR", force=True)
+                self._notify_interruption_best_effort("MANUTENCAO_COLETOR", force=True)
                 print("\n👋 Coletor Bac Bo encerrado pelo operador.")
                 return
             except Exception as exc:
-                self._notify_node_interruption("FLUXO_COLETOR_INTERROMPIDO")
+                self._notify_interruption_best_effort("FLUXO_COLETOR_INTERROMPIDO")
                 print(
                     "⚠️ BAC BO/REDIS | fluxo interrompido; "
                     f"nova sincronização em {RECONNECT_DELAY_SECONDS}s | "
