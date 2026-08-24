@@ -39,7 +39,7 @@ function tipoMensagem(texto) {
     if (t.includes('NOVA ENTRADA')) return 'ENTRADA';
     if (t.includes('POSSÍVEL GALE') || t.includes('POSSIVEL GALE') || t.includes('🔁 GALE ')) return 'GALE';
     if (t.includes('GREEN CONFIRMADO') || t.includes('EMPATE PROTEGIDO') || t.includes('GREEN - ')) return 'GREEN';
-    if (t.includes('RED CONFIRMADO')) return 'RED';
+    if (t.includes('RED CONFIRMADO') || t.includes('RED - ')) return 'RED';
     return null;
 }
 
@@ -78,27 +78,63 @@ function entradaPeloTeclado(replyMarkup) {
     return '';
 }
 
-function cabecalhoGreen(entrada) {
-    if (entrada === 'PLAYER') return 'GREEN - 🔵 PLAYER';
-    if (entrada === 'BANKER') return 'GREEN - 🔴 BANKER';
-    if (entrada === 'EMPATE') return 'GREEN - 🟡 EMPATE';
+function entradaPeloCabecalho(texto, tipo) {
+    const linhas = String(texto || '').split('\n');
+    const regex = tipo === 'RED' ? /RED/i : /GREEN|EMPATE\s+PROTEGIDO/i;
+    const linha = linhas.find(item => regex.test(item));
+    const t = String(linha || '').toUpperCase();
+    if (t.includes('PLAYER')) return 'PLAYER';
+    if (t.includes('BANKER')) return 'BANKER';
+    if (t.includes('EMPATE') || t.includes('TIE')) return 'EMPATE';
     return '';
 }
 
-function padronizarResultadoGreen(texto, replyMarkup) {
+function cabecalhoGreen(entrada) {
+    if (entrada === 'PLAYER') return '✅ GREEN - 🔵 PLAYER';
+    if (entrada === 'BANKER') return '✅ GREEN - 🔴 BANKER';
+    if (entrada === 'EMPATE') return '✅ GREEN - 🟡 EMPATE';
+    return '✅ GREEN';
+}
+
+function cabecalhoRed(entrada) {
+    if (entrada === 'PLAYER') return '❌ RED - 🔵 PLAYER';
+    if (entrada === 'BANKER') return '❌ RED - 🔴 BANKER';
+    if (entrada === 'EMPATE') return '❌ RED - 🟡 EMPATE';
+    return '❌ RED';
+}
+
+function padronizarResultadoFinal(texto, replyMarkup) {
     const original = String(texto || '');
     const upper = original.toUpperCase();
-    if (upper.includes('GREEN - 🔵 PLAYER') || upper.includes('GREEN - 🔴 BANKER') || upper.includes('GREEN - 🟡 EMPATE')) {
-        return original;
+    const entradaTeclado = entradaPeloTeclado(replyMarkup);
+
+    let tipo = '';
+    let entrada = '';
+
+    if (upper.includes('EMPATE PROTEGIDO')) {
+        tipo = 'GREEN';
+        entrada = 'EMPATE';
+    } else if (upper.includes('GREEN CONFIRMADO') || upper.includes('GREEN - ')) {
+        tipo = 'GREEN';
+        entrada = entradaPeloCabecalho(original, 'GREEN') || entradaTeclado;
+    } else if (upper.includes('RED CONFIRMADO') || upper.includes('RED - ')) {
+        tipo = 'RED';
+        entrada = entradaPeloCabecalho(original, 'RED') || entradaTeclado;
     }
 
-    const alvo = upper.includes('EMPATE PROTEGIDO')
-        ? 'GREEN - 🟡 EMPATE'
-        : (upper.includes('GREEN CONFIRMADO') ? cabecalhoGreen(entradaPeloTeclado(replyMarkup)) : '');
-    if (!alvo) return original;
+    if (!tipo) return original;
+    const alvo = tipo === 'GREEN' ? cabecalhoGreen(entrada) : cabecalhoRed(entrada);
 
     return original.split('\n').map(linha => {
-        if (/EMPATE\s+PROTEGIDO/i.test(linha) || /GREEN\s+CONFIRMADO/i.test(linha)) return alvo;
+        if (tipo === 'GREEN' && (
+            /EMPATE\s+PROTEGIDO/i.test(linha)
+            || /GREEN\s+CONFIRMADO/i.test(linha)
+            || /^\s*(?:✅\s*)?GREEN\s*-/i.test(linha)
+        )) return alvo;
+        if (tipo === 'RED' && (
+            /RED\s+CONFIRMADO/i.test(linha)
+            || /^\s*(?:❌\s*)?RED\s*-/i.test(linha)
+        )) return alvo;
         return linha;
     }).join('\n');
 }
@@ -191,12 +227,32 @@ function formatarPercentual(valor) {
     return Number.isFinite(Number(valor)) ? `${Number(valor).toFixed(1)}%` : 'N/D';
 }
 
+function limparStatusAtivoEstrategia(linha) {
+    const bruto = String(linha || '');
+    if (!/^\s*📊\s*Estratégia:/i.test(bruto)) return bruto;
+    return bruto
+        .replace(/\s*\[ATIVO\]\s*/gi, ' ')
+        .replace(/[ \t]{2,}/g, ' ')
+        .replace(/[ \t]+$/g, '');
+}
+
+function garantirEspacoAposStatus(linhas) {
+    if (!Array.isArray(linhas) || linhas.length === 0) return linhas;
+    const indice = linhas.findIndex(linha => {
+        const trim = String(linha || '').trim();
+        return /^(?:🎯\s*NOVA\s+ENTRADA|✅\s*GREEN\b|❌\s*RED\b|🔁\s*(?:POSSÍVEL\s+)?GALE\b)/iu.test(trim);
+    });
+    if (indice < 0 || indice >= linhas.length - 1) return linhas;
+    if (String(linhas[indice + 1] || '').trim() !== '') linhas.splice(indice + 1, 0, '');
+    return linhas;
+}
+
 function filtrarEComplementarTexto(texto, preferencias, stats) {
     const original = String(texto || '');
     const assertOriginal = extrairAssertividadeOriginal(original);
     const ehTieGreen = original.toUpperCase().includes('GREEN - 🟡 EMPATE');
 
-    let linhas = original.split('\n').filter(linha => {
+    let linhas = original.split('\n').map(limparStatusAtivoEstrategia).filter(linha => {
         const trim = linha.trim();
         if (/Proteção\s+(?:de|do|no)?\s*empate/i.test(trim)) return false;
         if (ehTieGreen && /Resultado:\s*PROTEÇÃO\s+NO\s+EMPATE/i.test(trim)) return false;
@@ -223,6 +279,8 @@ function filtrarEComplementarTexto(texto, preferencias, stats) {
         linhas.splice(indice, 0, ...linhasAssertividade);
     }
 
+    garantirEspacoAposStatus(linhas);
+
     const saida = [];
     let vazioAnterior = false;
     for (const linha of linhas) {
@@ -242,7 +300,7 @@ async function apresentarPayload(payload) {
 
     const finalizado = tipo === 'GREEN' || tipo === 'RED';
     const replyMarkupOriginal = payload.reply_markup;
-    let texto = padronizarResultadoGreen(payload.text, replyMarkupOriginal);
+    let texto = padronizarResultadoFinal(payload.text, replyMarkupOriginal);
 
     const nomeRobo = extrairNomeRobo(texto);
     const nomeEstrategia = extrairNomeEstrategia(texto);
