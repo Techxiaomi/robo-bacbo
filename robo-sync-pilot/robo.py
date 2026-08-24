@@ -34,6 +34,8 @@ BROWSER_KEEP_ALIVE_INTERVAL_SECONDS = 15.0
 DRIVER_RECOVERY_DELAY_SECONDS = 2.0
 EXECUTOR_BET_ACCEPTANCE_TIMEOUT_SECONDS = 8.0
 EXECUTOR_BET_ACCEPTANCE_TOLERANCE = 0.10
+BETTING_WINDOW_TIMEOUT_MS = 14000
+BETTING_CHIP_SELECTOR = "[data-role='chip'][data-value]"
 
 PLAYWRIGHT_DRIVER_FATAL_MARKERS = (
     "socket.send",
@@ -70,6 +72,10 @@ class ErroExecucaoAposta(RuntimeError):
     def __init__(self, mensagem, ambigua=False):
         super().__init__(mensagem)
         self.execucao_ambigua = bool(ambigua)
+
+
+class ErroJanelaApostasTimeout(ErroExecucaoAposta):
+    pass
 
 
 def registrar_erro_limitado(chave, mensagem, intervalo_segundos=30):
@@ -498,6 +504,28 @@ def localizar_frame_saldo(page):
     return None
 
 
+def aguardar_janela_apostas_aberta(page):
+    frame = localizar_frame_saldo(page)
+    if frame is None:
+        raise ErroExecucaoAposta(
+            "Frame da mesa indisponivel antes do gate de apostas",
+            ambigua=False,
+        )
+
+    try:
+        frame.wait_for_selector(
+            BETTING_CHIP_SELECTOR,
+            state="visible",
+            timeout=BETTING_WINDOW_TIMEOUT_MS,
+        )
+    except PlaywrightTimeoutError as e:
+        raise ErroJanelaApostasTimeout(
+            f"JANELA_FECHADA_TIMEOUT: nenhuma ficha ficou visivel em {BETTING_WINDOW_TIMEOUT_MS}ms"
+        ) from e
+
+    return frame
+
+
 def ler_saldo_atual(page, aguardar_ms=0):
     prazo = time.monotonic() + max(0.0, float(aguardar_ms) / 1000.0)
 
@@ -785,13 +813,16 @@ def confirmar_debito_saldo(page, saldo_antes, exposicao):
 
 def executar_place_bet(page, dados):
     planos = montar_planos_aposta(dados)
+
+    # Gate financeiro real: a ordem pode chegar antes da janela, mas nenhum clique
+    # ocorre enquanto a Evolution nao expuser uma ficha de aposta visivel no DOM.
+    frame = aguardar_janela_apostas_aberta(page)
+
+    # O saldo-base e lido somente apos a abertura da janela, imediatamente antes
+    # da validacao dos controles e dos cliques financeiros.
     saldo_antes = ler_saldo_atual(page, aguardar_ms=2500)
     if saldo_antes is None:
         raise ErroExecucaoAposta("Saldo real indisponivel antes da aposta", ambigua=False)
-
-    frame = localizar_frame_aposta(page, planos)
-    if frame is None:
-        raise ErroExecucaoAposta("Elementos da mesa nao estao disponiveis para a ordem", ambigua=False)
 
     ficha_corrente = None
     cliques_alvo = 0
@@ -1007,6 +1038,17 @@ def processar_comando_playwright(p, sessao, comando):
                 order_id,
                 "EXECUTADA",
                 confirmacao=confirmacao,
+            )
+            return
+        except ErroJanelaApostasTimeout as e:
+            publicar_resultado_aposta_redis(
+                order_id,
+                "EXPIRADA",
+                motivo=str(e),
+            )
+            print(
+                f"⏱️ Ordem {order_id}: janela de apostas nao abriu em "
+                f"{BETTING_WINDOW_TIMEOUT_MS}ms; entrada descartada."
             )
             return
         except Exception as e:
