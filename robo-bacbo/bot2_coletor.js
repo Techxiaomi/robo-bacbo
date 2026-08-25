@@ -3262,6 +3262,184 @@ function roboPodeAvaliarPadraoAposCursor(roboId, tamanhoPadrao) {
     return rodadasNovas >= tamanho;
 }
 
+// MICRO-COMMIT 4: snapshot imutável de inscritos por ciclo.
+// O primeiro acesso operacional a um estado ativo congela o
+// conjunto de robôs daquele ciclo. Alterações posteriores nas
+// listas mutáveis não mudam retroativamente Gale, liberação
+// ou finalização.
+const robosDoEstadoSinalSemSnapshot = robosDoEstadoSinal;
+const snapshotsInscricaoSinalPorEstado = new WeakMap();
+
+function estrategiaIdDoEstadoSinal(estado) {
+    if (!estado || typeof estado !== 'object') return null;
+
+    for (const [estrategiaId, estadoAtual] of Object.entries(estadoApostas)) {
+        if (estadoAtual === estado) {
+            return String(estrategiaId);
+        }
+    }
+
+    return null;
+}
+
+function criarSnapshotInscricaoSinal(estrategiaId, estado) {
+    if (!estado || typeof estado !== 'object') {
+        return null;
+    }
+
+    const estrategiaChave =
+        estrategiaId === null || estrategiaId === undefined
+            ? ''
+            : String(estrategiaId);
+
+    if (!estrategiaChave) {
+        return null;
+    }
+
+    const existente =
+        snapshotsInscricaoSinalPorEstado.get(estado);
+
+    if (existente) {
+        if (
+            existente.estrategia_id !== estrategiaChave
+        ) {
+            console.error(
+                `🚨 Snapshot de ciclo divergente | ` +
+                `snapshot=${existente.estrategia_id} | ` +
+                `estado=${estrategiaChave}.`
+            );
+
+            return null;
+        }
+
+        return existente;
+    }
+
+    const participantesAtuais =
+        robosDoEstadoSinalSemSnapshot(estado);
+
+    const porId = new Map();
+
+    for (const robo of participantesAtuais) {
+        const id = chaveLockSinalRobo(robo);
+
+        if (!id) continue;
+
+        if (!porId.has(id)) {
+            porId.set(id, robo);
+        }
+    }
+
+    if (porId.size === 0) {
+        return null;
+    }
+
+    const robos = Object.freeze(
+        Array.from(porId.values())
+    );
+
+    const ids = Object.freeze(
+        Array.from(porId.keys())
+    );
+
+    const snapshot = Object.freeze({
+        estrategia_id: estrategiaChave,
+        robos,
+        ids
+    });
+
+    snapshotsInscricaoSinalPorEstado.set(
+        estado,
+        snapshot
+    );
+
+    return snapshot;
+}
+
+function robosDoEstadoSinalIsolado(estrategiaId, estado) {
+    const snapshot = criarSnapshotInscricaoSinal(
+        estrategiaId,
+        estado
+    );
+
+    return snapshot
+        ? snapshot.robos
+        : [];
+}
+
+function limparSnapshotInscricaoSinal(estrategiaId, estado) {
+    if (!estado || typeof estado !== 'object') {
+        return false;
+    }
+
+    const snapshot =
+        snapshotsInscricaoSinalPorEstado.get(estado);
+
+    if (!snapshot) {
+        return false;
+    }
+
+    if (
+        snapshot.estrategia_id !== String(estrategiaId)
+    ) {
+        console.error(
+            `🚨 Tentativa de limpar snapshot de outro ciclo | ` +
+            `snapshot=${snapshot.estrategia_id} | ` +
+            `solicitante=${estrategiaId}.`
+        );
+
+        return false;
+    }
+
+    snapshotsInscricaoSinalPorEstado.delete(
+        estado
+    );
+
+    return true;
+}
+
+// Compatibilidade com os helpers já existentes.
+//
+// liberarLocksSinalDoEstado,
+// atualizarGaleLocksSinal e
+// sincronizarLocksSinalComEstadoApostas
+// continuam usando robosDoEstadoSinal normalmente.
+//
+// Para um estado ativo, porém, esta camada passa a devolver
+// sempre o mesmo conjunto congelado de participantes.
+robosDoEstadoSinal = function robosDoEstadoSinalComSnapshot(estado) {
+    if (!estado || typeof estado !== 'object') {
+        return robosDoEstadoSinalSemSnapshot(estado);
+    }
+
+    const existente =
+        snapshotsInscricaoSinalPorEstado.get(estado);
+
+    if (existente) {
+        return existente.robos;
+    }
+
+    if (estado.aguardandoResultado !== true) {
+        return robosDoEstadoSinalSemSnapshot(estado);
+    }
+
+    const estrategiaId =
+        estrategiaIdDoEstadoSinal(estado);
+
+    if (!estrategiaId) {
+        return [];
+    }
+
+    const snapshot = criarSnapshotInscricaoSinal(
+        estrategiaId,
+        estado
+    );
+
+    return snapshot
+        ? snapshot.robos
+        : [];
+};
+
 // MICRO-COMMIT 3: isolamento de estado/transições.
 // Cada estado ativo só pode avançar quando TODOS os robôs do seu ciclo ainda
 // possuem o lock da mesma estratégia e do mesmo nível de Gale.
@@ -3269,7 +3447,7 @@ function estadoSinalComLocksConsistentes(estrategiaId, estado) {
     if (!estado || estado.aguardandoResultado !== true) return false;
     if (estadoApostas[String(estrategiaId)] !== estado) return false;
 
-    const participantes = robosDoEstadoSinal(estado);
+    const participantes = robosDoEstadoSinalIsolado(estrategiaId, estado);
     if (participantes.length === 0) return false;
 
     const galeAtual = Math.max(
@@ -3304,6 +3482,7 @@ function invalidarEstadoSinalInconsistente(
     // liberarLocksSinalDoEstado só remove locks realmente pertencentes
     // a esta estratégia. Locks de outros ciclos permanecem intocados.
     liberarLocksSinalDoEstado(estrategiaId, estado);
+    limparSnapshotInscricaoSinal(estrategiaId, estado);
 
     estado.aguardandoResultado = false;
     estado.galeAtual = 0;
@@ -3380,6 +3559,7 @@ function finalizarEstadoSinal(
         estrategiaId,
         estado
     );
+    limparSnapshotInscricaoSinal(estrategiaId, estado);
 
     estado.galeAtual = 0;
 
