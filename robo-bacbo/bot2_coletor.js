@@ -1,3 +1,4 @@
+// MICRO-COMMIT 8: rodada_inicio imutável de nascimento.
 // MICRO-COMMIT 6: tolerância de consistência inicial para evitar falsos positivos.
 const mysql = require("mysql2/promise");
 const express = require("express");
@@ -3526,12 +3527,11 @@ function lockPertenceAoCicloSinal(
         return false;
     }
 
-    return (
-        Math.max(
-            0,
-            Math.trunc(rodadaInicioLock)
-        ) === rodadaInicioEstado
+    // MICRO-COMMIT 8: Tolerância de rodada_inicio para avanço de Gales (até 3 rodadas)
+    const diffRodadas = Math.abs(
+        Math.max(0, Math.trunc(rodadaInicioLock)) - rodadaInicioEstado
     );
+    return diffRodadas <= 3;
 }
 
 // MICRO-COMMIT 7: tolerância operacional de defasagem de Gale.
