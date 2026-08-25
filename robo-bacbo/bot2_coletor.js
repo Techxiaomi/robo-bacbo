@@ -3218,9 +3218,10 @@ function liberarLocksSinalDoEstado(
         if (!id) continue;
 
         const lock = locksSinalPorRobo.get(id);
-        const pertenceAoCiclo = Boolean(
-            lock &&
-            String(lock.estrategia_id) === String(estrategiaId)
+        const pertenceAoCiclo = lockPertenceAoCicloSinal(
+            estrategiaId,
+            estado,
+            lock
         );
 
         // Nunca libera nem rearma o cursor de um lock que pertença a outro ciclo.
@@ -3344,6 +3345,10 @@ function criarSnapshotInscricaoSinal(estrategiaId, estado) {
 
     const snapshot = Object.freeze({
         estrategia_id: estrategiaChave,
+        rodada_inicio: Math.max(
+            0,
+            Math.trunc(Number(contadorRodadasSinal) || 0)
+        ),
         robos,
         ids
     });
@@ -3440,6 +3445,94 @@ robosDoEstadoSinal = function robosDoEstadoSinalComSnapshot(estado) {
         : [];
 };
 
+// MICRO-COMMIT 5: identidade de geração por rodada_inicio.
+//
+// MC3 isolou lock/estado por robô e estratégia.
+// MC4 congelou os participantes de cada estado.
+//
+// MC5 fecha o caso ABA:
+// ciclos diferentes podem reutilizar a mesma estratégia.
+// Portanto estrategia_id sozinho não prova ownership.
+//
+// rodada_inicio passa a funcionar como fencing token da geração.
+function rodadaInicioSnapshotSinal(estrategiaId, estado) {
+    if (!estado || typeof estado !== 'object') {
+        return null;
+    }
+
+    const snapshot =
+        snapshotsInscricaoSinalPorEstado.get(estado) ||
+        criarSnapshotInscricaoSinal(
+            estrategiaId,
+            estado
+        );
+
+    if (!snapshot) {
+        return null;
+    }
+
+    if (
+        snapshot.estrategia_id !== String(estrategiaId)
+    ) {
+        return null;
+    }
+
+    const rodadaInicio =
+        Number(snapshot.rodada_inicio);
+
+    if (!Number.isFinite(rodadaInicio)) {
+        return null;
+    }
+
+    return Math.max(
+        0,
+        Math.trunc(rodadaInicio)
+    );
+}
+
+function lockPertenceAoCicloSinal(
+    estrategiaId,
+    estado,
+    lock
+) {
+    if (!lock) {
+        return false;
+    }
+
+    if (
+        String(lock.estrategia_id) !==
+        String(estrategiaId)
+    ) {
+        return false;
+    }
+
+    const rodadaInicioEstado =
+        rodadaInicioSnapshotSinal(
+            estrategiaId,
+            estado
+        );
+
+    if (rodadaInicioEstado === null) {
+        return false;
+    }
+
+    const rodadaInicioLock =
+        Number(lock.rodada_inicio);
+
+    // Lock incompleto, legado ou corrompido:
+    // nunca é tratado como pertencente ao ciclo atual.
+    if (!Number.isFinite(rodadaInicioLock)) {
+        return false;
+    }
+
+    return (
+        Math.max(
+            0,
+            Math.trunc(rodadaInicioLock)
+        ) === rodadaInicioEstado
+    );
+}
+
 // MICRO-COMMIT 3: isolamento de estado/transições.
 // Cada estado ativo só pode avançar quando TODOS os robôs do seu ciclo ainda
 // possuem o lock da mesma estratégia e do mesmo nível de Gale.
@@ -3449,6 +3542,22 @@ function estadoSinalComLocksConsistentes(estrategiaId, estado) {
 
     const participantes = robosDoEstadoSinalIsolado(estrategiaId, estado);
     if (participantes.length === 0) return false;
+
+    // Fencing de geração:
+    // todos os locks precisam pertencer à mesma rodada de nascimento
+    // registrada no snapshot deste estado.
+    const geracaoConsistente = participantes.every(robo => {
+        const id = chaveLockSinalRobo(robo);
+        if (!id) return false;
+
+        return lockPertenceAoCicloSinal(
+            estrategiaId,
+            estado,
+            locksSinalPorRobo.get(id)
+        );
+    });
+
+    if (!geracaoConsistente) return false;
 
     const galeAtual = Math.max(
         0,
