@@ -361,6 +361,20 @@ let ROBOS_MEMORIA = [];
 let AUTO_TRADERS_MEMORIA = [];
 let historicoGirosAnalitico = [];
 let estadoApostas = {};
+
+// MICRO-COMMIT 2:
+// Um robô pode participar de somente um ciclo de sinal por vez.
+// Locks são independentes por robo.id, permitindo paralelismo entre robôs diferentes.
+const locksSinalPorRobo = new Map();
+
+// Quando um robô sai de um ciclo, grava a rodada em que voltou a escutar.
+// Um padrão novo só poderá ser reconhecido quando TODAS as suas casas tiverem
+// ocorrido depois dessa fronteira.
+const cursorRetomadaPorRobo = new Map();
+
+// Cursor monotônico das rodadas aceitas pelo Node nesta execução.
+let contadorRodadasSinal = 0;
+
 let estadoStandbyRobos = {};
 let idSessaoContinua = Date.now();
 let estadoContinuidadeColetor = {
@@ -2455,8 +2469,12 @@ function rotacionarSessaoAposInterrupcao(dados) {
 async function invalidarSequenciasAposBuracoDados(motivo) {
     let sinaisInvalidados = 0;
 
-    for (const estado of Object.values(estadoApostas)) {
+    for (const [estrategiaId, estado] of Object.entries(estadoApostas)) {
         if (!estado || !estado.aguardandoResultado) continue;
+
+        // A interrupção encerra a escuta anterior e cria uma nova fronteira.
+        liberarLocksSinalDoEstado(estrategiaId, estado);
+
         estado.aguardandoResultado = false;
         estado.galeAtual = 0;
         estado.robosWebInscritos = [];
@@ -3116,22 +3134,183 @@ function unirRobosInscritos(...listas) {
     return [...unicos.values()];
 }
 
-function ciclosAtivosPorRobo() {
-    const ciclos = new Map();
-    for (const [estrategiaId, estado] of Object.entries(estadoApostas || {})) {
-        if (!estado || estado.aguardandoResultado !== true) continue;
-        const robosCiclo = Array.isArray(estado.robosCiclo) && estado.robosCiclo.length > 0
-            ? estado.robosCiclo
-            : (Array.isArray(estado.robosInscritos) ? estado.robosInscritos : []);
-        for (const robo of robosCiclo) {
-            if (!robo || robo.id === undefined || robo.id === null) continue;
-            ciclos.set(String(robo.id), {
-                estrategia_id: String(estrategiaId),
-                gale_atual: Math.max(0, Number(estado.galeAtual) || 0)
-            });
+function chaveLockSinalRobo(roboOuId) {
+    const id = roboOuId && typeof roboOuId === 'object'
+        ? roboOuId.id
+        : roboOuId;
+
+    if (id === undefined || id === null) return '';
+    return String(id);
+}
+
+function robosDoEstadoSinal(estado) {
+    if (!estado) return [];
+
+    const ciclo = Array.isArray(estado.robosCiclo)
+        ? estado.robosCiclo
+        : [];
+
+    const inscritos = Array.isArray(estado.robosInscritos)
+        ? estado.robosInscritos
+        : [];
+
+    return unirRobosInscritos(ciclo, inscritos);
+}
+
+function adquirirLocksSinalRobos(robos, estrategiaId) {
+    const participantes = unirRobosInscritos(
+        Array.isArray(robos) ? robos : []
+    );
+
+    if (participantes.length === 0) return false;
+
+    // Aquisição atômica: primeiro valida TODOS, depois grava TODOS.
+    for (const robo of participantes) {
+        const id = chaveLockSinalRobo(robo);
+        if (!id || locksSinalPorRobo.has(id)) {
+            return false;
         }
     }
-    return ciclos;
+
+    for (const robo of participantes) {
+        const id = chaveLockSinalRobo(robo);
+
+        locksSinalPorRobo.set(id, {
+            estrategia_id: String(estrategiaId),
+            gale_atual: 0,
+            rodada_inicio: contadorRodadasSinal
+        });
+    }
+
+    return true;
+}
+
+function atualizarGaleLocksSinal(estado, estrategiaId) {
+    const galeAtual = Math.max(
+        0,
+        Math.trunc(Number(estado?.galeAtual) || 0)
+    );
+
+    for (const robo of robosDoEstadoSinal(estado)) {
+        const id = chaveLockSinalRobo(robo);
+        if (!id) continue;
+
+        const lock = locksSinalPorRobo.get(id);
+        if (!lock) continue;
+        if (String(lock.estrategia_id) !== String(estrategiaId)) continue;
+
+        locksSinalPorRobo.set(id, {
+            ...lock,
+            gale_atual: galeAtual
+        });
+    }
+}
+
+function liberarLocksSinalDoEstado(
+    estrategiaId,
+    estado,
+    { rearmarCursor = true } = {}
+) {
+    const participantes = robosDoEstadoSinal(estado);
+
+    for (const robo of participantes) {
+        const id = chaveLockSinalRobo(robo);
+        if (!id) continue;
+
+        const lock = locksSinalPorRobo.get(id);
+
+        // Nunca libera acidentalmente um lock que pertença a outro ciclo.
+        if (
+            lock &&
+            String(lock.estrategia_id) === String(estrategiaId)
+        ) {
+            locksSinalPorRobo.delete(id);
+        }
+
+        if (rearmarCursor) {
+            cursorRetomadaPorRobo.set(id, contadorRodadasSinal);
+        }
+    }
+}
+
+function roboPodeAvaliarPadraoAposCursor(roboId, tamanhoPadrao) {
+    const id = chaveLockSinalRobo(roboId);
+    if (!id) return false;
+
+    if (!cursorRetomadaPorRobo.has(id)) {
+        // Robô que nunca saiu de um lock continua usando o histórico normal.
+        return true;
+    }
+
+    const tamanho = Math.max(
+        1,
+        Math.trunc(Number(tamanhoPadrao) || 1)
+    );
+
+    const rodadaRetomada = Math.max(
+        0,
+        Number(cursorRetomadaPorRobo.get(id)) || 0
+    );
+
+    const rodadasNovas = Math.max(
+        0,
+        contadorRodadasSinal - rodadaRetomada
+    );
+
+    // Nenhuma casa do padrão pode ter sido formada enquanto o robô estava surdo.
+    return rodadasNovas >= tamanho;
+}
+
+function sincronizarLocksSinalComEstadoApostas() {
+    const idsAtivos = new Set();
+
+    for (const [estrategiaId, estado] of Object.entries(estadoApostas || {})) {
+        if (!estado || estado.aguardandoResultado !== true) continue;
+
+        const galeAtual = Math.max(
+            0,
+            Math.trunc(Number(estado.galeAtual) || 0)
+        );
+
+        for (const robo of robosDoEstadoSinal(estado)) {
+            const id = chaveLockSinalRobo(robo);
+            if (!id) continue;
+
+            idsAtivos.add(id);
+
+            const existente = locksSinalPorRobo.get(id);
+
+            if (
+                !existente ||
+                String(existente.estrategia_id) !== String(estrategiaId)
+            ) {
+                locksSinalPorRobo.set(id, {
+                    estrategia_id: String(estrategiaId),
+                    gale_atual: galeAtual,
+                    rodada_inicio: contadorRodadasSinal
+                });
+            } else if (existente.gale_atual !== galeAtual) {
+                locksSinalPorRobo.set(id, {
+                    ...existente,
+                    gale_atual: galeAtual
+                });
+            }
+        }
+    }
+
+    // Caso uma recarga de memória elimine um estado antigo, o lock não pode
+    // sobreviver órfão. A remoção também estabelece o cursor de retomada.
+    for (const id of [...locksSinalPorRobo.keys()]) {
+        if (idsAtivos.has(id)) continue;
+
+        locksSinalPorRobo.delete(id);
+        cursorRetomadaPorRobo.set(id, contadorRodadasSinal);
+    }
+}
+
+function ciclosAtivosPorRobo() {
+    sincronizarLocksSinalComEstadoApostas();
+    return new Map(locksSinalPorRobo);
 }
 
 async function selecionarRobosParaEstrategia(est, historicoLiveCanonico) {
@@ -3156,6 +3335,15 @@ async function selecionarRobosParaEstrategia(est, historicoLiveCanonico) {
             bloqueados.push({ ...snapshotPublicoRobo(robo), ...ciclo });
             return false;
         }
+
+        const tamanhoPadrao = Array.isArray(est.padrao)
+            ? est.padrao.length
+            : 0;
+
+        if (!roboPodeAvaliarPadraoAposCursor(robo.id, tamanhoPadrao)) {
+            return false;
+        }
+
         return true;
     });
 
@@ -3897,6 +4085,7 @@ async function carregarSistemasParaMemoria() {
             novoEstado[est.id] = estadoApostas[est.id] || { aguardandoResultado: false, galeAtual: 0, robosCiclo: [], robosInscritos: [], mensagensEntrada: [], mensagensGale: [] };
         });
         estadoApostas = novoEstado;
+        sincronizarLocksSinalComEstadoApostas();
 
         const [linhasRobos] = await dbPool.query('SELECT * FROM robos_canais WHERE ativo = true');
         const [destinatariosRobos] = await dbPool.query('SELECT robo_id, nome_cliente, chat_id FROM destinatarios_robo');
@@ -4167,6 +4356,10 @@ app.post("/receber-sinal", async (req, res) => {
         let totalP = (p1 + p2).toString().padStart(2, '0'); let totalB = (b1 + b2).toString().padStart(2, '0');
         console.log(`\n====================================\n🔥 Vencedor: ${logNomeVencedor}\n🔵 Jogador : ${totalP} | 🔴 Banca: ${totalB}\n====================================\n`);
 
+        // Cursor live independente do banco: toda rodada aceita pelo pipeline
+        // avança exatamente uma posição.
+        contadorRodadasSinal++;
+
         let giroPersistidoParaIA = false;
         let giroIdPersistidoParaIA = 0;
         try {
@@ -4298,6 +4491,7 @@ app.post("/receber-sinal", async (req, res) => {
                 } else {
                     if (st.galeAtual < est.gales) {
                         st.galeAtual++;
+                        atualizarGaleLocksSinal(st, est.id);
                         const extrasGale = { nivel: st.galeAtual };
                         emitirAlertaWebRobo('GALE', est, st, extrasGale);
                         void enviarTelegramParaInscritos('GALE', est, st, extrasGale).catch(e => {
@@ -4509,6 +4703,12 @@ app.post("/receber-sinal", async (req, res) => {
                 }
                 if (finalizar) {
                     st.aguardandoResultado = false;
+
+                    // GREEN, TIE protegido ou RED final encerram o lock.
+                    // O cursor passa a apontar para esta rodada, portanto
+                    // o próximo padrão precisa nascer integralmente depois dela.
+                    liberarLocksSinalDoEstado(est.id, st);
+
                     st.galeAtual = 0;
                     sinalFinalizadoAgora = true;
 
@@ -4539,10 +4739,15 @@ app.post("/receber-sinal", async (req, res) => {
         }
         const historicoLiveCanonico = estadoLiveCanonico.history;
 
-        let ocupado = Object.values(estadoApostas).some(e => e.aguardandoResultado);
-        if (!ocupado) {
+        {
+            // Não existe mais lock global. Estratégias diferentes podem abrir
+            // ciclos simultâneos desde que os robôs envolvidos estejam livres.
             for (let est of ESTRATEGIAS_MEMORIA) {
                 if (!est.ativo) continue;
+
+                // estadoApostas continua indexado por estratégia; uma estratégia
+                // já ativa nunca pode ser sobrescrita por um segundo ciclo.
+                if (estadoApostas[est.id]?.aguardandoResultado) continue;
                 if (historicoLiveCanonico.length >= est.padrao.length) {
                     let ult = historicoLiveCanonico.slice(-est.padrao.length);
                     let matchCores = ult.every((val, i) => val.resultado === est.padrao[i]);
@@ -4566,10 +4771,21 @@ app.post("/receber-sinal", async (req, res) => {
                             continue;
                         }
 
+                        const robosCiclo = unirRobosInscritos(selecaoRobos.todos);
+
+                        // Última barreira antes da publicação. Como o pipeline de
+                        // resultados é FIFO, esta aquisição é determinística.
+                        if (!adquirirLocksSinalRobos(robosCiclo, est.id)) {
+                            console.log(
+                                `🔒 Sinal ${est.id} suprimido: lock de robô mudou antes da aquisição.`
+                            );
+                            continue;
+                        }
+
                         estadoApostas[est.id] = {
                             aguardandoResultado: true,
                             galeAtual: 0,
-                            robosCiclo: unirRobosInscritos(selecaoRobos.todos),
+                            robosCiclo,
                             robosWebInscritos: selecaoRobos.web,
                             robosTelegramInscritos: [],
                             robosInscritos: unirRobosInscritos(selecaoRobos.todos),
@@ -4730,7 +4946,6 @@ app.post("/receber-sinal", async (req, res) => {
                                 }
                             }
                         }
-                        break;
                     }
                 }
             }
