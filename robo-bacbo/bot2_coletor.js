@@ -1,3 +1,4 @@
+// MICRO-COMMIT 6: tolerância de consistência inicial para evitar falsos positivos.
 const mysql = require("mysql2/promise");
 const express = require("express");
 const path = require("path");
@@ -3543,17 +3544,20 @@ function estadoSinalComLocksConsistentes(estrategiaId, estado) {
     const participantes = robosDoEstadoSinalIsolado(estrategiaId, estado);
     if (participantes.length === 0) return false;
 
-    // Fencing de geração:
-    // todos os locks precisam pertencer à mesma rodada de nascimento
-    // registrada no snapshot deste estado.
+    // Fencing de geração com tolerância de recém-nascido (MC6):
+    // Se o ciclo acabou de nascer (galeAtual 0 e sem locks populados ainda por atraso assíncrono),
+    // damos uma breve tolerância em vez de invalidar abruptamente em fail-closed.
     const geracaoConsistente = participantes.every(robo => {
         const id = chaveLockSinalRobo(robo);
         if (!id) return false;
-
+        const lock = locksSinalPorRobo.get(id);
+        if (!lock && Number(estado.galeAtual || 0) === 0) {
+            return true; // Tolera ausência momentânea no exato milissegundo de disparo
+        }
         return lockPertenceAoCicloSinal(
             estrategiaId,
             estado,
-            locksSinalPorRobo.get(id)
+            lock
         );
     });
 
