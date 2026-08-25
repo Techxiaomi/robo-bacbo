@@ -3534,6 +3534,10 @@ function lockPertenceAoCicloSinal(
     );
 }
 
+// MICRO-COMMIT 7: tolerância operacional de defasagem de Gale.
+// O fencing de geração continua estrito. Apenas a sincronização operacional
+// de gale_atual admite uma defasagem máxima de UMA transição para trás.
+//
 // MICRO-COMMIT 3: isolamento de estado/transições.
 // Cada estado ativo só pode avançar quando TODOS os robôs do seu ciclo ainda
 // possuem o lock da mesma estratégia e do mesmo nível de Gale.
@@ -3573,14 +3577,49 @@ function estadoSinalComLocksConsistentes(estrategiaId, estado) {
         if (!id) return false;
 
         const lock = locksSinalPorRobo.get(id);
-        if (!lock) return false;
 
+        // MC6 já autorizava esta tolerância na barreira de geração,
+        // mas a validação abaixo a anulava imediatamente.
+        //
+        // Em DIRETO, ausência momentânea do lock continua sendo
+        // tolerada somente enquanto galeAtual === 0.
+        if (!lock) {
+            return galeAtual === 0;
+        }
+
+        // Segurança estrutural NÃO é negociável:
+        // um lock existente precisa continuar pertencendo à mesma
+        // estratégia E à mesma rodada_inicio do snapshot.
+        if (
+            !lockPertenceAoCicloSinal(
+                estrategiaId,
+                estado,
+                lock
+            )
+        ) {
+            return false;
+        }
+
+        const galeLock = Math.max(
+            0,
+            Math.trunc(Number(lock.gale_atual) || 0)
+        );
+
+        // Estado e lock sincronizados: situação normal.
+        if (galeLock === galeAtual) {
+            return true;
+        }
+
+        // Tolerância operacional estritamente limitada:
+        //
+        // estado G1 + lock G0 -> aceita
+        // estado G2 + lock G1 -> aceita
+        //
+        // O lock só pode estar UMA transição ATRÁS.
+        // Lock adiantado ou dois níveis atrasado continua falhando.
         return (
-            String(lock.estrategia_id) === String(estrategiaId) &&
-            Math.max(
-                0,
-                Math.trunc(Number(lock.gale_atual) || 0)
-            ) === galeAtual
+            galeAtual > 0 &&
+            galeLock === (galeAtual - 1)
         );
     });
 }
