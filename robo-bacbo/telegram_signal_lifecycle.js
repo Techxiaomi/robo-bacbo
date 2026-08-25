@@ -10,6 +10,10 @@ const ciclos = new Map();
 const TELEGRAM_HOST = 'api.telegram.org';
 const URL_BOTAO_PADRAO = 'https://t.me';
 const AUX_TIMEOUT_MS = Math.max(1500, Number(process.env.TELEGRAM_SIGNAL_AUX_TIMEOUT_MS || 4000));
+const DELETE_MAX_ATTEMPTS = Math.max(1, Math.min(5, Number(process.env.TELEGRAM_DELETE_MAX_ATTEMPTS || 3)));
+const DELETE_BACKOFF_MS = Math.max(100, Math.min(5000, Number(process.env.TELEGRAM_DELETE_BACKOFF_MS || 250)));
+const CLEANUP_MAX_ROUNDS = Math.max(1, Math.min(8, Number(process.env.TELEGRAM_CLEANUP_MAX_ROUNDS || 5)));
+const limpezasPendentes = new Map();
 
 function dbPool() {
     if (pool) return pool;
@@ -98,6 +102,11 @@ function removerTarjas(texto) {
 function extrairNomeEstrategia(texto) {
     const linha = textoSeguro(texto).split('\n').find(item => /^📊\s*Estratégia:/i.test(item.trim()));
     return linha ? linha.replace(/^📊\s*Estratégia:\s*/i, '').trim() : '';
+}
+
+function extrairNomeRobo(texto) {
+    const linha = textoSeguro(texto).split('\n').find(item => /^🤖\s*Robô:/i.test(item.trim()));
+    return linha ? linha.replace(/^🤖\s*Robô:\s*/i, '').trim() : '';
 }
 
 function extrairEntrada(texto) {
@@ -207,7 +216,9 @@ function linhaEntradaEhGerenciada(linha) {
 }
 
 function linhaProtecaoEhGerenciada(linha) {
-    return /Proteção\s+(?:de|do|no)?\s*empate/i.test(linha);
+    // Somente o aviso operacional é gerenciado aqui. `🏁 Resultado:` deve sobreviver
+    // ao pipeline para registrar DIRETO/GALE mesmo quando o GREEN veio do empate.
+    return /^🛡️\s*Proteção\s+(?:de|do|no)?\s*empate/i.test(String(linha || '').trim());
 }
 
 function formatarTextoSinal(texto, politica) {
@@ -250,8 +261,38 @@ function botoesSinal(politica) {
     };
 }
 
-function chaveCiclo(token, chatId) {
+function normalizarNomeRobo(nome) {
+    return textoSeguro(nome).toLowerCase().replace(/\s+/g, ' ');
+}
+
+function chaveBaseCiclo(token, chatId) {
     return `${token}\n${String(chatId)}`;
+}
+
+function chaveCiclo(token, chatId, nomeRobo = '') {
+    return `${chaveBaseCiclo(token, chatId)}\n${normalizarNomeRobo(nomeRobo)}`;
+}
+
+function encontrarCiclo(token, chatId, texto) {
+    const nomeRobo = extrairNomeRobo(texto);
+    if (nomeRobo) {
+        const chaveExata = chaveCiclo(token, chatId, nomeRobo);
+        const exato = ciclos.get(chaveExata);
+        if (exato) return { chave: chaveExata, ciclo: exato };
+    }
+
+    const prefixo = `${chaveBaseCiclo(token, chatId)}\n`;
+    const candidatos = [...ciclos.entries()].filter(([chave]) => chave.startsWith(prefixo));
+    if (candidatos.length === 1) {
+        return { chave: candidatos[0][0], ciclo: candidatos[0][1] };
+    }
+    if (candidatos.length > 1) {
+        console.warn(
+            `⚠️ Telegram: correlação ambígua de ciclo para ${mascararChat(chatId)}; `
+            + `${candidatos.length} robôs compartilham o mesmo destino.`
+        );
+    }
+    return null;
 }
 
 function mascararChat(chatId) {
@@ -259,6 +300,10 @@ function mascararChat(chatId) {
     if (!valor) return '(vazio)';
     const final = valor.slice(-4);
     return `${'*'.repeat(Math.max(3, valor.length - final.length))}${final}`;
+}
+
+function esperar(ms) {
+    return new Promise(resolve => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
 }
 
 async function telegramApi(token, metodo, payload, signal = null) {
@@ -308,7 +353,6 @@ function mensagemPossivelGale(nivel, politica) {
 }
 
 async function criarMensagensGale(ciclo) {
-    const ids = [];
     for (let nivel = 1; nivel <= ciclo.politica.gales; nivel++) {
         const resultado = await telegramApi(ciclo.token, 'sendMessage', {
             chat_id: ciclo.chatId,
@@ -316,16 +360,19 @@ async function criarMensagensGale(ciclo) {
             reply_markup: botoesSinal(ciclo.politica)
         });
         if (resultado.ok && Number(resultado.corpo?.result?.message_id) > 0) {
-            ids[nivel - 1] = Number(resultado.corpo.result.message_id);
+            // Persiste imediatamente no objeto do ciclo. Assim um erro posterior não apaga
+            // IDs já confirmados pelo Telegram.
+            ciclo.galeMessageIds[nivel - 1] = Number(resultado.corpo.result.message_id);
         } else {
             console.warn(
                 `⚠️ Telegram: não foi possível criar placeholder do Gale ${nivel} `
-                + `para ${mascararChat(ciclo.chatId)}.`
+                + `para ${mascararChat(ciclo.chatId)} — HTTP ${resultado.status || 0}, `
+                + `código ${Number(resultado.corpo?.error_code) || 'n/a'}: `
+                + `${String(resultado.corpo?.description || 'sem descrição').slice(0, 180)}.`
             );
         }
     }
-    ciclo.galeMessageIds = ids;
-    return ids;
+    return [...ciclo.galeMessageIds];
 }
 
 async function editarMensagem(ciclo, messageId, texto) {
@@ -339,20 +386,124 @@ async function editarMensagem(ciclo, messageId, texto) {
     return resultado.ok;
 }
 
+function exclusaoJaEfetivada(resultado) {
+    const descricao = String(resultado?.corpo?.description || '').toLowerCase();
+    return Number(resultado?.status) === 400
+        && (descricao.includes('message to delete not found') || descricao.includes('message not found'));
+}
+
+function falhaExclusaoTransitoria(resultado) {
+    const status = Number(resultado?.status) || 0;
+    return status === 0 || status === 429 || status >= 500;
+}
+
 async function excluirMensagem(ciclo, messageId) {
-    if (!Number.isFinite(Number(messageId)) || Number(messageId) <= 0) return true;
-    const resultado = await telegramApi(ciclo.token, 'deleteMessage', {
-        chat_id: ciclo.chatId,
-        message_id: Number(messageId)
-    });
-    return resultado.ok;
+    const id = Number(messageId);
+    if (!Number.isFinite(id) || id <= 0) return { ok: true, message_id: id || 0, tentativas: 0 };
+
+    let ultimo = null;
+    for (let tentativa = 1; tentativa <= DELETE_MAX_ATTEMPTS; tentativa++) {
+        const resultado = await telegramApi(ciclo.token, 'deleteMessage', {
+            chat_id: ciclo.chatId,
+            message_id: id
+        });
+        ultimo = resultado;
+
+        if (resultado.ok || exclusaoJaEfetivada(resultado)) {
+            return { ok: true, message_id: id, tentativas: tentativa, resultado };
+        }
+
+        const transitoria = falhaExclusaoTransitoria(resultado);
+        const codigo = Number(resultado.corpo?.error_code) || null;
+        const descricao = String(resultado.corpo?.description || 'sem descrição').slice(0, 220);
+        if (!transitoria || tentativa >= DELETE_MAX_ATTEMPTS) {
+            console.error(
+                `❌ Telegram deleteMessage falhou | chat=${mascararChat(ciclo.chatId)} | `
+                + `message_id=${id} | tentativa=${tentativa}/${DELETE_MAX_ATTEMPTS} | `
+                + `HTTP=${resultado.status || 0} | code=${codigo || 'n/a'} | ${descricao}`
+            );
+            break;
+        }
+
+        const retryAfter = Math.max(0, Number(resultado.corpo?.parameters?.retry_after) || 0) * 1000;
+        const atraso = retryAfter > 0
+            ? retryAfter
+            : Math.min(10000, DELETE_BACKOFF_MS * (2 ** (tentativa - 1)));
+        console.warn(
+            `⚠️ Telegram deleteMessage transitório | chat=${mascararChat(ciclo.chatId)} | `
+            + `message_id=${id} | HTTP=${resultado.status || 0} | nova tentativa em ${atraso}ms.`
+        );
+        await esperar(atraso);
+    }
+
+    return { ok: false, message_id: id, tentativas: DELETE_MAX_ATTEMPTS, resultado: ultimo };
 }
 
 async function limparGales(ciclo) {
-    try { await ciclo.placeholdersPromise; } catch (_) {}
+    try { await ciclo.placeholdersPromise; } catch (erro) {
+        console.warn(`⚠️ Telegram: placeholders de Gale terminaram com erro antes da limpeza: ${erro.message}`);
+    }
+
     const ids = [...(Array.isArray(ciclo.galeMessageIds) ? ciclo.galeMessageIds : [])];
-    await Promise.all(ids.filter(Boolean).map(id => excluirMensagem(ciclo, id)));
-    ciclo.galeMessageIds = [];
+    const existentes = ids
+        .map((id, indice) => ({ id: Number(id), indice }))
+        .filter(item => Number.isFinite(item.id) && item.id > 0);
+    if (existentes.length === 0) {
+        ciclo.galeMessageIds = [];
+        return { ok: true, removidos: 0, pendentes: [] };
+    }
+
+    const resultados = await Promise.all(existentes.map(item => excluirMensagem(ciclo, item.id)));
+    const pendentes = [];
+    const idsRestantes = [];
+    resultados.forEach((resultado, posicao) => {
+        const item = existentes[posicao];
+        if (resultado.ok) return;
+        idsRestantes[item.indice] = item.id;
+        pendentes.push(item.id);
+    });
+    ciclo.galeMessageIds = idsRestantes;
+    return {
+        ok: pendentes.length === 0,
+        removidos: existentes.length - pendentes.length,
+        pendentes
+    };
+}
+
+function chaveLimpezaPendente(ciclo) {
+    return `${chaveCiclo(ciclo.token, ciclo.chatId, ciclo.nomeRobo)}\n${Number(ciclo.entradaMessageId) || 0}`;
+}
+
+function agendarLimpezaPendente(ciclo, rodada = 1) {
+    const chave = chaveLimpezaPendente(ciclo);
+    limpezasPendentes.set(chave, ciclo);
+    const atraso = Math.min(30000, 1000 * (2 ** Math.max(0, rodada - 1)));
+    const timer = setTimeout(() => {
+        void (async () => {
+            const resultado = await limparGales(ciclo);
+            if (resultado.ok) {
+                limpezasPendentes.delete(chave);
+                console.log(
+                    `🧹 Telegram: limpeza pendente concluída | chat=${mascararChat(ciclo.chatId)} | `
+                    + `robô=${ciclo.nomeRobo || 'n/a'}.`
+                );
+                return;
+            }
+            if (rodada < CLEANUP_MAX_ROUNDS) {
+                agendarLimpezaPendente(ciclo, rodada + 1);
+                return;
+            }
+            console.error(
+                `🚨 Telegram: limpeza de Gale permaneceu pendente após ${CLEANUP_MAX_ROUNDS} rodada(s) | `
+                + `chat=${mascararChat(ciclo.chatId)} | robô=${ciclo.nomeRobo || 'n/a'} | `
+                + `message_ids=${resultado.pendentes.join(',')}. IDs preservados em memória para diagnóstico.`
+            );
+        })().catch(erro => {
+            console.error(`🚨 Telegram: erro inesperado na limpeza pendente: ${erro.message}`);
+            if (rodada < CLEANUP_MAX_ROUNDS) agendarLimpezaPendente(ciclo, rodada + 1);
+        });
+    }, atraso);
+    timer.unref?.();
 }
 
 function resultadoSintetico(messageId) {
@@ -367,6 +518,17 @@ function resultadoSintetico(messageId) {
 }
 
 async function tratarEntrada(token, payload, init) {
+    const nomeRobo = extrairNomeRobo(payload.text);
+    const chave = chaveCiclo(token, payload.chat_id, nomeRobo);
+    const existente = ciclos.get(chave);
+    if (existente) {
+        console.warn(
+            `🔒 Telegram: NOVA ENTRADA duplicada suprimida para robô ${nomeRobo || 'n/a'} `
+            + `em ${mascararChat(payload.chat_id)}; ciclo anterior ainda está ativo.`
+        );
+        return respostaTelegram(resultadoSintetico(existente.entradaMessageId));
+    }
+
     const politica = await resolverPolitica(payload.text);
     const principal = await telegramApi(token, 'sendMessage', {
         ...payload,
@@ -380,17 +542,18 @@ async function tratarEntrada(token, payload, init) {
     const ciclo = {
         token,
         chatId: payload.chat_id,
+        nomeRobo,
         entradaMessageId: messageId,
         galeMessageIds: [],
         politica,
         placeholdersPromise: Promise.resolve([])
     };
-    ciclos.set(chaveCiclo(token, payload.chat_id), ciclo);
+    ciclos.set(chave, ciclo);
 
     if (politica.conhecida && politica.gales > 0) {
         ciclo.placeholdersPromise = criarMensagensGale(ciclo).catch(erro => {
             console.warn(`⚠️ Telegram: criação de mensagens de Gale falhou: ${erro.message}`);
-            return [];
+            return [...ciclo.galeMessageIds];
         });
     }
 
@@ -398,9 +561,9 @@ async function tratarEntrada(token, payload, init) {
 }
 
 async function tratarGale(token, payload) {
-    const chave = chaveCiclo(token, payload.chat_id);
-    const ciclo = ciclos.get(chave);
-    if (!ciclo) return null;
+    const localizado = encontrarCiclo(token, payload.chat_id, payload.text);
+    if (!localizado) return null;
+    const { ciclo } = localizado;
 
     try { await ciclo.placeholdersPromise; } catch (_) {}
     const nivel = nivelGale(payload.text);
@@ -422,9 +585,9 @@ async function tratarGale(token, payload) {
 }
 
 async function tratarFinal(token, payload) {
-    const chave = chaveCiclo(token, payload.chat_id);
-    const ciclo = ciclos.get(chave);
-    if (!ciclo) return null;
+    const localizado = encontrarCiclo(token, payload.chat_id, payload.text);
+    if (!localizado) return null;
+    const { chave, ciclo } = localizado;
 
     let finalId = ciclo.entradaMessageId;
     const editado = await editarMensagem(ciclo, ciclo.entradaMessageId, payload.text);
@@ -437,16 +600,24 @@ async function tratarFinal(token, payload) {
         });
         if (fallback.ok) {
             finalId = Number(fallback.corpo?.result?.message_id) || finalId;
-            await excluirMensagem(ciclo, ciclo.entradaMessageId);
+            const exclusaoPrincipal = await excluirMensagem(ciclo, ciclo.entradaMessageId);
+            if (!exclusaoPrincipal.ok) {
+                console.error(
+                    `⚠️ Telegram: mensagem principal antiga não pôde ser removida após fallback | `
+                    + `chat=${mascararChat(ciclo.chatId)} | message_id=${ciclo.entradaMessageId}.`
+                );
+            }
         } else {
-            await limparGales(ciclo);
+            const limpezaFalhaFinal = await limparGales(ciclo);
             ciclos.delete(chave);
+            if (!limpezaFalhaFinal.ok) agendarLimpezaPendente(ciclo);
             return respostaTelegram(fallback);
         }
     }
 
-    await limparGales(ciclo);
+    const limpeza = await limparGales(ciclo);
     ciclos.delete(chave);
+    if (!limpeza.ok) agendarLimpezaPendente(ciclo);
     return respostaTelegram(resultadoSintetico(finalId));
 }
 

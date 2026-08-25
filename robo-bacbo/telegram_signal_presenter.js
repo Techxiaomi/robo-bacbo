@@ -250,12 +250,11 @@ function garantirEspacoAposStatus(linhas) {
 function filtrarEComplementarTexto(texto, preferencias, stats) {
     const original = String(texto || '');
     const assertOriginal = extrairAssertividadeOriginal(original);
-    const ehTieGreen = original.toUpperCase().includes('GREEN - 🟡 EMPATE');
-
     let linhas = original.split('\n').map(limparStatusAtivoEstrategia).filter(linha => {
         const trim = linha.trim();
-        if (/Proteção\s+(?:de|do|no)?\s*empate/i.test(trim)) return false;
-        if (ehTieGreen && /Resultado:\s*PROTEÇÃO\s+NO\s+EMPATE/i.test(trim)) return false;
+        // Remove apenas o aviso operacional redundante. A linha `🏁 Resultado:`
+        // é evidência do desfecho/etapa e nunca deve ser descartada, inclusive no empate.
+        if (/^🛡️\s*Proteção\s+(?:de|do|no)?\s*empate/i.test(trim)) return false;
         if (!preferencias.nomeRobo && /^🤖\s*Robô:/i.test(trim)) return false;
         if (!preferencias.nomeEstrategia && /^📊\s*Estratégia:/i.test(trim)) return false;
         if (!preferencias.padrao && /^🧩\s*Padrão:/i.test(trim)) return false;
