@@ -600,7 +600,51 @@ def parsear_valor_monetario(texto):
     return round(valor, 2)
 
 
-def localizar_frame_saldo(page):
+def pagina_na_rota_home(page):
+    if not URL_HOME_CASSINO:
+        return False
+    try:
+        return _rota_url(page.url) == _rota_url(URL_HOME_CASSINO)
+    except Exception as e:
+        if erro_driver_playwright(e):
+            raise
+        return False
+
+
+def _ler_saldo_contexto(contexto):
+    try:
+        localizador = contexto.locator(CASINO_BALANCE_SELECTOR)
+        for indice in range(min(localizador.count(), 10)):
+            elemento = localizador.nth(indice)
+            if not elemento.is_visible():
+                continue
+
+            texto = elemento.get_attribute("data-balance-visible")
+            if not texto:
+                texto = elemento.inner_text(timeout=700)
+
+            saldo = parsear_valor_monetario(texto)
+            if saldo is not None:
+                return saldo
+
+    except Exception as e:
+        if erro_driver_playwright(e):
+            raise
+
+    return None
+
+
+def localizar_frame_saldo_mesa(page):
+    """
+    INVARIANTE FINANCEIRA:
+    se a URL da mesa estiver aberta, saldo do main frame/topo
+    jamais pode participar da operacao.
+
+    Apenas subframes da mesa Evolution sao candidatos.
+    """
+    if not pagina_na_rota_da_mesa(page):
+        return None
+
     try:
         frame_principal = page.main_frame
         frames = list(page.frames)
@@ -609,21 +653,113 @@ def localizar_frame_saldo(page):
             raise
         return None
 
+    frames_com_saldo = []
+    frames_evolution_com_saldo = []
+
     for frame in frames:
         if frame == frame_principal:
             continue
+
         try:
-            if frame.locator(CASINO_BALANCE_SELECTOR).count() > 0:
-                return frame
+            if frame.locator(CASINO_BALANCE_SELECTOR).count() <= 0:
+                continue
         except Exception as e:
             if erro_driver_playwright(e):
                 raise
             continue
+
+        frames_com_saldo.append(frame)
+
+        try:
+            if _frame_evolution_pronto(frame):
+                return frame
+        except Exception as e:
+            if erro_driver_playwright(e):
+                raise
+
+        try:
+            url = str(frame.url or "").lower()
+        except Exception as e:
+            if erro_driver_playwright(e):
+                raise
+            url = ""
+
+        if any(
+            marca in url
+            for marca in (
+                "evolution",
+                "evocdn",
+                "game"
+            )
+        ):
+            frames_evolution_com_saldo.append(frame)
+
+    # Um único frame claramente Evolution com saldo é seguro.
+    if len(frames_evolution_com_saldo) == 1:
+        return frames_evolution_com_saldo[0]
+
+    # Compatibilidade com iframe opaco:
+    # somente aceitamos quando existe UM ÚNICO subframe com saldo.
+    # Nunca usamos o main frame nesta rota.
+    if len(frames_com_saldo) == 1:
+        return frames_com_saldo[0]
+
+    # Ambiguidade financeira => fail-closed.
+    return None
+
+
+def localizar_frame_mesa(page):
+    """
+    Descobre o frame operacional da mesa independentemente
+    do seletor de saldo.
+    """
+    if not pagina_na_rota_da_mesa(page):
+        return None
+
+    try:
+        frame_principal = page.main_frame
+        frames = [
+            frame
+            for frame in list(page.frames)
+            if frame != frame_principal
+        ]
+    except Exception as e:
+        if erro_driver_playwright(e):
+            raise
+        return None
+
+    # Evidência mais forte: fichas da janela de apostas.
+    for frame in frames:
+        try:
+            if frame.locator(BETTING_CHIP_SELECTOR).count() > 0:
+                return frame
+        except Exception as e:
+            if erro_driver_playwright(e):
+                raise
+
+    # Segunda evidência: superfícies Bac Bo.
+    for frame in frames:
+        try:
+            if frame.locator("[data-role^='bacbo-bet-spot-']").count() > 0:
+                return frame
+        except Exception as e:
+            if erro_driver_playwright(e):
+                raise
+
+    # Último reconhecimento: contrato Evolution já existente.
+    for frame in frames:
+        try:
+            if _frame_evolution_pronto(frame):
+                return frame
+        except Exception as e:
+            if erro_driver_playwright(e):
+                raise
+
     return None
 
 
 def aguardar_janela_apostas_aberta(page):
-    frame = localizar_frame_saldo(page)
+    frame = localizar_frame_mesa(page)
     if frame is None:
         raise ErroExecucaoAposta(
             "Frame da mesa indisponivel antes do gate de apostas",
@@ -644,32 +780,190 @@ def aguardar_janela_apostas_aberta(page):
     return frame
 
 
-def ler_saldo_atual(page, aguardar_ms=0):
-    prazo = time.monotonic() + max(0.0, float(aguardar_ms) / 1000.0)
+def _texto_saldo_home_valido(texto):
+    """
+    Contrato estrito do saldo superior da HOME.
 
-    while True:
-        frame = localizar_frame_saldo(page)
-        if frame is not None:
+    O DOM atual da casa expõe:
+      button[type="button"]
+        > span.inline-flex.items-center.gap-2
+            R$ 1.580,00
+
+    Esta validação NÃO é usada dentro da Evolution.
+    """
+    if texto is None:
+        return None
+
+    normalizado = (
+        str(texto)
+        .replace("\xa0", " ")
+        .strip()
+    )
+
+    if not re.fullmatch(
+        r"R\$\s*(?:\d{1,3}(?:\.\d{3})+|\d+),\d{2}",
+        normalizado,
+    ):
+        return None
+
+    return parsear_valor_monetario(
+        normalizado
+    )
+
+
+def _ler_saldo_home_principal(page):
+    """
+    Lê exclusivamente o saldo superior do documento principal.
+
+    Segurança:
+    - somente elementos visíveis;
+    - somente dentro de button[type=button];
+    - texto monetário BR estrito;
+    - exatamente UM candidato válido.
+
+    Zero ou múltiplos candidatos => fail-closed.
+    """
+    seletor = (
+        "button[type='button'] "
+        "> span.inline-flex.items-center.gap-2"
+    )
+
+    saldos_validos = []
+
+    try:
+        candidatos = page.locator(
+            seletor
+        )
+
+        quantidade = min(
+            candidatos.count(),
+            64,
+        )
+
+        for indice in range(
+            quantidade
+        ):
+            elemento = candidatos.nth(
+                indice
+            )
+
+            if not elemento.is_visible():
+                continue
+
             try:
-                localizador = frame.locator(CASINO_BALANCE_SELECTOR)
-                for indice in range(min(localizador.count(), 10)):
-                    elemento = localizador.nth(indice)
-                    if not elemento.is_visible():
-                        continue
-                    texto = elemento.get_attribute("data-balance-visible")
-                    if not texto:
-                        texto = elemento.inner_text(timeout=700)
-                    saldo = parsear_valor_monetario(texto)
-                    if saldo is not None:
-                        return saldo
+                texto = elemento.inner_text(
+                    timeout=700
+                )
             except Exception as e:
                 if erro_driver_playwright(e):
                     raise
+                continue
+
+            saldo = _texto_saldo_home_valido(
+                texto
+            )
+
+            if saldo is not None:
+                saldos_validos.append(
+                    saldo
+                )
+
+    except Exception as e:
+        if erro_driver_playwright(e):
+            raise
+        return None
+
+    if len(saldos_validos) != 1:
+        return None
+
+    return saldos_validos[0]
+
+
+def ler_saldo_home(page, aguardar_ms=0):
+    """
+    Saldo do topo permitido SOMENTE na URL HOME.
+
+    Nunca percorre frames.
+    Nunca é fallback quando a mesa está aberta.
+    """
+    if not pagina_na_rota_home(page):
+        return None
+
+    prazo = (
+        time.monotonic()
+        + max(
+            0.0,
+            float(aguardar_ms) / 1000.0
+        )
+    )
+
+    while True:
+        saldo = _ler_saldo_home_principal(
+            page
+        )
+
+        if saldo is not None:
+            return saldo
 
         if time.monotonic() >= prazo:
             return None
+
         page.wait_for_timeout(250)
 
+def ler_saldo_mesa(page, aguardar_ms=0):
+    """
+    Na rota da mesa, lê EXCLUSIVAMENTE o saldo existente
+    dentro do subframe Evolution.
+
+    Não existe fallback para o saldo superior do cassino.
+    """
+    if not pagina_na_rota_da_mesa(page):
+        return None
+
+    prazo = (
+        time.monotonic()
+        + max(
+            0.0,
+            float(aguardar_ms) / 1000.0
+        )
+    )
+
+    while True:
+        frame = localizar_frame_saldo_mesa(page)
+
+        if frame is not None:
+            saldo = _ler_saldo_contexto(frame)
+
+            if saldo is not None:
+                return saldo
+
+        if time.monotonic() >= prazo:
+            return None
+
+        page.wait_for_timeout(250)
+
+
+def ler_saldo_atual(page, aguardar_ms=0):
+    """
+    Dispatcher financeiro fail-closed.
+
+    HOME  -> main frame/topo.
+    MESA  -> subframe Evolution.
+    OUTRO -> nenhum saldo é aceito.
+    """
+    if pagina_na_rota_da_mesa(page):
+        return ler_saldo_mesa(
+            page,
+            aguardar_ms=aguardar_ms
+        )
+
+    if pagina_na_rota_home(page):
+        return ler_saldo_home(
+            page,
+            aguardar_ms=aguardar_ms
+        )
+
+    return None
 
 def primeiro_elemento_dom_visivel(locator, limite=32):
     try:
@@ -1201,13 +1495,138 @@ def processar_comando_playwright(p, sessao, comando):
 
     if acao == "sync_balance":
         page, context = garantir_navegador(p, sessao)
-        garantir_destino_final_mesa(page, context)
-        saldo = ler_saldo_atual(page, aguardar_ms=5000)
+
+        # ============================================================
+        # INVARIANTE DE SALDO
+        #
+        # 1) Se JA estamos na mesa:
+        #    saldo SOMENTE do frame Evolution.
+        #
+        # 2) Se o navegador acabou de abrir / estamos fora da mesa:
+        #    tenta HOME primeiro e saldo SOMENTE do main frame.
+        #
+        # 3) Depois que a mesa for aberta:
+        #    o saldo superior fica proibido como fallback.
+        # ============================================================
+
+        if pagina_na_rota_da_mesa(page):
+            saldo = ler_saldo_mesa(
+                page,
+                aguardar_ms=5000
+            )
+
+            if saldo is None:
+                raise RuntimeError(
+                    "SALDO_MESA_INDISPONIVEL: "
+                    "saldo real nao localizado no frame da mesa Evolution"
+                )
+
+            publicar_saldo_redis(saldo)
+
+            print(
+                f"💰 Saldo real publicado via Redis: "
+                f"R$ {saldo:.2f} | origem=MESA_EVOLUTION."
+            )
+
+            garantir_destino_final_mesa(
+                page,
+                context
+            )
+            return
+
+        # Navegador novo, lobby ou contexto ainda fora da mesa.
+        # O saldo superior somente pode ser lido na URL HOME.
+        saldo = None
+
+        if URL_HOME_CASSINO:
+            try:
+                if not pagina_na_rota_home(page):
+                    page.goto(
+                        URL_HOME_CASSINO,
+                        wait_until="domcontentloaded",
+                        timeout=60000,
+                    )
+                    fechar_popups(page)
+
+                saldo = ler_saldo_home(
+                    page,
+                    aguardar_ms=2500
+                )
+
+                # Se a sessão persistida expirou, renova o login
+                # e tenta NOVAMENTE no HOME antes de abrir a mesa.
+                if saldo is None:
+                    renovar_sessao_automaticamente(
+                        page,
+                        context
+                    )
+
+                    saldo = ler_saldo_home(
+                        page,
+                        aguardar_ms=5000
+                    )
+
+            except Exception as e:
+                if erro_driver_playwright(e):
+                    raise
+
+                registrar_erro_limitado(
+                    "sync_balance_home",
+                    (
+                        "⚠️ Saldo HOME indisponivel; "
+                        "tentando contexto da mesa sem usar "
+                        f"o topo como fallback: {type(e).__name__}: {e}"
+                    ),
+                    15,
+                )
+
+        if saldo is not None:
+            publicar_saldo_redis(saldo)
+
+            print(
+                f"💰 Saldo real publicado via Redis: "
+                f"R$ {saldo:.2f} | origem=HOME."
+            )
+
+            # Depois da leitura válida do HOME, o destino operacional
+            # continua sendo a mesa. A partir daqui o topo passa a ser stale.
+            garantir_destino_final_mesa(
+                page,
+                context
+            )
+            return
+
+        # HOME não forneceu um saldo real.
+        # Podemos TRANSICIONAR para a mesa, mas depois da transição
+        # a leitura é EXCLUSIVAMENTE no frame Evolution.
+        garantir_destino_final_mesa(
+            page,
+            context
+        )
+
+        saldo = ler_saldo_mesa(
+            page,
+            aguardar_ms=5000
+        )
+
         if saldo is None:
-            raise RuntimeError("Saldo real nao localizado no iframe da Evolution")
+            raise RuntimeError(
+                "SALDO_MESA_INDISPONIVEL_APOS_HOME: "
+                "saldo do topo nao foi aceito e saldo real "
+                "nao foi localizado no frame da mesa Evolution"
+            )
+
         publicar_saldo_redis(saldo)
-        garantir_destino_final_mesa(page, context)
-        print(f"💰 Saldo real publicado via Redis: R$ {saldo:.2f}; mesa mantida pronta.")
+
+        print(
+            f"💰 Saldo real publicado via Redis: "
+            f"R$ {saldo:.2f} | origem=MESA_EVOLUTION_APOS_HOME."
+        )
+
+        garantir_destino_final_mesa(
+            page,
+            context
+        )
         return
 
 
