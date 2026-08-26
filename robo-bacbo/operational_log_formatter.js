@@ -68,6 +68,30 @@ function numeroUltimaRodada() {
     return numeroFormatado(ultimaSequenciaRodada);
 }
 
+function marcarSeparacaoProximaRodada() {
+    separarAntesProximaRodada = true;
+}
+
+function rotuloShadowOperacional(chave) {
+    const texto = String(chave || '').trim();
+    const match = texto.match(/^ia_(\d+)_/i);
+    return match ? `IA ${match[1]}` : (texto || 'SHADOW');
+}
+
+function formatarOcupacaoSuprimida(valor) {
+    const texto = String(valor || '')
+        .trim()
+        .replace(/\.$/, '');
+
+    const match = texto.match(
+        /^(\d+):(.+?)\s+em\s+\S+\s+\(([^)]+)\)$/i
+    );
+
+    if (!match) return texto;
+
+    return `Robô ${match[1]} · ${match[2].trim()} · ${match[3].trim()}`;
+}
+
 function linhaRodada(uuid, tipo, soma) {
     if (!lembrarUuid(uuid)) return null;
     const numero = numeroRodada();
@@ -137,13 +161,15 @@ function registrarSinalOperacional(payload) {
     const entradaNome = nomeResultado(payload.entrada);
     const assinatura = `${padrao || '?'} → ${entradaSimbolo}`;
 
-    robos.forEach((robo, indice) => {
+    robos.forEach(robo => {
         const id = robo?.id !== undefined && robo?.id !== null ? String(robo.id) : '?';
-        const prefixo = indice === 0 ? '\n' : '';
-        console.log(`${prefixo}🎯 SINAL    | Robô ${id} | ${assinatura} | Entrada: ${entradaNome}`);
+        console.log(
+            `\n🎯 SINAL | Robô ${id} | ${assinatura}\n`
+            + `   └─ Entrada: ${entradaNome}`
+        );
     });
 
-    separarAntesProximaRodada = true;
+    marcarSeparacaoProximaRodada();
     return true;
 }
 
@@ -172,14 +198,61 @@ function formatarTexto(valor) {
     if (/^✅ Nova rodada processada pela IA -> Vencedor:/i.test(texto)) return null;
     if (/^✅ IA atualizada \|/i.test(texto)) return null;
 
+    if (/^✅ Backend inicializado e pronto para atender APIs\.$/i.test(texto)) {
+        marcarSeparacaoProximaRodada();
+        return '✅ BACKEND | Inicializado e pronto para atender APIs';
+    }
+
+    match = texto.match(
+        /^🔒 Sinal\s+(.+?)\s+suprimido:\s+nenhum robô livre para novo ciclo\.(?:\s+Ocupados:\s+(.+))?$/i
+    );
+    if (match) {
+        marcarSeparacaoProximaRodada();
+
+        const sinal = match[1].trim();
+        const base =
+            `   🔒 SUPRIMIDO | ${numeroUltimaRodada()} | ${sinal}`;
+
+        if (!match[2]) {
+            return `${base} | Nenhum robô livre`;
+        }
+
+        const ocupado =
+            formatarOcupacaoSuprimida(match[2]);
+
+        return `${base}\n`
+            + '      ├─ Motivo: nenhum robô livre\n'
+            + `      └─ Ocupado: ${ocupado}`;
+    }
+
+    match = texto.match(
+        /^🔒 Sinal\s+(.+?)\s+suprimido:\s+(.+)$/i
+    );
+    if (match) {
+        marcarSeparacaoProximaRodada();
+        return `   🔒 SUPRIMIDO | ${numeroUltimaRodada()} | ${match[1].trim()}\n`
+            + `      └─ ${match[2].trim()}`;
+    }
+
+    match = texto.match(
+        /^👻 Shadow Live\s+(\S+):\s+(\d+)\/(\d+)\s+ocorrência(?:\(s\)|s)?,\s+assert=([0-9]+(?:[.,][0-9]+)?)%,\s+Wilson=([0-9]+(?:[.,][0-9]+)?)%,\s+pendente\s+\((\d+)\s+restante(?:\(s\)|s)?\)\.?$/i
+    );
+    if (match) {
+        marcarSeparacaoProximaRodada();
+        const ia =
+            rotuloShadowOperacional(match[1]);
+        return `   👻 SHADOW | ${numeroUltimaRodada()} | ${ia} | ${match[2]}/${match[3]} | `
+            + `Assert: ${match[4]}% | Wilson: ${match[5]}% | Restam: ${match[6]}`;
+    }
+
     match = texto.match(/^📨 Robô\s+(\d+):\s+Telegram confirmado em\s+(\d+)\/(\d+)\s+destino\(s\)\.$/i);
     if (match) {
-        return `📨 TELEGRAM | Robô ${match[1]} | Confirmado     | Destinos: ${match[2]}/${match[3]}`;
+        return `📨 TELEGRAM | Robô ${match[1]} | CONFIRMADO | Destinos: ${match[2]}/${match[3]}`;
     }
 
     match = texto.match(/^📨 Robô\s+(\d+):\s+teste Telegram confirmado em\s+(\d+)\/(\d+)\s+destino\(s\)\.$/i);
     if (match) {
-        return `📨 TESTE TG | Robô ${match[1]} | Confirmado     | Destinos: ${match[2]}/${match[3]}`;
+        return `📨 TESTE TG | Robô ${match[1]} | CONFIRMADO | Destinos: ${match[2]}/${match[3]}`;
     }
 
     match = texto.match(/^🧩 Recovery analítico \| (\d+) giro\(s\) recomposto\(s\) cronologicamente \| janela=(\d+)(.*)$/i);
@@ -191,7 +264,11 @@ function formatarTexto(valor) {
 
     match = texto.match(/^⚠️ Continuidade de dados comprometida \(([^)]+)\): (\d+) sinal\(is\) pendente\(s\) invalidado\(s\), (\d+) Auto-Trader\(s\) com ordem pendente bloqueado\(s\)\.$/i);
     if (match) {
-        return `🛡️ CONTINUIDADE | ${match[1]} | Sinais invalidados: ${match[2]} | Traders bloqueados: ${match[3]}`;
+        marcarSeparacaoProximaRodada();
+        return `\n🚨 CRÍTICO | CONTINUIDADE\n`
+            + `   ├─ Motivo: ${match[1]}\n`
+            + `   ├─ Sinais invalidados: ${match[2]}\n`
+            + `   └─ Traders bloqueados: ${match[3]}`;
     }
 
     if (/^⏳ Fila live aguardando o backend concluir a inicialização\.$/i.test(texto)) {
@@ -201,14 +278,21 @@ function formatarTexto(valor) {
         return `⏳ FILA     | ${numeroUltimaRodada()} | Servidor local indisponível; rodada preservada.`;
     }
     if (/^✅ Fila live liberada \| backend pronto; processamento retomado em ordem\.$/i.test(texto)) {
+        marcarSeparacaoProximaRodada();
         return `✅ FILA     | ${numeroUltimaRodada()} | Backend pronto; processamento retomado.`;
     }
     if (/^⚠️ Rodada live não entregue ao backend; fila preservada sem marcar como processada\.$/i.test(texto)) {
-        return `❌ ERRO     | ${numeroUltimaRodada()} | Rodada live não entregue; fila preservada.`;
+        marcarSeparacaoProximaRodada();
+        return `\n❌ ERRO | FILA\n`
+            + `   ├─ Rodada: ${numeroUltimaRodada()}\n`
+            + '   └─ Entrega ao backend falhou; fila preservada.';
     }
     if (/^⚠️ Persistencia bacbo_rounds falhou/i.test(texto)) {
         texto = texto.replace(/^⚠️ Persistencia bacbo_rounds falhou[^:]*:\s*/i, '');
-        return `⚠️ ALERTA   | ${numeroUltimaRodada()} | Persistência canônica falhou${texto ? ` | ${texto}` : ''}`;
+        marcarSeparacaoProximaRodada();
+        return `\n⚠️ WARNING | PERSISTÊNCIA\n`
+            + `   ├─ Rodada: ${numeroUltimaRodada()}\n`
+            + `   └─ Persistência canônica falhou${texto ? `: ${texto}` : ''}`;
     }
 
     match = texto.match(/^♻️ TipMiner HISTORY atualizado \| janela=(\d+) \| novas=(\d+) \| origem=([^\.]+)\.$/i);
@@ -256,27 +340,297 @@ function formatarTexto(valor) {
     return texto;
 }
 
+function textoErro(valor) {
+    if (valor instanceof Error) return String(valor.message || valor);
+    if (valor && typeof valor === 'object' && valor.message) return String(valor.message);
+    return typeof valor === 'string' ? valor : '';
+}
+
+function detalheSql(args) {
+    const itens = Array.isArray(args) ? args : [];
+    const erro = itens.find(v => v && typeof v === 'object');
+    const texto = itens.map(textoErro).filter(Boolean).join(' | ');
+
+    const porErrno = {
+        1040: 'ER_CON_COUNT_ERROR',
+        1045: 'ER_ACCESS_DENIED_ERROR',
+        1049: 'ER_BAD_DB_ERROR',
+        1054: 'ER_BAD_FIELD_ERROR',
+        1146: 'ER_NO_SUCH_TABLE',
+        1205: 'ER_LOCK_WAIT_TIMEOUT',
+        1213: 'ER_LOCK_DEADLOCK'
+    };
+
+    const motivos = {
+        ETIMEDOUT: 'Timeout ao estabelecer/completar a conexão com MySQL',
+        ECONNREFUSED: 'Servidor MySQL recusou a conexão',
+        ECONNRESET: 'Conexão com MySQL foi resetada',
+        ENOTFOUND: 'Host MySQL não foi encontrado',
+        EAI_AGAIN: 'Falha temporária de DNS do host MySQL',
+        PROTOCOL_CONNECTION_LOST: 'Conexão MySQL foi perdida durante a operação',
+        ER_ACCESS_DENIED_ERROR: 'Acesso MySQL negado para a origem/credencial configurada',
+        ER_CON_COUNT_ERROR: 'Servidor MySQL atingiu o limite de conexões',
+        ER_LOCK_DEADLOCK: 'Deadlock detectado pelo MySQL',
+        ER_LOCK_WAIT_TIMEOUT: 'Timeout aguardando lock no MySQL',
+        ER_BAD_DB_ERROR: 'Banco MySQL configurado não existe ou não está acessível',
+        ER_NO_SUCH_TABLE: 'Tabela MySQL esperada não existe',
+        ER_BAD_FIELD_ERROR: 'Coluna MySQL esperada não existe'
+    };
+
+    let codigo = String(erro?.code || '').trim().toUpperCase();
+
+    if (!motivos[codigo]) {
+        codigo =
+            Object.keys(motivos).find(
+                c => new RegExp('\\b' + c + '\\b', 'i').test(texto)
+            )
+            || porErrno[Number(erro?.errno)]
+            || '';
+    }
+
+    return {
+        codigo: codigo || 'N/D',
+        motivo:
+            motivos[codigo]
+            || texto.replace(/\s+/g, ' ').slice(0, 180)
+            || 'Falha SQL sem detalhe textual'
+    };
+}
+
+function blocoSql(titulo, linhas) {
+    const itens = linhas.filter(Boolean);
+
+    return '\n'
+        + titulo
+        + '\n'
+        + itens
+            .map(
+                (v, i) =>
+                    (i === itens.length - 1 ? '   └─' : '   ├─')
+                    + ' '
+                    + v
+            )
+            .join('\n');
+}
+
+function formatarFalhaSqlConhecida(nivel, args) {
+    const entrada = Array.isArray(args) ? [...args] : [];
+    const p = typeof entrada[0] === 'string' ? entrada[0] : '';
+
+    if (!p) return null;
+
+    const d = detalheSql(entrada);
+
+    let titulo = '';
+    let linhas = [];
+    let preservarErro = false;
+    let m;
+
+    if (
+        /^⚠️ Schema bacbo_rounds não inicializou no bootstrap:/i.test(p)
+    ) {
+        titulo = '⚠️ SQL | INDISPONÍVEL | BACBO_ROUNDS';
+
+        linhas = [
+            'Fase: bootstrap do schema canônico',
+            'Impacto: runtime segue ativo; persistência canônica pode ficar indisponível',
+            `Código: ${d.codigo}`,
+            `Motivo: ${d.motivo}`
+        ];
+
+    } else if (
+        (
+            m = p.match(
+                /^⚠️ Persistencia bacbo_rounds falhou(?:\s*\|\s*uuid=([^:|]+))?:?/i
+            )
+        )
+    ) {
+        titulo = '⚠️ SQL | PERSISTÊNCIA | RODADA LIVE';
+
+        linhas = [
+            `Rodada: ${numeroUltimaRodada()}`,
+            m[1] ? `UUID: ${m[1].trim()}` : '',
+            'Impacto: rodada permanece no runtime; persistência canônica falhou',
+            `Código: ${d.codigo}`,
+            `Motivo: ${d.motivo}`
+        ];
+
+    } else if (
+        /^⚠️ Persistencia do historico BacBo falhou:/i.test(p)
+    ) {
+        titulo = '⚠️ SQL | PERSISTÊNCIA | HISTÓRICO BAC BO';
+
+        linhas = [
+            'Fase: sincronização do histórico canônico',
+            'Impacto: histórico não é confirmado enquanto persistir a falha',
+            `Código: ${d.codigo}`,
+            `Motivo: ${d.motivo}`
+        ];
+
+    } else if (
+        /^⚠️ Recovery analítico do histórico falhou sem afetar bacbo_rounds:/i.test(p)
+    ) {
+        titulo = '⚠️ SQL | RECOVERY | ANALÍTICO';
+
+        linhas = [
+            'Fase: recomposição analítica do histórico',
+            'Impacto: bacbo_rounds permanece preservado',
+            `Código: ${d.codigo}`,
+            `Motivo: ${d.motivo}`
+        ];
+
+    } else if (
+        /^⚠️ Telegram: (?:preferências visuais não foram migradas no bootstrap|não foi possível carregar preferências visuais do robô):/i.test(p)
+    ) {
+        titulo = '⚠️ SQL | CONFIGURAÇÃO | TELEGRAM';
+
+        linhas = [
+            'Fase: preferências visuais do robô',
+            'Impacto: Telegram usa configuração persistida/default',
+            `Código: ${d.codigo}`,
+            `Motivo: ${d.motivo}`
+        ];
+
+    } else if (
+        /^❌ Erro Crítico ao preparar banco de dados:/i.test(p)
+    ) {
+        titulo = '🚨 SQL | BOOTSTRAP BLOQUEADO';
+
+        linhas = [
+            'Fase: preparar banco de dados',
+            'Ação: inicialização permanece fail-closed',
+            `Código: ${d.codigo}`,
+            `Motivo: ${d.motivo}`
+        ];
+
+    } else if (
+        /^❌ Falha em migration incremental:/i.test(p)
+    ) {
+        titulo = '🚨 SQL | MIGRATION BLOQUEADA';
+
+        linhas = [
+            'Fase: migration incremental',
+            'Ação: bootstrap não ignora migration inválida',
+            `Código: ${d.codigo}`,
+            `Motivo: ${d.motivo}`
+        ];
+
+    } else if (
+        /^⚠️ Falha ao encerrar pool MySQL após erro de inicialização:/i.test(p)
+    ) {
+        titulo = '⚠️ SQL | ENCERRAMENTO | POOL';
+
+        linhas = [
+            'Fase: fechamento seguro após falha de bootstrap',
+            `Código: ${d.codigo}`,
+            `Motivo: ${d.motivo}`
+        ];
+
+    } else if (
+        /^🔥 Inicialização do backend falhou; encerrando processo em modo seguro:/i.test(p)
+        && d.codigo !== 'N/D'
+    ) {
+        titulo = '🚨 SQL | BACKEND ENCERRADO EM MODO SEGURO';
+
+        linhas = [
+            'Fase: inicialização principal',
+            'Ação: backend permanece fail-closed',
+            `Código: ${d.codigo}`,
+            `Motivo: ${d.motivo}`
+        ];
+
+        preservarErro = true;
+    }
+
+    if (!titulo) return null;
+
+    marcarSeparacaoProximaRodada();
+
+    const bloco = blocoSql(
+        titulo,
+        linhas
+    );
+
+    const objetos = entrada
+        .slice(1)
+        .filter(
+            v =>
+                v
+                && typeof v === 'object'
+        );
+
+    return preservarErro && objetos.length
+        ? [bloco, ...objetos]
+        : [bloco];
+}
+
+function formatarChamadaConsole(nivel, args) {
+    const sql =
+        formatarFalhaSqlConhecida(
+            nivel,
+            args
+        );
+
+    if (sql) return sql;
+
+    const out = [];
+
+    for (
+        const arg of
+        Array.isArray(args)
+            ? args
+            : []
+    ) {
+        if (
+            typeof arg !== 'string'
+        ) {
+            out.push(arg);
+            continue;
+        }
+
+        const v =
+            formatarTexto(arg);
+
+        if (v === null) {
+            return null;
+        }
+
+        out.push(v);
+    }
+
+    return out;
+}
+
 function instalarLogOperacional() {
     if (instalado) return;
 
-    for (const nivel of ['log', 'info', 'warn', 'error']) {
-        const original = console[nivel].bind(console);
-        console[nivel] = (...args) => {
-            const saida = [];
-            for (const arg of args) {
-                if (typeof arg !== 'string') {
-                    saida.push(arg);
-                    continue;
+    for (
+        const nivel of
+        ['log', 'info', 'warn', 'error']
+    ) {
+        const original =
+            console[nivel].bind(console);
+
+        console[nivel] =
+            (...args) => {
+                const saida =
+                    formatarChamadaConsole(
+                        nivel,
+                        args
+                    );
+
+                if (saida === null) {
+                    return;
                 }
-                const formatado = formatarTexto(arg);
-                if (formatado === null) return;
-                saida.push(formatado);
-            }
-            original(...saida);
-        };
+
+                original(...saida);
+            };
     }
 
-    onHistoricoRecuperado(registrarRecoveryOperacional);
+    onHistoricoRecuperado(
+        registrarRecoveryOperacional
+    );
+
     instalado = true;
 }
 
@@ -284,5 +638,7 @@ module.exports = {
     instalarLogOperacional,
     formatarTexto,
     registrarSinalOperacional,
-    registrarRecoveryOperacional
+    registrarRecoveryOperacional,
+    formatarChamadaConsole,
+    detalheSql
 };
