@@ -138,14 +138,18 @@ function montarCenariosOraculo(historico, mesaAtual, gales) {
 }
 
 function ordenarCenariosOraculo(a, b) {
-    if (b.confianca_wilson !== a.confianca_wilson) return b.confianca_wilson - a.confianca_wilson;
-    if (b.amostras !== a.amostras) return b.amostras - a.amostras;
+    if (b.taxa_bruta !== a.taxa_bruta) return b.taxa_bruta - a.taxa_bruta;
     if (b.n !== a.n) return b.n - a.n;
+    if (b.amostras !== a.amostras) return b.amostras - a.amostras;
     return String(a.lado).localeCompare(String(b.lado));
 }
 
 function melhorCenarioOraculo(cenarios) {
-    const lista = (Array.isArray(cenarios) ? cenarios : []).filter(item => item && Number.isFinite(item.confianca_wilson));
+    const lista = (Array.isArray(cenarios) ? cenarios : []).filter(item => (
+        item
+        && Number.isFinite(Number(item.taxa_bruta))
+        && Number(item.amostras) >= 3
+    ));
     return lista.length > 0 ? [...lista].sort(ordenarCenariosOraculo)[0] : null;
 }
 
@@ -202,36 +206,26 @@ function decidirOraculo(cenarios, mesaAtual, confiancaMinima) {
     }
 
     const melhor = melhorCenarioOraculo(cenarios);
-    if (!melhor || Number(melhor.amostras) <= 0) {
+    if (!melhor) {
         return rejeicaoMesaOraculo(
             'DADOS_HISTORICOS_INSUFICIENTES',
             0,
-            'A janela histórica não possui ocorrências completas suficientes para avaliar a mesa atual.'
+            'A janela histórica não possui pelo menos 3 ocorrências completas para validar os N-Grams da mesa atual.'
         );
     }
 
-    const forteN3 = direcaoForteOraculo(cenarios, 3, minimo);
-    const forteN5 = direcaoForteOraculo(cenarios, 5, minimo);
-    if (forteN3 && forteN5 && forteN3.lado !== forteN5.lado) {
-        return rejeicaoMesaOraculo(
-            'CONFLITO_DIRECIONAL',
-            melhor.confianca_wilson,
-            'Mesa Instável por conflito direcional entre os recortes N-3 e N-5. Aguarde.'
-        );
-    }
-
-    if (melhor.confianca_wilson < minimo) {
+    if (melhor.taxa_bruta < minimo) {
         return rejeicaoMesaOraculo(
             'ABAIXO_DA_META',
-            melhor.confianca_wilson,
-            'A maior confiança Wilson no momento não atinge seu alvo. Aguarde.'
+            melhor.taxa_bruta,
+            'A maior probabilidade histórica no momento não atinge seu alvo. Aguarde.'
         );
     }
 
     return {
         status: 'APROVADO',
         sugerido: melhor.lado,
-        confianca_wilson: arredondar1Oraculo(melhor.confianca_wilson),
+        confianca_wilson: arredondar1Oraculo(melhor.taxa_bruta),
         amostras_base: Number(melhor.amostras) || 0,
         padrao_vencedor: 'N-' + melhor.n,
         mensagem: 'Sinal forte detectado.'

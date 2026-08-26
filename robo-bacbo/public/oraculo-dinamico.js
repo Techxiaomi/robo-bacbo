@@ -138,6 +138,12 @@
     function renderizarResultado(data) {
         const box = resultadoElemento();
         if (!box) return;
+
+        const nota = document.querySelector('.oraculo-nota');
+        if (nota) {
+            nota.textContent = 'O valor exibido é a taxa de assertividade real (probabilidade bruta) baseada no histórico recente selecionado. É exigido um mínimo de 3 ocorrências para validar o padrão.';
+        }
+
         box.dataset.temResultado = '1';
         if (data && data.status === 'APROVADO') {
             const lado = data.sugerido === 'P' ? '🔵 JOGADOR' : '🔴 BANCA';
@@ -145,7 +151,7 @@
             box.innerHTML =
                 '<div class="oraculo-res-titulo">✅ APROVADO — ' + lado + '</div>'
                 + '<div class="oraculo-res-grid">'
-                + '<div><span>Wilson 95%</span><strong>' + Number(data.confianca_wilson || 0).toFixed(1) + '%</strong></div>'
+                + '<div><span>Probabilidade</span><strong>' + Number(data.confianca_wilson || 0).toFixed(1) + '%</strong></div>'
                 + '<div><span>Amostras</span><strong>' + Number(data.amostras_base || 0) + '</strong></div>'
                 + '<div><span>Recorte</span><strong>' + escaparHtml(data.padrao_vencedor || '-') + '</strong></div>'
                 + '</div>'
@@ -158,7 +164,7 @@
             '<div class="oraculo-res-titulo">⛔ REJEITADO</div>'
             + '<div class="oraculo-res-grid">'
             + '<div><span>Motivo</span><strong>' + escaparHtml((data && (data.detalhe || data.motivo)) || 'MESA_INSTAVEL') + '</strong></div>'
-            + '<div><span>Melhor Wilson</span><strong>' + (Number.isFinite(melhor) ? melhor.toFixed(1) + '%' : '-') + '</strong></div>'
+            + '<div><span>Melhor Prob.</span><strong>' + (Number.isFinite(melhor) ? melhor.toFixed(1) + '%' : '-') + '</strong></div>'
             + '</div>'
             + '<div class="oraculo-mensagem">' + escaparHtml((data && data.mensagem) || 'Mesa Instável. Aguarde.') + '</div>';
     }
@@ -205,8 +211,8 @@
         if (loading) loading.style.display = 'flex';
         faseLoading('Método ativo: recortes N-3, N-4, N-5 e N-6.');
         const fases = [
-            setTimeout(() => faseLoading('Blindagem estatística: limite inferior de Wilson a 95%.'), 850),
-            setTimeout(() => faseLoading('Filtros ativos: conflito direcional, confiança e empates.'), 1700)
+            setTimeout(() => faseLoading('Validação pragmática: taxa bruta com mínimo de 3 ocorrências.'), 850),
+            setTimeout(() => faseLoading('Filtros ativos: amostra mínima, confiança e empates.'), 1700)
         ];
 
         try {
@@ -289,6 +295,11 @@
             const fragmento = await response.text();
             if (!document.getElementById('oraculo-modal')) {
                 document.body.insertAdjacentHTML('beforeend', fragmento);
+            }
+
+            const nota = document.querySelector('.oraculo-nota');
+            if (nota) {
+                nota.textContent = 'O valor exibido é a taxa de assertividade real (probabilidade bruta) baseada no histórico recente selecionado. É exigido um mínimo de 3 ocorrências para validar o padrão.';
             }
             if (!document.getElementById('nav-btn-oraculo')) {
                 const botao = document.createElement('button');
