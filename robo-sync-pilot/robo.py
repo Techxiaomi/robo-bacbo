@@ -65,6 +65,16 @@ AUTO_TRADER_ENABLED = _env_bool("AUTO_TRADER_ENABLED", False)
 fila_comandos_redis = queue.Queue()
 auto_trader_operando = threading.Event()
 navegador_aberto = threading.Event()
+
+# Sinal cooperativo de encerramento do processo.
+# O main thread recebe Ctrl+C; listener Redis e Playwright apenas observam.
+encerrar_executor = threading.Event()
+
+# O socket do SUBSCRIBE pertence ao listener Redis, mas o main pode emitir
+# shutdown(SHUT_RDWR) para destravar uma leitura bloqueante durante Ctrl+C.
+redis_listener_socket_lock = threading.Lock()
+redis_listener_socket = None
+
 atividade_node_lock = threading.Lock()
 ultima_atividade_node_monotonic = time.monotonic()
 avisos_erro_limitados = {}
@@ -110,6 +120,46 @@ def segundos_inatividade_node():
 
 def auto_trader_habilitado():
     return AUTO_TRADER_ENABLED is True
+
+
+def registrar_socket_listener_redis(sock):
+    global redis_listener_socket
+
+    with redis_listener_socket_lock:
+        redis_listener_socket = sock
+
+
+def limpar_socket_listener_redis(sock):
+    global redis_listener_socket
+
+    with redis_listener_socket_lock:
+        if redis_listener_socket is sock:
+            redis_listener_socket = None
+
+
+def solicitar_encerramento_executor():
+    """
+    Sinaliza encerramento sem interromper uma operação financeira no meio.
+
+    O shutdown do socket é proposital: socket.makefile() pode manter a leitura
+    bloqueada mesmo quando o objeto socket recebe close(), enquanto SHUT_RDWR
+    faz a leitura do SUBSCRIBE retornar/errar e permite ao listener executar
+    seu bloco finally normalmente.
+    """
+    encerrar_executor.set()
+
+    with redis_listener_socket_lock:
+        sock = redis_listener_socket
+
+    if sock is None:
+        return
+
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    except Exception:
+        pass
 
 
 # ====================================================================
@@ -339,59 +389,150 @@ def finalizar_order_id(order_id, status, motivo="", confirmacao=None):
 
 
 def ouvir_comandos_redis():
-    while True:
+    while not encerrar_executor.is_set():
         sock = None
         stream = None
-        try:
-            sock, stream = _abrir_conexao_redis(bloqueante=True)
-            confirmacao = _enviar_comando_redis(sock, stream, "SUBSCRIBE", REDIS_COMMAND_CHANNEL)
-            if not isinstance(confirmacao, list) or len(confirmacao) < 3 or _texto_redis(confirmacao[0]).lower() != "subscribe":
-                raise RuntimeError("Redis nao confirmou assinatura de auto_trader_commands")
 
-            print(f"🎧 Redis ativo: aguardando comandos em {REDIS_COMMAND_CHANNEL}.")
-            while True:
-                resposta = _ler_resposta_redis(stream)
-                if not isinstance(resposta, list) or len(resposta) < 3:
+        try:
+            sock, stream = _abrir_conexao_redis(
+                bloqueante=True
+            )
+
+            registrar_socket_listener_redis(
+                sock
+            )
+
+            confirmacao = _enviar_comando_redis(
+                sock,
+                stream,
+                "SUBSCRIBE",
+                REDIS_COMMAND_CHANNEL,
+            )
+
+            if (
+                not isinstance(
+                    confirmacao,
+                    list
+                )
+                or len(confirmacao) < 3
+                or _texto_redis(
+                    confirmacao[0]
+                ).lower() != "subscribe"
+            ):
+                raise RuntimeError(
+                    "Redis nao confirmou assinatura de "
+                    "auto_trader_commands"
+                )
+
+            print(
+                f"🎧 Redis ativo: aguardando comandos em "
+                f"{REDIS_COMMAND_CHANNEL}."
+            )
+
+            while not encerrar_executor.is_set():
+                resposta = _ler_resposta_redis(
+                    stream
+                )
+
+                if encerrar_executor.is_set():
+                    break
+
+                if (
+                    not isinstance(
+                        resposta,
+                        list
+                    )
+                    or len(resposta) < 3
+                ):
                     continue
-                if _texto_redis(resposta[0]).lower() != "message":
+
+                if (
+                    _texto_redis(
+                        resposta[0]
+                    ).lower()
+                    != "message"
+                ):
                     continue
-                if _texto_redis(resposta[1]) != REDIS_COMMAND_CHANNEL:
+
+                if (
+                    _texto_redis(
+                        resposta[1]
+                    )
+                    != REDIS_COMMAND_CHANNEL
+                ):
                     continue
 
                 try:
-                    dados = json.loads(_texto_redis(resposta[2]))
+                    dados = json.loads(
+                        _texto_redis(
+                            resposta[2]
+                        )
+                    )
                 except json.JSONDecodeError:
                     continue
-                if not isinstance(dados, dict):
+
+                if not isinstance(
+                    dados,
+                    dict
+                ):
                     continue
 
                 registrar_atividade_node()
-                acao = str(dados.get("action") or "").strip()
+
+                acao = str(
+                    dados.get(
+                        "action"
+                    )
+                    or ""
+                ).strip()
 
                 if acao == "sync_balance":
-                    fila_comandos_redis.put(dados)
+                    fila_comandos_redis.put(
+                        dados
+                    )
                     continue
 
                 if acao != "place_bet":
                     continue
 
-                order_id = str(dados.get("order_id") or "").strip().lower()
+                order_id = str(
+                    dados.get(
+                        "order_id"
+                    )
+                    or ""
+                ).strip().lower()
+
                 if not order_id:
-                    print("⚠️ place_bet rejeitado no listener: order_id ausente.")
+                    print(
+                        "⚠️ place_bet rejeitado no listener: "
+                        "order_id ausente."
+                    )
                     continue
 
-                estado_id, resultado_anterior = consultar_order_id(order_id)
+                estado_id, resultado_anterior = (
+                    consultar_order_id(
+                        order_id
+                    )
+                )
+
                 if estado_id == "FINALIZADA":
                     print(
-                        f"🛡️ IDEMPOTÊNCIA | duplicata bloqueada no listener | "
-                        f"order_id={order_id} | status={resultado_anterior.get('status')}"
+                        f"🛡️ IDEMPOTÊNCIA | duplicata bloqueada "
+                        f"no listener | order_id={order_id} | "
+                        f"status={resultado_anterior.get('status')}"
                     )
-                    republicar_resultado_order_id(order_id, resultado_anterior)
+
+                    republicar_resultado_order_id(
+                        order_id,
+                        resultado_anterior,
+                    )
                     continue
 
                 if estado_id == "EM_PROCESSAMENTO":
                     print(
-                        f"🛡️ IDEMPOTÊNCIA | duplicata ainda em processamento bloqueada | order_id={order_id}"
+                        f"🛡️ IDEMPOTÊNCIA | duplicata ainda em "
+                        f"processamento bloqueada | "
+                        f"order_id={order_id}"
                     )
                     continue
 
@@ -401,35 +542,57 @@ def ouvir_comandos_redis():
                         "FALHOU",
                         motivo="AUTO_TRADER_DESLIGADO",
                     )
+
                     print(
-                        f"🛑 AUTO TRADER | ordem rejeitada pelo fusível | order_id={order_id}"
+                        f"🛑 AUTO TRADER | ordem rejeitada pelo "
+                        f"fusível | order_id={order_id}"
                     )
                     continue
 
-                fila_comandos_redis.put(dados)
+                # Após pedido de shutdown nenhuma tarefa nova entra no worker.
+                if encerrar_executor.is_set():
+                    break
+
+                fila_comandos_redis.put(
+                    dados
+                )
+
         except Exception as e:
+            if encerrar_executor.is_set():
+                break
+
             registrar_erro_limitado(
                 "redis_auto_trader_commands",
-                f"⚠️ Redis auto_trader_commands indisponivel: {type(e).__name__}: {e}",
+                (
+                    "⚠️ Redis auto_trader_commands indisponivel: "
+                    f"{type(e).__name__}: {e}"
+                ),
                 30,
             )
-            time.sleep(2)
+
+            # Diferente de time.sleep(2), o Event permite que Ctrl+C
+            # interrompa também o backoff de reconexão imediatamente.
+            if encerrar_executor.wait(
+                2.0
+            ):
+                break
+
         finally:
+            limpar_socket_listener_redis(
+                sock
+            )
+
             if stream is not None:
                 try:
                     stream.close()
                 except Exception:
                     pass
+
             if sock is not None:
                 try:
                     sock.close()
                 except Exception:
                     pass
-
-
-# ====================================================================
-# PLAYWRIGHT: LOGIN, MANUTENCAO, SALDO E EXECUCAO CEGA DE ORDEM
-# ====================================================================
 def aplicar_stealth(page):
     try:
         from playwright_stealth import stealth_sync
@@ -1653,10 +1816,12 @@ def executar_manutencao_se_devida(p, sessao, forcar_abertura=False):
 
 
 def ciclo_playwright(p, sessao):
-    while True:
+    while not encerrar_executor.is_set():
         try:
             comando = fila_comandos_redis.get(timeout=1.0)
         except queue.Empty:
+            if encerrar_executor.is_set():
+                return
             try:
                 if auto_trader_habilitado():
                     executar_manutencao_se_devida(p, sessao, forcar_abertura=True)
@@ -1697,6 +1862,12 @@ def ciclo_playwright(p, sessao):
                     )
             continue
 
+        # Ctrl+C bloqueia o início de uma nova tarefa que ainda estava na fila.
+        # Uma operação já dentro de processar_comando_playwright continua até
+        # atingir seu estado terminal, preservando o fail-closed financeiro.
+        if encerrar_executor.is_set():
+            return
+
         try:
             processar_comando_playwright(p, sessao, comando)
             sessao["ultima_manutencao"] = time.monotonic()
@@ -1729,7 +1900,7 @@ def ciclo_playwright(p, sessao):
 def worker_playwright():
     reabrir_apos_falha_driver = False
 
-    while True:
+    while not encerrar_executor.is_set():
         sessao = {"browser": None, "context": None, "page": None, "ultima_manutencao": 0.0}
         try:
             with sync_playwright() as p:
@@ -1779,10 +1950,75 @@ def exibir_painel_versao():
     print("=" * 60)
 
 
-if __name__ == "__main__":
+def executar_main():
+    encerrar_executor.clear()
+
     exibir_painel_versao()
-    threading.Thread(target=worker_playwright, daemon=True).start()
+
+    thread_playwright = threading.Thread(
+        target=worker_playwright,
+        name="bacbo-playwright-worker",
+        daemon=True,
+    )
+
+    thread_redis = threading.Thread(
+        target=ouvir_comandos_redis,
+        name="bacbo-redis-listener",
+        daemon=True,
+    )
+
+    thread_playwright.start()
+    thread_redis.start()
+
     try:
-        ouvir_comandos_redis()
+        # O main thread fica deliberadamente fora do socket Redis.
+        # Assim o Windows consegue entregar KeyboardInterrupt ao Python.
+        while not encerrar_executor.wait(0.5):
+            if not thread_redis.is_alive():
+                print(
+                    "⚠️ Listener Redis encerrou inesperadamente; "
+                    "encerrando executor."
+                )
+                break
+
     except KeyboardInterrupt:
-        print("\n👋 Executor Redis encerrado.")
+        print(
+            "\n🛑 Ctrl+C recebido; solicitando encerramento seguro."
+        )
+
+    finally:
+        solicitar_encerramento_executor()
+
+        # Nunca mata o processo no meio de uma aposta física.
+        # O listener já está lacrado para novas ordens; se uma ordem havia
+        # começado, aguardamos processar_comando_playwright atingir terminal.
+        if auto_trader_operando.is_set():
+            print(
+                "⏳ Operação financeira em curso; aguardando conclusão "
+                "segura antes de encerrar."
+            )
+
+        while auto_trader_operando.is_set():
+            try:
+                time.sleep(0.10)
+            except KeyboardInterrupt:
+                print(
+                    "⚠️ Encerramento já solicitado; operação financeira "
+                    "ainda em curso e não será interrompida no meio."
+                )
+
+        thread_redis.join(
+            timeout=3.0
+        )
+
+        thread_playwright.join(
+            timeout=5.0
+        )
+
+        print(
+            "👋 Executor Redis encerrado."
+        )
+
+
+if __name__ == "__main__":
+    executar_main()
