@@ -341,30 +341,6 @@ function respostaTelegram(resultado) {
     });
 }
 
-// MC9: mensagens temporárias de Gale são deliberadamente enxutas.
-function mensagemGale(nivel, estrategiaNome = '') {
-    const linhas = [
-        `🔁 GALE ${nivel}`
-    ];
-
-    const estrategia = textoSeguro(
-        estrategiaNome
-    );
-
-    if (estrategia) {
-        linhas.push('');
-        linhas.push(
-            `📊 Estratégia: ${estrategia}`
-        );
-    }
-
-    linhas.push(
-        '⌛ Aguardando resultado da mesa...'
-    );
-
-    return linhas.join('\n');
-}
-
 function registrarMensagemGaleParaLimpeza(ciclo, messageId) {
     const id = Number(messageId);
 
@@ -379,35 +355,6 @@ function registrarMensagemGaleParaLimpeza(ciclo, messageId) {
     ciclo.galeCleanupMessageIds.add(id);
 
     return id;
-}
-
-async function criarMensagensGale(ciclo) {
-    for (let nivel = 1; nivel <= ciclo.politica.gales; nivel++) {
-        const resultado = await telegramApi(ciclo.token, 'sendMessage', {
-            chat_id: ciclo.chatId,
-            text: mensagemGale(nivel, ciclo.estrategiaNome),
-            reply_markup: botoesSinal(ciclo.politica)
-        });
-        if (resultado.ok && Number(resultado.corpo?.result?.message_id) > 0) {
-            // Persiste imediatamente no objeto do ciclo.
-            // O ID também entra no ledger de limpeza do ciclo e
-            // nunca é esquecido caso posteriormente exista fallback.
-            const messageId = registrarMensagemGaleParaLimpeza(
-                ciclo,
-                resultado.corpo.result.message_id
-            );
-
-            ciclo.galeMessageIds[nivel - 1] = messageId;
-        } else {
-            console.warn(
-                `⚠️ Telegram: não foi possível criar placeholder do Gale ${nivel} `
-                + `para ${mascararChat(ciclo.chatId)} — HTTP ${resultado.status || 0}, `
-                + `código ${Number(resultado.corpo?.error_code) || 'n/a'}: `
-                + `${String(resultado.corpo?.description || 'sem descrição').slice(0, 180)}.`
-            );
-        }
-    }
-    return [...ciclo.galeMessageIds];
 }
 
 function edicaoTelegramJaEfetivada(resultado) {
@@ -501,14 +448,6 @@ async function excluirMensagem(ciclo, messageId) {
 }
 
 async function limparGales(ciclo) {
-    try {
-        await ciclo.placeholdersPromise;
-    } catch (erro) {
-        console.warn(
-            `⚠️ Telegram: placeholders de Gale terminaram com erro antes da limpeza: ${erro.message}`
-        );
-    }
-
     const idsAtuais = Array.isArray(ciclo.galeMessageIds)
         ? ciclo.galeMessageIds
         : [];
@@ -650,55 +589,95 @@ async function tratarEntrada(token, payload, init) {
         token,
         chatId: payload.chat_id,
         nomeRobo,
-        estrategiaNome: extrairNomeEstrategia(payload.text),
         entradaMessageId: messageId,
         galeMessageIds: [],
         galeCleanupMessageIds: new Set(),
-        politica,
-        placeholdersPromise: Promise.resolve([])
+        politica
     };
     ciclos.set(chave, ciclo);
 
-    if (politica.conhecida && politica.gales > 0) {
-        ciclo.placeholdersPromise = criarMensagensGale(ciclo).catch(erro => {
-            console.warn(`⚠️ Telegram: criação de mensagens de Gale falhou: ${erro.message}`);
-            return [...ciclo.galeMessageIds];
-        });
-    }
-
+    // MC11: nenhum Gale é antecipado.
+    // O ciclo passa a criar Gale N exclusivamente quando
+    // o evento real GALE N for recebido.
     return respostaTelegram(principal);
 }
 
 async function tratarGale(token, payload) {
-    const localizado = encontrarCiclo(token, payload.chat_id, payload.text);
-    if (!localizado) return null;
-    const { ciclo } = localizado;
+    const localizado =
+        encontrarCiclo(
+            token,
+            payload.chat_id,
+            payload.text
+        );
 
-    try { await ciclo.placeholdersPromise; } catch (_) {}
-    const nivel = nivelGale(payload.text);
-    const messageId = ciclo.galeMessageIds[nivel - 1];
-
-    if (messageId && await editarMensagem(ciclo, messageId, payload.text)) {
-        return respostaTelegram(resultadoSintetico(messageId));
+    if (!localizado) {
+        return null;
     }
 
-    const fallback = await telegramApi(token, 'sendMessage', {
-        ...payload,
-        text: formatarTextoSinal(payload.text, ciclo.politica),
-        reply_markup: botoesSinal(ciclo.politica)
-    });
-    if (fallback.ok && Number(fallback.corpo?.result?.message_id) > 0) {
-        const fallbackId =
+    const { ciclo } = localizado;
+    const nivel = nivelGale(payload.text);
+
+    const messageId =
+        ciclo.galeMessageIds[nivel - 1];
+
+    // Evento repetido do mesmo Gale:
+    // reutiliza a mensagem existente em vez de criar outra.
+    if (messageId) {
+        const editado =
+            await editarMensagem(
+                ciclo,
+                messageId,
+                payload.text
+            );
+
+        if (editado) {
+            return respostaTelegram(
+                resultadoSintetico(messageId)
+            );
+        }
+
+        console.warn(
+            `⚠️ Telegram: edição do Gale ${nivel} falhou; `
+            + 'será criado fallback mantendo o ID anterior '
+            + 'no ledger de limpeza.'
+        );
+    }
+
+    // MC11: somente o evento REAL de Gale chega até aqui.
+    // Portanto a mensagem Gale nasce exatamente neste momento.
+    const envio = await telegramApi(
+        token,
+        'sendMessage',
+        {
+            ...payload,
+            text: formatarTextoSinal(
+                payload.text,
+                ciclo.politica
+            ),
+            reply_markup: botoesSinal(
+                ciclo.politica
+            )
+        }
+    );
+
+    if (
+        envio.ok
+        && Number(
+            envio.corpo?.result?.message_id
+        ) > 0
+    ) {
+        const novoId =
             registrarMensagemGaleParaLimpeza(
                 ciclo,
-                fallback.corpo.result.message_id
+                envio.corpo.result.message_id
             );
 
         ciclo.galeMessageIds[
             nivel - 1
-        ] = fallbackId;
+        ] = novoId;
     }
-    return respostaTelegram(fallback);
+
+    return respostaTelegram(envio);
 }
 
 async function tratarFinal(token, payload) {
