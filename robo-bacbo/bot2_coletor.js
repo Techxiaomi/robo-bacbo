@@ -3905,12 +3905,16 @@ function montarMensagemTelegram(tipo, est, estado, robo, extras = {}) {
         linhas.push(`💰 Entrada: ${rotuloEntradaTelegram(est.entrada)}`);
     }
 
-    if (tipo === 'GREEN' && extras.resultado === 'TIE' && config.detalhar_empates !== false && extras.multiplicador) {
+    // MC9: o multiplicador do empate sempre segue no payload bruto.
+    // O presenter incorpora esse valor ao título final.
+    if (tipo === 'GREEN' && extras.resultado === 'TIE' && extras.multiplicador) {
         linhas.push(`✨ Multiplicador: ${extras.multiplicador}`);
     }
 
+    // MC9: todo GREEN carrega somente a etapa em que foi concluído.
+    // A semântica visual "Entrada: Principal/Gale N" pertence ao presenter.
     if (tipo === 'GREEN') {
-        linhas.push(`🏁 Resultado: ${extras.resultado === 'TIE' ? 'PROTEÇÃO NO EMPATE' : rotuloNivelTelegram(estado.galeAtual)}`);
+        linhas.push(`🏁 Resultado: ${rotuloNivelTelegram(estado.galeAtual)}`);
     }
 
     if (['ENTRADA', 'GREEN', 'RED'].includes(tipo)) {

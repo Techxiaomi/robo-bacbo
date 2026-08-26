@@ -89,10 +89,39 @@ function entradaPeloCabecalho(texto, tipo) {
     return '';
 }
 
-function cabecalhoGreen(entrada) {
-    if (entrada === 'PLAYER') return '✅ GREEN - 🔵 PLAYER';
-    if (entrada === 'BANKER') return '✅ GREEN - 🔴 BANKER';
-    if (entrada === 'EMPATE') return '✅ GREEN - 🟡 EMPATE';
+function extrairMultiplicadorTelegram(texto) {
+    const linha = extrairLinha(
+        texto,
+        /^✨?\s*Multiplicador:/i
+    );
+
+    const match = linha.match(
+        /([0-9]+(?:[.,][0-9]+)?)\s*x/i
+    );
+
+    if (!match) return '';
+
+    return `${match[1].replace(',', '.')}x`;
+}
+
+function cabecalhoGreen(
+    entrada,
+    multiplicador = ''
+) {
+    if (entrada === 'PLAYER') {
+        return '✅ GREEN - 🔵 PLAYER';
+    }
+
+    if (entrada === 'BANKER') {
+        return '✅ GREEN - 🔴 BANKER';
+    }
+
+    if (entrada === 'EMPATE') {
+        return multiplicador
+            ? `✅ GREEN - 🟡 EMPATE (${multiplicador})`
+            : '✅ GREEN - 🟡 EMPATE';
+    }
+
     return '✅ GREEN';
 }
 
@@ -103,10 +132,47 @@ function cabecalhoRed(entrada) {
     return '❌ RED';
 }
 
+function linhaEntradaFinalTelegram(linha) {
+    const bruto = String(linha || '');
+    const match = bruto
+        .trim()
+        .match(
+            /^🏁\s*Resultado:\s*(DIRETO|GALE\s*\d+)\s*$/i
+        );
+
+    if (!match) {
+        return bruto;
+    }
+
+    const etapa = String(
+        match[1] || ''
+    ).toUpperCase();
+
+    if (etapa === 'DIRETO') {
+        return '🎯 Entrada: Principal';
+    }
+
+    const nivelMatch =
+        etapa.match(/GALE\s*(\d+)/i);
+
+    if (!nivelMatch) {
+        return bruto;
+    }
+
+    const nivel = Math.max(
+        1,
+        Math.trunc(Number(nivelMatch[1]) || 1)
+    );
+
+    return `🎯 Entrada: Gale ${nivel}`;
+}
+
 function padronizarResultadoFinal(texto, replyMarkup) {
     const original = String(texto || '');
     const upper = original.toUpperCase();
     const entradaTeclado = entradaPeloTeclado(replyMarkup);
+    const multiplicadorEmpate =
+        extrairMultiplicadorTelegram(original);
 
     let tipo = '';
     let entrada = '';
@@ -123,7 +189,14 @@ function padronizarResultadoFinal(texto, replyMarkup) {
     }
 
     if (!tipo) return original;
-    const alvo = tipo === 'GREEN' ? cabecalhoGreen(entrada) : cabecalhoRed(entrada);
+    const alvo = tipo === 'GREEN'
+        ? cabecalhoGreen(
+            entrada,
+            entrada === 'EMPATE'
+                ? multiplicadorEmpate
+                : ''
+        )
+        : cabecalhoRed(entrada);
 
     return original.split('\n').map(linha => {
         if (tipo === 'GREEN' && (
@@ -135,6 +208,25 @@ function padronizarResultadoFinal(texto, replyMarkup) {
             /RED\s+CONFIRMADO/i.test(linha)
             || /^\s*(?:❌\s*)?RED\s*-/i.test(linha)
         )) return alvo;
+
+        // No empate, o multiplicador já está incorporado
+        // ao título. A linha separada deixa de ser exibida.
+        if (
+            tipo === 'GREEN'
+            && entrada === 'EMPATE'
+            && /^✨?\s*Multiplicador:/i.test(
+                linha.trim()
+            )
+        ) {
+            return '';
+        }
+
+        if (tipo === 'GREEN') {
+            return linhaEntradaFinalTelegram(
+                linha
+            );
+        }
+
         return linha;
     }).join('\n');
 }
@@ -247,16 +339,74 @@ function garantirEspacoAposStatus(linhas) {
     return linhas;
 }
 
-function filtrarEComplementarTexto(texto, preferencias, stats) {
+function normalizarCabecalhoGaleTelegram(linha) {
+    const bruto = String(linha || '');
+    const match = bruto
+        .trim()
+        .match(
+            /^🔁\s*(?:POSSÍVEL\s+|POSSIVEL\s+)?GALE\s*(\d+)/iu
+        );
+
+    if (!match) {
+        return bruto;
+    }
+
+    const nivel = Math.max(
+        1,
+        Math.trunc(Number(match[1]) || 1)
+    );
+
+    return `🔁 GALE ${nivel}`;
+}
+
+function filtrarEComplementarTexto(
+    texto,
+    preferencias,
+    stats,
+    tipo
+) {
     const original = String(texto || '');
     const assertOriginal = extrairAssertividadeOriginal(original);
-    let linhas = original.split('\n').map(limparStatusAtivoEstrategia).filter(linha => {
+    let linhas = original
+        .split('\n')
+        .map(limparStatusAtivoEstrategia)
+        .map(linha =>
+            tipo === 'GALE'
+                ? normalizarCabecalhoGaleTelegram(linha)
+                : linha
+        )
+        .filter(linha => {
         const trim = linha.trim();
         // Remove apenas o aviso operacional redundante. A linha `🏁 Resultado:`
         // é evidência do desfecho/etapa e nunca deve ser descartada, inclusive no empate.
         if (/^🛡️\s*Proteção\s+(?:de|do|no)?\s*empate/i.test(trim)) return false;
+
+        // MC9: Gale é uma mensagem operacional curta.
+        if (
+            tipo === 'GALE'
+            && /^🤖\s*Robô:/i.test(trim)
+        ) {
+            return false;
+        }
+
+        if (
+            tipo === 'GALE'
+            && /Aguardando\s+(?:necessidade\s+de\s+recuperação|resultado\s+da\s+mesa)/i.test(trim)
+        ) {
+            return false;
+        }
+
         if (!preferencias.nomeRobo && /^🤖\s*Robô:/i.test(trim)) return false;
-        if (!preferencias.nomeEstrategia && /^📊\s*Estratégia:/i.test(trim)) return false;
+
+        // A estratégia é obrigatória no Gale para permitir
+        // conferência visual com a entrada principal.
+        if (
+            tipo !== 'GALE'
+            && !preferencias.nomeEstrategia
+            && /^📊\s*Estratégia:/i.test(trim)
+        ) {
+            return false;
+        }
         if (!preferencias.padrao && /^🧩\s*Padrão:/i.test(trim)) return false;
         if (/^📈\s*Assertividade(?:\s*\([^)]*\))?\s*:/i.test(trim)) return false;
         if (!preferencias.detalharEmpates && /^✨?\s*Multiplicador:/i.test(trim)) return false;
@@ -272,13 +422,26 @@ function filtrarEComplementarTexto(texto, preferencias, stats) {
         linhasAssertividade.push(`🕒 Assertividade (24h): ${formatarPercentual(stats?.h24)}`);
     }
 
-    if (linhasAssertividade.length > 0) {
-        let indice = linhas.findIndex(linha => /^(🏁|🔥|⏳|✨)/u.test(linha.trim()));
+    if (
+        tipo !== 'GALE'
+        && linhasAssertividade.length > 0
+    ) {
+        let indice = linhas.findIndex(linha =>
+            /^(?:🏁|🔥|⏳|✨|🎯\s*Entrada:)/u.test(
+                linha.trim()
+            )
+        );
         if (indice < 0) indice = linhas.length;
         linhas.splice(indice, 0, ...linhasAssertividade);
     }
 
     garantirEspacoAposStatus(linhas);
+
+    if (tipo === 'GALE') {
+        linhas.push(
+            '⌛ Aguardando resultado da mesa...'
+        );
+    }
 
     const saida = [];
     let vazioAnterior = false;
@@ -307,7 +470,12 @@ async function apresentarPayload(payload) {
     const stats = statsEstrategia(nomeEstrategia);
     if (preferencias.assertividade24h && !stats) void atualizarStatsCache();
 
-    texto = filtrarEComplementarTexto(texto, preferencias, stats);
+    texto = filtrarEComplementarTexto(
+        texto,
+        preferencias,
+        stats,
+        tipo
+    );
     const replyMarkup = normalizarTeclado(replyMarkupOriginal, finalizado);
     return { ...payload, text: texto, ...(replyMarkup ? { reply_markup: replyMarkup } : {}) };
 }

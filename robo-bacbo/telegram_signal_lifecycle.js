@@ -341,14 +341,27 @@ function respostaTelegram(resultado) {
     });
 }
 
-function mensagemPossivelGale(nivel, politica) {
+// MC9: mensagens temporárias de Gale são deliberadamente enxutas.
+function mensagemGale(nivel, estrategiaNome = '') {
     const linhas = [
-        `🔁 Possível Gale ${nivel}`,
-        '⏳ Aguardando necessidade de recuperação.'
+        `🔁 GALE ${nivel}`
     ];
-    if (politica?.conhecida && politica.protegerEmpate) {
-        linhas.push('🛡️ Proteção de empate: ATIVA');
+
+    const estrategia = textoSeguro(
+        estrategiaNome
+    );
+
+    if (estrategia) {
+        linhas.push('');
+        linhas.push(
+            `📊 Estratégia: ${estrategia}`
+        );
     }
+
+    linhas.push(
+        '⌛ Aguardando resultado da mesa...'
+    );
+
     return linhas.join('\n');
 }
 
@@ -356,7 +369,7 @@ async function criarMensagensGale(ciclo) {
     for (let nivel = 1; nivel <= ciclo.politica.gales; nivel++) {
         const resultado = await telegramApi(ciclo.token, 'sendMessage', {
             chat_id: ciclo.chatId,
-            text: mensagemPossivelGale(nivel, ciclo.politica),
+            text: mensagemGale(nivel, ciclo.estrategiaNome),
             reply_markup: botoesSinal(ciclo.politica)
         });
         if (resultado.ok && Number(resultado.corpo?.result?.message_id) > 0) {
@@ -543,6 +556,7 @@ async function tratarEntrada(token, payload, init) {
         token,
         chatId: payload.chat_id,
         nomeRobo,
+        estrategiaNome: extrairNomeEstrategia(payload.text),
         entradaMessageId: messageId,
         galeMessageIds: [],
         politica,
