@@ -398,11 +398,12 @@ function filtrarEComplementarTexto(
 
         if (!preferencias.nomeRobo && /^🤖\s*Robô:/i.test(trim)) return false;
 
-        // A estratégia é obrigatória no Gale para permitir
-        // conferência visual com a entrada principal.
+        // MC10: nenhuma mensagem pode ignorar a preferência
+        // visual configurada no cadastro do robô.
+        // Se nomeEstrategia estiver desabilitado, vale também
+        // para os placeholders temporários de Gale.
         if (
-            tipo !== 'GALE'
-            && !preferencias.nomeEstrategia
+            !preferencias.nomeEstrategia
             && /^📊\s*Estratégia:/i.test(trim)
         ) {
             return false;

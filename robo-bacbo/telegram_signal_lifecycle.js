@@ -365,6 +365,22 @@ function mensagemGale(nivel, estrategiaNome = '') {
     return linhas.join('\n');
 }
 
+function registrarMensagemGaleParaLimpeza(ciclo, messageId) {
+    const id = Number(messageId);
+
+    if (!Number.isFinite(id) || id <= 0) {
+        return 0;
+    }
+
+    if (!(ciclo.galeCleanupMessageIds instanceof Set)) {
+        ciclo.galeCleanupMessageIds = new Set();
+    }
+
+    ciclo.galeCleanupMessageIds.add(id);
+
+    return id;
+}
+
 async function criarMensagensGale(ciclo) {
     for (let nivel = 1; nivel <= ciclo.politica.gales; nivel++) {
         const resultado = await telegramApi(ciclo.token, 'sendMessage', {
@@ -373,9 +389,15 @@ async function criarMensagensGale(ciclo) {
             reply_markup: botoesSinal(ciclo.politica)
         });
         if (resultado.ok && Number(resultado.corpo?.result?.message_id) > 0) {
-            // Persiste imediatamente no objeto do ciclo. Assim um erro posterior não apaga
-            // IDs já confirmados pelo Telegram.
-            ciclo.galeMessageIds[nivel - 1] = Number(resultado.corpo.result.message_id);
+            // Persiste imediatamente no objeto do ciclo.
+            // O ID também entra no ledger de limpeza do ciclo e
+            // nunca é esquecido caso posteriormente exista fallback.
+            const messageId = registrarMensagemGaleParaLimpeza(
+                ciclo,
+                resultado.corpo.result.message_id
+            );
+
+            ciclo.galeMessageIds[nivel - 1] = messageId;
         } else {
             console.warn(
                 `⚠️ Telegram: não foi possível criar placeholder do Gale ${nivel} `
@@ -388,15 +410,41 @@ async function criarMensagensGale(ciclo) {
     return [...ciclo.galeMessageIds];
 }
 
+function edicaoTelegramJaEfetivada(resultado) {
+    const descricao = String(
+        resultado?.corpo?.description || ''
+    ).toLowerCase();
+
+    return Number(resultado?.status) === 400
+        && descricao.includes('message is not modified');
+}
+
 async function editarMensagem(ciclo, messageId, texto) {
-    if (!Number.isFinite(Number(messageId)) || Number(messageId) <= 0) return false;
-    const resultado = await telegramApi(ciclo.token, 'editMessageText', {
-        chat_id: ciclo.chatId,
-        message_id: Number(messageId),
-        text: formatarTextoSinal(texto, ciclo.politica),
-        reply_markup: botoesSinal(ciclo.politica)
-    });
-    return resultado.ok;
+    if (!Number.isFinite(Number(messageId)) || Number(messageId) <= 0) {
+        return false;
+    }
+
+    const resultado = await telegramApi(
+        ciclo.token,
+        'editMessageText',
+        {
+            chat_id: ciclo.chatId,
+            message_id: Number(messageId),
+            text: formatarTextoSinal(
+                texto,
+                ciclo.politica
+            ),
+            reply_markup: botoesSinal(
+                ciclo.politica
+            )
+        }
+    );
+
+    // 200 OK: edição aplicada.
+    // 400 "message is not modified": conteúdo já estava correto,
+    // portanto também é sucesso idempotente.
+    return resultado.ok
+        || edicaoTelegramJaEfetivada(resultado);
 }
 
 function exclusaoJaEfetivada(resultado) {
@@ -453,32 +501,78 @@ async function excluirMensagem(ciclo, messageId) {
 }
 
 async function limparGales(ciclo) {
-    try { await ciclo.placeholdersPromise; } catch (erro) {
-        console.warn(`⚠️ Telegram: placeholders de Gale terminaram com erro antes da limpeza: ${erro.message}`);
+    try {
+        await ciclo.placeholdersPromise;
+    } catch (erro) {
+        console.warn(
+            `⚠️ Telegram: placeholders de Gale terminaram com erro antes da limpeza: ${erro.message}`
+        );
     }
 
-    const ids = [...(Array.isArray(ciclo.galeMessageIds) ? ciclo.galeMessageIds : [])];
-    const existentes = ids
-        .map((id, indice) => ({ id: Number(id), indice }))
-        .filter(item => Number.isFinite(item.id) && item.id > 0);
-    if (existentes.length === 0) {
+    const idsAtuais = Array.isArray(ciclo.galeMessageIds)
+        ? ciclo.galeMessageIds
+        : [];
+
+    const idsRastreados =
+        ciclo.galeCleanupMessageIds instanceof Set
+            ? [...ciclo.galeCleanupMessageIds]
+            : [];
+
+    // Nunca dependemos apenas do "ID atual" do Gale.
+    // Qualquer mensagem criada por este ciclo permanece
+    // responsabilizada até ser efetivamente excluída.
+    const ids = [
+        ...new Set(
+            [...idsAtuais, ...idsRastreados]
+                .map(Number)
+                .filter(id =>
+                    Number.isFinite(id)
+                    && id > 0
+                )
+        )
+    ];
+
+    if (ids.length === 0) {
         ciclo.galeMessageIds = [];
-        return { ok: true, removidos: 0, pendentes: [] };
+        ciclo.galeCleanupMessageIds = new Set();
+
+        return {
+            ok: true,
+            removidos: 0,
+            pendentes: []
+        };
     }
 
-    const resultados = await Promise.all(existentes.map(item => excluirMensagem(ciclo, item.id)));
+    const resultados = await Promise.all(
+        ids.map(id =>
+            excluirMensagem(ciclo, id)
+        )
+    );
+
     const pendentes = [];
-    const idsRestantes = [];
-    resultados.forEach((resultado, posicao) => {
-        const item = existentes[posicao];
-        if (resultado.ok) return;
-        idsRestantes[item.indice] = item.id;
-        pendentes.push(item.id);
-    });
-    ciclo.galeMessageIds = idsRestantes;
+
+    resultados.forEach(
+        (resultado, indice) => {
+            if (resultado.ok) {
+                return;
+            }
+
+            pendentes.push(
+                ids[indice]
+            );
+        }
+    );
+
+    // Após uma rodada de limpeza, somente mensagens cuja
+    // exclusão ainda não foi confirmada permanecem no ledger.
+    ciclo.galeMessageIds = [];
+    ciclo.galeCleanupMessageIds =
+        new Set(pendentes);
+
     return {
         ok: pendentes.length === 0,
-        removidos: existentes.length - pendentes.length,
+        removidos:
+            ids.length - pendentes.length,
         pendentes
     };
 }
@@ -559,6 +653,7 @@ async function tratarEntrada(token, payload, init) {
         estrategiaNome: extrairNomeEstrategia(payload.text),
         entradaMessageId: messageId,
         galeMessageIds: [],
+        galeCleanupMessageIds: new Set(),
         politica,
         placeholdersPromise: Promise.resolve([])
     };
@@ -593,7 +688,15 @@ async function tratarGale(token, payload) {
         reply_markup: botoesSinal(ciclo.politica)
     });
     if (fallback.ok && Number(fallback.corpo?.result?.message_id) > 0) {
-        ciclo.galeMessageIds[nivel - 1] = Number(fallback.corpo.result.message_id);
+        const fallbackId =
+            registrarMensagemGaleParaLimpeza(
+                ciclo,
+                fallback.corpo.result.message_id
+            );
+
+        ciclo.galeMessageIds[
+            nivel - 1
+        ] = fallbackId;
     }
     return respostaTelegram(fallback);
 }
