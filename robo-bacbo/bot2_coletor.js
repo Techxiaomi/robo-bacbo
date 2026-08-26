@@ -896,6 +896,70 @@ async function solicitarSincronizacaoSaldoRedis() {
     }
 }
 
+// MC19:
+// Ativação financeira nunca reutiliza saldo vencido.
+// Se o cache global não estiver fresco, solicita uma
+// leitura física ao executor e só libera a operação
+// depois que o MESMO gate de freshness confirmar
+// o balance_update recebido.
+async function obterSaldoAutoTraderParaAtivacao() {
+    const saldoJaFresco = obterSaldoGlobalFresco();
+
+    if (saldoJaFresco !== null) {
+        return {
+            ok: true,
+            saldo: saldoJaFresco,
+            sincronizado_agora: false,
+            erro: null
+        };
+    }
+
+    try {
+        await solicitarSincronizacaoSaldoRedis();
+
+        const saldoConfirmado =
+            obterSaldoGlobalFresco();
+
+        if (saldoConfirmado === null) {
+            console.warn(
+                '⚠️ AUTO-TRADER | sync de saldo respondeu, '
+                + 'mas o gate de freshness permaneceu fechado.'
+            );
+
+            return {
+                ok: false,
+                saldo: null,
+                sincronizado_agora: false,
+                erro: 'SALDO_NAO_FICOU_FRESCO'
+            };
+        }
+
+        return {
+            ok: true,
+            saldo: saldoConfirmado,
+            sincronizado_agora: true,
+            erro: null
+        };
+    } catch (e) {
+        console.warn(
+            '⚠️ AUTO-TRADER | sincronização automática '
+            + 'de saldo para ativação falhou:',
+            e.message
+        );
+
+        return {
+            ok: false,
+            saldo: null,
+            sincronizado_agora: false,
+            erro: String(
+                e && e.message
+                    ? e.message
+                    : 'SYNC_BALANCE_FALHOU'
+            )
+        };
+    }
+}
+
 function normalizarInterrupcaoColetorId(dados) {
     const id = String(dados?.interrupcao_id || '').trim();
     if (!id || id.length > 256 || !/^[A-Za-z0-9:_-]+$/.test(id)) return '';
@@ -2283,18 +2347,33 @@ app.post("/api/auto-trader", async (req, res) => {
                 return res.status(400).json({ sucesso: false, erro: 'protecao_empate_invalida', mensagem: politicaEmpate.motivo });
             }
         }
-        const saldoFresco = obterSaldoGlobalFresco();
+        let saldoBaseline = 0;
+        let saldoSincronizadoAgora = false;
 
-        if (novoAtivo && saldoFresco === null) {
-            return res.status(409).json({
-                sucesso: false,
-                erro: 'saldo_global_indisponivel',
-                mensagem: 'Saldo real ausente ou desatualizado. Aguarde a sincronização da página antes de ativar o Auto-Trader.'
-            });
+        if (novoAtivo) {
+            const gateSaldo =
+                await obterSaldoAutoTraderParaAtivacao();
+
+            if (!gateSaldo.ok) {
+                return res.status(409).json({
+                    sucesso: false,
+                    erro: 'saldo_global_indisponivel',
+                    mensagem:
+                        'Não foi possível confirmar um saldo real recente. '
+                        + 'O Auto-Trader permaneceu desligado.',
+                    detalhe: gateSaldo.erro
+                });
+            }
+
+            saldoBaseline = gateSaldo.saldo;
+            saldoSincronizadoAgora =
+                gateSaldo.sincronizado_agora;
         }
 
-        const saldoBaseline = novoAtivo ? saldoFresco : 0;
-        const statusInicial = novoAtivo ? 'STANDBY' : 'DESLIGADO';
+        const statusInicial =
+            novoAtivo
+                ? 'STANDBY'
+                : 'DESLIGADO';
         const dataContadorEntradas = controleDiarioAutoTrader.dataOperacional();
         const estadoCiclo = estadoInicialCiclo();
         await dbPool.query(
@@ -2311,7 +2390,11 @@ app.post("/api/auto-trader", async (req, res) => {
             ]
         );
         await carregarSistemasParaMemoria();
-        res.json({ sucesso: true, saldo_inicial: saldoBaseline });
+        res.json({
+            sucesso: true,
+            saldo_inicial: saldoBaseline,
+            saldo_sincronizado_agora: saldoSincronizadoAgora
+        });
     } catch (e) {
         console.error('❌ POST /api/auto-trader falhou:', e.message);
 
@@ -2376,16 +2459,26 @@ app.put("/api/auto-trader/:id", async (req, res) => {
         const estavaAtivo = existentes[0].ativo === true || existentes[0].ativo === 1;
         const reativando = !estavaAtivo && novoAtivo;
         const desligando = estavaAtivo && !novoAtivo;
+        let saldoSincronizadoAgora = false;
 
         if (reativando) {
-            const saldoFresco = obterSaldoGlobalFresco();
-            if (saldoFresco === null) {
+            const gateSaldo =
+                await obterSaldoAutoTraderParaAtivacao();
+
+            if (!gateSaldo.ok) {
                 return res.status(409).json({
                     sucesso: false,
                     erro: 'saldo_global_indisponivel',
-                    mensagem: 'Saldo real ausente ou desatualizado. Aguarde a sincronização da página antes de reativar o Auto-Trader.'
+                    mensagem:
+                        'Não foi possível confirmar um saldo real recente. '
+                        + 'O Auto-Trader permaneceu desligado.',
+                    detalhe: gateSaldo.erro
                 });
             }
+
+            const saldoFresco = gateSaldo.saldo;
+            saldoSincronizadoAgora =
+                gateSaldo.sincronizado_agora;
 
             const estadoCiclo = estadoInicialCiclo();
             await dbPool.query(
@@ -2465,7 +2558,8 @@ app.put("/api/auto-trader/:id", async (req, res) => {
         res.json({
             sucesso: true,
             baseline_recapturado: reativando,
-            ciclo_resetado: reativando || cicloConfigMudou
+            ciclo_resetado: reativando || cicloConfigMudou,
+            saldo_sincronizado_agora: saldoSincronizadoAgora
         });
     } catch (e) {
         console.error(

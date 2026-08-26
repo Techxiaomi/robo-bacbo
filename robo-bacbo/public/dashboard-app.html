@@ -2753,27 +2753,76 @@
         async function carregarAutoTraders() { try { const res = await fetch('/api/auto-traders?_t=' + Date.now()); autoTradersGlobais = await res.json(); renderizarCardsAutoTraders(); } catch(e){} }
 
         async function toggleAutoTraderRapido(id, check) {
-            const at = autoTradersGlobais.find(x => x.id === id);
-            if (!at) return;
+            const at =
+                autoTradersGlobais.find(
+                    x => x.id === id
+                );
 
-            const novoAtivo = !!check.checked;
+            if (!at || !check) return;
+
+            const novoAtivo =
+                !!check.checked;
+
+            const slider =
+                check.nextElementSibling;
+
+            check.disabled = true;
+
+            if (slider) {
+                slider.style.opacity = '0.55';
+                slider.style.cursor = 'wait';
+            }
+
             try {
-                const res = await fetch(`/api/auto-trader/${id}`, {
-                    method: 'PUT',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ ...at, ativo: novoAtivo })
-                });
+                const res =
+                    await fetch(
+                        `/api/auto-trader/${id}`,
+                        {
+                            method: 'PUT',
+                            headers: {
+                                'Content-Type':
+                                    'application/json'
+                            },
+                            body: JSON.stringify({
+                                ...at,
+                                ativo: novoAtivo
+                            })
+                        }
+                    );
 
                 let resposta = {};
-                try { resposta = await res.json(); } catch (e) {}
+
+                try {
+                    resposta =
+                        await res.json();
+                } catch (e) {}
+
                 if (!res.ok) {
-                    throw new Error(resposta.mensagem || 'Falha ao atualizar o Auto-Trader.');
+                    throw new Error(
+                        resposta.mensagem
+                        || 'Falha ao atualizar o Auto-Trader.'
+                    );
                 }
 
                 await carregarAutoTraders();
             } catch(e) {
-                check.checked = !novoAtivo;
-                alert(e.message || 'Erro ao atualizar o Auto-Trader.');
+                // Fail-closed visual:
+                // se a confirmação do backend não chegou,
+                // o switch volta à posição anterior.
+                check.checked =
+                    !novoAtivo;
+
+                alert(
+                    e.message
+                    || 'Erro ao atualizar o Auto-Trader.'
+                );
+            } finally {
+                check.disabled = false;
+
+                if (slider) {
+                    slider.style.opacity = '';
+                    slider.style.cursor = '';
+                }
             }
         }
 
