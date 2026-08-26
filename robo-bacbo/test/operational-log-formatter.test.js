@@ -181,3 +181,219 @@ test('SQL: limite de conexões reconhecido',()=>{
     );
 });
 
+test(
+    'MC13: memória operacional vira uma linha compacta',
+    () => {
+        const bloco = [
+            '',
+            '📂 MEMÓRIA ALOCADA COM SUCESSO:',
+            '   - Estratégias Ativas: 38',
+            '   - Robôs de Canal: 3',
+            '   - Motores Auto-Trader: 0',
+            ''
+        ].join('\n');
+
+        assert.deepEqual(
+            formatarChamadaConsole(
+                'log',
+                [bloco]
+            ),
+            [
+                '🧩 MEMÓRIA | Estratégias: 38 | Robôs: 3 | Auto-Traders: 0'
+            ]
+        );
+    }
+);
+
+test(
+    'MC13: resumo do pool IA fica compacto',
+    () => {
+        assert.deepEqual(
+            formatarChamadaConsole(
+                'log',
+                [
+                    '🧠 Auto Pilot IA 7: 12 ativo(s), 0 reserva(s), 20 sombra.'
+                ]
+            ),
+            [
+                '🧠 IA 7 | Pool: 12 ativos | 0 reservas | 20 sombra'
+            ]
+        );
+    }
+);
+
+test(
+    'MC13: descarte live vira evento operacional curto',
+    () => {
+        assert.deepEqual(
+            formatarChamadaConsole(
+                'warn',
+                [
+                    '🗑️ Auto Pilot IA: padrão ia_7_4d5fb6f8d455faee41 desativado imediatamente por DROP_ASSERT (assertividade live=80.0%, streak RED=0).'
+                ]
+            ),
+            [
+                '🗑️ IA 7 | DROP_ASSERT | padrão=ia_7_4d5fb6f8d455faee41 | live=80.0% | streak RED=0'
+            ]
+        );
+    }
+);
+
+test(
+    'MC13: revalidação live omite ranking completo e mantém pool',
+    () => {
+        const bloco = [
+            '',
+            '🧠 AUTO PILOT IA 7 — DESCARTE_LIVE:DROP_ASSERT',
+            '   Janela: 1000 | treino: 800 | validação histórica: 200',
+            '   Padrões únicos: 231 | combinações avaliadas: 462',
+            '   Reprovados: ocorrências=312, assertividade=109, shadow histórico=23',
+            '   Blacklist configurada: 0',
+            '   Pool: 12/20 ativos | 0 reservas | 20 shadow histórico | 0 shadow live | 0 rejeitados live | 9 fora do pool',
+            '   🏆 ATIVOS',
+            '      #1 P-P-B-P → P | score=85.1 | assert=97.0% | n=33 | Wilson=84.7%',
+            '      #2 T-B-P → B | score=80.4 | assert=100.0% | n=12 | Wilson=75.7%'
+        ].join('\n');
+
+        const saida =
+            formatarChamadaConsole(
+                'log',
+                [bloco]
+            );
+
+        assert.deepEqual(
+            saida,
+            [
+                '🧠 IA 7 | DESCARTE_LIVE:DROP_ASSERT | Pool 12/20 | Reservas 0 | Shadow H/L 20/0 | Rejeitados 0 | Fora 9'
+            ]
+        );
+
+        assert.doesNotMatch(
+            saida[0],
+            /🏆|#1|score=/
+        );
+    }
+);
+
+test(
+    'MC13: STARTUP da IA permanece completo',
+    () => {
+        const bloco = [
+            '',
+            '🧠 AUTO PILOT IA 12 — STARTUP',
+            '   Janela: 1000 | treino: 800 | validação histórica: 200',
+            '   Pool: 3/40 ativos | 0 reservas | 18 shadow histórico | 1 shadow live | 1 rejeitados live | 1 fora do pool',
+            '   🏆 ATIVOS',
+            '      #1 P-P-T → P | score=71.7 | assert=91.3% | n=23 | Wilson=73.2%'
+        ].join('\n');
+
+        assert.deepEqual(
+            formatarChamadaConsole(
+                'log',
+                [bloco]
+            ),
+            [bloco]
+        );
+    }
+);
+
+test(
+    'MC13: bloco IA desconhecido permanece literal',
+    () => {
+        const bloco =
+            '🧠 AUTO PILOT EXPERIMENTAL | formato futuro sem contrato';
+
+        assert.deepEqual(
+            formatarChamadaConsole(
+                'warn',
+                [bloco]
+            ),
+            [bloco]
+        );
+    }
+);
+
+test(
+    'MC13 real: quatro console.log de memória viram uma linha',
+    () => {
+        assert.equal(
+            formatarChamadaConsole(
+                'log',
+                [
+                    '\n📂 MEMÓRIA ALOCADA COM SUCESSO:'
+                ]
+            ),
+            null
+        );
+
+        assert.equal(
+            formatarChamadaConsole(
+                'log',
+                [
+                    '   - Estratégias Ativas: 38'
+                ]
+            ),
+            null
+        );
+
+        assert.equal(
+            formatarChamadaConsole(
+                'log',
+                [
+                    '   - Robôs de Canal: 3'
+                ]
+            ),
+            null
+        );
+
+        assert.deepEqual(
+            formatarChamadaConsole(
+                'log',
+                [
+                    '   - Motores Auto-Trader: 0\n'
+                ]
+            ),
+            [
+                '🧩 MEMÓRIA | Estratégias: 38 | Robôs: 3 | Auto-Traders: 0'
+            ]
+        );
+    }
+);
+
+test(
+    'MC13 real: sequência de memória incompleta falha aberta sem perder log',
+    () => {
+        assert.equal(
+            formatarChamadaConsole(
+                'log',
+                [
+                    '\n📂 MEMÓRIA ALOCADA COM SUCESSO:'
+                ]
+            ),
+            null
+        );
+
+        const saida =
+            formatarChamadaConsole(
+                'warn',
+                [
+                    '⚠️ Evento inesperado entre as linhas.'
+                ]
+            );
+
+        assert.equal(
+            saida.length,
+            1
+        );
+
+        assert.match(
+            saida[0],
+            /MEMÓRIA ALOCADA COM SUCESSO/
+        );
+
+        assert.match(
+            saida[0],
+            /Evento inesperado/
+        );
+    }
+);

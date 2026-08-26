@@ -564,7 +564,298 @@ function formatarFalhaSqlConhecida(nivel, args) {
         : [bloco];
 }
 
+function formatarChamadaIaConhecida(
+    nivel,
+    args
+) {
+    const entrada =
+        Array.isArray(args)
+            ? [...args]
+            : [];
+
+    if (
+        typeof entrada[0]
+        !== 'string'
+    ) {
+        return undefined;
+    }
+
+    const texto =
+        entrada[0];
+
+    let match =
+        texto.match(
+            /^\s*📂 MEMÓRIA ALOCADA COM SUCESSO:\s*\r?\n\s*-\s*Estratégias Ativas:\s*(\d+)\s*\r?\n\s*-\s*Robôs de Canal:\s*(\d+)\s*\r?\n\s*-\s*Motores Auto-Trader:\s*(\d+)\s*$/i
+        );
+
+    if (match) {
+        return [
+            `🧩 MEMÓRIA | Estratégias: ${match[1]} | Robôs: ${match[2]} | Auto-Traders: ${match[3]}`,
+            ...entrada.slice(1)
+        ];
+    }
+
+    match =
+        texto.match(
+            /^🧠 Auto Pilot IA\s+(\d+):\s+(\d+)\s+ativo\(s\),\s+(\d+)\s+reserva\(s\),\s+(\d+)\s+sombra\.\s*$/i
+        );
+
+    if (match) {
+        return [
+            `🧠 IA ${match[1]} | Pool: ${match[2]} ativos | ${match[3]} reservas | ${match[4]} sombra`,
+            ...entrada.slice(1)
+        ];
+    }
+
+    match =
+        texto.match(
+            /^🗑️ Auto Pilot IA:\s+padrão\s+(ia_(\d+)_[A-Za-z0-9]+)\s+desativado imediatamente por\s+([A-Z0-9_:-]+)\s+\(assertividade live=([^,]+),\s*streak RED=(\d+)\)\.\s*$/i
+        );
+
+    if (match) {
+        return [
+            `🗑️ IA ${match[2]} | ${match[3].toUpperCase()} | padrão=${match[1]} | live=${match[4].trim()} | streak RED=${match[5]}`,
+            ...entrada.slice(1)
+        ];
+    }
+
+    const linhas =
+        texto
+            .split(/\r?\n/)
+            .map(
+                linha =>
+                    linha.trim()
+            )
+            .filter(Boolean);
+
+    if (
+        linhas.length === 0
+    ) {
+        return undefined;
+    }
+
+    const cabecalho =
+        linhas[0].match(
+            /^🧠 AUTO PILOT IA\s+(\d+)\s+—\s+(.+)$/i
+        );
+
+    if (!cabecalho) {
+        return undefined;
+    }
+
+    const roboId =
+        cabecalho[1];
+
+    const motivo =
+        String(
+            cabecalho[2] || ''
+        )
+            .trim()
+            .toUpperCase();
+
+    /*
+     * STARTUP permanece completo.
+     *
+     * É um diagnóstico único,
+     * importante para verificar
+     * mineração, Wilson, ranking,
+     * shadow e composição inicial.
+     */
+    if (
+        motivo === 'STARTUP'
+    ) {
+        return entrada;
+    }
+
+    const pool =
+        linhas.find(
+            linha =>
+                /^Pool:/i.test(linha)
+        );
+
+    /*
+     * Fail-safe visual:
+     *
+     * se aparecer um formato novo
+     * que ainda não conhecemos,
+     * NÃO eliminamos nenhuma informação.
+     */
+    if (!pool) {
+        return entrada;
+    }
+
+    match =
+        pool.match(
+            /^Pool:\s*(\d+)\/(\d+)\s+ativos\s*\|\s*(\d+)\s+reservas\s*\|\s*(\d+)\s+shadow histórico\s*\|\s*(\d+)\s+shadow live\s*\|\s*(\d+)\s+rejeitados live\s*\|\s*(\d+)\s+fora do pool$/i
+        );
+
+    if (!match) {
+        return entrada;
+    }
+
+    return [
+        `🧠 IA ${roboId} | ${motivo} | Pool ${match[1]}/${match[2]} | Reservas ${match[3]} | Shadow H/L ${match[4]}/${match[5]} | Rejeitados ${match[6]} | Fora ${match[7]}`,
+        ...entrada.slice(1)
+    ];
+}
+
+
+let memoriaOperacionalPendente = null;
+
+function formatarMemoriaOperacionalSequencial(args) {
+    const entrada =
+        Array.isArray(args)
+            ? [...args]
+            : [];
+
+    if (
+        typeof entrada[0]
+        !== 'string'
+    ) {
+        if (!memoriaOperacionalPendente) {
+            return undefined;
+        }
+
+        const anterior =
+            memoriaOperacionalPendente;
+
+        memoriaOperacionalPendente =
+            null;
+
+        return [
+            anterior.linhas.join('\n'),
+            ...entrada
+        ];
+    }
+
+    const primeiro =
+        entrada[0];
+
+    const limpo =
+        primeiro.trim();
+
+    const ehCabecalho =
+        /^📂 MEMÓRIA ALOCADA COM SUCESSO:$/i
+            .test(limpo);
+
+    if (!memoriaOperacionalPendente) {
+        if (!ehCabecalho) {
+            return undefined;
+        }
+
+        memoriaOperacionalPendente = {
+            etapa: 1,
+            linhas: [primeiro],
+            estrategias: null,
+            robos: null
+        };
+
+        return null;
+    }
+
+    const pendente =
+        memoriaOperacionalPendente;
+
+    /*
+     * Um novo cabeçalho antes do fechamento
+     * não pode apagar silenciosamente o anterior.
+     */
+    if (ehCabecalho) {
+        memoriaOperacionalPendente = {
+            etapa: 1,
+            linhas: [primeiro],
+            estrategias: null,
+            robos: null
+        };
+
+        return [
+            pendente.linhas.join('\n')
+        ];
+    }
+
+    let match = null;
+
+    if (pendente.etapa === 1) {
+        match =
+            limpo.match(
+                /^-\s*Estratégias Ativas:\s*(\d+)$/i
+            );
+
+        if (match) {
+            pendente.estrategias =
+                match[1];
+
+            pendente.etapa = 2;
+            pendente.linhas.push(primeiro);
+
+            return null;
+        }
+    }
+
+    if (pendente.etapa === 2) {
+        match =
+            limpo.match(
+                /^-\s*Robôs de Canal:\s*(\d+)$/i
+            );
+
+        if (match) {
+            pendente.robos =
+                match[1];
+
+            pendente.etapa = 3;
+            pendente.linhas.push(primeiro);
+
+            return null;
+        }
+    }
+
+    if (pendente.etapa === 3) {
+        match =
+            limpo.match(
+                /^-\s*Motores Auto-Trader:\s*(\d+)$/i
+            );
+
+        if (match) {
+            memoriaOperacionalPendente =
+                null;
+
+            return [
+                '🧩 MEMÓRIA'
+                + ' | Estratégias: '
+                + pendente.estrategias
+                + ' | Robôs: '
+                + pendente.robos
+                + ' | Auto-Traders: '
+                + match[1],
+                ...entrada.slice(1)
+            ];
+        }
+    }
+
+    /*
+     * Fail-safe:
+     * se o contrato de quatro linhas mudar,
+     * devolvemos tudo que já foi recebido.
+     * Nada fica oculto.
+     */
+    memoriaOperacionalPendente =
+        null;
+
+    return [
+        pendente.linhas.join('\n')
+            + '\n'
+            + primeiro,
+        ...entrada.slice(1)
+    ];
+}
+
+
 function formatarChamadaConsole(nivel, args) {
+    const memoria = formatarMemoriaOperacionalSequencial(args);
+    if (memoria !== undefined) return memoria;
+
+    const ia = formatarChamadaIaConhecida(nivel, args);
+    if (ia !== undefined) return ia;
     const sql =
         formatarFalhaSqlConhecida(
             nivel,
