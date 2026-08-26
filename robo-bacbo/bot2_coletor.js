@@ -11,6 +11,7 @@ const {
 } = require("./tie_protection");
 const { Server } = require("socket.io");
 const { criarAutoPilotService } = require("./auto_pilot_ia");
+const { analisarOraculo, extrairMesaAtual, normalizarResultadoOraculo } = require("./oraculo_dinamico");
 const { criarControleDiarioAutoTrader } = require("./bug051b_daily_counter");
 const { criarIntegracaoContadorDiario } = require("./bug051b_integration");
 const {
@@ -1619,6 +1620,106 @@ app.get("/api/historico-giros", async (req, res) => {
     } catch (e) {
         console.error('❌ GET /api/historico-giros falhou:', e.message);
         res.status(500).json([]);
+    }
+});
+
+
+app.post("/api/oraculo/analisar", async (req, res) => {
+    try {
+        const gales = Number(req.body?.gales);
+        const janela = String(req.body?.janela || '').trim().toLowerCase();
+        const confiancaMinima = Number(req.body?.confianca_minima);
+        const janelasSql = {
+            '24h': 'data_hora >= DATE_SUB(NOW(), INTERVAL 24 HOUR)',
+            '48h': 'data_hora >= DATE_SUB(NOW(), INTERVAL 48 HOUR)',
+            '7d': 'data_hora >= DATE_SUB(NOW(), INTERVAL 7 DAY)'
+        };
+
+        if (!Number.isInteger(gales) || gales < 0 || gales > 2) {
+            return res.status(400).json({ erro: 'gales_invalidos', mensagem: 'Gales Permitidos deve ser 0, 1 ou 2.' });
+        }
+        if (!janelasSql[janela]) {
+            return res.status(400).json({ erro: 'janela_invalida', mensagem: 'Janela Histórica deve ser 24h, 48h ou 7d.' });
+        }
+        if (!Number.isFinite(confiancaMinima) || confiancaMinima < 0 || confiancaMinima > 100) {
+            return res.status(400).json({ erro: 'confianca_invalida', mensagem: 'Confiança Mínima deve estar entre 0 e 100.' });
+        }
+
+        const mesaClientePrevia =
+            (Array.isArray(req.body?.mesa_atual) ? req.body.mesa_atual : [])
+                .map(normalizarResultadoOraculo)
+                .filter(Boolean)
+                .slice(-20);
+
+        const empatesClienteUltimos5 =
+            mesaClientePrevia
+                .slice(-5)
+                .filter(item => item === 'T')
+                .length;
+
+        if (
+            mesaClientePrevia.length >= 5
+            && empatesClienteUltimos5 >= 2
+        ) {
+            return res.json({
+                status: 'REJEITADO',
+                motivo: 'MESA_INSTAVEL',
+                detalhe: 'EMPATES_EXCESSIVOS',
+                melhor_confianca: 0,
+                empates_ultimos_5: empatesClienteUltimos5,
+                mensagem: 'Mesa Instável: dois ou mais empates foram observados nos últimos cinco giros.'
+            });
+        }
+
+        const sql =
+            'SELECT id, resultado, id_sessao, UNIX_TIMESTAMP(data_hora) * 1000 AS timestamp_ms '
+            + 'FROM giros_recentes WHERE ' + janelasSql[janela] + ' ORDER BY id ASC';
+        const [linhas] = await dbPool.query(sql);
+        const historico = Array.isArray(linhas) ? linhas : [];
+        const mesaAtual = extrairMesaAtual(historico, 20);
+
+        const mesaCliente = (Array.isArray(req.body?.mesa_atual) ? req.body.mesa_atual : [])
+            .map(normalizarResultadoOraculo)
+            .filter(Boolean)
+            .slice(-6);
+        const mesaCanonica6 = mesaAtual.slice(-6).map(item => item.resultado);
+        if (
+            mesaCliente.length >= 6
+            && mesaCanonica6.length >= 6
+            && mesaCliente.join(',') !== mesaCanonica6.join(',')
+        ) {
+            return res.json({
+                status: 'REJEITADO',
+                motivo: 'MESA_INSTAVEL',
+                detalhe: 'MESA_DESSINCRONIZADA',
+                melhor_confianca: 0,
+                mensagem: 'A mesa mudou entre o visor e o histórico canônico. Atualize e analise novamente.'
+            });
+        }
+
+        const resultado = analisarOraculo({
+            historico,
+            mesaAtual,
+            gales,
+            confiancaMinima
+        });
+
+        const confiancaLog = resultado.status === 'APROVADO'
+            ? resultado.confianca_wilson
+            : resultado.melhor_confianca;
+        console.log(
+            '🔮 ORÁCULO | ' + resultado.status
+            + ' | janela=' + janela
+            + ' | gales=' + gales
+            + ' | wilson=' + Number(confiancaLog || 0).toFixed(1) + '%'
+        );
+        return res.json(resultado);
+    } catch (e) {
+        console.error('❌ POST /api/oraculo/analisar falhou:', e.message);
+        return res.status(500).json({
+            erro: 'falha_oraculo',
+            mensagem: 'Não foi possível concluir a análise estatística sob demanda.'
+        });
     }
 });
 

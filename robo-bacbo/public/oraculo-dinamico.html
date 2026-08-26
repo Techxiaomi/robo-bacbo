@@ -1,0 +1,80 @@
+<style id="oraculo-dinamico-style">
+    .oraculo-trigger { background:#6f42c1 !important; color:#fff !important; box-shadow:0 0 10px rgba(111,66,193,.45); }
+    .oraculo-trigger:hover { box-shadow:0 0 15px rgba(111,66,193,.7); }
+    #oraculo-modal { z-index:5000; }
+    .oraculo-modal-content { max-width:720px; border-top-color:#6f42c1; }
+    .oraculo-cabecalho { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:16px; }
+    .oraculo-cabecalho h2 { margin:0; font-size:20px; }
+    .oraculo-subtitulo { margin-top:5px; color:#999; font-size:12px; line-height:1.45; }
+    .oraculo-fechar { border:0; background:#282828; color:#bbb; width:32px; height:32px; border-radius:6px; cursor:pointer; font-size:18px; }
+    .oraculo-fita-wrap { margin:14px 0 18px; }
+    .oraculo-fita-label { display:flex; justify-content:space-between; gap:12px; color:#aaa; font-size:11px; margin-bottom:7px; }
+    #oraculo-fita { min-height:44px; align-items:center; }
+    .oraculo-fita-vazia { color:#666; font-size:12px; padding:3px; }
+    .oraculo-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }
+    .oraculo-acoes { display:flex; gap:10px; align-items:center; margin-top:16px; }
+    #oraculo-analisar { background:#6f42c1; min-width:170px; }
+    #oraculo-analisar:disabled { opacity:.55; cursor:not-allowed; }
+    .oraculo-loading { display:none; flex:1; min-height:36px; align-items:center; gap:10px; color:#c8b5f4; font-size:12px; }
+    .oraculo-spinner { width:18px; height:18px; border:2px solid #4d3a75; border-top-color:#b89cff; border-radius:50%; animation:oraculoSpin .7s linear infinite; flex-shrink:0; }
+    @keyframes oraculoSpin { to { transform:rotate(360deg); } }
+    .oraculo-resultado { margin-top:16px; border:1px solid #333; background:#111; border-radius:8px; padding:14px; min-height:52px; }
+    .oraculo-resultado:empty { display:none; }
+    .oraculo-resultado.aprovado { border-color:#2d7042; background:#102117; }
+    .oraculo-resultado.rejeitado { border-color:#774045; background:#241315; }
+    .oraculo-resultado.neutro { color:#aaa; }
+    .oraculo-res-titulo { font-weight:800; margin-bottom:10px; }
+    .oraculo-res-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+    .oraculo-res-grid > div { background:rgba(0,0,0,.22); padding:9px; border-radius:6px; }
+    .oraculo-res-grid span { display:block; color:#888; font-size:9px; text-transform:uppercase; margin-bottom:3px; }
+    .oraculo-res-grid strong { font-size:14px; }
+    .oraculo-mensagem { margin-top:10px; color:#ddd; font-size:12px; }
+    .oraculo-nota { margin-top:12px; color:#777; font-size:10px; line-height:1.45; }
+    @media (max-width:700px) { .oraculo-grid, .oraculo-res-grid { grid-template-columns:1fr; } .oraculo-acoes { align-items:stretch; flex-direction:column; } #oraculo-analisar { width:100%; } }
+</style>
+<div id="oraculo-modal" class="modal-form-overlay" role="dialog" aria-modal="true" aria-labelledby="oraculo-titulo">
+    <div class="modal-form-content oraculo-modal-content">
+        <div class="oraculo-cabecalho">
+            <div>
+                <h2 id="oraculo-titulo">🔮 Oráculo Dinâmico</h2>
+                <div class="oraculo-subtitulo">Consulta estatística sob demanda. O motor lê o histórico canônico somente quando você solicita a análise.</div>
+            </div>
+            <button type="button" class="oraculo-fechar" data-oraculo-fechar aria-label="Fechar">×</button>
+        </div>
+        <div class="oraculo-fita-wrap">
+            <div class="oraculo-fita-label"><span>Últimos 20 resultados</span><span>Atualização live</span></div>
+            <div class="bk-fita" id="oraculo-fita"></div>
+        </div>
+        <div class="oraculo-grid">
+            <div class="form-group">
+                <label for="oraculo-gales">Gales Permitidos</label>
+                <select id="oraculo-gales">
+                    <option value="0">Tiro Seco (Direto)</option>
+                    <option value="1">Gale 1</option>
+                    <option value="2">Gale 2</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="oraculo-janela">Janela Histórica</label>
+                <select id="oraculo-janela">
+                    <option value="24h">Últimas 24h</option>
+                    <option value="48h">Últimas 48h</option>
+                    <option value="7d">Últimos 7 Dias</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="oraculo-confianca">Confiança Mínima (%)</label>
+                <input id="oraculo-confianca" type="number" min="0" max="100" step="0.1" value="85">
+            </div>
+        </div>
+        <div class="oraculo-acoes">
+            <button type="button" id="oraculo-analisar" class="btn">🔮 Analisar Sinal</button>
+            <div id="oraculo-loading" class="oraculo-loading" aria-live="polite">
+                <span class="oraculo-spinner" aria-hidden="true"></span>
+                <span id="oraculo-loading-fase">Preparando análise...</span>
+            </div>
+        </div>
+        <div id="oraculo-resultado" class="oraculo-resultado neutro" aria-live="polite"></div>
+        <div class="oraculo-nota">O valor exibido é o limite inferior do Score de Wilson com 95% de confiança sobre ocorrências históricas. Ele é uma estimativa conservadora, não uma garantia nem uma probabilidade exata do próximo giro.</div>
+    </div>
+</div>
