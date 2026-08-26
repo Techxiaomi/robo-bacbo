@@ -2561,7 +2561,57 @@
             }
         }
 
-        function abrirFormularioAutoTrader() {
+        async function atualizarFontesAutoTrader(fontesAtivas = []) {
+            const box = document.getElementById('at-lista-fontes');
+
+            if (box) {
+                box.innerHTML = '<span style="color:#17a2b8;">⏳ Atualizando robôs ativos...</span>';
+            }
+
+            try {
+                const res = await fetch(
+                    '/api/robos?_t=' + Date.now(),
+                    { cache: 'no-store' }
+                );
+
+                if (!res.ok) {
+                    throw new Error('HTTP ' + res.status);
+                }
+
+                const dados = await res.json();
+
+                if (!Array.isArray(dados)) {
+                    throw new Error(
+                        'Resposta de /api/robos não é uma lista'
+                    );
+                }
+
+                robosGlobais = dados;
+
+                renderizarCheckboxFontesAT(
+                    fontesAtivas
+                );
+
+                return true;
+            } catch (e) {
+                console.error(
+                    '❌ Auto-Trader: falha ao atualizar fontes de sinal:',
+                    e
+                );
+
+                if (box) {
+                    box.innerHTML =
+                        '<span style="color:#ff7777;">' +
+                        'Não foi possível carregar os robôs ativos. ' +
+                        'Feche o formulário e tente novamente.' +
+                        '</span>';
+                }
+
+                return false;
+            }
+        }
+
+        async function abrirFormularioAutoTrader() {
             autoTraderEditandoId = null; document.getElementById('at-titulo').innerText = "💸 Cadastrar Motor de Execução";
             document.getElementById('at-nome').value = ''; document.getElementById('at-ativo').checked = true; document.getElementById('at-saldo-visor').innerText = "R$ 0,00"; document.getElementById('at-saldo-visor').style.color = '#fff'; document.getElementById('at-stake').value = "10.00"; document.getElementById('at-gale1').value = "2.0"; document.getElementById('at-gale2').value = "4.0";
             document.getElementById('at-gatilho-reds-virtuais').value = "0"; document.getElementById('at-sinais-por-onda').value = "0"; document.getElementById('at-tipo-aleatoriedade').value = "NENHUMA"; document.getElementById('at-pulo-min').value = "1"; document.getElementById('at-pulo-max').value = "3"; document.getElementById('at-chance-entrada-pct').value = "100"; document.getElementById('at-limite-ciclos').value = "0"; toggleEstrategiaAutoTrader();
@@ -2572,10 +2622,10 @@
             document.getElementById('at-stop-reds-acao').value = "PAUSAR";
             document.getElementById('at-stop-reds-pausa').value = "60";
             toggleStopRedsAutoTrader();
-            mudarAbaAT('gestao'); renderizarCheckboxFontesAT([]); document.getElementById('modal-autotrader').style.display = 'flex';
+            mudarAbaAT('gestao'); document.getElementById('modal-autotrader').style.display = 'flex'; await atualizarFontesAutoTrader([]);
         }
 
-        function prepararEdicaoAutoTrader(id) {
+        async function prepararEdicaoAutoTrader(id) {
             let at = autoTradersGlobais.find(x => x.id === id); if (!at) return;
             autoTraderEditandoId = at.id; let cf = at.config;
             document.getElementById('at-titulo').innerText = "✏️ Editar Motor de Execução"; document.getElementById('at-nome').value = at.nome; document.getElementById('at-ativo').checked = at.ativo; document.getElementById('at-saldo-visor').innerText = `R$ ${parseFloat(at.saldo_atual).toFixed(2).replace('.',',')}`; document.getElementById('at-saldo-visor').style.color = '#28a745'; document.getElementById('at-stake').value = (cf.stake_inicial || 10).toFixed(2); document.getElementById('at-gale1').value = cf.gale_1_mult || 2.0; document.getElementById('at-gale2').value = cf.gale_2_mult || 4.0;
@@ -2587,7 +2637,7 @@
             document.getElementById('at-stop-reds-acao').value = String(cf.stop_reds_acao || 'PAUSAR').toUpperCase() === 'DESLIGAR' ? 'DESLIGAR' : 'PAUSAR';
             document.getElementById('at-stop-reds-pausa').value = Math.max(1, Number(cf.stop_reds_pausa_min) || 60);
             toggleStopRedsAutoTrader();
-            mudarAbaAT('gestao'); renderizarCheckboxFontesAT(cf.fontes_sinal || []); document.getElementById('modal-autotrader').style.display = 'flex';
+            mudarAbaAT('gestao'); document.getElementById('modal-autotrader').style.display = 'flex'; await atualizarFontesAutoTrader(cf.fontes_sinal || []);
         }
 
         function fecharFormularioAutoTrader() { document.getElementById('modal-autotrader').style.display = 'none'; }

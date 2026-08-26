@@ -2314,7 +2314,28 @@ app.post("/api/auto-trader", async (req, res) => {
         res.json({ sucesso: true, saldo_inicial: saldoBaseline });
     } catch (e) {
         console.error('❌ POST /api/auto-trader falhou:', e.message);
-        res.status(500).json({ sucesso: false });
+
+        if (
+            e
+            && e.code === 'BUG051D_CONFIG_INVALIDA'
+        ) {
+            return res.status(400).json({
+                sucesso: false,
+                erro: 'configuracao_auto_trader_invalida',
+                campo: e.campo_configuracao || null,
+                mensagem: String(
+                    e.message ||
+                    'Configuração Auto-Trader inválida'
+                ).replace(
+                    /^Configuração Auto-Trader rejeitada:\s*/,
+                    ''
+                )
+            });
+        }
+
+        res.status(500).json({
+            sucesso: false
+        });
     }
 });
 
@@ -2447,8 +2468,32 @@ app.put("/api/auto-trader/:id", async (req, res) => {
             ciclo_resetado: reativando || cicloConfigMudou
         });
     } catch (e) {
-        console.error(`❌ PUT /api/auto-trader/${req.params.id} falhou:`, e.message);
-        res.status(500).json({ sucesso: false });
+        console.error(
+            `❌ PUT /api/auto-trader/${req.params.id} falhou:`,
+            e.message
+        );
+
+        if (
+            e
+            && e.code === 'BUG051D_CONFIG_INVALIDA'
+        ) {
+            return res.status(400).json({
+                sucesso: false,
+                erro: 'configuracao_auto_trader_invalida',
+                campo: e.campo_configuracao || null,
+                mensagem: String(
+                    e.message ||
+                    'Configuração Auto-Trader inválida'
+                ).replace(
+                    /^Configuração Auto-Trader rejeitada:\s*/,
+                    ''
+                )
+            });
+        }
+
+        res.status(500).json({
+            sucesso: false
+        });
     }
 });
 

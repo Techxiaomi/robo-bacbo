@@ -217,22 +217,15 @@ function validarConfiguracaoAutoTrader(config) {
     if (typeof config.trailing_stop !== 'boolean') {
         return falha('trailing_stop', 'deve ser booleano');
     }
-    if (config.trailing_stop === true) {
-        if (
-            !numeroEstrito(config.trailing_recuo)
-            || config.trailing_recuo <= 0
-            || config.trailing_recuo > LIMITE_DECIMAL_DINHEIRO
-        ) {
-            return falha(
-                'trailing_recuo',
-                'com Trailing Stop ativo deve ser número maior que zero dentro do limite financeiro'
-            );
-        }
-    } else if (
-        config.trailing_recuo !== undefined
-        && (!numeroEstrito(config.trailing_recuo) || config.trailing_recuo < 0)
+    if (
+        !numeroEstrito(config.trailing_recuo)
+        || config.trailing_recuo < 0
+        || config.trailing_recuo > LIMITE_DECIMAL_DINHEIRO
     ) {
-        return falha('trailing_recuo', 'quando informado deve ser número maior ou igual a zero');
+        return falha(
+            'trailing_recuo',
+            'deve ser número maior ou igual a zero dentro do limite financeiro; zero mantém o Trailing Stop não armado'
+        );
     }
 
     if (
