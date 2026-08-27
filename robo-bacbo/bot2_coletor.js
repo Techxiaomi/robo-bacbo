@@ -1886,11 +1886,65 @@ app.put("/api/estrategia/:id", async (req, res) => {
 
 app.delete("/api/estrategia/:id", async (req, res) => {
     try {
-        await apagarEstrategiaEDados(req.params.id);
-        await carregarSistemasParaMemoria(); ioServer.emit('atualizar_interface'); res.json({ sucesso: true });
+        const [existentes] = await dbPool.query(
+            'SELECT id, nome, is_dinamico FROM estrategias WHERE id=? LIMIT 1',
+            [req.params.id]
+        );
+
+        if (existentes.length === 0) {
+            return res.status(404).json({
+                sucesso: false,
+                erro: 'estrategia_nao_encontrada',
+                mensagem: 'Padrão não encontrado.'
+            });
+        }
+
+        const estrategia = existentes[0];
+        const dinamico =
+            estrategia.is_dinamico === true
+            || estrategia.is_dinamico === 1
+            || estrategia.is_dinamico === '1';
+
+        // Padrões IA são propriedade do robô pai.
+        // A rota CRUD manual nunca pode removê-los.
+        if (dinamico) {
+            return res.status(409).json({
+                sucesso: false,
+                erro: 'padrao_dinamico_gerenciado_pelo_robo',
+                mensagem:
+                    'Padrões dinâmicos devem ser gerenciados '
+                    + 'pelo Robô IA pai.'
+            });
+        }
+
+        await apagarEstrategiaEDados(
+            req.params.id
+        );
+
+        await carregarSistemasParaMemoria();
+
+        ioServer.emit(
+            'atualizar_interface'
+        );
+
+        console.log(
+            `🗑️ PADRÃO MANUAL | ${req.params.id} — `
+            + `${estrategia.nome}: excluído pelo painel.`
+        );
+
+        return res.json({
+            sucesso: true
+        });
+
     } catch (erro) {
-        console.error(`❌ DELETE /api/estrategia/${req.params.id} falhou:`, erro.message);
-        res.status(500).json({ sucesso: false });
+        console.error(
+            `❌ DELETE /api/estrategia/${req.params.id} falhou:`,
+            erro.message
+        );
+
+        return res.status(500).json({
+            sucesso: false
+        });
     }
 });
 
@@ -2134,6 +2188,31 @@ app.put("/api/robo/:id", async (req, res) => {
         } catch (e) {
             console.error(`⚠️ Robô ${id}: remineração IA após edição falhou, configuração foi preservada:`, e.message);
         }
+
+        if (reativando) {
+            const [contagemReativada] =
+                await dbPool.query(
+                    `SELECT COUNT(*) AS qtd
+                     FROM estrategias
+                     WHERE is_dinamico=true
+                       AND robo_dono_id=?
+                       AND ativo=true`,
+                    [id]
+                );
+
+            const qtdAtivos = Math.max(
+                0,
+                Number(
+                    contagemReativada?.[0]?.qtd
+                ) || 0
+            );
+
+            console.log(
+                `🤖 Robô/Canal ${id} — ${nome}: reativado; `
+                + `${qtdAtivos} padrão(ões) dinâmico(s) ativo(s) liberado(s).`
+            );
+        }
+
         ioServer.emit('atualizar_robos');
         res.json({
             sucesso: true,

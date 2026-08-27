@@ -3242,7 +3242,196 @@
         function salvarConfig() { localStorage.setItem('threshGreen', document.getElementById('cfg-green').value); localStorage.setItem('threshYellow', document.getElementById('cfg-yellow').value); toggleModalConfig(false); aplicarFiltrosEOrdenar(); atualizarDashboardValores(); }
         function getCor(pctStr) { if (pctStr === '-') return '#aaa'; let pct = parseFloat(pctStr); let gVal = parseFloat(localStorage.getItem('threshGreen') || 80); let yVal = parseFloat(localStorage.getItem('threshYellow') || 50); if (pct >= gVal) return '#28a745'; if (pct >= yVal) return '#ffc107'; return '#ff7777'; }
 
-        async function toggleEstrategiaRapido(id, check) { let e = estrategiasGlobais.find(x => x.id.toString() === id.toString()); if (!e) return; let nA = check.checked; try { await fetch(`/api/estrategia/${id}`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({...e, padrao: e.padrao.join(','), ativo: nA}) }); e.ativo = nA; aplicarFiltrosEOrdenar(); } catch(err) { check.checked = !nA; } }
+        function serializarPadraoEstrategiaParaApi(est) {
+            const bruto = est?.padrao;
+
+            if (Array.isArray(bruto)) {
+                return bruto.join(',');
+            }
+
+            if (typeof bruto === 'string') {
+                const texto = bruto.trim();
+                if (!texto) return '';
+
+                try {
+                    const convertido = JSON.parse(texto);
+
+                    if (Array.isArray(convertido)) {
+                        return convertido.join(',');
+                    }
+                } catch (_) {}
+
+                // Também aceita o formato legado:
+                // Player,Banker,Tie
+                return texto;
+            }
+
+            return '';
+        }
+
+        function estrategiaProtegeEmpate(est) {
+            const valor = est?.proteger_empate;
+
+            return (
+                valor === true
+                || valor === 1
+                || valor === '1'
+            );
+        }
+
+        async function toggleEstrategiaRapido(id, check) {
+            const estrategia = estrategiasGlobais.find(
+                item => String(item.id) === String(id)
+            );
+
+            if (!estrategia) {
+                check.checked = !check.checked;
+                alert('Estratégia não encontrada. Atualize a página.');
+                return;
+            }
+
+            if (estrategiaEhDinamica(estrategia)) {
+                check.checked =
+                    estrategia.ativo === true
+                    || estrategia.ativo === 1;
+
+                alert(
+                    'Padrões dinâmicos são gerenciados pelo Robô IA pai.'
+                );
+                return;
+            }
+
+            const novoAtivo = !!check.checked;
+            check.disabled = true;
+
+            try {
+                const respostaHttp = await fetch(
+                    `/api/estrategia/${encodeURIComponent(id)}`,
+                    {
+                        method: 'PUT',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            nome: estrategia.nome,
+                            origem: estrategia.origem,
+                            padrao:
+                                serializarPadraoEstrategiaParaApi(
+                                    estrategia
+                                ),
+                            entrada: estrategia.entrada,
+                            gales: estrategia.gales,
+                            protegerEmpate:
+                                estrategiaProtegeEmpate(
+                                    estrategia
+                                ),
+                            ativo: novoAtivo
+                        })
+                    }
+                );
+
+                let resposta = {};
+
+                try {
+                    resposta = await respostaHttp.json();
+                } catch (_) {}
+
+                if (
+                    !respostaHttp.ok
+                    || resposta.sucesso !== true
+                ) {
+                    throw new Error(
+                        resposta.mensagem
+                        || 'Backend não confirmou a alteração.'
+                    );
+                }
+
+                // Recarrega o estado canônico do backend.
+                await inicializarSistema();
+
+            } catch (erro) {
+                check.checked = !novoAtivo;
+
+                console.error(
+                    `❌ UI PADRÕES | falha ao ${novoAtivo ? 'ativar' : 'desativar'} ${id}:`,
+                    erro
+                );
+
+                alert(
+                    'Não foi possível alterar o estado do padrão. '
+                    + 'A alteração foi revertida.'
+                );
+            } finally {
+                check.disabled = false;
+            }
+        }
+
+        async function excluirEstrategia(id) {
+            const estrategia = estrategiasGlobais.find(
+                item => String(item.id) === String(id)
+            );
+
+            if (!estrategia) {
+                alert(
+                    'Estratégia não encontrada. Atualize a página.'
+                );
+                return;
+            }
+
+            if (estrategiaEhDinamica(estrategia)) {
+                alert(
+                    'Padrões dinâmicos pertencem ao Robô IA e '
+                    + 'não podem ser excluídos individualmente.'
+                );
+                return;
+            }
+
+            if (
+                !confirm(
+                    `Excluir permanentemente o padrão "${estrategia.nome}"?`
+                )
+            ) {
+                return;
+            }
+
+            try {
+                const respostaHttp = await fetch(
+                    `/api/estrategia/${encodeURIComponent(id)}`,
+                    {
+                        method: 'DELETE'
+                    }
+                );
+
+                let resposta = {};
+
+                try {
+                    resposta = await respostaHttp.json();
+                } catch (_) {}
+
+                if (
+                    !respostaHttp.ok
+                    || resposta.sucesso !== true
+                ) {
+                    throw new Error(
+                        resposta.mensagem
+                        || 'Backend não confirmou a exclusão.'
+                    );
+                }
+
+                await inicializarSistema();
+
+            } catch (erro) {
+                console.error(
+                    `❌ UI PADRÕES | falha ao excluir ${id}:`,
+                    erro
+                );
+
+                alert(
+                    erro?.message
+                    || 'Não foi possível excluir o padrão.'
+                );
+            }
+        }
         function abrirFormularioNova() { mudarAbaPrincipal('padroes'); estrategiaEditandoId = null; document.getElementById('titulo-formulario').innerText = "Cadastrar Nova Estratégia"; document.getElementById('nome').value = ''; document.getElementById('gales').value = '0'; document.getElementById('entrada').value = 'Player'; document.getElementById('proteger_empate').checked = false; document.getElementById('ativo').checked = true; limparPadraoModal(); document.getElementById('modal-cadastro').style.display = 'flex'; }
         function fecharFormulario() { document.getElementById('modal-cadastro').style.display = 'none'; }
         function prepararEdicao(id) { const est = estrategiasGlobais.find(e => e.id === id); if (!est) return; estrategiaEditandoId = est.id; document.getElementById('titulo-formulario').innerText = "✏️ Editar Estratégia"; document.getElementById('nome').value = est.nome; let selO = document.getElementById('origem'); if (Array.from(selO.options).some(o => o.value === est.origem)) { selO.value = est.origem; } document.getElementById('entrada').value = est.entrada; document.getElementById('gales').value = est.gales; document.getElementById('proteger_empate').checked = est.proteger_empate === 1; document.getElementById('ativo').checked = est.ativo === 1 || est.ativo === true; limparPadraoModal(); try { JSON.parse(est.padrao).forEach(j => adicionarNoPadraoModal(j)); } catch(e) {} document.getElementById('modal-cadastro').style.display = 'flex'; }
