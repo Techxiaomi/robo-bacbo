@@ -26,6 +26,7 @@ const {
     avancarAposSinalOperado,
     aplicarEstadoCiclo
 } = require("./auto_trader");
+const { criarArbitroFinanceiroAutoTrader } = require("./auto_trader_round_arbiter");
 require("./env_loader").loadEnvFile(path.join(__dirname, "..", ".env"));
 
 // Erros globais realmente não tratados são fatais: continuar pode deixar estado financeiro incoerente.
@@ -265,6 +266,7 @@ async function prepararBancoDeDados() {
             CREATE TABLE IF NOT EXISTS auditoria_ordens (
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 trader_id INT,
+                estrategia_id VARCHAR(100) DEFAULT NULL,
                 estrategia_nome VARCHAR(100),
                 fonte_sinal VARCHAR(100),
                 alvo VARCHAR(20),
@@ -315,6 +317,7 @@ async function prepararBancoDeDados() {
         await adicionarColuna("ALTER TABLE estrategias ADD COLUMN quarentena_restante INT DEFAULT 0");
         await adicionarColuna("ALTER TABLE estrategias ADD COLUMN ia_status VARCHAR(30) DEFAULT NULL");
         await adicionarColuna("ALTER TABLE historico_disparos_robos ADD COLUMN estrategia_origem VARCHAR(100) DEFAULT ''");
+        await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN estrategia_id VARCHAR(100) DEFAULT NULL");
         await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN executor_order_id VARCHAR(64) DEFAULT NULL");
         await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN valor_empate DECIMAL(12,2) DEFAULT 0");
         await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN executor_confirmacao_metodo VARCHAR(40) DEFAULT NULL");
@@ -362,6 +365,7 @@ async function prepararBancoDeDados() {
 let ESTRATEGIAS_MEMORIA = [];
 let ROBOS_MEMORIA = [];
 let AUTO_TRADERS_MEMORIA = [];
+let arbitroFinanceiroAutoTrader = null;
 let historicoGirosAnalitico = [];
 let estadoApostas = {};
 
@@ -1268,11 +1272,12 @@ async function criarIntencaoOrdem(queryable, dados) {
     const orderId = String(dados.order_id || crypto.randomUUID());
     const [resultado] = await queryable.query(
         `INSERT INTO auditoria_ordens
-            (trader_id, estrategia_nome, fonte_sinal, alvo, nivel, risco_total,
+            (trader_id, estrategia_id, estrategia_nome, fonte_sinal, alvo, nivel, risco_total,
              valor_entrada, valor_empate, executor_order_id, status_ordem)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PREPARANDO')`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PREPARANDO')`,
         [
             dados.trader_id,
+            dados.estrategia_id ?? null,
             dados.estrategia_nome,
             dados.fonte_sinal,
             dados.alvo,
@@ -4784,6 +4789,14 @@ async function autorizarNovaEntradaFinanceiraTrader(trader) {
         return false;
     }
 
+    if (arbitroFinanceiroAutoTrader) {
+        const abertas = await arbitroFinanceiroAutoTrader.listarOrdensFinanceirasEmAbertoTrader(trader.id);
+        if (abertas.length > 0) {
+            console.warn(`⛔ MC21 SINGLE-FLIGHT | Trader ${trader.id}: nova entrada bloqueada por ordem/intenção financeira aberta.`);
+            return false;
+        }
+    }
+
     if (await traderPossuiLiquidacaoPendente(trader.id)) {
         console.warn(
             `⛔ BUG-051A Trader ${trader.id}: nova entrada bloqueada; `
@@ -4859,6 +4872,23 @@ async function autorizarNovaEntradaFinanceiraTrader(trader) {
     ioServer.emit('atualizar_interface');
     return false;
 }
+
+arbitroFinanceiroAutoTrader = criarArbitroFinanceiroAutoTrader({
+    dbPool,
+    crypto,
+    log: console,
+    listarTraders: () => AUTO_TRADERS_MEMORIA,
+    autoTraderParticipouDoSinal,
+    traderDentroHorarioExecucao,
+    formatarFaixasHorario,
+    prepararEntradaCicloAutoTrader,
+    autorizarNovaEntradaFinanceiraTrader,
+    calcularPlanoAposta,
+    criarIntencaoOrdem,
+    enviarOrdemAoExecutor,
+    marcarIntencaoAposFalhaEnvio,
+    bloquearTraderAposExecucaoAmbigua
+});
 
 async function carregarSistemasParaMemoria() {
     try {
@@ -5250,7 +5280,7 @@ app.post("/receber-sinal", async (req, res) => {
                         for (let trader of AUTO_TRADERS_MEMORIA) {
                             let cf = trader.config;
                             if (trader.ativo && (trader.status_operacao === 'OPERANDO' || trader.status_operacao === 'STANDBY') && autoTraderAutorizaEstrategia(cf, est, ROBOS_MEMORIA)) {
-                                const [pendentes] = await dbPool.query(`SELECT id, valor_entrada, valor_empate FROM auditoria_ordens WHERE trader_id = ? AND status_ordem = 'PENDENTE' LIMIT 1`, [trader.id]);
+                                const [pendentes] = await dbPool.query(`SELECT id, valor_entrada, valor_empate FROM auditoria_ordens WHERE trader_id = ? AND estrategia_id = ? AND status_ordem = 'PENDENTE' LIMIT 1`, [trader.id, est.id]);
                                 if (pendentes.length > 0) {
                                     let vEntrada = parseFloat(pendentes[0].valor_entrada);
                                     let vEmpate = Math.max(0, Number(pendentes[0].valor_empate) || 0);
@@ -5321,7 +5351,7 @@ app.post("/receber-sinal", async (req, res) => {
                             for (let trader of AUTO_TRADERS_MEMORIA) {
                                 let cf = trader.config;
                                 if (trader.ativo && trader.status_operacao === 'OPERANDO' && autoTraderAutorizaEstrategia(cf, est, ROBOS_MEMORIA)) {
-                                    const [pendentes] = await dbPool.query(`SELECT id, risco_total, valor_entrada, valor_empate FROM auditoria_ordens WHERE trader_id = ? AND status_ordem = 'PENDENTE' LIMIT 1`, [trader.id]);
+                                    const [pendentes] = await dbPool.query(`SELECT id, risco_total, valor_entrada, valor_empate FROM auditoria_ordens WHERE trader_id = ? AND estrategia_id = ? AND status_ordem = 'PENDENTE' LIMIT 1`, [trader.id, est.id]);
                                     if (pendentes.length > 0) {
                                         let riscoAntigo = parseFloat(pendentes[0].risco_total);
                                         const pnlEtapaAnterior = calcularPnLEtapa({
@@ -5354,6 +5384,7 @@ app.post("/receber-sinal", async (req, res) => {
                                             );
                                             intencaoGale = await criarIntencaoOrdem(conexaoGale, {
                                                 trader_id: trader.id,
+                                                estrategia_id: est.id,
                                                 estrategia_nome: est.nome,
                                                 fonte_sinal: est.origem,
                                                 alvo: alvoPython,
@@ -5481,7 +5512,7 @@ app.post("/receber-sinal", async (req, res) => {
                             for (let trader of AUTO_TRADERS_MEMORIA) {
                                 let cf = trader.config;
                                 if (trader.ativo && (trader.status_operacao === 'OPERANDO' || trader.status_operacao === 'STANDBY') && autoTraderAutorizaEstrategia(cf, est, ROBOS_MEMORIA)) {
-                                    const [pendentes] = await dbPool.query(`SELECT id, valor_entrada, valor_empate FROM auditoria_ordens WHERE trader_id = ? AND status_ordem = 'PENDENTE' LIMIT 1`, [trader.id]);
+                                    const [pendentes] = await dbPool.query(`SELECT id, valor_entrada, valor_empate FROM auditoria_ordens WHERE trader_id = ? AND estrategia_id = ? AND status_ordem = 'PENDENTE' LIMIT 1`, [trader.id, est.id]);
                                     if (pendentes.length > 0) {
                                         let prejuizo = calcularPnLEtapa({
                                             resultado: vencedor,
@@ -5564,6 +5595,8 @@ app.post("/receber-sinal", async (req, res) => {
             return;
         }
         const historicoLiveCanonico = estadoLiveCanonico.history;
+        const oportunidadesFinanceirasAutoTraderRodada =
+            arbitroFinanceiroAutoTrader.criarMapaRodada(contadorRodadasSinal);
 
         {
             // Não existe mais lock global. Estratégias diferentes podem abrir
@@ -5625,150 +5658,18 @@ app.post("/receber-sinal", async (req, res) => {
                         estadoSinal.telegramEntradaPromise = inscreverRobosTelegramEntrada(est, estadoSinal, selecaoRobos.telegram);
 
                         if (est.quarentena_restante <= 0) {
-                            for (let trader of AUTO_TRADERS_MEMORIA) {
-                                let cf = trader.config;
-                                if (trader.ativo && trader.status_operacao === 'OPERANDO' && autoTraderAutorizaEstrategia(cf, est, ROBOS_MEMORIA)) {
-
-                                    const robosAutorizadores = robosAutoTraderAutorizadores(cf, est, ROBOS_MEMORIA);
-                                    const descricaoAutorizadores = robosAutorizadores.length > 0
-                                        ? robosAutorizadores.map(robo => `${robo.id}:${robo.nome}`).join(', ')
-                                        : `configuração legada:${String(est.origem || '').trim()}`;
-
-                                    console.log(
-                                        `🎯 Auto-Trader ${trader.id} (${trader.nome}) autorizado para o sinal `
-                                        + `${est.id} pelo(s) robô(s) ativo(s) ${descricaoAutorizadores}.`
+                            for (const trader of AUTO_TRADERS_MEMORIA) {
+                                if (
+                                    trader.ativo
+                                    && trader.status_operacao === 'OPERANDO'
+                                    && autoTraderParticipouDoSinal(trader, est, estadoSinal)
+                                ) {
+                                    arbitroFinanceiroAutoTrader.registrarCandidato(
+                                        oportunidadesFinanceirasAutoTraderRodada,
+                                        trader,
+                                        est,
+                                        estadoSinal
                                     );
-
-                                    if (!traderDentroHorarioExecucao(cf)) {
-                                        console.log(
-                                            `Trader ${trader.id} fora das faixas de execução `
-                                            + `(${formatarFaixasHorario(cf)}). Nova entrada ignorada.`
-                                        );
-                                        continue;
-                                    }
-
-                                    if (cf.limite_entradas && trader.entradas_feitas >= cf.limite_entradas) {
-                                        trader.status_operacao = 'META_ATINGIDA';
-                                        try {
-                                            await dbPool.query('UPDATE auto_traders SET status_operacao=? WHERE id=?', ['META_ATINGIDA', trader.id]);
-                                        } catch(e) {
-                                            console.error(`❌ Falha ao persistir META_ATINGIDA do trader ${trader.id}:`, e.message);
-                                        }
-                                        continue;
-                                    }
-
-                                    try {
-                                        if (!(await prepararEntradaCicloAutoTrader(trader))) continue;
-                                    } catch (e) {
-                                        console.error(`❌ Trader ${trader.id}: falha ao persistir máquina de estados; entrada bloqueada:`, e.message);
-                                        continue;
-                                    }
-
-                                    if (!(await autorizarNovaEntradaFinanceiraTrader(trader))) {
-                                        continue;
-                                    }
-
-                                    const planoDireto = calcularPlanoAposta(cf, est, 0);
-                                    if (!planoDireto.ok) {
-                                        console.error(`❌ Entrada do trader ${trader.id} bloqueada: ${planoDireto.motivo}`);
-                                        continue;
-                                    }
-                                    let valorArredondado = planoDireto.valor_principal;
-                                    let valorEmpateDireto = planoDireto.valor_empate;
-                                    let alvoPython = planoDireto.apostas[0].alvo;
-
-                                    const ordemExecutorIdDireto = crypto.randomUUID();
-                                    let intencaoDireto = null;
-                                    try {
-                                        intencaoDireto = await criarIntencaoOrdem(dbPool, {
-                                            trader_id: trader.id,
-                                            estrategia_nome: est.nome,
-                                            fonte_sinal: est.origem,
-                                            alvo: alvoPython,
-                                            nivel: 'DIRETO',
-                                            risco_total: planoDireto.exposicao_etapa,
-                                            valor_entrada: valorArredondado,
-                                            valor_empate: valorEmpateDireto,
-                                            order_id: ordemExecutorIdDireto
-                                        });
-                                    } catch(e) {
-                                        console.error(
-                                            `❌ Ordem DIRETO do trader ${trader.id} bloqueada: `
-                                            + `falha ao persistir intenção PREPARANDO antes do executor:`,
-                                            e.message
-                                        );
-                                        continue;
-                                    }
-
-                                    let executorConfirmouDireto = false;
-                                    try {
-                                        const confirmacaoExecutorDireto = await enviarOrdemAoExecutor(
-                                            alvoPython,
-                                            valorArredondado,
-                                            ordemExecutorIdDireto,
-                                            planoDireto.apostas
-                                        );
-                                        executorConfirmouDireto = true;
-                                        const evidenciaDireto = confirmacaoExecutorDireto.execucao.confirmacao;
-
-                                        const conexao = await dbPool.getConnection();
-                                        try {
-                                            await conexao.beginTransaction();
-                                            const novasEntradas = trader.entradas_feitas + 1;
-                                            await conexao.query('UPDATE auto_traders SET entradas_feitas=? WHERE id=?', [novasEntradas, trader.id]);
-                                            const [auditoriaAtualizada] = await conexao.query(
-                                                `UPDATE auditoria_ordens
-                                                 SET status_ordem='PENDENTE', executor_confirmacao_metodo=?,
-                                                     executor_saldo_antes=?, executor_saldo_depois=?,
-                                                     executor_debito_observado=?, execucao_confirmada_em=?
-                                                 WHERE id=? AND executor_order_id=? AND status_ordem='PREPARANDO'`,
-                                                [
-                                                    evidenciaDireto.metodo,
-                                                    evidenciaDireto.saldo_antes,
-                                                    evidenciaDireto.saldo_depois,
-                                                    evidenciaDireto.debito_observado,
-                                                    evidenciaDireto.confirmada_em,
-                                                    intencaoDireto.auditoria_id,
-                                                    ordemExecutorIdDireto
-                                                ]
-                                            );
-                                            if (Number(auditoriaAtualizada.affectedRows) !== 1) {
-                                                throw new Error('Intenção PREPARANDO DIRETO não encontrada após ACK do executor');
-                                            }
-                                            await conexao.commit();
-                                            trader.entradas_feitas = novasEntradas;
-                                        } catch(e) {
-                                            try { await conexao.rollback(); } catch(rollbackError) { console.error(`❌ Rollback falhou para o trader ${trader.id}:`, rollbackError.message); }
-                                            throw e;
-                                        } finally {
-                                            conexao.release();
-                                        }
-                                    } catch(e) {
-                                        if (executorConfirmouDireto) {
-                                            console.error(
-                                                `⚠️ Ordem DIRETO confirmada pelo executor (${ordemExecutorIdDireto}), `
-                                                + `mas a intenção ${intencaoDireto.auditoria_id} não avançou para PENDENTE; `
-                                                + `PREPARANDO foi preservado para reconciliação:`,
-                                                e.message
-                                            );
-                                        } else {
-                                            const statusFalha = await marcarIntencaoAposFalhaEnvio(
-                                                intencaoDireto.auditoria_id,
-                                                e,
-                                                `DIRETO do trader ${trader.id}`
-                                            );
-                                            await bloquearTraderAposExecucaoAmbigua(
-                                                trader,
-                                                statusFalha,
-                                                'DIRETO'
-                                            );
-                                            console.error(
-                                                `❌ Ordem DIRETO não confirmada para o trader ${trader.id}; `
-                                                + `intenção ${intencaoDireto.auditoria_id} marcada ${statusFalha}:`,
-                                                e.message
-                                            );
-                                        }
-                                    }
                                 }
                             }
                         }
@@ -5776,6 +5677,13 @@ app.post("/receber-sinal", async (req, res) => {
                 }
             }
         }
+
+        // MC21: somente sinais realmente admitidos pelos locks MC1-MC8
+        // chegam à decisão financeira. Aleatoriedade é consumida uma vez
+        // por oportunidade agregada, nunca por sinal bruto concorrente.
+        await arbitroFinanceiroAutoTrader.processarRodada(
+            oportunidadesFinanceirasAutoTraderRodada
+        );
     } catch(erroGeral) {
         console.error('🔥 Falha no processamento de /receber-sinal após o ACK:', erroGeral);
     } finally {
