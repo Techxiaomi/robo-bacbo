@@ -2,9 +2,9 @@
 
 const mysql = require('mysql2/promise');
 
-// MC22-C/D — associação operacional inicial com mesa_id.
-// O escopo permanece restrito a dados históricos/analíticos. Nenhuma consulta do runtime,
-// lock, sinal, IA, Oráculo ou Auto-Trader é filtrada por mesa neste checkpoint.
+// MC22-C/D/F — associação operacional inicial com mesa_id.
+// C/D cobre histórico/analítico; F associa as entidades de configuração que definem
+// robôs e estratégias. Nenhuma consulta do runtime é filtrada por mesa ainda.
 const TABELAS_HISTORICAS_MC22C = Object.freeze([
     'historico_resultados',
     'historico_disparos_robos',
@@ -12,11 +12,16 @@ const TABELAS_HISTORICAS_MC22C = Object.freeze([
     'giros_recentes'
 ]);
 
+const TABELAS_OPERACIONAIS_MC22F = Object.freeze([
+    'robos_canais',
+    'estrategias'
+]);
+
 function validarMesaPersistida(mesa) {
     const id = Number(mesa?.id);
     const codigo = String(mesa?.codigo || '').trim();
     if (!Number.isInteger(id) || id <= 0 || !codigo) {
-        const erro = new Error('MC22-C: identidade persistida da mesa é inválida');
+        const erro = new Error('MC22: identidade persistida da mesa é inválida');
         erro.code = 'MESA_IDENTIDADE_INVALIDA';
         throw erro;
     }
@@ -46,12 +51,12 @@ async function obterColunaMesa(conexao, tabela) {
     return Array.isArray(linhas) && linhas.length === 1 ? linhas[0] : null;
 }
 
-async function garantirMesaIdHistorico(conexao, tabela, mesaId) {
+async function garantirMesaIdTabela(conexao, tabela, mesaId, fase) {
     if (!(await tabelaExiste(conexao, tabela))) {
         // Em instalação totalmente nova, bot2_coletor ainda criará suas tabelas depois
         // deste bootstrap. Não criamos cópias parciais delas aqui para evitar divergência
-        // de schema. A adaptação canônica dessas CREATE TABLE virá em checkpoint próprio.
-        console.warn(`⚠️ MC22-C | ${tabela}: tabela ainda ausente; vínculo mesa_id adiado.`);
+        // de schema. A adaptação canônica das CREATE TABLE virá em checkpoint próprio.
+        console.warn(`⚠️ ${fase} | ${tabela}: tabela ainda ausente; vínculo mesa_id adiado.`);
         return { tabela, migrada: false, motivo: 'TABELA_AUSENTE' };
     }
 
@@ -87,7 +92,7 @@ async function garantirMesaIdHistorico(conexao, tabela, mesaId) {
          WHERE mesa_id IS NULL`
     );
     if (Number(validacao?.sem_mesa || 0) !== 0) {
-        const erro = new Error(`MC22-C: ${tabela} permaneceu com registros sem mesa_id`);
+        const erro = new Error(`${fase}: ${tabela} permaneceu com registros sem mesa_id`);
         erro.code = 'MESA_BACKFILL_INCOMPLETO';
         throw erro;
     }
@@ -106,17 +111,32 @@ async function prepararEscopoHistoricoMesaAtual(mesaPersistida) {
     });
 
     try {
-        const resultados = [];
+        const historicas = [];
         for (const tabela of TABELAS_HISTORICAS_MC22C) {
-            resultados.push(await garantirMesaIdHistorico(conexao, tabela, mesa.id));
+            historicas.push(await garantirMesaIdTabela(conexao, tabela, mesa.id, 'MC22-C/D'));
         }
 
-        const migradas = resultados.filter(item => item.migrada).length;
+        const historicasMigradas = historicas.filter(item => item.migrada).length;
         console.log(
             `🧭 MC22-C/D | Escopo histórico/analítico associado a ${mesa.codigo}: `
-            + `${migradas}/${TABELAS_HISTORICAS_MC22C.length} tabela(s).`
+            + `${historicasMigradas}/${TABELAS_HISTORICAS_MC22C.length} tabela(s).`
         );
-        return resultados;
+
+        const operacionais = [];
+        for (const tabela of TABELAS_OPERACIONAIS_MC22F) {
+            operacionais.push(await garantirMesaIdTabela(conexao, tabela, mesa.id, 'MC22-F'));
+        }
+
+        const operacionaisMigradas = operacionais.filter(item => item.migrada).length;
+        console.log(
+            `🧭 MC22-F | Robôs/estratégias associados a ${mesa.codigo}: `
+            + `${operacionaisMigradas}/${TABELAS_OPERACIONAIS_MC22F.length} tabela(s).`
+        );
+
+        return {
+            historicas,
+            operacionais
+        };
     } finally {
         await conexao.end();
     }
@@ -124,5 +144,6 @@ async function prepararEscopoHistoricoMesaAtual(mesaPersistida) {
 
 module.exports = {
     TABELAS_HISTORICAS_MC22C,
+    TABELAS_OPERACIONAIS_MC22F,
     prepararEscopoHistoricoMesaAtual
 };
