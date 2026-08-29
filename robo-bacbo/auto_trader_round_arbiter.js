@@ -1,5 +1,7 @@
 'use strict';
 
+const { obterMesaRuntime } = require('./mesa_runtime_context');
+
 function normalizarAlvoFinanceiro(valor) {
     const alvo = String(valor || '').trim().toUpperCase();
     if (['PLAYER', 'PLAYERWON', 'JOGADOR'].includes(alvo)) return 'Player';
@@ -81,9 +83,17 @@ function criarArbitroFinanceiroAutoTrader(deps = {}) {
 
     const log = deps.log || console;
     const dbPool = deps.dbPool;
+    const mesaRuntime = obterMesaRuntime();
 
     if (!dbPool || typeof dbPool.query !== 'function') {
         throw new Error('MC21: dbPool ausente ao criar arbitro financeiro');
+    }
+    if (!Number.isInteger(Number(mesaRuntime?.id)) || Number(mesaRuntime.id) <= 0) {
+        throw new Error('MC22-L: mesa do runtime ausente ao criar arbitro financeiro');
+    }
+
+    function chaveGateTrader(traderId) {
+        return `${mesaRuntime.id}:${Number(traderId)}`;
     }
 
     async function listarOrdensFinanceirasEmAbertoTrader(traderId) {
@@ -91,10 +101,11 @@ function criarArbitroFinanceiroAutoTrader(deps = {}) {
             `SELECT id, estrategia_id, status_ordem, executor_order_id
              FROM auditoria_ordens
              WHERE trader_id=?
+               AND mesa_id=?
                AND status_ordem IN ('PREPARANDO','PENDENTE','ENVIO_AMBIGUO')
              ORDER BY id ASC
              LIMIT 2`,
-            [Number(traderId)]
+            [Number(traderId), mesaRuntime.id]
         );
         return Array.isArray(linhas) ? linhas : [];
     }
@@ -136,14 +147,14 @@ function criarArbitroFinanceiroAutoTrader(deps = {}) {
     }
 
     function adquirirGate(traderId) {
-        const chave = String(Number(traderId));
+        const chave = chaveGateTrader(traderId);
         if (!chave || gatesMemoria.has(chave)) return false;
         gatesMemoria.add(chave);
         return true;
     }
 
     function liberarGate(traderId) {
-        gatesMemoria.delete(String(Number(traderId)));
+        gatesMemoria.delete(chaveGateTrader(traderId));
     }
 
     async function executarEntradaDireta(trader, est, decisao) {
@@ -232,7 +243,8 @@ function criarArbitroFinanceiroAutoTrader(deps = {}) {
                          SET status_ordem='PENDENTE', executor_confirmacao_metodo=?,
                              executor_saldo_antes=?, executor_saldo_depois=?,
                              executor_debito_observado=?, execucao_confirmada_em=?
-                         WHERE id=? AND executor_order_id=? AND status_ordem='PREPARANDO'`,
+                         WHERE id=? AND executor_order_id=? AND status_ordem='PREPARANDO'
+                           AND mesa_id=?`,
                         [
                             evidenciaDireto.metodo,
                             evidenciaDireto.saldo_antes,
@@ -240,11 +252,12 @@ function criarArbitroFinanceiroAutoTrader(deps = {}) {
                             evidenciaDireto.debito_observado,
                             evidenciaDireto.confirmada_em,
                             intencaoDireto.auditoria_id,
-                            ordemExecutorIdDireto
+                            ordemExecutorIdDireto,
+                            mesaRuntime.id
                         ]
                     );
                     if (Number(auditoriaAtualizada.affectedRows) !== 1) {
-                        throw new Error('Intenção PREPARANDO DIRETO não encontrada após ACK do executor');
+                        throw new Error('Intenção PREPARANDO DIRETO não encontrada após ACK do executor na mesa atual');
                     }
                     await conexao.commit();
                     trader.entradas_feitas = novasEntradas;
@@ -255,7 +268,7 @@ function criarArbitroFinanceiroAutoTrader(deps = {}) {
                     conexao.release();
                 }
 
-                log.log(`💰 MC21 | Trader ${trader.id} | rodada ${decisao.rodada} | líder=${est.id} | direção=${decisao.alvo} | exposição única confirmada.`);
+                log.log(`💰 MC21 | Mesa ${mesaRuntime.codigo} | Trader ${trader.id} | rodada ${decisao.rodada} | líder=${est.id} | direção=${decisao.alvo} | exposição única confirmada.`);
                 return true;
             } catch (e) {
                 if (executorConfirmouDireto) {
