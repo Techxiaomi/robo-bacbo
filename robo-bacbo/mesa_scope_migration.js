@@ -2,9 +2,9 @@
 
 const mysql = require('mysql2/promise');
 
-// MC22-C/D/F — associação operacional inicial com mesa_id.
-// C/D cobre histórico/analítico; F associa as entidades de configuração que definem
-// robôs e estratégias. Nenhuma consulta do runtime é filtrada por mesa ainda.
+// MC22-C/D/F/G — associação operacional inicial com mesa_id.
+// C/D cobre histórico/analítico; F associa robôs/estratégias; G associa o domínio
+// financeiro persistido. Nenhuma consulta do runtime é filtrada por mesa ainda.
 const TABELAS_HISTORICAS_MC22C = Object.freeze([
     'historico_resultados',
     'historico_disparos_robos',
@@ -15,6 +15,11 @@ const TABELAS_HISTORICAS_MC22C = Object.freeze([
 const TABELAS_OPERACIONAIS_MC22F = Object.freeze([
     'robos_canais',
     'estrategias'
+]);
+
+const TABELAS_FINANCEIRAS_MC22G = Object.freeze([
+    'auto_traders',
+    'auditoria_ordens'
 ]);
 
 function validarMesaPersistida(mesa) {
@@ -133,9 +138,21 @@ async function prepararEscopoHistoricoMesaAtual(mesaPersistida) {
             + `${operacionaisMigradas}/${TABELAS_OPERACIONAIS_MC22F.length} tabela(s).`
         );
 
+        const financeiras = [];
+        for (const tabela of TABELAS_FINANCEIRAS_MC22G) {
+            financeiras.push(await garantirMesaIdTabela(conexao, tabela, mesa.id, 'MC22-G'));
+        }
+
+        const financeirasMigradas = financeiras.filter(item => item.migrada).length;
+        console.log(
+            `🧭 MC22-G | Auto-Trader/auditoria associados a ${mesa.codigo}: `
+            + `${financeirasMigradas}/${TABELAS_FINANCEIRAS_MC22G.length} tabela(s).`
+        );
+
         return {
             historicas,
-            operacionais
+            operacionais,
+            financeiras
         };
     } finally {
         await conexao.end();
@@ -145,5 +162,6 @@ async function prepararEscopoHistoricoMesaAtual(mesaPersistida) {
 module.exports = {
     TABELAS_HISTORICAS_MC22C,
     TABELAS_OPERACIONAIS_MC22F,
+    TABELAS_FINANCEIRAS_MC22G,
     prepararEscopoHistoricoMesaAtual
 };
