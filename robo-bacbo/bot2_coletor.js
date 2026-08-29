@@ -5358,7 +5358,7 @@ app.post("/receber-sinal", async (req, res) => {
                             for (let trader of AUTO_TRADERS_MEMORIA) {
                                 let cf = trader.config;
                                 if (trader.ativo && trader.status_operacao === 'OPERANDO' && autoTraderAutorizaEstrategia(cf, est, ROBOS_MEMORIA)) {
-                                    const [pendentes] = await dbPool.query(`SELECT id, risco_total, valor_entrada, valor_empate FROM auditoria_ordens WHERE trader_id = ? AND estrategia_id = ? AND status_ordem = 'PENDENTE' LIMIT 1`, [trader.id, est.id]);
+                                    const [pendentes] = await dbPool.query(`SELECT id, risco_total, valor_entrada, valor_empate FROM auditoria_ordens WHERE trader_id = ? AND estrategia_id = ? AND mesa_id = ? AND status_ordem = 'PENDENTE' LIMIT 1`, [trader.id, est.id, Number(dados.mesa_id)]);
                                     if (pendentes.length > 0) {
                                         let riscoAntigo = parseFloat(pendentes[0].risco_total);
                                         const pnlEtapaAnterior = calcularPnLEtapa({
@@ -5383,12 +5383,25 @@ app.post("/receber-sinal", async (req, res) => {
                                         try {
                                             conexaoGale = await dbPool.getConnection();
                                             await conexaoGale.beginTransaction();
-                                            await conexaoGale.query(
+                                            const [etapaAnteriorFechada] = await conexaoGale.query(
                                                 `UPDATE auditoria_ordens
                                                  SET status_ordem='LOSS', lucro_prejuizo=?, saldo_pos=?, placar_mesa=?
-                                                 WHERE id=?`,
-                                                [pnlEtapaAnterior, trader.saldo_atual, `[P:${p1+p2} B:${b1+b2}]`, pendentes[0].id]
+                                                 WHERE id=? AND mesa_id=? AND status_ordem='PENDENTE'`,
+                                                [
+                                                    pnlEtapaAnterior,
+                                                    trader.saldo_atual,
+                                                    `[P:${p1+p2} B:${b1+b2}]`,
+                                                    pendentes[0].id,
+                                                    Number(dados.mesa_id)
+                                                ]
                                             );
+                                            if (Number(etapaAnteriorFechada.affectedRows) !== 1) {
+                                                throw new Error(
+                                                    `MC22-Q: etapa anterior ${pendentes[0].id} nao pode ser fechada ` +
+                                                    `para GALE na mesa ${dados.mesa_id}`
+                                                );
+                                            }
+
                                             intencaoGale = await criarIntencaoOrdem(conexaoGale, {
                                                 trader_id: trader.id,
                                                 estrategia_id: est.id,
@@ -5401,6 +5414,26 @@ app.post("/receber-sinal", async (req, res) => {
                                                 valor_empate: valorEmpateGale,
                                                 order_id: ordemExecutorIdGale
                                             });
+
+                                            const [intencaoGaleVinculada] = await conexaoGale.query(
+                                                `UPDATE auditoria_ordens
+                                                 SET mesa_id=?
+                                                 WHERE id=?
+                                                   AND trader_id=?
+                                                   AND status_ordem='PREPARANDO'`,
+                                                [
+                                                    Number(dados.mesa_id),
+                                                    intencaoGale.auditoria_id,
+                                                    trader.id
+                                                ]
+                                            );
+                                            if (Number(intencaoGaleVinculada.affectedRows) !== 1) {
+                                                throw new Error(
+                                                    `MC22-Q: intencao GALE ${intencaoGale.auditoria_id} ` +
+                                                    `nao pode ser vinculada a mesa ${dados.mesa_id}`
+                                                );
+                                            }
+
                                             await conexaoGale.commit();
                                         } catch(e) {
                                             if (conexaoGale) {
@@ -5433,7 +5466,8 @@ app.post("/receber-sinal", async (req, res) => {
                                                  SET status_ordem='PENDENTE', executor_confirmacao_metodo=?,
                                                      executor_saldo_antes=?, executor_saldo_depois=?,
                                                      executor_debito_observado=?, execucao_confirmada_em=?
-                                                 WHERE id=? AND executor_order_id=? AND status_ordem='PREPARANDO'`,
+                                                 WHERE id=? AND executor_order_id=? AND status_ordem='PREPARANDO'
+                                                   AND mesa_id=?`,
                                                 [
                                                     evidenciaGale.metodo,
                                                     evidenciaGale.saldo_antes,
@@ -5441,7 +5475,8 @@ app.post("/receber-sinal", async (req, res) => {
                                                     evidenciaGale.debito_observado,
                                                     evidenciaGale.confirmada_em,
                                                     intencaoGale.auditoria_id,
-                                                    ordemExecutorIdGale
+                                                    ordemExecutorIdGale,
+                                                    Number(dados.mesa_id)
                                                 ]
                                             );
                                             if (Number(auditoriaAtualizada.affectedRows) !== 1) {
