@@ -226,8 +226,27 @@ function criarArbitroFinanceiroAutoTrader(deps = {}) {
             const ordemExecutorIdDireto = deps.crypto.randomUUID();
 
             let intencaoDireto = null;
+            let conexaoIntencao = null;
             try {
-                intencaoDireto = await deps.criarIntencaoOrdem(dbPool, {
+                conexaoIntencao = await dbPool.getConnection();
+                await conexaoIntencao.beginTransaction();
+
+                const [traderMesa] = await conexaoIntencao.query(
+                    `SELECT mesa_id
+                     FROM auto_traders
+                     WHERE id=?
+                     FOR UPDATE`,
+                    [trader.id]
+                );
+                if (
+                    !Array.isArray(traderMesa)
+                    || traderMesa.length !== 1
+                    || Number(traderMesa[0].mesa_id) !== Number(mesaRuntime.id)
+                ) {
+                    throw new Error('Auto-Trader mudou de mesa antes da criação da intenção DIRETO');
+                }
+
+                intencaoDireto = await deps.criarIntencaoOrdem(conexaoIntencao, {
                     trader_id: trader.id,
                     estrategia_id: est.id,
                     estrategia_nome: est.nome,
@@ -239,9 +258,28 @@ function criarArbitroFinanceiroAutoTrader(deps = {}) {
                     valor_empate: valorEmpateDireto,
                     order_id: ordemExecutorIdDireto
                 });
+
+                const [intencaoVinculada] = await conexaoIntencao.query(
+                    `UPDATE auditoria_ordens
+                     SET mesa_id=?
+                     WHERE id=?
+                       AND trader_id=?
+                       AND status_ordem='PREPARANDO'`,
+                    [mesaRuntime.id, intencaoDireto.auditoria_id, trader.id]
+                );
+                if (Number(intencaoVinculada.affectedRows) !== 1) {
+                    throw new Error('Intenção DIRETO não pôde ser vinculada atomicamente à mesa atual');
+                }
+
+                await conexaoIntencao.commit();
             } catch (e) {
+                if (conexaoIntencao) {
+                    try { await conexaoIntencao.rollback(); } catch (_) {}
+                }
                 log.error(`❌ Ordem DIRETO arbitrada do trader ${trader.id} bloqueada antes do executor:`, e.message);
                 return false;
+            } finally {
+                if (conexaoIntencao) conexaoIntencao.release();
             }
 
             let executorConfirmouDireto = false;
