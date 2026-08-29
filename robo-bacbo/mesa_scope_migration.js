@@ -2,13 +2,14 @@
 
 const mysql = require('mysql2/promise');
 
-// MC22-C — primeira associação operacional com mesa_id.
-// Escopo propositalmente restrito às tabelas históricas. Nenhuma consulta do runtime,
-// lock, sinal, IA, Oráculo ou Auto-Trader é alterada neste checkpoint.
+// MC22-C/D — associação operacional inicial com mesa_id.
+// O escopo permanece restrito a dados históricos/analíticos. Nenhuma consulta do runtime,
+// lock, sinal, IA, Oráculo ou Auto-Trader é filtrada por mesa neste checkpoint.
 const TABELAS_HISTORICAS_MC22C = Object.freeze([
     'historico_resultados',
     'historico_disparos_robos',
-    'historico_shadow_ia'
+    'historico_shadow_ia',
+    'giros_recentes'
 ]);
 
 function validarMesaPersistida(mesa) {
@@ -112,7 +113,7 @@ async function prepararEscopoHistoricoMesaAtual(mesaPersistida) {
 
         const migradas = resultados.filter(item => item.migrada).length;
         console.log(
-            `🧭 MC22-C | Escopo histórico associado a ${mesa.codigo}: `
+            `🧭 MC22-C/D | Escopo histórico/analítico associado a ${mesa.codigo}: `
             + `${migradas}/${TABELAS_HISTORICAS_MC22C.length} tabela(s).`
         );
         return resultados;
