@@ -14,6 +14,7 @@ const {
     instalarMesaNoTransporteLive,
     confirmarContratoMesaTransporteRuntime
 } = require('./mesa_transport_context');
+const { instalarGuardaMesaBackend } = require('./mesa_backend_guard');
 
 async function iniciar() {
     const canonicalBridge = require('./bacbo_canonical_bridge');
@@ -55,9 +56,9 @@ async function iniciar() {
         console.log(`🔒 BOOTSTRAP | histórico consolidado | janela=${estadoHistorico.janela}.`);
     }
 
-    // MC22-B/C/F/G/H/J: persiste a identidade, associa os dados legados, fixa a mesa
-    // deste processo e arma o contrato fail-closed do transporte live. Ainda existe
-    // somente BACBO_INT.
+    // MC22-B/C/F/G/H/J/K: persiste a identidade, associa os dados legados, fixa a mesa,
+    // valida o transporte e protege a entrada HTTP antes do motor operacional.
+    // Ainda existe somente BACBO_INT.
     const mesaAtual = await prepararSchemaMesas();
     await prepararEscopoHistoricoMesaAtual(mesaAtual);
     const mesaRuntime = definirMesaRuntime(mesaAtual);
@@ -66,6 +67,7 @@ async function iniciar() {
         + `(${mesaRuntime.tipo_jogo}) | id=${mesaRuntime.id}.`
     );
     confirmarContratoMesaTransporteRuntime();
+    instalarGuardaMesaBackend();
 
     // Registra a IA como consumidor crítico da barreira FINAL antes da criação do serviço.
     // O coletor só recebe ACK final depois que essa revalidação termina.
