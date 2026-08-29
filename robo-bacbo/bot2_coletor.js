@@ -5280,7 +5280,7 @@ app.post("/receber-sinal", async (req, res) => {
                         for (let trader of AUTO_TRADERS_MEMORIA) {
                             let cf = trader.config;
                             if (trader.ativo && (trader.status_operacao === 'OPERANDO' || trader.status_operacao === 'STANDBY') && autoTraderAutorizaEstrategia(cf, est, ROBOS_MEMORIA)) {
-                                const [pendentes] = await dbPool.query(`SELECT id, valor_entrada, valor_empate FROM auditoria_ordens WHERE trader_id = ? AND estrategia_id = ? AND status_ordem = 'PENDENTE' LIMIT 1`, [trader.id, est.id]);
+                                const [pendentes] = await dbPool.query(`SELECT id, valor_entrada, valor_empate FROM auditoria_ordens WHERE trader_id = ? AND estrategia_id = ? AND mesa_id = ? AND status_ordem = 'PENDENTE' LIMIT 1`, [trader.id, est.id, Number(dados.mesa_id)]);
                                 if (pendentes.length > 0) {
                                     let vEntrada = parseFloat(pendentes[0].valor_entrada);
                                     let vEmpate = Math.max(0, Number(pendentes[0].valor_empate) || 0);
@@ -5293,20 +5293,27 @@ app.post("/receber-sinal", async (req, res) => {
                                     });
                                     try {
                                         const resultadoConfirmadoEm = Date.now();
-                                        await dbPool.query(
+                                        const [resultadoFechamentoFinal] = await dbPool.query(
                                             `UPDATE auditoria_ordens
                                              SET status_ordem = ?, lucro_prejuizo = ?, saldo_pos = NULL,
                                                  resultado_confirmado_em = ?, saldo_pos_confirmado_em = NULL,
                                                  placar_mesa = ?
-                                             WHERE id = ?`,
+                                             WHERE id = ? AND mesa_id = ? AND status_ordem = 'PENDENTE'`,
                                             [
                                                 isTie ? 'TIE' : 'WIN',
                                                 vLucro,
                                                 resultadoConfirmadoEm,
                                                 `[P:${p1+p2} B:${b1+b2}]`,
-                                                pendentes[0].id
+                                                pendentes[0].id,
+                                                Number(dados.mesa_id)
                                             ]
                                         );
+                                        if (Number(resultadoFechamentoFinal.affectedRows) !== 1) {
+                                            throw new Error(
+                                                `MC22-P: ordem ${pendentes[0].id} nao pode ser fechada ` +
+                                                `como ${isTie ? 'TIE' : 'WIN'} na mesa ${dados.mesa_id}`
+                                            );
+                                        }
                                         await processarResultadoStopRedsAutoTrader(
                                             trader,
                                             isTie ? 'TIE' : 'GREEN',
@@ -5512,7 +5519,7 @@ app.post("/receber-sinal", async (req, res) => {
                             for (let trader of AUTO_TRADERS_MEMORIA) {
                                 let cf = trader.config;
                                 if (trader.ativo && (trader.status_operacao === 'OPERANDO' || trader.status_operacao === 'STANDBY') && autoTraderAutorizaEstrategia(cf, est, ROBOS_MEMORIA)) {
-                                    const [pendentes] = await dbPool.query(`SELECT id, valor_entrada, valor_empate FROM auditoria_ordens WHERE trader_id = ? AND estrategia_id = ? AND status_ordem = 'PENDENTE' LIMIT 1`, [trader.id, est.id]);
+                                    const [pendentes] = await dbPool.query(`SELECT id, valor_entrada, valor_empate FROM auditoria_ordens WHERE trader_id = ? AND estrategia_id = ? AND mesa_id = ? AND status_ordem = 'PENDENTE' LIMIT 1`, [trader.id, est.id, Number(dados.mesa_id)]);
                                     if (pendentes.length > 0) {
                                         let prejuizo = calcularPnLEtapa({
                                             resultado: vencedor,
@@ -5523,19 +5530,26 @@ app.post("/receber-sinal", async (req, res) => {
                                         });
                                         try {
                                             const resultadoConfirmadoEm = Date.now();
-                                            await dbPool.query(
+                                            const [resultadoFechamentoRedFinal] = await dbPool.query(
                                                 `UPDATE auditoria_ordens
                                                  SET status_ordem = 'LOSS', lucro_prejuizo = ?, saldo_pos = NULL,
                                                      resultado_confirmado_em = ?, saldo_pos_confirmado_em = NULL,
                                                      placar_mesa = ?
-                                                 WHERE id = ?`,
+                                                 WHERE id = ? AND mesa_id = ? AND status_ordem = 'PENDENTE'`,
                                                 [
                                                     prejuizo,
                                                     resultadoConfirmadoEm,
                                                     `[P:${p1+p2} B:${b1+b2}]`,
-                                                    pendentes[0].id
+                                                    pendentes[0].id,
+                                                    Number(dados.mesa_id)
                                                 ]
                                             );
+                                            if (Number(resultadoFechamentoRedFinal.affectedRows) !== 1) {
+                                                throw new Error(
+                                                    `MC22-P: ordem ${pendentes[0].id} nao pode ser fechada ` +
+                                                    `como LOSS na mesa ${dados.mesa_id}`
+                                                );
+                                            }
                                             await processarResultadoStopRedsAutoTrader(
                                                 trader,
                                                 'RED',
