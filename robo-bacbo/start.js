@@ -10,6 +10,7 @@ require('./telegram_signal_lifecycle').instalarTelegramSignalLifecycle();
 const { prepararSchemaMesas } = require('./mesa_schema');
 const { prepararEscopoHistoricoMesaAtual } = require('./mesa_scope_migration');
 const { definirMesaRuntime } = require('./mesa_runtime_context');
+const { instalarMesaNoTransporteLive } = require('./mesa_transport_context');
 
 async function iniciar() {
     const canonicalBridge = require('./bacbo_canonical_bridge');
@@ -17,6 +18,10 @@ async function iniciar() {
     // Compatibilidade controlada: o motor antigo continua disponível como fallback,
     // mas sinais novos passam a usar o histórico canônico winner+result do Runtime V3.
     canonicalBridge.instalarCompatibilidadeSinais();
+
+    // MC22-I: identifica toda entrega HTTP interna de rodada live antes que o Runtime V3
+    // capture o fetch nativo. Neste checkpoint a única identidade permitida é BACBO_INT.
+    instalarMesaNoTransporteLive();
 
     const redisRuntime = require('./redis_runtime_v3');
     redisRuntime.instalarRedisRuntimeV3();
