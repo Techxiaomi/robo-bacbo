@@ -92,6 +92,11 @@ function criarArbitroFinanceiroAutoTrader(deps = {}) {
         throw new Error('MC22-L: mesa do runtime ausente ao criar arbitro financeiro');
     }
 
+    function mapaPertenceMesaRuntime(mapa) {
+        return Number(mapa?.mesa_id) === Number(mesaRuntime.id)
+            && String(mapa?.mesa_codigo || '') === String(mesaRuntime.codigo || '');
+    }
+
     function chaveGateTrader(traderId) {
         return `${mesaRuntime.id}:${Number(traderId)}`;
     }
@@ -124,6 +129,8 @@ function criarArbitroFinanceiroAutoTrader(deps = {}) {
 
     function criarMapaRodada(rodada) {
         return {
+            mesa_id: Number(mesaRuntime.id),
+            mesa_codigo: String(mesaRuntime.codigo || ''),
             rodada: Math.max(0, Math.trunc(Number(rodada) || 0)),
             porTrader: new Map()
         };
@@ -131,6 +138,12 @@ function criarArbitroFinanceiroAutoTrader(deps = {}) {
 
     function registrarCandidato(mapa, trader, est, estadoSinal) {
         if (!mapa?.porTrader || !trader || !est || !estadoSinal) return false;
+        if (!mapaPertenceMesaRuntime(mapa)) {
+            log.error(
+                `⛔ MC22-O | Candidato financeiro recusado: mapa da rodada não pertence a ${mesaRuntime.codigo}.`
+            );
+            return false;
+        }
 
         const traderId = Number(trader.id);
         const estrategiaId = String(est.id || '').trim();
@@ -358,6 +371,12 @@ function criarArbitroFinanceiroAutoTrader(deps = {}) {
 
     async function processarRodada(mapa) {
         if (!mapa?.porTrader) return;
+        if (!mapaPertenceMesaRuntime(mapa)) {
+            log.error(
+                `⛔ MC22-O | Mapa financeiro da rodada recusado: contexto de mesa divergente de ${mesaRuntime.codigo}.`
+            );
+            return;
+        }
 
         for (const registro of mapa.porTrader.values()) {
             const trader = deps.listarTraders().find(item => Number(item.id) === Number(registro.trader_id));
@@ -388,6 +407,8 @@ function criarArbitroFinanceiroAutoTrader(deps = {}) {
 
             const contexto = {
                 ...decisao,
+                mesa_id: Number(mesaRuntime.id),
+                mesa_codigo: String(mesaRuntime.codigo || ''),
                 trader_id: Number(trader.id),
                 rodada: Number(mapa.rodada)
             };
