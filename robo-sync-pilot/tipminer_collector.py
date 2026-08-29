@@ -1,6 +1,8 @@
 import hashlib
 import json
 import os
+import signal
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -76,6 +78,10 @@ BROWSER_HEADERS = {
 VALID_TYPES = {"BANKER", "PLAYER", "TIE"}
 
 
+class CollectorShutdownRequested(Exception):
+    pass
+
+
 class TipMinerCollector:
     def __init__(self):
         if not INTERNAL_API_TOKEN:
@@ -96,6 +102,10 @@ class TipMinerCollector:
         self.history = []
         self._pending_interruption = None
         self._last_confirmed_interruption = None
+        self._shutdown_event = threading.Event()
+        self._shutdown_signal_count = 0
+        self._shutdown_finalized = False
+        self._active_live_response = None
 
     @staticmethod
     def _json_dumps(value):
@@ -247,6 +257,65 @@ class TipMinerCollector:
             "TIE": "🟡 EMPATE",
         }.get(str(round_type or "").upper(), "RESULTADO")
 
+    def install_shutdown_handlers(self):
+        handled = []
+        for signal_name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+            signal_value = getattr(signal, signal_name, None)
+            if signal_value is None:
+                continue
+            signal.signal(signal_value, self._handle_shutdown_signal)
+            handled.append(signal_name)
+        print(f"🧯 BAC BO | shutdown controlado ativo | sinais={','.join(handled)}.")
+
+    def _handle_shutdown_signal(self, signum, _frame):
+        self._shutdown_signal_count += 1
+        if self._shutdown_signal_count >= 2:
+            print("\n🛑 BAC BO | segundo sinal recebido; encerramento forçado imediato.")
+            os._exit(130)
+
+        if not self._shutdown_event.is_set():
+            print("\n🛑 BAC BO | encerramento solicitado; fechando fluxo live e continuidade.")
+        self._shutdown_event.set()
+
+        response = self._active_live_response
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass
+
+    def _raise_if_shutdown(self):
+        if self._shutdown_event.is_set():
+            raise CollectorShutdownRequested()
+
+    def _wait_or_shutdown(self, seconds):
+        if self._shutdown_event.wait(max(0.0, float(seconds))):
+            raise CollectorShutdownRequested()
+
+    def _close_resources(self):
+        response = self._active_live_response
+        self._active_live_response = None
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass
+        for resource in (self.http, self.node_http, self.redis):
+            try:
+                resource.close()
+            except Exception:
+                pass
+
+    def _finalize_operator_shutdown(self):
+        if self._shutdown_finalized:
+            return
+        self._shutdown_finalized = True
+        try:
+            self._notify_interruption_best_effort("MANUTENCAO_COLETOR", force=True)
+        finally:
+            self._close_resources()
+        print("👋 Coletor Bac Bo encerrado pelo operador.")
+
     def _queue_interruption(self, reason, force=False):
         if self._pending_interruption is not None and not force:
             return self._pending_interruption
@@ -307,6 +376,7 @@ class TipMinerCollector:
         last_status = None
 
         while self._pending_interruption is not None:
+            self._raise_if_shutdown()
             attempt += 1
             ok, status = self._try_notify_pending_interruption(emit_success=True)
             if ok:
@@ -323,7 +393,7 @@ class TipMinerCollector:
                 CONTINUITY_RETRY_MAX_SECONDS,
                 CONTINUITY_RETRY_MIN_SECONDS + ((attempt - 1) * 0.5),
             )
-            time.sleep(delay)
+            self._wait_or_shutdown(delay)
 
         return self._last_confirmed_interruption
 
@@ -371,11 +441,13 @@ class TipMinerCollector:
         return True
 
     def sync_history(self, quiet_if_unchanged=False, force_publish=False, barrier_id=None):
+        self._raise_if_shutdown()
         response = self.http.get(
             HISTORY_URL,
             headers={"Accept": "application/json"},
             timeout=(HTTP_CONNECT_TIMEOUT_SECONDS, HTTP_READ_TIMEOUT_SECONDS),
         )
+        self._raise_if_shutdown()
         response.raise_for_status()
 
         payload = response.json()
@@ -435,6 +507,7 @@ class TipMinerCollector:
         last_publish = time.monotonic()
 
         while True:
+            self._raise_if_shutdown()
             ack = self._read_history_ack()
             ack_signature = str((ack or {}).get("signature") or "")
             ack_barrier = str((ack or {}).get("barrier_id") or "")
@@ -464,9 +537,10 @@ class TipMinerCollector:
                     "⏳ BAC BO | histórico final | aguardando aplicação integral no Node; live bloqueado."
                 )
                 last_log = now
-            time.sleep(HISTORY_ACK_POLL_SECONDS)
+            self._wait_or_shutdown(HISTORY_ACK_POLL_SECONDS)
 
     def _open_live_stream(self):
+        self._raise_if_shutdown()
         response = self.http.get(
             LIVE_URL,
             headers={
@@ -476,6 +550,9 @@ class TipMinerCollector:
             stream=True,
             timeout=(HTTP_CONNECT_TIMEOUT_SECONDS, HTTP_READ_TIMEOUT_SECONDS),
         )
+        if self._shutdown_event.is_set():
+            response.close()
+            raise CollectorShutdownRequested()
         response.raise_for_status()
 
         content_type = str(response.headers.get("Content-Type") or "").lower()
@@ -484,6 +561,7 @@ class TipMinerCollector:
             raise RuntimeError(
                 f"Fluxo Bac Bo respondeu Content-Type inesperado: {content_type or 'ausente'}"
             )
+        self._active_live_response = response
         return response
 
     def listen_live(self, response):
@@ -492,6 +570,7 @@ class TipMinerCollector:
         client = SSEClient(response)
         try:
             for event in client.events():
+                self._raise_if_shutdown()
                 raw_data = str(getattr(event, "data", "") or "").strip()
                 if not raw_data:
                     continue
@@ -513,8 +592,11 @@ class TipMinerCollector:
                     f"Soma: {round_data['result']}"
                 )
         finally:
+            if self._active_live_response is response:
+                self._active_live_response = None
             response.close()
 
+        self._raise_if_shutdown()
         raise ConnectionError("stream SSE Bac Bo encerrou sem excecao")
 
     def run_forever(self):
@@ -526,59 +608,75 @@ class TipMinerCollector:
 
         self._queue_interruption("COLETOR_REINICIADO", force=True)
 
-        while True:
-            live_response = None
-            try:
-                self.redis.ping()
+        try:
+            while True:
+                self._raise_if_shutdown()
+                live_response = None
+                try:
+                    self.redis.ping()
 
-                # Abre o SSE antes do snapshot. Eventos posteriores ficam bufferizados no socket
-                # enquanto as barreiras são concluídas; nenhum intervalo fica sem cobertura.
-                live_response = self._open_live_stream()
+                    # Abre o SSE antes do snapshot. Eventos posteriores ficam bufferizados no socket
+                    # enquanto as barreiras são concluídas; nenhum intervalo fica sem cobertura.
+                    live_response = self._open_live_stream()
 
-                # Se o Node já está pronto, invalida a continuidade antiga imediatamente.
-                # Se ainda está subindo, o snapshot abaixo alimenta o bootstrap primeiro.
-                self._try_notify_pending_interruption(emit_success=True)
-                self.sync_history()
-                self._await_pending_interruption_ack()
+                    # Se o Node já está pronto, invalida a continuidade antiga imediatamente.
+                    # Se ainda está subindo, o snapshot abaixo alimenta o bootstrap primeiro.
+                    self._try_notify_pending_interruption(emit_success=True)
+                    self.sync_history()
+                    self._await_pending_interruption_ack()
 
-                # Barreira FINAL: ID único impede ACK antigo ou de outro processo Node de liberar live.
-                barrier_id = f"hist-{os.getpid()}-{uuid.uuid4().hex}"
-                final_sync = self.sync_history(
-                    quiet_if_unchanged=True,
-                    force_publish=True,
-                    barrier_id=barrier_id,
-                )
-                self._await_history_application_ack(
-                    final_sync["signature"],
-                    barrier_id,
-                    final_sync["published_at"],
-                )
+                    # Barreira FINAL: ID único impede ACK antigo ou de outro processo Node de liberar live.
+                    barrier_id = f"hist-{os.getpid()}-{uuid.uuid4().hex}"
+                    final_sync = self.sync_history(
+                        quiet_if_unchanged=True,
+                        force_publish=True,
+                        barrier_id=barrier_id,
+                    )
+                    self._await_history_application_ack(
+                        final_sync["signature"],
+                        barrier_id,
+                        final_sync["published_at"],
+                    )
 
-                # Só depois de interrupção + histórico + consumidores críticos confirmados
-                # o buffer SSE é drenado para Redis live.
-                self.listen_live(live_response)
-            except KeyboardInterrupt:
-                self._notify_interruption_best_effort("MANUTENCAO_COLETOR", force=True)
-                print("\n👋 Coletor Bac Bo encerrado pelo operador.")
-                return
-            except Exception as exc:
-                self._notify_interruption_best_effort("FLUXO_COLETOR_INTERROMPIDO")
-                print(
-                    "⚠️ BAC BO/REDIS | fluxo interrompido; "
-                    f"nova sincronização em {RECONNECT_DELAY_SECONDS}s | "
-                    f"{type(exc).__name__}: {exc}"
-                )
-                time.sleep(RECONNECT_DELAY_SECONDS)
-            finally:
-                if live_response is not None:
-                    try:
-                        live_response.close()
-                    except Exception:
-                        pass
+                    # Só depois de interrupção + histórico + consumidores críticos confirmados
+                    # o buffer SSE é drenado para Redis live.
+                    self.listen_live(live_response)
+                except CollectorShutdownRequested:
+                    break
+                except KeyboardInterrupt:
+                    self._shutdown_event.set()
+                    break
+                except Exception as exc:
+                    if self._shutdown_event.is_set():
+                        break
+                    self._notify_interruption_best_effort("FLUXO_COLETOR_INTERROMPIDO")
+                    print(
+                        "⚠️ BAC BO/REDIS | fluxo interrompido; "
+                        f"nova sincronização em {RECONNECT_DELAY_SECONDS}s | "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    self._wait_or_shutdown(RECONNECT_DELAY_SECONDS)
+                finally:
+                    if live_response is not None:
+                        if self._active_live_response is live_response:
+                            self._active_live_response = None
+                        try:
+                            live_response.close()
+                        except Exception:
+                            pass
+        except CollectorShutdownRequested:
+            self._shutdown_event.set()
+        finally:
+            if self._shutdown_event.is_set():
+                self._finalize_operator_shutdown()
+            else:
+                self._close_resources()
 
 
 def main():
-    TipMinerCollector().run_forever()
+    collector = TipMinerCollector()
+    collector.install_shutdown_handlers()
+    collector.run_forever()
 
 
 if __name__ == "__main__":
