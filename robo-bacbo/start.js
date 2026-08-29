@@ -9,6 +9,7 @@ require('./telegram_signal_presenter').instalarTelegramSignalPresenter();
 require('./telegram_signal_lifecycle').instalarTelegramSignalLifecycle();
 const { prepararSchemaMesas } = require('./mesa_schema');
 const { prepararEscopoHistoricoMesaAtual } = require('./mesa_scope_migration');
+const { definirMesaRuntime } = require('./mesa_runtime_context');
 
 async function iniciar() {
     const canonicalBridge = require('./bacbo_canonical_bridge');
@@ -46,10 +47,15 @@ async function iniciar() {
         console.log(`🔒 BOOTSTRAP | histórico consolidado | janela=${estadoHistorico.janela}.`);
     }
 
-    // MC22-B/C: persiste a identidade canônica e associa somente tabelas históricas
-    // existentes à mesa atual. O runtime de sinais continua single-mesa neste checkpoint.
+    // MC22-B/C/F/G/H: persiste a identidade, associa os dados legados e fixa a mesa
+    // deste processo antes de carregar o backend principal. Ainda existe somente BACBO_INT.
     const mesaAtual = await prepararSchemaMesas();
     await prepararEscopoHistoricoMesaAtual(mesaAtual);
+    const mesaRuntime = definirMesaRuntime(mesaAtual);
+    console.log(
+        `🧭 MC22-H | Runtime fixado em ${mesaRuntime.codigo} `
+        + `(${mesaRuntime.tipo_jogo}) | id=${mesaRuntime.id}.`
+    );
 
     // Registra a IA como consumidor crítico da barreira FINAL antes da criação do serviço.
     // O coletor só recebe ACK final depois que essa revalidação termina.
