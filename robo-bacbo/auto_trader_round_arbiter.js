@@ -96,6 +96,18 @@ function criarArbitroFinanceiroAutoTrader(deps = {}) {
         return `${mesaRuntime.id}:${Number(traderId)}`;
     }
 
+    async function traderPertenceMesaAtual(traderId) {
+        const [linhas] = await dbPool.query(
+            `SELECT mesa_id
+             FROM auto_traders
+             WHERE id=?
+             LIMIT 1`,
+            [Number(traderId)]
+        );
+        if (!Array.isArray(linhas) || linhas.length !== 1) return false;
+        return Number(linhas[0].mesa_id) === Number(mesaRuntime.id);
+    }
+
     async function listarOrdensFinanceirasEmAbertoTrader(traderId) {
         const [linhas] = await dbPool.query(
             `SELECT id, estrategia_id, status_ordem, executor_order_id
@@ -165,6 +177,13 @@ function criarArbitroFinanceiroAutoTrader(deps = {}) {
         }
 
         try {
+            if (!(await traderPertenceMesaAtual(traderId))) {
+                log.warn(
+                    `⛔ MC22-M | Trader ${traderId} não pertence à mesa ${mesaRuntime.codigo}; `
+                    + 'entrada financeira bloqueada.'
+                );
+                return false;
+            }
             if (!trader.ativo || trader.status_operacao !== 'OPERANDO') return false;
 
             const cf = trader.config || {};
@@ -176,7 +195,10 @@ function criarArbitroFinanceiroAutoTrader(deps = {}) {
             if (cf.limite_entradas && trader.entradas_feitas >= cf.limite_entradas) {
                 trader.status_operacao = 'META_ATINGIDA';
                 try {
-                    await dbPool.query('UPDATE auto_traders SET status_operacao=? WHERE id=?', ['META_ATINGIDA', trader.id]);
+                    await dbPool.query(
+                        'UPDATE auto_traders SET status_operacao=? WHERE id=? AND mesa_id=?',
+                        ['META_ATINGIDA', trader.id, mesaRuntime.id]
+                    );
                 } catch (e) {
                     log.error(`❌ Falha ao persistir META_ATINGIDA do trader ${trader.id}:`, e.message);
                 }
@@ -237,7 +259,13 @@ function criarArbitroFinanceiroAutoTrader(deps = {}) {
                 try {
                     await conexao.beginTransaction();
                     const novasEntradas = trader.entradas_feitas + 1;
-                    await conexao.query('UPDATE auto_traders SET entradas_feitas=? WHERE id=?', [novasEntradas, trader.id]);
+                    const [traderAtualizado] = await conexao.query(
+                        'UPDATE auto_traders SET entradas_feitas=? WHERE id=? AND mesa_id=?',
+                        [novasEntradas, trader.id, mesaRuntime.id]
+                    );
+                    if (Number(traderAtualizado.affectedRows) !== 1) {
+                        throw new Error('Auto-Trader não pertence à mesa atual ao confirmar entrada DIRETO');
+                    }
                     const [auditoriaAtualizada] = await conexao.query(
                         `UPDATE auditoria_ordens
                          SET status_ordem='PENDENTE', executor_confirmacao_metodo=?,
@@ -296,6 +324,13 @@ function criarArbitroFinanceiroAutoTrader(deps = {}) {
         for (const registro of mapa.porTrader.values()) {
             const trader = deps.listarTraders().find(item => Number(item.id) === Number(registro.trader_id));
             if (!trader || !trader.ativo || trader.status_operacao !== 'OPERANDO') continue;
+            if (!(await traderPertenceMesaAtual(trader.id))) {
+                log.warn(
+                    `⛔ MC22-M | Trader ${trader.id} ignorado pelo árbitro: `
+                    + `não pertence à mesa ${mesaRuntime.codigo}.`
+                );
+                continue;
+            }
 
             const candidatosAtuais = registro.candidatos.filter(candidato =>
                 candidato?.est
