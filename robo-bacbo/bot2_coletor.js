@@ -27,6 +27,7 @@ const {
     aplicarEstadoCiclo
 } = require("./auto_trader");
 const { criarArbitroFinanceiroAutoTrader } = require("./auto_trader_round_arbiter");
+const { obterMesaRuntime } = require("./mesa_runtime_context");
 require("./env_loader").loadEnvFile(path.join(__dirname, "..", ".env"));
 
 // Erros globais realmente não tratados são fatais: continuar pode deixar estado financeiro incoerente.
@@ -4721,21 +4722,24 @@ function avaliarLimitesFinanceirosTrader(trader, snapshotSaldo) {
 }
 
 async function traderPossuiLiquidacaoPendente(traderId) {
+    const mesaRuntime = obterMesaRuntime();
     const [linhas] = await dbPool.query(
         `SELECT id
          FROM auditoria_ordens
          WHERE trader_id=?
+           AND mesa_id=?
            AND status_ordem IN ('WIN','LOSS','TIE')
            AND resultado_confirmado_em IS NOT NULL
            AND saldo_pos_confirmado_em IS NULL
          ORDER BY id DESC
          LIMIT 1`,
-        [traderId]
+        [traderId, mesaRuntime.id]
     );
     return linhas.length > 0;
 }
 
 async function confirmarSaldosPosLiquidacao(saldo, sincronizadoEm = Date.now()) {
+    const mesaRuntime = obterMesaRuntime();
     const saldoNumero = Number(saldo);
     const syncMs = Number(sincronizadoEm);
     if (
@@ -4751,12 +4755,13 @@ async function confirmarSaldosPosLiquidacao(saldo, sincronizadoEm = Date.now()) 
     const [linhas] = await dbPool.query(
         `SELECT id
          FROM auditoria_ordens
-         WHERE status_ordem IN ('WIN','LOSS','TIE')
+         WHERE mesa_id=?
+           AND status_ordem IN ('WIN','LOSS','TIE')
            AND resultado_confirmado_em IS NOT NULL
            AND resultado_confirmado_em < ?
            AND saldo_pos_confirmado_em IS NULL
          ORDER BY id ASC`,
-        [syncConfirmadoEm]
+        [mesaRuntime.id, syncConfirmadoEm]
     );
 
     const ids = linhas
@@ -4769,9 +4774,10 @@ async function confirmarSaldosPosLiquidacao(saldo, sincronizadoEm = Date.now()) 
         `UPDATE auditoria_ordens
          SET saldo_pos=?, saldo_pos_confirmado_em=?
          WHERE id IN (${placeholders})
+           AND mesa_id=?
            AND saldo_pos_confirmado_em IS NULL
            AND resultado_confirmado_em < ?`,
-        [saldoNumero, syncConfirmadoEm, ...ids, syncConfirmadoEm]
+        [saldoNumero, syncConfirmadoEm, ...ids, mesaRuntime.id, syncConfirmadoEm]
     );
 
     const confirmadas = Math.max(0, Number(resultado.affectedRows) || 0);
