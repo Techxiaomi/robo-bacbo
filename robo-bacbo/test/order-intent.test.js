@@ -9,6 +9,16 @@ const vm = require("node:vm");
 const backendPath = path.join(__dirname, "..", "bot2_coletor.js");
 const source = fs.readFileSync(backendPath, "utf8").replace(/\r\n/g, "\n");
 
+const arbiterPath = path.join(
+    __dirname,
+    "..",
+    "auto_trader_round_arbiter.js"
+);
+const arbiterSource = fs.readFileSync(
+    arbiterPath,
+    "utf8"
+).replace(/\r\n/g, "\n");
+
 function carregarTransporte(fetchImpl, executionTimeout = 60) {
     const inicio = source.indexOf("function criarEsperaResultadoExecutor");
     const fim = source.indexOf("async function criarIntencaoOrdem", inicio);
@@ -156,12 +166,23 @@ test("callback FALHOU vira FALHA_EXECUCAO e callback EXPIRADA vira ORDEM_EXPIRAD
 });
 
 test("DIRETO e GALE continuam persistindo PREPARANDO antes do POST ao executor", () => {
-    const diretoIntent = source.indexOf("intencaoDireto = await criarIntencaoOrdem(dbPool");
-    const diretoSend = source.indexOf(
-        "const confirmacaoExecutorDireto = await enviarOrdemAoExecutor(",
+    const diretoIntent = arbiterSource.indexOf(
+        "intencaoDireto = await deps.criarIntencaoOrdem(conexaoIntencao"
+    );
+    const diretoCommit = arbiterSource.indexOf(
+        "await conexaoIntencao.commit();",
         diretoIntent
     );
-    assert.ok(diretoIntent >= 0 && diretoSend > diretoIntent);
+    const diretoSend = arbiterSource.indexOf(
+        "const confirmacaoExecutorDireto = await deps.enviarOrdemAoExecutor(",
+        diretoIntent
+    );
+
+    assert.ok(
+        diretoIntent >= 0
+        && diretoCommit > diretoIntent
+        && diretoSend > diretoCommit
+    );
 
     const galeIntent = source.indexOf("intencaoGale = await criarIntencaoOrdem(conexaoGale");
     const galeCommit = source.indexOf("await conexaoGale.commit();", galeIntent);

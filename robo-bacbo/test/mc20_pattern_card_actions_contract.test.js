@@ -62,7 +62,7 @@ test('MC20: lixeira possui ação frontend real', () => {
 test('MC20: backend impede exclusão individual de padrão dinâmico', () => {
     assert.match(
         backend,
-        /SELECT id, nome, is_dinamico FROM estrategias WHERE id=\? LIMIT 1/
+        /SELECT id, nome, is_dinamico FROM estrategias WHERE id=\? AND mesa_id=\? LIMIT 1/
     );
 
     assert.match(
