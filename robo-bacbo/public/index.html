@@ -12,6 +12,7 @@
     <script src="/mesa-switcher.js"></script>
     <script src="/dom-ui2-transform.js"></script>
     <script src="/bacbo-result-map.js"></script>
+    <script src="/bacbo-result-sum-integrity.js"></script>
     <script src="/backtest-ui3-transform.js"></script>
     <script src="/resources-ui4.js"></script>
     <script src="/telegram-form-ui.js"></script>
@@ -55,6 +56,9 @@
                 }
                 if (!window.__bacboResultMap?.render) {
                     throw new Error('Componente Mapa Bac Bo não carregado');
+                }
+                if (window.__mc27ResultSumIntegrityReady !== true) {
+                    throw new Error('Integridade numérica MC27 do Mapa Bac Bo não carregada');
                 }
                 if (window.__backtestUi3Ready !== true || typeof window.otimizarScriptPrincipalUI3 !== 'function') {
                     throw new Error('Transformador Backtest UI-3 não carregado');
