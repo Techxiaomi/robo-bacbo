@@ -4,6 +4,9 @@ const fs = require("fs");
 const path = require("path");
 const util = require("util");
 const metricasRuntime = require("./metrics");
+const {
+    nomeArquivoEscopadoPorMesa
+} = require("./mesa_operational_scope");
 
 let instalado = false;
 let ultimoAvisoFalhaEm = 0;
@@ -165,7 +168,11 @@ function configLogging(opcoes = {}) {
         : path.join(baseDir, "logs");
 
     const nomeArquivoBruto = String(env.LOG_FILE_NAME || "backend.jsonl").trim() || "backend.jsonl";
-    const nomeArquivo = path.basename(nomeArquivoBruto);
+    const nomeArquivo =
+        nomeArquivoEscopadoPorMesa(
+            nomeArquivoBruto,
+            env
+        );
 
     return {
         enabled: booleanoConfig(env.LOG_FILE_ENABLED, true),

@@ -28,6 +28,9 @@ const {
 } = require("./auto_trader");
 const { criarArbitroFinanceiroAutoTrader } = require("./auto_trader_round_arbiter");
 const { obterMesaRuntime } = require("./mesa_runtime_context");
+const {
+    nomeCookieEscopadoPorMesa
+} = require("./mesa_operational_scope");
 require("./env_loader").loadEnvFile(path.join(__dirname, "..", ".env"));
 
 // Erros globais realmente não tratados são fatais: continuar pode deixar estado financeiro incoerente.
@@ -676,7 +679,11 @@ const ADMIN_SESSION_TTL_MS = (
         ? adminSessionTtlMinutesConfig
         : 720
 ) * 60 * 1000;
-const ADMIN_SESSION_COOKIE = 'bacbo_admin_session';
+const ADMIN_SESSION_COOKIE =
+    nomeCookieEscopadoPorMesa(
+        'bacbo_admin_session',
+        process.env
+    );
 const adminCookieSecureConfig = String(process.env.ADMIN_COOKIE_SECURE || '').trim().toLowerCase();
 const ADMIN_COOKIE_SECURE = adminCookieSecureConfig === 'true'
     || (adminCookieSecureConfig !== 'false' && !hostNodeEhLoopback(NODE_HOST));

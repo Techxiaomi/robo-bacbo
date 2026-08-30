@@ -3,6 +3,9 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { monitorEventLoopDelay } = require("node:perf_hooks");
+const {
+    nomeArquivoEscopadoPorMesa
+} = require("./mesa_operational_scope");
 
 let instalado = false;
 let intervaloAtivo = null;
@@ -60,7 +63,13 @@ function configMetricas(opcoes = {}) {
 
     return {
         enabled: booleanoConfig(env.METRICS_ENABLED, true),
-        filePath: path.join(metricsDir, path.basename(nomeBruto)),
+        filePath: path.join(
+            metricsDir,
+            nomeArquivoEscopadoPorMesa(
+                nomeBruto,
+                env
+            )
+        ),
         intervalMs: inteiroConfig(env.METRICS_INTERVAL_SECONDS, 15, 5, 300) * 1000
     };
 }
