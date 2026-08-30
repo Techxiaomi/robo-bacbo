@@ -16,21 +16,40 @@ const financeiro = require(
 const root = path.join(__dirname, '..');
 
 function comMesaEnv(valor, executar) {
-    const anterior =
-        process.env.BACBO_MESA_CODIGO;
+    const anteriores = {
+        BACBO_MESA_CODIGO:
+            process.env.BACBO_MESA_CODIGO,
+        BACBO_MESA_RUNTIME_ENABLED:
+            process.env.BACBO_MESA_RUNTIME_ENABLED,
+        TIPMINER_BACBO_ROUND_ID:
+            process.env.TIPMINER_BACBO_ROUND_ID
+    };
 
     try {
         process.env.BACBO_MESA_CODIGO =
             valor;
 
+        // O contrato abaixo testa pre-ativacao.
+        // Portanto deve ser independente do ambiente
+        // usado para executar a suite.
+        delete process.env
+            .BACBO_MESA_RUNTIME_ENABLED;
+
+        delete process.env
+            .TIPMINER_BACBO_ROUND_ID;
+
         return executar();
     } finally {
-        if (anterior === undefined) {
-            delete process.env
-                .BACBO_MESA_CODIGO;
-        } else {
-            process.env.BACBO_MESA_CODIGO =
-                anterior;
+        for (
+            const [chave, valorAnterior]
+            of Object.entries(anteriores)
+        ) {
+            if (valorAnterior === undefined) {
+                delete process.env[chave];
+            } else {
+                process.env[chave] =
+                    valorAnterior;
+            }
         }
     }
 }

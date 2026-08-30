@@ -69,6 +69,28 @@ async function prepararSchemaMesas() {
             }
         }
 
+        // MC23-A:
+        // Se chegamos aqui com uma mesa de ativacao explicita,
+        // mesaConfigurada() ja validou:
+        // - BACBO_MESA_RUNTIME_ENABLED=1
+        // - round TipMiner presente e UUID valido
+        // - ausencia de reutilizacao do round conhecido da INT
+        //
+        // Portanto o proprio startup operacional pode ativar
+        // a identidade persistida selecionada, eliminando SQL
+        // manual. Isto NAO concede autorizacao financeira.
+        if (
+            mesa.runtime_ativacao_explicita
+                === true
+        ) {
+            await conexao.query(
+                `UPDATE mesas
+                 SET ativo=true
+                 WHERE codigo=?`,
+                [mesa.codigo]
+            );
+        }
+
         const [linhas] = await conexao.query(
             `SELECT id, codigo, nome, tipo_jogo, ativo
              FROM mesas
