@@ -1,14 +1,14 @@
 'use strict';
 
 const mysql = require('mysql2/promise');
-const { mesaPadrao } = require('./mesa_context');
+const { mesaConfigurada } = require('./mesa_context');
 
 // MC22-B — persistência mínima e aditiva da identidade da mesa atual.
-// Não migra tabelas operacionais, não cria BACBO_BR e não altera o runtime de sinais.
+// Nao migra tabelas operacionais, nao registra segunda mesa e nao altera o runtime de sinais.
 // O objetivo deste checkpoint é apenas garantir que BACBO_INT exista como entidade
 // persistida antes de começarmos a introduzir mesa_id nos domínios existentes.
 async function prepararSchemaMesas() {
-    const mesa = mesaPadrao();
+    const mesa = mesaConfigurada();
     const conexao = await mysql.createConnection({
         host: process.env.DB_HOST,
         port: Number(process.env.DB_PORT || 3306),

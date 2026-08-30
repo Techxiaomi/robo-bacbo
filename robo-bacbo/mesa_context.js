@@ -30,6 +30,21 @@ function resolverMesaConhecida(valor = MESA_PADRAO_CODIGO) {
     return mesa;
 }
 
+function codigoMesaConfigurada() {
+    const codigo = normalizarCodigoMesa(
+        process.env.BACBO_MESA_CODIGO
+        || MESA_PADRAO_CODIGO
+    );
+
+    return codigo || MESA_PADRAO_CODIGO;
+}
+
+function mesaConfigurada() {
+    return resolverMesaConhecida(
+        codigoMesaConfigurada()
+    );
+}
+
 function mesaPadrao() {
     return MESAS_CONHECIDAS[MESA_PADRAO_CODIGO];
 }
@@ -40,5 +55,7 @@ module.exports = {
     MESAS_CONHECIDAS,
     normalizarCodigoMesa,
     resolverMesaConhecida,
+    codigoMesaConfigurada,
+    mesaConfigurada,
     mesaPadrao
 };

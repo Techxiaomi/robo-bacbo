@@ -1,6 +1,6 @@
 'use strict';
 
-const { mesaPadrao } = require('./mesa_context');
+const { mesaConfigurada } = require('./mesa_context');
 const { obterMesaRuntime } = require('./mesa_runtime_context');
 
 let instalado = false;
@@ -38,7 +38,7 @@ function normalizar(valor) {
 }
 
 function mesaCanonicaRuntime() {
-    const declarada = mesaPadrao();
+    const declarada = mesaConfigurada();
     const runtime = obterMesaRuntime();
 
     if (runtime.codigo !== declarada.codigo || runtime.tipo_jogo !== declarada.tipo_jogo) {
@@ -134,7 +134,7 @@ function instalarMesaNoTransporteLive() {
     };
 
     instalado = true;
-    const mesa = mesaPadrao();
+    const mesa = mesaConfigurada();
     console.log(`🧭 MC22-I | Transporte live identificado como ${mesa.codigo} (${mesa.tipo_jogo}).`);
     return true;
 }
