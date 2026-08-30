@@ -9,6 +9,7 @@ const loaderHtml = fs.readFileSync(path.join(root, 'public', 'index.html'), 'utf
 const appHtml = fs.readFileSync(path.join(root, 'public', 'dashboard-app.html'), 'utf8');
 const dashboardJs = fs.readFileSync(path.join(root, 'public', 'dashboard-ui.js'), 'utf8');
 const enhancementsJs = fs.readFileSync(path.join(root, 'public', 'ui-enhancements.js'), 'utf8');
+const resourcesJs = fs.readFileSync(path.join(root, 'public', 'resources-ui4.js'), 'utf8');
 const backend = fs.readFileSync(path.join(root, 'bot2_coletor.js'), 'utf8');
 
 function criarElemento(valor = '') {
@@ -45,8 +46,19 @@ function criarSandboxDashboard(fetchImpl) {
         return botao;
     });
 
+    class AbortControllerFake {
+        constructor() {
+            this.signal = {};
+        }
+
+        abort() {
+            this.signal.aborted = true;
+        }
+    }
+
     const sandbox = {
         window: { getCor: () => '#28a745' },
+        AbortController: AbortControllerFake,
         document: {
             getElementById: id => elementos[id] || null,
             querySelectorAll: seletor => seletor === '.btn-dash' ? botoes : []
@@ -65,26 +77,89 @@ function criarSandboxDashboard(fetchImpl) {
     return { sandbox, elementos, botoes };
 }
 
-test('BUG-017: loader elimina document.write e fixa a ordem das dependencias criticas', () => {
+test('BUG-017/UI-4: bootstrap mantem apenas dependencias criticas e assets pesados lazy', () => {
     assert.doesNotMatch(loaderHtml, /document\.open\(\)/);
     assert.doesNotMatch(loaderHtml, /document\.write\(/);
     assert.doesNotMatch(loaderHtml, /document\.close\(\)/);
 
-    const posChart = loaderHtml.indexOf('cdn.jsdelivr.net/npm/chart.js');
-    const posPdf = loaderHtml.indexOf('html2pdf.bundle.min.js');
     const posSocket = loaderHtml.indexOf('/socket.io/socket.io.js');
     const posDashboard = loaderHtml.indexOf('/dashboard-ui.js');
-    assert.ok(posChart >= 0, 'Chart.js ausente');
-    assert.ok(posPdf > posChart, 'html2pdf deve carregar depois do Chart.js');
-    assert.ok(posSocket > posPdf, 'Socket.IO deve carregar antes da aplicacao');
-    assert.ok(posDashboard > posSocket, 'dashboard-ui deve carregar depois do Socket.IO');
+    const posResources = loaderHtml.indexOf('/resources-ui4.js');
 
-    assert.match(loaderHtml, /new DOMParser\(\)\.parseFromString\(html, 'text\/html'\)/);
-    assert.match(loaderHtml, /querySelectorAll\('script:not\(\[src\]\)'\)/);
-    assert.match(loaderHtml, /codigo\.includes\('const socketWeb = io\(\);'\)/);
-    assert.match(loaderHtml, /parsed\.querySelectorAll\('script'\)\.forEach\(script => script\.remove\(\)\)/);
-    assert.match(loaderHtml, /document\.body\.replaceChildren\(/);
-    assert.match(loaderHtml, /script\.textContent = scriptPrincipal/);
+    assert.ok(posSocket >= 0, 'Socket.IO ausente');
+    assert.ok(
+        posDashboard > posSocket,
+        'dashboard-ui deve carregar depois do Socket.IO'
+    );
+    assert.ok(
+        posResources > posDashboard,
+        'resources-ui4 deve carregar depois do dashboard'
+    );
+
+    assert.doesNotMatch(
+        loaderHtml,
+        /cdn\.jsdelivr\.net\/npm\/chart\.js/
+    );
+
+    assert.doesNotMatch(
+        loaderHtml,
+        /html2pdf\.bundle\.min\.js/
+    );
+
+    assert.match(
+        resourcesJs,
+        /const CHART_JS_URL =/
+    );
+
+    assert.match(
+        resourcesJs,
+        /const HTML2PDF_URL =/
+    );
+
+    assert.match(
+        resourcesJs,
+        /function carregarChartJsUI4\(\)/
+    );
+
+    assert.match(
+        resourcesJs,
+        /function carregarHtml2PdfUI4\(\)/
+    );
+
+    assert.match(
+        loaderHtml,
+        /new DOMParser\(\)\.parseFromString\(html, 'text\/html'\)/
+    );
+
+    assert.match(
+        loaderHtml,
+        /querySelectorAll\('script:not\(\[src\]\)'\)/
+    );
+
+    assert.match(
+        loaderHtml,
+        /codigo\.includes\('const socketWeb = io\(\);'\)/
+    );
+
+    assert.match(
+        loaderHtml,
+        /parsed\.querySelectorAll\('script'\)\.forEach\(script => script\.remove\(\)\)/
+    );
+
+    assert.match(
+        loaderHtml,
+        /document\.body\.replaceChildren\(/
+    );
+
+    assert.match(
+        loaderHtml,
+        /window\.otimizarScriptPrincipalUI4\(scriptPrincipalUi3\)/
+    );
+
+    assert.match(
+        loaderHtml,
+        /script\.textContent = scriptPrincipalOtimizado/
+    );
 });
 
 test('BUG-017: seletores e card de sinal continuam ligados ao ciclo principal da aplicacao', () => {

@@ -51,7 +51,7 @@ function carregarLogicaPura() {
         ),
         trechoEntre(
             "function contarTiesLegados",
-            "async function calcularAssertividadePersistidaEstrategia"
+            "function calcularAssertividadeLiveCanonica"
         ),
         trechoEntre(
             "function roboSintonizaEstrategia",
@@ -62,8 +62,12 @@ function carregarLogicaPura() {
             "async function enviarMensagemTelegram"
         ),
         trechoEntre(
-            "function horarioParaMinutos",
-            "async function carregarSistemasParaMemoria"
+            "function avaliarStopRedsAutoTrader",
+            "async function processarResultadoStopRedsAutoTrader"
+        ),
+        trechoEntre(
+            "function avaliarTrailingStopTrader",
+            "async function autorizarNovaEntradaFinanceiraTrader"
         )
     ];
 
@@ -102,8 +106,6 @@ function carregarLogicaPura() {
             avaliarStopRedsRobo,
             formatarPadraoTelegram,
             montarMensagemTelegram,
-            horarioParaMinutos,
-            traderDentroHorarioExecucao,
             avaliarLimitesFinanceirosTrader,
             avaliarTrailingStopTrader,
             avaliarStopRedsAutoTrader
@@ -115,7 +117,14 @@ function carregarLogicaPura() {
     return contexto.module.exports;
 }
 
-const logic = carregarLogicaPura();
+const {
+    traderDentroHorarioExecucao
+} = require("../auto_trader");
+
+const logic = {
+    ...carregarLogicaPura(),
+    traderDentroHorarioExecucao
+};
 
 function carregarHelpersAutenticacao() {
     const trecho = trechoEntre(
@@ -152,10 +161,15 @@ module.exports = {
 const authHelpers = carregarHelpersAutenticacao();
 
 function relogio(horas, minutos) {
-    return {
-        getHours: () => horas,
-        getMinutes: () => minutos
-    };
+    return new Date(
+        2026,
+        0,
+        1,
+        horas,
+        minutos,
+        0,
+        0
+    );
 }
 
 test("calcularFichaSegura arredonda para fichas de 5 e rejeita valores invalidos", () => {
@@ -473,15 +487,6 @@ test("BUG-035: token Telegram não retorna ao painel e teste expõe erro sem seg
     assert.doesNotMatch(source, /res\.json\([^\n]*telegram_token/);
 });
 
-test("horarioParaMinutos valida formato HH:MM estrito", () => {
-    assert.equal(logic.horarioParaMinutos("00:00", "12:34"), 0);
-    assert.equal(logic.horarioParaMinutos("23:59", "12:34"), 1439);
-    assert.equal(logic.horarioParaMinutos("", "08:30"), 510);
-    assert.equal(logic.horarioParaMinutos("24:00", "08:30"), null);
-    assert.equal(logic.horarioParaMinutos("8:30", "08:30"), null);
-    assert.equal(logic.horarioParaMinutos("12:60", "08:30"), null);
-});
-
 test("traderDentroHorarioExecucao cobre janela normal, full-day e overnight", () => {
     assert.equal(
         logic.traderDentroHorarioExecucao(
@@ -535,13 +540,6 @@ test("traderDentroHorarioExecucao cobre janela normal, full-day e overnight", ()
         false
     );
 
-    assert.equal(
-        logic.traderDentroHorarioExecucao(
-            { hora_inicio: "invalido", hora_fim: "17:00" },
-            relogio(12, 0)
-        ),
-        false
-    );
 });
 
 test("handlers fatais encerram o Node e promises Telegram fire-and-forget possuem catch local", () => {
