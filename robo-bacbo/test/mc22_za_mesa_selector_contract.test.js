@@ -69,12 +69,29 @@ test('MC22-Z-A: mesa nao cadastrada continua fail-closed', () => {
     });
 });
 
-test('MC22-Z-A: catalogo continua contendo somente a mesa internacional', () => {
+test('MC22-Z-A: catalogo preserva INT e conhece BR sem habilitar runtime', () => {
     assert.deepEqual(
         Object.keys(
             mesaContext.MESAS_CONHECIDAS
         ),
-        ['BACBO_INT']
+        [
+            'BACBO_INT',
+            'BACBO_BR'
+        ]
+    );
+
+    assert.equal(
+        mesaContext.MESAS_CONHECIDAS
+            .BACBO_INT
+            .runtime_habilitado,
+        true
+    );
+
+    assert.equal(
+        mesaContext.MESAS_CONHECIDAS
+            .BACBO_BR
+            .runtime_habilitado,
+        false
     );
 });
 

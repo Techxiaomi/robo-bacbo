@@ -188,7 +188,7 @@ test('MC22-Z-C: sessao administrativa usa cookie escopado pela mesa', () => {
     );
 });
 
-test('MC22-Z-C: segunda mesa continua nao registrada e Redis financeiro permanece global', () => {
+test('MC22-Z-C: identidade BR conhecida preserva Redis financeiro global', () => {
     const mesaContext = fs.readFileSync(
         path.join(root, 'mesa_context.js'),
         'utf8'
@@ -211,7 +211,7 @@ test('MC22-Z-C: segunda mesa continua nao registrada e Redis financeiro permanec
         mesaContext.includes(
             codigoSegundaMesa
         ),
-        false
+        true
     );
 
     assert.match(

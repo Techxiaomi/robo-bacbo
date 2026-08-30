@@ -6,12 +6,23 @@
 
 const TIPO_JOGO_BACBO = 'BACBO';
 const MESA_PADRAO_CODIGO = 'BACBO_INT';
+const MESA_BR_CODIGO = 'BACBO_BR';
 
 const MESAS_CONHECIDAS = Object.freeze({
     [MESA_PADRAO_CODIGO]: Object.freeze({
         codigo: MESA_PADRAO_CODIGO,
         nome: 'Bac Bo Live Internacional',
-        tipo_jogo: TIPO_JOGO_BACBO
+        tipo_jogo: TIPO_JOGO_BACBO,
+        runtime_habilitado: true,
+        ativo_persistido: true
+    }),
+
+    [MESA_BR_CODIGO]: Object.freeze({
+        codigo: MESA_BR_CODIGO,
+        nome: 'Bac Bo Brasil',
+        tipo_jogo: TIPO_JOGO_BACBO,
+        runtime_habilitado: false,
+        ativo_persistido: false
     })
 });
 
@@ -30,6 +41,29 @@ function resolverMesaConhecida(valor = MESA_PADRAO_CODIGO) {
     return mesa;
 }
 
+function afirmarMesaRuntimeHabilitada(mesa) {
+    if (
+        !mesa
+        || mesa.runtime_habilitado !== true
+    ) {
+        const codigo = normalizarCodigoMesa(
+            mesa?.codigo
+        );
+
+        const erro = new Error(
+            `Mesa conhecida, mas ainda nao habilitada no runtime: `
+            + `${codigo || '<vazia>'}`
+        );
+
+        erro.code =
+            'MESA_RUNTIME_NAO_HABILITADA';
+
+        throw erro;
+    }
+
+    return mesa;
+}
+
 function codigoMesaConfigurada() {
     const codigo = normalizarCodigoMesa(
         process.env.BACBO_MESA_CODIGO
@@ -40,8 +74,10 @@ function codigoMesaConfigurada() {
 }
 
 function mesaConfigurada() {
-    return resolverMesaConhecida(
-        codigoMesaConfigurada()
+    return afirmarMesaRuntimeHabilitada(
+        resolverMesaConhecida(
+            codigoMesaConfigurada()
+        )
     );
 }
 
@@ -52,9 +88,11 @@ function mesaPadrao() {
 module.exports = {
     TIPO_JOGO_BACBO,
     MESA_PADRAO_CODIGO,
+    MESA_BR_CODIGO,
     MESAS_CONHECIDAS,
     normalizarCodigoMesa,
     resolverMesaConhecida,
+    afirmarMesaRuntimeHabilitada,
     codigoMesaConfigurada,
     mesaConfigurada,
     mesaPadrao

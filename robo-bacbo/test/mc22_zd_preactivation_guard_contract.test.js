@@ -151,17 +151,12 @@ test('MC22-Z-D: atualizacoes de saldo persistem somente na mesa runtime', () => 
     );
 });
 
-test('MC22-Z-D: segunda mesa continua nao cadastrada e canais financeiros seguem globais', () => {
-    const mesaContext = fs.readFileSync(
-        path.join(root, 'mesa_context.js'),
-        'utf8'
-    );
-
+test('MC22-Z-D: BACBO_BR conhecida continua financeiramente bloqueada e canais globais', () => {
     const codigoSegundaMesa =
         ['BACBO', 'BR'].join('_');
 
     assert.equal(
-        mesaContext.includes(
+        financeiro.mesaFinanceiraPermitida(
             codigoSegundaMesa
         ),
         false

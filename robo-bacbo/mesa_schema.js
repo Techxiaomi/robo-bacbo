@@ -1,7 +1,10 @@
 'use strict';
 
 const mysql = require('mysql2/promise');
-const { mesaConfigurada } = require('./mesa_context');
+const {
+    MESAS_CONHECIDAS,
+    mesaConfigurada
+} = require('./mesa_context');
 
 // MC22-B — persistência mínima e aditiva da identidade da mesa atual.
 // Nao migra tabelas operacionais, nao registra segunda mesa e nao altera o runtime de sinais.
@@ -32,14 +35,38 @@ async function prepararSchemaMesas() {
             )
         `);
 
-        await conexao.query(
-            `INSERT INTO mesas (codigo, nome, tipo_jogo, ativo)
-             VALUES (?, ?, ?, true)
-             ON DUPLICATE KEY UPDATE
-                 nome=VALUES(nome),
-                 tipo_jogo=VALUES(tipo_jogo)`,
-            [mesa.codigo, mesa.nome, mesa.tipo_jogo]
-        );
+        for (
+            const conhecida
+            of Object.values(MESAS_CONHECIDAS)
+        ) {
+            await conexao.query(
+                `INSERT INTO mesas
+                    (codigo, nome, tipo_jogo, ativo)
+                 VALUES (?, ?, ?, ?)
+                 ON DUPLICATE KEY UPDATE
+                     nome=VALUES(nome),
+                     tipo_jogo=VALUES(tipo_jogo)`,
+                [
+                    conhecida.codigo,
+                    conhecida.nome,
+                    conhecida.tipo_jogo,
+                    conhecida.ativo_persistido === true
+                ]
+            );
+
+            // Identidade conhecida em pre-ativacao nunca pode
+            // permanecer ativa por dado legado/manual.
+            if (
+                conhecida.runtime_habilitado !== true
+            ) {
+                await conexao.query(
+                    `UPDATE mesas
+                     SET ativo=false
+                     WHERE codigo=?`,
+                    [conhecida.codigo]
+                );
+            }
+        }
 
         const [linhas] = await conexao.query(
             `SELECT id, codigo, nome, tipo_jogo, ativo
