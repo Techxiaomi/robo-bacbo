@@ -26,6 +26,34 @@ const botSource =
         'utf8'
     );
 
+function blocoRotasOrigens() {
+    const inicio =
+        botSource.indexOf(
+            'app.get("/api/origens"'
+        );
+
+    const fim =
+        botSource.indexOf(
+            'app.get("/api/robos"',
+            inicio
+        );
+
+    assert.ok(
+        inicio >= 0,
+        'inicio das rotas de origens ausente'
+    );
+
+    assert.ok(
+        fim > inicio,
+        'fim das rotas de origens ausente'
+    );
+
+    return botSource.slice(
+        inicio,
+        fim
+    );
+}
+
 test(
     'MC23-B: fresh schema cria origens com mesa_id obrigatorio',
     () => {
@@ -69,34 +97,17 @@ test(
 test(
     'MC23-B: leitura e criacao de origens usam mesa runtime',
     () => {
-        const inicio =
-            botSource.indexOf(
-                'app.get("/api/origens"'
-            );
-
-        const fim =
-            botSource.indexOf(
-                '// ==========================================\n// 6. API: GESTÃO DE ROBÔS',
-                inicio
-            );
-
-        assert.ok(inicio >= 0);
-        assert.ok(fim > inicio);
-
         const bloco =
-            botSource.slice(
-                inicio,
-                fim
-            );
+            blocoRotasOrigens();
 
         assert.match(
             bloco,
-            /SELECT \* FROM origens WHERE mesa_id=\? ORDER BY nome ASC/
+            /FROM origens[\s\S]*?WHERE mesa_id=\?[\s\S]*?ORDER BY nome ASC/
         );
 
         assert.match(
             bloco,
-            /INSERT INTO origens \(mesa_id, nome\) VALUES \(\?, \?\)/
+            /INSERT INTO origens[\s\S]*?\(mesa_id, nome\)[\s\S]*?VALUES \(\?, \?\)/
         );
 
         assert.doesNotMatch(
@@ -114,25 +125,8 @@ test(
 test(
     'MC23-B: rename e delete nao atravessam mesas',
     () => {
-        const inicio =
-            botSource.indexOf(
-                'app.put("/api/origem/:id"'
-            );
-
-        const fim =
-            botSource.indexOf(
-                '// ==========================================\n// 6. API: GESTÃO DE ROBÔS',
-                inicio
-            );
-
-        assert.ok(inicio >= 0);
-        assert.ok(fim > inicio);
-
         const bloco =
-            botSource.slice(
-                inicio,
-                fim
-            );
+            blocoRotasOrigens();
 
         assert.match(
             bloco,

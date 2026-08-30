@@ -26,7 +26,7 @@ test('MC22-Z-B: fresh install cria mesa_id NOT NULL sem DEFAULT de runtime', () 
 
     assert.equal(
         neutros.length,
-        8
+        9
     );
 
     assert.doesNotMatch(

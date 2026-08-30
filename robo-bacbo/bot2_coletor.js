@@ -173,6 +173,7 @@ async function prepararBancoDeDados() {
         await dbPool.query(`
             CREATE TABLE IF NOT EXISTS origens (
                 id INT AUTO_INCREMENT PRIMARY KEY,
+                mesa_id SMALLINT UNSIGNED NOT NULL,
                 nome VARCHAR(100)
             )
         `);
@@ -2239,14 +2240,276 @@ async function apagarEstrategiaEDados(id, mesaId) {
     );
 }
 
-app.get("/api/origens", async (req, res) => { try { const [linhas] = await dbPool.query('SELECT * FROM origens ORDER BY nome ASC'); res.json(linhas); } catch(e) { console.error('❌ GET /api/origens falhou:', e.message); res.status(500).json([]); } });
-app.post("/api/nova-origem", async (req, res) => { try { await dbPool.query('INSERT INTO origens (nome) VALUES (?)', [req.body.nome]); ioServer.emit('atualizar_interface'); res.json({ sucesso: true }); } catch(e) { console.error('❌ POST /api/nova-origem falhou:', e.message); res.status(500).json({sucesso: false}); } });
-app.put("/api/origem/:id", async (req, res) => { try { await dbPool.query('UPDATE origens SET nome = ? WHERE id = ?', [req.body.novoNome, req.params.id]); await dbPool.query('UPDATE estrategias SET origem = ? WHERE origem = ? AND is_dinamico = false', [req.body.novoNome, req.body.nomeAntigo]); await carregarSistemasParaMemoria(); ioServer.emit('atualizar_interface'); res.json({ sucesso: true }); } catch(e) { console.error(`❌ PUT /api/origem/${req.params.id} falhou:`, e.message); res.status(500).json({sucesso:false}); } });
-app.delete("/api/origem/:id", async (req, res) => { try { await dbPool.query('DELETE FROM origens WHERE id = ?', [req.params.id]); ioServer.emit('atualizar_interface'); res.json({ sucesso: true }); } catch(e) { console.error(`❌ DELETE /api/origem/${req.params.id} falhou:`, e.message); res.status(500).json({sucesso:false}); } });
+app.get("/api/origens", async (req, res) => {
+    try {
+        const mesaId =
+            mesaIdRuntimeApi();
 
-// ==========================================
-// 6. API: GESTÃO DE ROBÔS E AUTO-TRADERS
-// ==========================================
+        const [linhas] =
+            await dbPool.query(
+                `SELECT *
+                 FROM origens
+                 WHERE mesa_id=?
+                 ORDER BY nome ASC`,
+                [mesaId]
+            );
+
+        return res.json(
+            linhas
+        );
+    } catch (e) {
+        console.error(
+            '? GET /api/origens falhou:',
+            e.message
+        );
+
+        return res
+            .status(500)
+            .json([]);
+    }
+});
+
+app.post("/api/nova-origem", async (req, res) => {
+    try {
+        const mesaId =
+            mesaIdRuntimeApi();
+
+        const nome =
+            String(
+                req.body?.nome || ''
+            ).trim();
+
+        if (!nome) {
+            return res
+                .status(400)
+                .json({
+                    sucesso: false,
+                    erro: 'nome_origem_invalido'
+                });
+        }
+
+        await dbPool.query(
+            `INSERT INTO origens
+                (mesa_id, nome)
+             VALUES (?, ?)`,
+            [
+                mesaId,
+                nome
+            ]
+        );
+
+        ioServer.emit(
+            'atualizar_interface'
+        );
+
+        return res.json({
+            sucesso: true
+        });
+    } catch (e) {
+        console.error(
+            '? POST /api/nova-origem falhou:',
+            e.message
+        );
+
+        return res
+            .status(500)
+            .json({
+                sucesso: false
+            });
+    }
+});
+
+app.put("/api/origem/:id", async (req, res) => {
+    let conexao = null;
+    let transacaoAberta = false;
+
+    try {
+        const mesaId =
+            mesaIdRuntimeApi();
+
+        const novoNome =
+            String(
+                req.body?.novoNome || ''
+            ).trim();
+
+        if (!novoNome) {
+            return res
+                .status(400)
+                .json({
+                    sucesso: false,
+                    erro: 'nome_origem_invalido'
+                });
+        }
+
+        conexao =
+            await dbPool.getConnection();
+
+        await conexao.beginTransaction();
+        transacaoAberta = true;
+
+        const [origens] =
+            await conexao.query(
+                `SELECT id, nome
+                 FROM origens
+                 WHERE id=?
+                   AND mesa_id=?
+                 LIMIT 1
+                 FOR UPDATE`,
+                [
+                    req.params.id,
+                    mesaId
+                ]
+            );
+
+        if (
+            origens.length === 0
+        ) {
+            await conexao.rollback();
+            transacaoAberta = false;
+
+            return res
+                .status(404)
+                .json({
+                    sucesso: false,
+                    erro: 'origem_nao_encontrada'
+                });
+        }
+
+        const nomeAnterior =
+            String(
+                origens[0].nome || ''
+            );
+
+        const [resultadoOrigem] =
+            await conexao.query(
+                `UPDATE origens
+                 SET nome=?
+                 WHERE id=?
+                   AND mesa_id=?`,
+                [
+                    novoNome,
+                    req.params.id,
+                    mesaId
+                ]
+            );
+
+        if (
+            Number(
+                resultadoOrigem.affectedRows
+            ) !== 1
+        ) {
+            throw new Error(
+                'MC23-B: origem mudou de ownership durante rename'
+            );
+        }
+
+        await conexao.query(
+            `UPDATE estrategias
+             SET origem=?
+             WHERE origem=?
+               AND is_dinamico=false
+               AND mesa_id=?`,
+            [
+                novoNome,
+                nomeAnterior,
+                mesaId
+            ]
+        );
+
+        await conexao.commit();
+        transacaoAberta = false;
+
+        await carregarSistemasParaMemoria();
+
+        ioServer.emit(
+            'atualizar_interface'
+        );
+
+        return res.json({
+            sucesso: true
+        });
+    } catch (e) {
+        if (
+            conexao
+            && transacaoAberta
+        ) {
+            try {
+                await conexao.rollback();
+            } catch (rollbackError) {
+                console.error(
+                    '? MC23-B rollback origem:',
+                    rollbackError.message
+                );
+            }
+        }
+
+        console.error(
+            `? PUT /api/origem/${req.params.id} falhou:`,
+            e.message
+        );
+
+        return res
+            .status(500)
+            .json({
+                sucesso: false
+            });
+    } finally {
+        if (conexao) {
+            conexao.release();
+        }
+    }
+});
+
+app.delete("/api/origem/:id", async (req, res) => {
+    try {
+        const mesaId =
+            mesaIdRuntimeApi();
+
+        const [resultado] =
+            await dbPool.query(
+                `DELETE FROM origens
+                 WHERE id=?
+                   AND mesa_id=?`,
+                [
+                    req.params.id,
+                    mesaId
+                ]
+            );
+
+        if (
+            Number(
+                resultado.affectedRows
+            ) !== 1
+        ) {
+            return res
+                .status(404)
+                .json({
+                    sucesso: false,
+                    erro: 'origem_nao_encontrada'
+                });
+        }
+
+        ioServer.emit(
+            'atualizar_interface'
+        );
+
+        return res.json({
+            sucesso: true
+        });
+    } catch (e) {
+        console.error(
+            `? DELETE /api/origem/${req.params.id} falhou:`,
+            e.message
+        );
+
+        return res
+            .status(500)
+            .json({
+                sucesso: false
+            });
+    }
+});
+
 app.get("/api/robos", async (req, res) => {
     try {
         const mesaId = mesaIdRuntimeApi();
