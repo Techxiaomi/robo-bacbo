@@ -11,6 +11,9 @@ const {
     persistirRodadaBacbo,
     persistirHistoricoBacbo
 } = require('./bacbo_round_store');
+const {
+    obterEscopoRedisMesa
+} = require('./mesa_redis_scope');
 
 let instalado = false;
 let publisher = null;
@@ -24,14 +27,36 @@ let sequenciaLocal = 0;
 
 const REDIS_COMMAND_CHANNEL = 'auto_trader_commands';
 const REDIS_RESPONSE_CHANNEL = 'auto_trader_responses';
-const BACBO_EVENTS_CHANNEL = 'bacbo_events';
-const STATUS_VALIDOS = new Set(['EXECUTADA', 'FALHOU', 'EXPIRADA', 'AMBIGUA']);
-const SESSION_LOCAL = `tipminer-bacbo-${process.pid}-${Date.now()}`;
+
+const ESCOPO_REDIS_MESA =
+    obterEscopoRedisMesa();
+
+const BACBO_EVENTS_CHANNEL =
+    ESCOPO_REDIS_MESA.eventsChannel;
+
+const STATUS_VALIDOS =
+    new Set([
+        'EXECUTADA',
+        'FALHOU',
+        'EXPIRADA',
+        'AMBIGUA'
+    ]);
+
+const SESSION_LOCAL =
+    `tipminer-${ESCOPO_REDIS_MESA.codigo}-`
+    + `${process.pid}-${Date.now()}`;
+
 const DEDUP_MAX = 5000;
 const fingerprints = new Map();
-const ROAD_SNAPSHOT_KEY = 'robo_bacbo:last_road_snapshot';
-const RECENT_ROUNDS_KEY = 'robo_bacbo:recent_rounds_v3';
-const LIVE_DELIVERY_ATTEMPTS = Number.POSITIVE_INFINITY;
+
+const ROAD_SNAPSHOT_KEY =
+    ESCOPO_REDIS_MESA.roadSnapshotKey;
+
+const RECENT_ROUNDS_KEY =
+    ESCOPO_REDIS_MESA.recentRoundsKey;
+
+const LIVE_DELIVERY_ATTEMPTS =
+    Number.POSITIVE_INFINITY;
 
 function objeto(valor) {
     return valor && typeof valor === 'object' && !Array.isArray(valor) ? valor : null;
@@ -91,6 +116,8 @@ function snapshotRoadLegado(raiz, history) {
     if (normalizados.some(item => item === null)) return null;
     return {
         evento: 'ROAD_SNAPSHOT',
+        mesa_id: ESCOPO_REDIS_MESA.mesaId,
+        mesa_codigo: ESCOPO_REDIS_MESA.codigo,
         coletor_sessao: String(objeto(raiz)?.coletor_sessao || SESSION_LOCAL),
         timestamp_coleta: Date.now(),
         history: normalizados
@@ -99,6 +126,8 @@ function snapshotRoadLegado(raiz, history) {
 
 function payloadNode(round) {
     const payload = {
+        mesa_id: ESCOPO_REDIS_MESA.mesaId,
+        mesa_codigo: ESCOPO_REDIS_MESA.codigo,
         uuid: round.uuid,
         round_uuid: round.uuid,
         tipminer_uuid: round.uuid,
@@ -311,6 +340,23 @@ async function processarBacbo(mensagem) {
     const raiz = parseMensagem(mensagem);
     if (!raiz) {
         console.warn('⚠️ bacbo_events ignorado: JSON/payload inválido.');
+        return false;
+    }
+
+    const mesaCodigo =
+        String(raiz.mesa_codigo || '')
+            .trim()
+            .toUpperCase();
+
+    if (
+        mesaCodigo !== ESCOPO_REDIS_MESA.codigo
+    ) {
+        console.warn(
+            `MC22-Y-B: evento Redis rejeitado | `
+            + `mesa=${mesaCodigo || '<ausente>'} | `
+            + `runtime=${ESCOPO_REDIS_MESA.codigo}.`
+        );
+
         return false;
     }
 

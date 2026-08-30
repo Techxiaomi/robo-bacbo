@@ -2,12 +2,26 @@
 
 const crypto = require('crypto');
 
-const BACBO_EVENTS_CHANNEL = 'bacbo_events';
-const BACBO_HISTORY_KEY = 'bacbo_history';
-const HISTORY_ACK_KEY = String(
-    process.env.REDIS_BACBO_HISTORY_ACK_KEY || 'robo_bacbo:history_applied_signature'
-).trim() || 'robo_bacbo:history_applied_signature';
-const PROCESS_EPOCH = `${process.pid}-${Date.now()}`;
+const {
+    obterEscopoRedisMesa
+} = require('./mesa_redis_scope');
+
+const ESCOPO_REDIS_MESA =
+    obterEscopoRedisMesa();
+
+const BACBO_EVENTS_CHANNEL =
+    ESCOPO_REDIS_MESA.eventsChannel;
+
+const BACBO_HISTORY_KEY =
+    ESCOPO_REDIS_MESA.historyKey;
+
+const HISTORY_ACK_KEY =
+    ESCOPO_REDIS_MESA.historyAckKey;
+
+const PROCESS_EPOCH =
+    `${ESCOPO_REDIS_MESA.codigo}-`
+    + `${process.pid}-${Date.now()}`;
+
 const MAX_BARRIERS = 1000;
 
 let instalado = false;
@@ -179,6 +193,7 @@ function marcarConsumidoresCriticosProntos() {
 async function publicarAckHistorico(assinatura, janela, origem, barrierId = '') {
     if (!reader || !assinatura) return false;
     const payload = {
+        mesa_codigo: ESCOPO_REDIS_MESA.codigo,
         signature: assinatura,
         barrier_id: normalizarBarrierId(barrierId) || null,
         applied_at: Date.now(),
@@ -261,6 +276,7 @@ async function entregarHistory(processarBacbo, origem, opcoes = {}) {
         }
 
         const aceito = await processarBacbo(JSON.stringify({
+            mesa_codigo: ESCOPO_REDIS_MESA.codigo,
             action: 'history_snapshot',
             source: 'bacbo_history_key',
             history_meta: {
@@ -347,7 +363,23 @@ async function instalarTipMinerHistorySync(processarBacbo) {
         let evento = null;
         try { evento = JSON.parse(String(mensagem || '')); } catch (_) { return; }
         const root = objeto(evento) || {};
-        const action = String(root.action || '').trim().toLowerCase();
+
+        const mesaCodigo =
+            String(root.mesa_codigo || '')
+                .trim()
+                .toUpperCase();
+
+        if (
+            mesaCodigo !== ESCOPO_REDIS_MESA.codigo
+        ) {
+            return;
+        }
+
+        const action =
+            String(root.action || '')
+                .trim()
+                .toLowerCase();
+
         if (action !== 'history_sync') return;
         const barrierId = normalizarBarrierId(root.barrier_id);
         void enfileirarHistory(processadorBacbo, 'history_sync', { barrier_id: barrierId }).catch(erro => {

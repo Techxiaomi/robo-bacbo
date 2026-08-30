@@ -17,25 +17,101 @@ from env_loader import load_env_file
 PROJECT_ENV_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env"))
 load_env_file(PROJECT_ENV_PATH)
 
-HISTORY_URL = (
-    "https://api.core.public.tipminer.com/v1/bac-bo/rounds/"
-    "cc71e81d-8b56-4868-91c7-7224be543dce/history?limit=200"
-)
-LIVE_URL = (
-    "https://api.core.public.tipminer.com/v1/bac-bo/rounds/"
-    "cc71e81d-8b56-4868-91c7-7224be543dce/live"
+MESA_CODIGO = (
+    os.getenv("BACBO_MESA_CODIGO", "BACBO_INT")
+    .strip()
+    .upper()
 )
 
-REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0").strip()
-REDIS_HISTORY_KEY = os.getenv("REDIS_BACBO_HISTORY_KEY", "bacbo_history").strip() or "bacbo_history"
-REDIS_LATEST_ROUND_KEY = (
-    os.getenv("REDIS_BACBO_LATEST_ROUND_KEY", "bacbo_latest_round").strip()
-    or "bacbo_latest_round"
+if (
+    not MESA_CODIGO
+    or any(
+        ch not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+        for ch in MESA_CODIGO
+    )
+):
+    raise RuntimeError(
+        f"BACBO_MESA_CODIGO invalido: "
+        f"{MESA_CODIGO or '<vazio>'}"
+    )
+
+TIPMINER_ROUND_ID = (
+    os.getenv(
+        "TIPMINER_BACBO_ROUND_ID",
+        "cc71e81d-8b56-4868-91c7-7224be543dce",
+    )
+    .strip()
 )
-REDIS_EVENTS_CHANNEL = os.getenv("REDIS_BACBO_EVENTS_CHANNEL", "bacbo_events").strip() or "bacbo_events"
-REDIS_HISTORY_ACK_KEY = (
-    os.getenv("REDIS_BACBO_HISTORY_ACK_KEY", "robo_bacbo:history_applied_signature").strip()
-    or "robo_bacbo:history_applied_signature"
+
+if not TIPMINER_ROUND_ID:
+    raise RuntimeError(
+        "TIPMINER_BACBO_ROUND_ID ausente"
+    )
+
+HISTORY_URL = (
+    os.getenv(
+        "TIPMINER_BACBO_HISTORY_URL",
+        "",
+    ).strip()
+    or (
+        "https://api.core.public.tipminer.com/"
+        "v1/bac-bo/rounds/"
+        f"{TIPMINER_ROUND_ID}/history?limit=200"
+    )
+)
+
+LIVE_URL = (
+    os.getenv(
+        "TIPMINER_BACBO_LIVE_URL",
+        "",
+    ).strip()
+    or (
+        "https://api.core.public.tipminer.com/"
+        "v1/bac-bo/rounds/"
+        f"{TIPMINER_ROUND_ID}/live"
+    )
+)
+
+
+def _redis_scoped(env_name, default_base):
+    base = (
+        os.getenv(env_name, default_base).strip()
+        or default_base
+    )
+
+    suffix = f":{MESA_CODIGO}"
+
+    if base.upper().endswith(
+        suffix.upper()
+    ):
+        return base
+
+    return f"{base}{suffix}"
+
+
+REDIS_URL = os.getenv(
+    "REDIS_URL",
+    "redis://127.0.0.1:6379/0",
+).strip()
+
+REDIS_HISTORY_KEY = _redis_scoped(
+    "REDIS_BACBO_HISTORY_KEY",
+    "bacbo_history",
+)
+
+REDIS_LATEST_ROUND_KEY = _redis_scoped(
+    "REDIS_BACBO_LATEST_ROUND_KEY",
+    "bacbo_latest_round",
+)
+
+REDIS_EVENTS_CHANNEL = _redis_scoped(
+    "REDIS_BACBO_EVENTS_CHANNEL",
+    "bacbo_events",
+)
+
+REDIS_HISTORY_ACK_KEY = _redis_scoped(
+    "REDIS_BACBO_HISTORY_ACK_KEY",
+    "robo_bacbo:history_applied_signature",
 )
 
 NODE_HOST = os.getenv("NODE_HOST", "127.0.0.1").strip() or "127.0.0.1"
@@ -322,6 +398,7 @@ class TipMinerCollector:
 
         self._pending_interruption = {
             "evento": "INTERRUPCAO",
+            "mesa_codigo": MESA_CODIGO,
             "motivo": str(reason or "INTERRUPCAO_COLETOR")[:120],
             "interrupcao_id": f"bacbo-{os.getpid()}-{uuid.uuid4().hex}",
             "timestamp_coleta": int(time.time() * 1000),
@@ -410,6 +487,7 @@ class TipMinerCollector:
     def _publish_history_sync(self, signature, barrier_id=None):
         serialized_history = self._json_dumps(self.history)
         event = {
+            "mesa_codigo": MESA_CODIGO,
             "action": "history_sync",
             "signature": signature,
         }
@@ -431,7 +509,11 @@ class TipMinerCollector:
 
         serialized_round = self._json_dumps(round_data)
         serialized_history = self._json_dumps(self.history)
-        event = self._json_dumps({"action": "live_round", "data": round_data})
+        event = self._json_dumps({
+            "mesa_codigo": MESA_CODIGO,
+            "action": "live_round",
+            "data": round_data,
+        })
 
         pipeline = self.redis.pipeline(transaction=True)
         pipeline.set(REDIS_LATEST_ROUND_KEY, serialized_round)
@@ -512,9 +594,13 @@ class TipMinerCollector:
             ack_signature = str((ack or {}).get("signature") or "")
             ack_barrier = str((ack or {}).get("barrier_id") or "")
             ack_applied_at = int((ack or {}).get("applied_at") or 0)
+            ack_mesa = str(
+                (ack or {}).get("mesa_codigo") or ""
+            ).upper()
 
             if (
-                ack_signature == signature
+                ack_mesa == MESA_CODIGO
+                and ack_signature == signature
                 and ack_barrier == str(barrier_id)
                 and ack_applied_at >= int(min_applied_at)
             ):
@@ -601,7 +687,9 @@ class TipMinerCollector:
 
     def run_forever(self):
         print("============================================================")
-        print("📡 COLETOR BAC BO | API -> REDIS")
+        print(
+            f"?? COLETOR BAC BO | {MESA_CODIGO} | API -> REDIS"
+        )
         print(f"🧠 Histórico Redis: {REDIS_HISTORY_KEY}")
         print(f"📣 Canal Redis: {REDIS_EVENTS_CHANNEL}")
         print("============================================================")

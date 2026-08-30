@@ -10,11 +10,23 @@ const {
     publicarHistoricoRecuperado
 } = require('./bacbo_live_bus');
 
+const {
+    obterEscopoRedisMesa
+} = require('./mesa_redis_scope');
+
+const ESCOPO_REDIS_MESA =
+    obterEscopoRedisMesa();
+
 const MAX_ROUNDS = 1000;
 const SNAPSHOT_PATH = path.join(__dirname, 'public', 'bacbo-map-snapshot.json');
-const RETENTION_KEY = 'robo_bacbo:recent_rounds_v3';
-const HISTORY_KEY = 'bacbo_history';
-const EVENTS_CHANNEL = 'bacbo_events';
+const RETENTION_KEY =
+    ESCOPO_REDIS_MESA.recentRoundsKey;
+
+const HISTORY_KEY =
+    ESCOPO_REDIS_MESA.historyKey;
+
+const EVENTS_CHANNEL =
+    ESCOPO_REDIS_MESA.eventsChannel;
 
 let instalado = false;
 let pool = null;
@@ -115,9 +127,13 @@ async function hidratarBanco() {
         const [linhas] = await dbPool().query(
             `SELECT uuid, winner, \`result\`, instant
              FROM bacbo_rounds
+             WHERE mesa_id=?
              ORDER BY instant DESC
              LIMIT ?`,
-            [MAX_ROUNDS]
+            [
+                ESCOPO_REDIS_MESA.mesaId,
+                MAX_ROUNDS
+            ]
         );
         if (Array.isArray(linhas) && linhas.length > 0) {
             rodadas = ordenarELimitar(linhas.reverse());
@@ -260,7 +276,21 @@ async function conectarRedis() {
     recoveryAtivo = true;
     await subscriber.subscribe(EVENTS_CHANNEL, mensagem => {
         const raiz = parseJson(mensagem);
-        const acao = String(raiz?.action || '').toLowerCase();
+
+        const mesaCodigo =
+            String(raiz?.mesa_codigo || '')
+                .trim()
+                .toUpperCase();
+
+        if (
+            mesaCodigo !== ESCOPO_REDIS_MESA.codigo
+        ) {
+            return;
+        }
+
+        const acao =
+            String(raiz?.action || '')
+                .toLowerCase();
 
         if (acao === 'history_sync') {
             void enfileirarEvento(() => incorporarHistoricoRetido()).catch(erro => {
