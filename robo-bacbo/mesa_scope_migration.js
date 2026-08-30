@@ -1,6 +1,9 @@
 'use strict';
 
 const mysql = require('mysql2/promise');
+const {
+    MESA_PADRAO_CODIGO
+} = require('./mesa_context');
 
 // MC22-C/D/F/G — associação operacional inicial com mesa_id.
 // C/D cobre histórico/analítico; F associa robôs/estratégias; G associa o domínio
@@ -15,6 +18,14 @@ const TABELAS_HISTORICAS_MC22C = Object.freeze([
 const TABELAS_OPERACIONAIS_MC22F = Object.freeze([
     'robos_canais',
     'estrategias'
+]);
+
+// MC23-B:
+// "origens" era global antes do multimesa.
+// Toda linha legada sem mesa pertence ao runtime historico BACBO_INT,
+// mesmo que BACBO_BR seja o primeiro processo novo a executar a migration.
+const TABELAS_ORIGENS_MC23B = Object.freeze([
+    'origens'
 ]);
 
 const TABELAS_FINANCEIRAS_MC22G = Object.freeze([
@@ -425,6 +436,39 @@ async function garantirMesaIdTabela(
     };
 }
 
+async function obterMesaIdPersistidaPorCodigo(
+    conexao,
+    codigo
+) {
+    const [linhas] = await conexao.query(
+        `SELECT id
+         FROM mesas
+         WHERE codigo=?
+         LIMIT 1`,
+        [codigo]
+    );
+
+    const id = Number(
+        linhas?.[0]?.id
+    );
+
+    if (
+        !Number.isInteger(id)
+        || id <= 0
+    ) {
+        const erro = new Error(
+            `MC23-B: mesa persistida ausente para backfill legado: ${codigo}`
+        );
+
+        erro.code =
+            'MC23B_MESA_LEGADA_AUSENTE';
+
+        throw erro;
+    }
+
+    return id;
+}
+
 async function prepararEscopoHistoricoMesaAtual(mesaPersistida) {
     const mesa = validarMesaPersistida(mesaPersistida);
     const conexao = await mysql.createConnection({
@@ -468,6 +512,43 @@ async function prepararEscopoHistoricoMesaAtual(mesaPersistida) {
             + `${operacionaisMigradas}/${TABELAS_OPERACIONAIS_MC22F.length} tabela(s).`
         );
 
+        // MC23-B:
+        // Origens anteriores ao multimesa pertencem ? BACBO_INT.
+        // N?o usamos mesa.id neste backfill porque BACBO_BR pode
+        // ser o primeiro processo novo a executar a migration.
+        const mesaIdLegadoOrigens =
+            await obterMesaIdPersistidaPorCodigo(
+                conexao,
+                MESA_PADRAO_CODIGO
+            );
+
+        const origens = [];
+
+        for (
+            const tabela
+            of TABELAS_ORIGENS_MC23B
+        ) {
+            origens.push(
+                await garantirMesaIdTabela(
+                    conexao,
+                    tabela,
+                    mesaIdLegadoOrigens,
+                    'MC23-B'
+                )
+            );
+        }
+
+        const origensMigradas =
+            origens.filter(
+                item => item.migrada
+            ).length;
+
+        console.log(
+            `MC23-B | Origens isoladas por mesa: `
+            + `${origensMigradas}/`
+            + `${TABELAS_ORIGENS_MC23B.length} tabela(s).`
+        );
+
         const financeiras = [];
         for (const tabela of TABELAS_FINANCEIRAS_MC22G) {
             financeiras.push(await garantirMesaIdTabela(conexao, tabela, mesa.id, 'MC22-G'));
@@ -483,6 +564,7 @@ async function prepararEscopoHistoricoMesaAtual(mesaPersistida) {
             historicas,
             shadowUnicidade,
             operacionais,
+            origens,
             financeiras
         };
     } finally {
@@ -493,6 +575,7 @@ async function prepararEscopoHistoricoMesaAtual(mesaPersistida) {
 module.exports = {
     TABELAS_HISTORICAS_MC22C,
     TABELAS_OPERACIONAIS_MC22F,
+    TABELAS_ORIGENS_MC23B,
     TABELAS_FINANCEIRAS_MC22G,
     prepararEscopoHistoricoMesaAtual
 };
