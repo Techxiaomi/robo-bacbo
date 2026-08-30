@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const { obterMesaRuntime } = require('./mesa_runtime_context');
 
 const RESULTADOS_VALIDOS = new Set(['Player', 'Banker', 'Tie']);
 const ALVOS = ['Player', 'Banker'];
@@ -538,6 +539,17 @@ function formatarLogDesativacaoAutoPilot(robo, motivo, quantidade) {
 
 function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notificar, log = console }) {
     if (!dbPool || typeof dbPool.query !== 'function') throw new Error('dbPool inválido para Auto Pilot IA');
+    // MC22-V-A: esta instancia da IA pertence exclusivamente
+    // a mesa imutavel do processo Node.
+    const mesaRuntime = obterMesaRuntime();
+    const mesaId = Number(mesaRuntime.id);
+
+    if (!Number.isInteger(mesaId) || mesaId <= 0) {
+        throw new Error(
+            'MC22-V-A: mesa runtime invalida para Auto Pilot IA'
+        );
+    }
+
     const contadores = new Map();
     const pendenciasForcadas = new Map();
     let execucaoEmAndamento = Promise.resolve();
@@ -549,7 +561,10 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
     };
 
     async function carregarRobo(roboId) {
-        const [linhas] = await dbPool.query('SELECT * FROM robos_canais WHERE id=? LIMIT 1', [roboId]);
+        const [linhas] = await dbPool.query(
+            'SELECT * FROM robos_canais WHERE id=? AND mesa_id=? LIMIT 1',
+            [roboId, mesaId]
+        );
         if (linhas.length === 0) return null;
         const row = linhas[0];
         let config = {};
@@ -562,9 +577,10 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
             `SELECT id, resultado, multiplicador, id_sessao,
                     UNIX_TIMESTAMP(data_hora) * 1000 AS timestamp_ms
              FROM giros_recentes
+             WHERE mesa_id=?
              ORDER BY id DESC
              LIMIT ?`,
-            [range]
+            [mesaId, range]
         );
         return linhas.reverse().map(r => ({
             id: Number(r.id) || 0,
@@ -582,9 +598,10 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
         const [linhas] = await dbPool.query(
             `SELECT estrategia_id, tipo_resultado, data_hora, id
              FROM historico_resultados
-             WHERE estrategia_id IN (${placeholders})
+             WHERE mesa_id=?
+               AND estrategia_id IN (${placeholders})
              ORDER BY data_hora ASC, id ASC`,
-            ids
+            [mesaId, ...ids]
         );
         for (const row of linhas) {
             const id = String(row.estrategia_id);
@@ -606,9 +623,10 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
                     SUM(tipo_resultado='TIE') AS ties,
                     SUM(tipo_resultado='RED') AS reds
              FROM historico_shadow_ia
-             WHERE estrategia_id IN (${placeholders})
+             WHERE mesa_id=?
+               AND estrategia_id IN (${placeholders})
              GROUP BY estrategia_id`,
-            ids
+            [mesaId, ...ids]
         );
         for (const row of linhas) {
             mapa.set(String(row.estrategia_id), normalizarMetricasShadowLive(row));
@@ -674,11 +692,15 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
         const [linhas] = await dbPool.query(
             `SELECT e.id, e.padrao, e.entrada, e.gales, e.proteger_empate, e.robo_dono_id, r.config_json
              FROM estrategias e
-             JOIN robos_canais r ON r.id=e.robo_dono_id
-             WHERE e.is_dinamico=true
+             JOIN robos_canais r
+               ON r.id=e.robo_dono_id
+              AND r.mesa_id=e.mesa_id
+             WHERE e.mesa_id=?
+               AND e.is_dinamico=true
                AND e.ativo=false
                AND e.ia_status='SHADOW_LIVE'
-               AND r.ativo=true`
+               AND r.ativo=true`,
+            [mesaId]
         );
         if (linhas.length === 0) return { registrados: 0, robos: [] };
 
@@ -707,9 +729,10 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
             const ultimo = historico[historico.length - 1];
             const [resultado] = await dbPool.query(
                 `INSERT IGNORE INTO historico_shadow_ia
-                    (estrategia_id, robo_id, giro_resultado_id, tipo_resultado, nivel, multiplicador, data_hora)
-                 VALUES (?, ?, ?, ?, ?, ?, FROM_UNIXTIME(?))`,
+                    (mesa_id, estrategia_id, robo_id, giro_resultado_id, tipo_resultado, nivel, multiplicador, data_hora)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, FROM_UNIXTIME(?))`,
                 [
+                    mesaId,
                     row.id,
                     row.robo_dono_id,
                     idGiro,
@@ -745,8 +768,11 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
                 await dbPool.query(
                     `UPDATE estrategias
                      SET ativo=false, ia_status='REJEITADO', quarentena_restante=0
-                     WHERE id=? AND is_dinamico=true AND robo_dono_id=?`,
-                    [item.id, item.robo_id]
+                     WHERE mesa_id=?
+                       AND id=?
+                       AND is_dinamico=true
+                       AND robo_dono_id=?`,
+                    [mesaId, item.id, item.robo_id]
                 );
             }
             if (avaliacao.concluido) robosReavaliacao.add(item.robo_id);
@@ -758,8 +784,10 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
         const [existentes] = await dbPool.query(
             `SELECT id, padrao, entrada, ativo, criado_em, quarentena_restante
              FROM estrategias
-             WHERE is_dinamico=true AND robo_dono_id=?`,
-            [robo.id]
+             WHERE mesa_id=?
+               AND is_dinamico=true
+               AND robo_dono_id=?`,
+            [mesaId, robo.id]
         );
         const existentesMap = new Map(existentes.map(e => [String(e.id), e]));
         const incumbentesAtivos = new Set(
@@ -824,10 +852,10 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
 
                 await conexao.query(
                     `INSERT INTO estrategias
-                        (id, nome, origem, padrao, entrada, gales, proteger_empate, ativo,
+                        (id, mesa_id, nome, origem, padrao, entrada, gales, proteger_empate, ativo,
                          green_direto, gale1, gale2, red, ties_json,
                          is_dinamico, robo_dono_id, criado_em, quarentena_restante, ia_status)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, ?, true, ?, ?, ?, ?)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, ?, true, ?, ?, ?, ?)
                      ON DUPLICATE KEY UPDATE
                         nome=VALUES(nome), origem=VALUES(origem), padrao=VALUES(padrao),
                         entrada=VALUES(entrada), gales=VALUES(gales), proteger_empate=VALUES(proteger_empate),
@@ -836,6 +864,7 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
                         ia_status=VALUES(ia_status)`,
                     [
                         candidato.id,
+                        mesaId,
                         nome,
                         origem,
                         JSON.stringify(candidato.padrao),
@@ -852,6 +881,48 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
                 );
             }
 
+            if (reter.length > 0) {
+                const idsRetidos = [
+                    ...new Set(
+                        reter.map(c => String(c.id))
+                    )
+                ];
+
+                const placeholdersRetidos =
+                    idsRetidos.map(() => '?').join(',');
+
+                const [ownershipRetidos] =
+                    await conexao.query(
+                        `SELECT id, mesa_id
+                         FROM estrategias
+                         WHERE id IN (${placeholdersRetidos})
+                         ORDER BY id ASC
+                         FOR UPDATE`,
+                        idsRetidos
+                    );
+
+                if (
+                    ownershipRetidos.length
+                    !== idsRetidos.length
+                ) {
+                    throw new Error(
+                        'MC22-V-A: conjunto de estrategias persistidas incompleto'
+                    );
+                }
+
+                for (const estrategia of ownershipRetidos) {
+                    if (
+                        Number(estrategia.mesa_id)
+                        !== mesaId
+                    ) {
+                        throw new Error(
+                            `MC22-V-A: estrategia ${estrategia.id} ` +
+                            `pertence a outra mesa`
+                        );
+                    }
+                }
+            }
+
             for (const existente of existentes) {
                 const id = String(existente.id);
                 if (reterIds.has(id)) continue;
@@ -859,8 +930,11 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
                     await conexao.query(
                         `UPDATE estrategias
                          SET ativo=false, ia_status='REJEITADO', quarentena_restante=0
-                         WHERE id=? AND is_dinamico=true AND robo_dono_id=?`,
-                        [id, robo.id]
+                         WHERE mesa_id=?
+                           AND id=?
+                           AND is_dinamico=true
+                           AND robo_dono_id=?`,
+                        [mesaId, id, robo.id]
                     );
                     continue;
                 }
@@ -870,9 +944,15 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
                 if (expirado) {
                     // Remove somente a definição. O histórico live fica preservado pelo ID determinístico
                     // para que um padrão ruim não possa reaparecer futuramente com reputação zerada.
-                    await conexao.query('DELETE FROM estrategias WHERE id=? AND is_dinamico=true AND robo_dono_id=?', [id, robo.id]);
+                    await conexao.query(
+                        'DELETE FROM estrategias WHERE mesa_id=? AND id=? AND is_dinamico=true AND robo_dono_id=?',
+                        [mesaId, id, robo.id]
+                    );
                 } else {
-                    await conexao.query('UPDATE estrategias SET ativo=false WHERE id=? AND is_dinamico=true AND robo_dono_id=?', [id, robo.id]);
+                    await conexao.query(
+                        'UPDATE estrategias SET ativo=false WHERE mesa_id=? AND id=? AND is_dinamico=true AND robo_dono_id=?',
+                        [mesaId, id, robo.id]
+                    );
                 }
             }
 
@@ -913,8 +993,11 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
     async function desativarPadroesRobo(robo, motivo) {
         const [resultado] = await dbPool.query(
             `UPDATE estrategias SET ativo=false
-             WHERE is_dinamico=true AND robo_dono_id=? AND ativo=true`,
-            [robo.id]
+             WHERE mesa_id=?
+               AND is_dinamico=true
+               AND robo_dono_id=?
+               AND ativo=true`,
+            [mesaId, robo.id]
         );
         const desativados = Math.max(0, Number(resultado.affectedRows) || 0);
         contadores.set(Number(robo.id), 0);
@@ -954,8 +1037,8 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
         }
 
         const [existentes] = await dbPool.query(
-            'SELECT id FROM estrategias WHERE is_dinamico=true AND robo_dono_id=? AND ativo=true',
-            [robo.id]
+            'SELECT id FROM estrategias WHERE mesa_id=? AND is_dinamico=true AND robo_dono_id=? AND ativo=true',
+            [mesaId, robo.id]
         );
         const historico = await carregarHistorico(config.range);
         const candidatos = minerarCandidatos(historico, config, {
@@ -979,7 +1062,10 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
     async function executarTodosInterno(opcoes = {}) {
         if (typeof estaOcupado === 'function' && estaOcupado()) {
             if (opcoes.forcar) {
-                const [todosRobos] = await dbPool.query('SELECT id FROM robos_canais');
+                const [todosRobos] = await dbPool.query(
+                    'SELECT id FROM robos_canais WHERE mesa_id=?',
+                    [mesaId]
+                );
                 for (const row of todosRobos) {
                     pendenciasForcadas.set(Number(row.id), String(opcoes.motivo || 'forcado'));
                 }
@@ -988,9 +1074,9 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
         }
 
         const sqlRobos = opcoes.forcar
-            ? 'SELECT id, ativo, config_json FROM robos_canais'
-            : 'SELECT id, ativo, config_json FROM robos_canais WHERE ativo=true';
-        const [robos] = await dbPool.query(sqlRobos);
+            ? 'SELECT id, ativo, config_json FROM robos_canais WHERE mesa_id=?'
+            : 'SELECT id, ativo, config_json FROM robos_canais WHERE mesa_id=? AND ativo=true';
+        const [robos] = await dbPool.query(sqlRobos, [mesaId]);
         const saida = [];
         for (const row of robos) {
             let config = {};
@@ -1024,7 +1110,10 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
             }
         }
 
-        const [robos] = await dbPool.query('SELECT id, config_json FROM robos_canais WHERE ativo=true');
+        const [robos] = await dbPool.query(
+            'SELECT id, config_json FROM robos_canais WHERE mesa_id=? AND ativo=true',
+            [mesaId]
+        );
         let haDevido = false;
         for (const row of robos) {
             let config = {};
@@ -1055,10 +1144,14 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
             const [linhas] = await dbPool.query(
                 `SELECT e.id, e.robo_dono_id, e.ativo, r.ativo AS robo_ativo, r.config_json
                  FROM estrategias e
-                 JOIN robos_canais r ON r.id=e.robo_dono_id
-                 WHERE e.id=? AND e.is_dinamico=true
+                 JOIN robos_canais r
+                   ON r.id=e.robo_dono_id
+                  AND r.mesa_id=e.mesa_id
+                 WHERE e.mesa_id=?
+                   AND e.id=?
+                   AND e.is_dinamico=true
                  LIMIT 1`,
-                [id]
+                [mesaId, id]
             );
             if (linhas.length === 0) return { executado: false, motivo: 'ESTRATEGIA_DINAMICA_INEXISTENTE' };
 
@@ -1073,8 +1166,8 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
             }
 
             await dbPool.query(
-                'UPDATE estrategias SET ativo=false WHERE id=? AND is_dinamico=true',
-                [id]
+                'UPDATE estrategias SET ativo=false WHERE mesa_id=? AND id=? AND is_dinamico=true',
+                [mesaId, id]
             );
             if (typeof recarregarMemoria === 'function') await recarregarMemoria();
             log.warn(
