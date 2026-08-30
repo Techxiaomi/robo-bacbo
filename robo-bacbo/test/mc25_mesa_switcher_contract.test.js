@@ -44,11 +44,11 @@ test('MC25: identidade visual diferencia INT e BR de forma permanente', () => {
     assert.match(switcher, /Execução financeira bloqueada nesta mesa/);
 });
 
-test('MC25: BR bloqueia Auto-Trader na UI sem substituir o gate do backend', () => {
+test('MC25: BR bloqueia Trader na UI sem substituir o gate do backend', () => {
     assert.match(switcher, /mesa\?\.codigo === 'BACBO_BR'/);
     assert.match(switcher, /botao\.disabled = true/);
     assert.match(switcher, /botao\.removeAttribute\('onclick'\)/);
-    assert.match(switcher, /Auto-Trader \(BR bloqueado\)/);
+    assert.match(switcher, /botao\.textContent = '🔒 Trader'/);
     assert.match(switcher, /Execução financeira não autorizada para BACBO_BR/);
 });
 
