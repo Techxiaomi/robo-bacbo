@@ -293,9 +293,22 @@ class MC22YBMultimesaContractTests(
             encoding="utf-8"
         )
 
+        scope_source = (
+            Path(collector_module.__file__)
+            .with_name("mesa_tipminer_scope.py")
+            .read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertIn(
+            "resolver_tipminer_round_id",
+            source,
+        )
+
         self.assertIn(
             "TIPMINER_BACBO_ROUND_ID",
-            source,
+            scope_source,
         )
 
         self.assertIn(

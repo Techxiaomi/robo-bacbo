@@ -50,6 +50,14 @@ function carregarTransporte(fetchImpl, executionTimeout = 60) {
         const EXECUTOR_EXECUTION_TIMEOUT_MS = ${executionTimeout};
         const CONFIRMACOES_EXECUTOR_PENDENTES = new Map();
         function headersInternos() { return { "Content-Type": "application/json", "X-Internal-Token": "test" }; }
+
+        function afirmarMesaFinanceiraAutorizada() {
+            return {
+                id: 1,
+                codigo: "BACBO_INT"
+            };
+        }
+
         ${trecho}
         module.exports = {
             enviarOrdemAoExecutor,

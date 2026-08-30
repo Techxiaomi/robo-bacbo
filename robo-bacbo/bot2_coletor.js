@@ -31,6 +31,9 @@ const { obterMesaRuntime } = require("./mesa_runtime_context");
 const {
     nomeCookieEscopadoPorMesa
 } = require("./mesa_operational_scope");
+const {
+    afirmarMesaFinanceiraAutorizada
+} = require("./mesa_financial_scope");
 require("./env_loader").loadEnvFile(path.join(__dirname, "..", ".env"));
 
 // Erros globais realmente não tratados são fatais: continuar pode deixar estado financeiro incoerente.
@@ -864,9 +867,15 @@ async function aplicarSaldoGlobalRecebido(saldo, atualizadoEm = Date.now()) {
     }
 
     const timestampConfirmado = Math.trunc(timestampNumero);
+    const mesaSaldo =
+        afirmarMesaFinanceiraAutorizada(
+            'balance_update'
+        );
+    const mesaIdSaldo = Number(mesaSaldo.id);
+
     await dbPool.query(
-        'UPDATE auto_traders SET saldo_atual=? WHERE ativo=true',
-        [saldoNumero]
+        'UPDATE auto_traders SET saldo_atual=? WHERE ativo=true AND mesa_id=?',
+        [saldoNumero, mesaIdSaldo]
     );
 
     saldoGlobalCorretora = saldoNumero;
@@ -947,6 +956,10 @@ async function garantirRedisSaldoPronto() {
 }
 
 async function solicitarSincronizacaoSaldoRedis() {
+    afirmarMesaFinanceiraAutorizada(
+        'sync_balance'
+    );
+
     await garantirRedisSaldoPronto();
     const espera = criarEsperaAtualizacaoSaldoRedis();
 
@@ -966,6 +979,28 @@ async function solicitarSincronizacaoSaldoRedis() {
 // depois que o MESMO gate de freshness confirmar
 // o balance_update recebido.
 async function obterSaldoAutoTraderParaAtivacao() {
+    try {
+        afirmarMesaFinanceiraAutorizada(
+            'ativacao_auto_trader'
+        );
+    } catch (e) {
+        console.warn(
+            'AUTO-TRADER | ativacao financeira bloqueada:',
+            e.message
+        );
+
+        return {
+            ok: false,
+            saldo: null,
+            sincronizado_agora: false,
+            erro: String(
+                e?.code
+                || e?.message
+                || 'MESA_FINANCEIRA_NAO_AUTORIZADA'
+            )
+        };
+    }
+
     const saldoJaFresco = obterSaldoGlobalFresco();
 
     if (saldoJaFresco !== null) {
@@ -1173,6 +1208,10 @@ function erroResultadoExecucaoExecutor(resultado) {
 }
 
 async function enviarOrdemAoExecutor(alvo, valor, orderId = crypto.randomUUID(), apostas = null) {
+    afirmarMesaFinanceiraAutorizada(
+        'place_bet'
+    );
+
     const esperaExecucao = criarEsperaResultadoExecutor(orderId);
     let ultimoErro = null;
     let confirmacaoAceite = null;
@@ -5843,9 +5882,17 @@ app.post("/receber-sinal", async (req, res) => {
                 if (!vencedor) return res.status(400).json({ erro: "saldo_atual invalido" });
             } else {
                 try {
+                    const mesaSaldoRecebido =
+                        afirmarMesaFinanceiraAutorizada(
+                            'balance_update_http'
+                        );
+
                     await dbPool.query(
-                        'UPDATE auto_traders SET saldo_atual=? WHERE ativo=true',
-                        [saldoRecebido]
+                        'UPDATE auto_traders SET saldo_atual=? WHERE ativo=true AND mesa_id=?',
+                        [
+                            saldoRecebido,
+                            mesaSaldoRecebido.id
+                        ]
                     );
 
                     saldoGlobalCorretora = saldoRecebido;

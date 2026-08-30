@@ -12,6 +12,7 @@ import requests
 from sseclient import SSEClient
 
 from env_loader import load_env_file
+from mesa_tipminer_scope import resolver_tipminer_round_id
 
 
 PROJECT_ENV_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env"))
@@ -36,17 +37,11 @@ if (
     )
 
 TIPMINER_ROUND_ID = (
-    os.getenv(
-        "TIPMINER_BACBO_ROUND_ID",
-        "cc71e81d-8b56-4868-91c7-7224be543dce",
+    resolver_tipminer_round_id(
+        MESA_CODIGO,
+        os.environ,
     )
-    .strip()
 )
-
-if not TIPMINER_ROUND_ID:
-    raise RuntimeError(
-        "TIPMINER_BACBO_ROUND_ID ausente"
-    )
 
 HISTORY_URL = (
     os.getenv(
