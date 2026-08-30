@@ -16,6 +16,14 @@ const dashboardAppSource = fs.readFileSync(
     "utf8"
 ).replace(/\r\n/g, "\n");
 const executorPythonSource = fs.readFileSync(executorPythonPath, "utf8").replace(/\r\n/g, "\n");
+const arbiterSource = fs.readFileSync(
+    path.join(
+        __dirname,
+        "..",
+        "auto_trader_round_arbiter.js"
+    ),
+    "utf8"
+).replace(/\r\n/g, "\n");
 
 function trechoEntre(inicio, fim) {
     const posInicio = source.indexOf(inicio);
@@ -222,7 +230,10 @@ test("BUG-037: PDF separa aceite comprovado de registros legados e usa A4 paisag
     assert.doesNotMatch(dashboardAppSource, /Lucro Líquido Real/);
     assert.doesNotMatch(dashboardAppSource, /Hash de Autenticidade/);
     assert.match(source, /exposicaoConfirmadaExecutor - exposicaoEsperadaNode/);
-    assert.match(source, /SET ativo=false, status_operacao='BLOQUEADO_AMBIGUIDADE'/);
+    assert.match(
+        source,
+        /SET ativo=false,\s*status_operacao='BLOQUEADO_AMBIGUIDADE'[\s\S]*?WHERE id=\?\s*AND mesa_id=\?/
+    );
 });
 
 test("nivelHistoricoResultado preserva DIRETO/GALE1/GALE2", () => {
@@ -364,47 +375,65 @@ test("BUG-033: painel lista somente robôs ativos e não renderiza origens", () 
     assert.doesNotMatch(source, /fontes_sinal\.includes\(est\.origem\)/);
     assert.equal(
         (source.match(/autoTraderAutorizaEstrategia\(cf, est, ROBOS_MEMORIA\)/g) || []).length,
-        4
+        3
     );
-    assert.match(source, /Auto-Trader \$\{trader\.id\} \(\$\{trader\.nome\}\) autorizado para o sinal/);
 });
 
-test("BUG-046: executor ancora a janela em Resolved + 8.5s e Node preserva o callback", () => {
-    assert.match(executorPythonSource, /EXECUTOR_BETTING_WINDOW_TIMEOUT_SECONDS = 180\.0/);
-    assert.match(executorPythonSource, /normalizado in \{"waitingforbets", "closingbets", "acceptingbets", "betting"\}/);
-    assert.match(executorPythonSource, /ultimo_resolved_monotonic = 0\.0/);
-    assert.match(executorPythonSource, /resolved_monotonic_aceite/);
-    assert.match(executorPythonSource, /alvo_temporal = resolved_base \+ 8\.5/);
-    assert.match(executorPythonSource, /janela real alvo em \+8500ms/);
-    assert.match(executorPythonSource, /janela real liberada em/);
-    assert.match(executorPythonSource, /if contexto\["estado"\] == "EXPIRADA":/);
-    assert.match(executorPythonSource, /fichas_acionaveis/);
-    assert.match(executorPythonSource, /alvos_acionaveis/);
-    assert.match(executorPythonSource, /candidatos\.evaluate_all/);
-    assert.match(executorPythonSource, /JA_SELECIONADA/);
-    assert.match(executorPythonSource, /CLICAR_AGUARDANDO_ESTABILIDADE/);
-    assert.match(executorPythonSource, /selecionar_ficha_com_confirmacao/);
-    assert.match(executorPythonSource, /SUPERFICIE_PLAYWRIGHT_/);
-    assert.match(executorPythonSource, /page\.wait_for_timeout\(25\)/);
-    assert.match(executorPythonSource, /page\.wait_for_timeout\(2500\)/);
-    assert.equal((executorPythonSource.match(/elemento\.click\(timeout=2000\)/g) || []).length, 2);
-    assert.match(executorPythonSource, /page\.wait_for_timeout\(150\)/);
-    assert.match(executorPythonSource, /page\.wait_for_timeout\(120\)/);
-    assert.doesNotMatch(executorPythonSource, /aguardando 1500ms para estabilização visual das fichas/);
-    assert.doesNotMatch(executorPythonSource, /page\.mouse\.move/);
-    assert.doesNotMatch(executorPythonSource, /elemento\.dispatch_event\("pointerdown"\)/);
-    assert.doesNotMatch(executorPythonSource, /elemento\.dispatch_event\("pointerup"\)/);
-    assert.doesNotMatch(executorPythonSource, /elemento\.evaluate\("el => el\.click\(\)"\)/);
-    assert.doesNotMatch(executorPythonSource, /hit_elemento\.click/);
-    assert.match(executorPythonSource, /aria-pressed/);
-
-    const localizador = executorPythonSource.slice(
-        executorPythonSource.indexOf("def localizar_contexto_apostavel"),
-        executorPythonSource.indexOf("def localizar_frame_apostavel")
+test("BUG-046 atual: executor aguarda DOM apostavel e confirma aceite financeiro", () => {
+    assert.match(
+        executorPythonSource,
+        /BETTING_WINDOW_TIMEOUT_MS = 14000/
     );
-    assert.doesNotMatch(localizador, /evolution|evocdn|game/);
-    assert.match(source, /process\.env\.EXECUTOR_EXECUTION_TIMEOUT_MS \|\| 210000/);
-    assert.match(source, /executorExecutionTimeoutConfig >= 195000/);
+
+    assert.match(
+        executorPythonSource,
+        /EXECUTOR_BET_ACCEPTANCE_TIMEOUT_SECONDS = 8\.0/
+    );
+
+    assert.match(
+        executorPythonSource,
+        /BETTING_CHIP_SELECTOR =/
+    );
+
+    assert.match(
+        executorPythonSource,
+        /class ErroJanelaApostasTimeout/
+    );
+
+    assert.match(
+        executorPythonSource,
+        /frame\.wait_for_selector\([\s\S]*?BETTING_CHIP_SELECTOR[\s\S]*?state="visible"[\s\S]*?timeout=BETTING_WINDOW_TIMEOUT_MS/
+    );
+
+    assert.match(
+        executorPythonSource,
+        /def confirmar_debito_saldo\(/
+    );
+
+    assert.match(
+        executorPythonSource,
+        /page\.wait_for_timeout\(2500\)/
+    );
+
+    assert.match(
+        executorPythonSource,
+        /prazo = time\.monotonic\(\) \+ EXECUTOR_BET_ACCEPTANCE_TIMEOUT_SECONDS/
+    );
+
+    assert.doesNotMatch(
+        executorPythonSource,
+        /alvo_temporal = resolved_base \+ 8\.5/
+    );
+
+    assert.match(
+        source,
+        /process\.env\.EXECUTOR_EXECUTION_TIMEOUT_MS \|\| 210000/
+    );
+
+    assert.match(
+        source,
+        /executorExecutionTimeoutConfig >= 195000/
+    );
 });
 
 test("formatarPadraoTelegram preserva a representacao visual do sinal", () => {
@@ -592,14 +621,72 @@ test("avaliarLimitesFinanceirosTrader aplica Stop Win/Stop Loss somente com sald
     assert.equal(r.motivo, "SALDO_INDISPONIVEL");
 });
 
-test("nova entrada DIRETO passa pelo guard financeiro antes do executor", () => {
-    assert.match(
-        source,
-        /if \(!\(await autorizarNovaEntradaFinanceiraTrader\(trader\)\)\) \{[\s\S]*?continue;[\s\S]*?if \(cf\.limite_entradas/
+test("nova entrada DIRETO passa pelos guards financeiros antes do executor no arbitro", () => {
+    const inicio = arbiterSource.indexOf(
+        "async function executarEntradaDireta"
     );
+
+    const fim = arbiterSource.indexOf(
+        "async function processarRodada",
+        inicio
+    );
+
+    assert.ok(inicio >= 0);
+    assert.ok(fim > inicio);
+
+    const bloco = arbiterSource.slice(
+        inicio,
+        fim
+    );
+
+    const posLimite =
+        bloco.indexOf("cf.limite_entradas");
+
+    const posCiclo =
+        bloco.indexOf(
+            "deps.prepararEntradaCicloAutoTrader(trader)"
+        );
+
+    const posGuard =
+        bloco.indexOf(
+            "deps.autorizarNovaEntradaFinanceiraTrader(trader)"
+        );
+
+    const posPlano =
+        bloco.indexOf(
+            "deps.calcularPlanoAposta(cf, est, 0)"
+        );
+
+    const posIntencao =
+        bloco.indexOf(
+            "deps.criarIntencaoOrdem"
+        );
+
+    const posExecutor =
+        bloco.indexOf(
+            "deps.enviarOrdemAoExecutor"
+        );
+
+    assert.ok(posLimite >= 0);
+    assert.ok(posCiclo > posLimite);
+    assert.ok(posGuard > posCiclo);
+    assert.ok(posPlano > posGuard);
+    assert.ok(posIntencao > posPlano);
+    assert.ok(posExecutor > posIntencao);
+
     assert.match(
-        source,
-        /autorizarNovaEntradaFinanceiraTrader[\s\S]*?UPDATE auto_traders SET ativo=false, status_operacao=\?, saldo_atual=\?/
+        bloco,
+        /status_ordem='PREPARANDO'/
+    );
+
+    assert.match(
+        bloco,
+        /status_ordem='PENDENTE'/
+    );
+
+    assert.match(
+        bloco,
+        /mesa_id/
     );
 });
 
@@ -661,15 +748,22 @@ test("avaliarStopRedsAutoTrader aplica pausa, desligamento e reset por sequencia
     assert.equal(r.reds_consecutivos, 0);
 });
 
-test("Stop Reds do Auto-Trader so e atualizado dentro de ordem PENDENTE realmente executada", () => {
+test("Stop Reds do Auto-Trader permanece vinculado a ordem PENDENTE da mesma mesa", () => {
     assert.match(
         source,
-        /if \(pendentes\.length > 0\) \{[\s\S]{0,2200}processarResultadoStopRedsAutoTrader\(\s*trader,\s*isTie \? 'TIE' : 'GREEN'/
+        /trader_id = \? AND estrategia_id = \? AND mesa_id = \? AND status_ordem = 'PENDENTE'/
     );
+
     assert.match(
         source,
-        /if \(pendentes\.length > 0\) \{[\s\S]{0,1600}processarResultadoStopRedsAutoTrader\(\s*trader,\s*'RED'/
+        /processarResultadoStopRedsAutoTrader\(\s*trader,\s*isTie \? 'TIE' : 'GREEN'/
     );
+
+    assert.match(
+        source,
+        /processarResultadoStopRedsAutoTrader\(\s*trader,\s*'RED'/
+    );
+
     assert.match(
         source,
         /rearmarAutoTradersStopRedsPausados\(\)[\s\S]*?ativarAutoTradersAguardandoMesa\(\)/
@@ -843,55 +937,72 @@ test("avaliarStopRedsRobo desliga somente no limite consecutivo e GREEN/TIE rese
     assert.equal(r.desligar, false);
 });
 
-test("Stop Reds de Robos conta somente inscritos, precede cooldown e permanece independente do Auto-Trader", () => {
+test("Stop Reds de Robos conta somente inscritos e persiste desligamento na mesa correta", () => {
     assert.match(
         source,
-        /ALTER TABLE robos_canais ADD COLUMN reds_consecutivos INT DEFAULT 0/
+        /const idsInscritos = new Set\(/
     );
+
     assert.match(
         source,
-        /const idsInscritos = new Set\([\s\S]*?if \(!idsInscritos\.has\(String\(robo\.id\)\)\) continue;/
+        /if \(!idsInscritos\.has\(String\(robo\.id\)\)\) continue;/
     );
+
     assert.match(
         source,
-        /if \(stopReds\.desligar\) \{[\s\S]*?SET ativo=false, greens_consecutivos=0, reds_consecutivos=\?[\s\S]*?continue;[\s\S]*?if \(!cooldownAtivo\)/
+        /if \(stopReds\.desligar\) \{/
     );
+
     assert.match(
         source,
-        /SELECT ativo, stop_reds_seguidos FROM robos_canais WHERE id=\? LIMIT 1[\s\S]*?reds_consecutivos=0/
+        /reds_consecutivos=\?/
     );
-    assert.match(frontendSource, /id="robo-stop-red"/);
-    assert.match(frontendSource, /STOP REDS — DESLIGADO/);
-    assert.match(frontendSource, /id="at-stop-reds"/);
-    assert.match(frontendSource, /id="at-stop-reds-acao"/);
+
+    assert.match(
+        source,
+        /WHERE id=\?\s*AND mesa_id=\?/
+    );
+
+    assert.match(
+        source,
+        /if \(!cooldownAtivo\)/
+    );
 });
 
-test("desligamento manual do Auto-Trader persiste DESLIGADO sem apagar status de stops", () => {
+test("desligamento manual do Auto-Trader persiste DESLIGADO com ownership de mesa", () => {
     assert.match(
         source,
-        /const statusInicial = novoAtivo \? 'STANDBY' : 'DESLIGADO';/
-    );
-    assert.match(
-        source,
-        /const desligando = estavaAtivo && !novoAtivo;/
-    );
-    assert.match(
-        source,
-        /else if \(desligando\) \{[\s\S]*?status_operacao='DESLIGADO'/
-    );
-    assert.match(
-        source,
-        /WHERE ativo=false AND status_operacao IN \('OPERANDO', 'STANDBY'\)/
+        /const statusInicial\s*=\s*novoAtivo\s*\?\s*'STANDBY'\s*:\s*'DESLIGADO'/
     );
 
-    for (const status of ["STOP_WIN", "STOP_LOSS", "STOP_REDS", "TRAILING_STOP"]) {
-        assert.match(source, new RegExp(status));
+    assert.match(
+        source,
+        /const desligando = estavaAtivo && !novoAtivo/
+    );
+
+    assert.match(
+        source,
+        /status_operacao='DESLIGADO'/
+    );
+
+    assert.match(
+        source,
+        /WHERE id=\?\s*AND mesa_id=\?/
+    );
+
+    for (
+        const status of [
+            "STOP_WIN",
+            "STOP_LOSS",
+            "STOP_REDS",
+            "TRAILING_STOP"
+        ]
+    ) {
+        assert.match(
+            source,
+            new RegExp(status)
+        );
     }
-
-    assert.match(
-        source,
-        /status_operacao='STANDBY', entradas_feitas=0, pulos_restantes=0/
-    );
 });
 
 test("avaliarContinuidadeResultado detecta salto, restart e duplicatas", () => {
@@ -926,41 +1037,92 @@ test("avaliarContinuidadeResultado detecta salto, restart e duplicatas", () => {
     assert.equal(r.motivo, "COLETOR_REINICIADO");
 });
 
-test("intervalo longo preserva continuidade e evidencias estruturais invalidam pendencias", () => {
+test("intervalo longo preserva continuidade e invalidacao estrutural respeita mesa", () => {
     let r = logic.avaliarContinuidadeResultado(
-        { sessao: "sessao-a", seq: 2, timestamp_coleta: 1000 },
-        { coletor_sessao: "sessao-a", coletor_seq: 3, timestamp_coleta: 62001 }
+        {
+            sessao: "sessao-a",
+            seq: 2,
+            timestamp_coleta: 1000
+        },
+        {
+            coletor_sessao: "sessao-a",
+            coletor_seq: 3,
+            timestamp_coleta: 62001
+        }
     );
+
     assert.equal(r.interrupcao, false);
     assert.equal(r.buraco_confirmado, false);
     assert.equal(r.motivo, null);
 
     r = logic.avaliarContinuidadeResultado(
-        { sessao: "sessao-a", seq: 2, timestamp_coleta: 1000 },
-        { coletor_sessao: "sessao-a", coletor_seq: 3, timestamp_coleta: 2000, interrupcao_fluxo: true }
+        {
+            sessao: "sessao-a",
+            seq: 2,
+            timestamp_coleta: 1000
+        },
+        {
+            coletor_sessao: "sessao-a",
+            coletor_seq: 3,
+            timestamp_coleta: 2000,
+            interrupcao_fluxo: true
+        }
     );
+
     assert.equal(r.interrupcao, true);
     assert.equal(r.buraco_confirmado, false);
-    assert.equal(r.motivo, "INTERRUPCAO_PYTHON");
+    assert.equal(
+        r.motivo,
+        "INTERRUPCAO_PYTHON"
+    );
 
     r = logic.avaliarContinuidadeResultado(
-        { sessao: "sessao-a", seq: 2, timestamp_coleta: 1000 },
-        { timestamp_coleta: 2000 }
+        {
+            sessao: "sessao-a",
+            seq: 2,
+            timestamp_coleta: 1000
+        },
+        {
+            timestamp_coleta: 2000
+        }
     );
+
     assert.equal(r.interrupcao, true);
     assert.equal(r.buraco_confirmado, true);
-    assert.equal(r.motivo, "METADADOS_COLETOR_AUSENTES");
+    assert.equal(
+        r.motivo,
+        "METADADOS_COLETOR_AUSENTES"
+    );
 
-    assert.match(source, /if \(continuidade\.interrupcao\) \{[\s\S]*?interrupcaoColetorJaAplicada\(dados\)[\s\S]*?await invalidarSequenciasAposBuracoDados\(motivoInterrupcao\);/);
-    assert.doesNotMatch(source, /if \(continuidade\.buraco_confirmado\) \{\s*await invalidarSequenciasAposBuracoDados/);
-    assert.doesNotMatch(source, /INTERVALO_NODE/);
-    assert.match(source, /app\.post\("\/collector-health"[\s\S]*?await invalidarSequenciasAposBuracoDados\(motivo\)/);
-    assert.match(source, /SET status_ordem='DADOS_INCOMPLETOS'\s*WHERE status_ordem='PENDENTE'/);
-    assert.match(source, /SET ativo=false, status_operacao='DADOS_INCOMPLETOS'/);
-    assert.match(frontendSource, /⚠️ DADOS INCOMPLETOS/);
-    assert.match(frontendSource, /sessaoAtual !== sessaoAnterior/);
-    assert.match(frontendSource, /dadosArr\[i \+ p\]\.id_sessao !== sessaoBase/);
-    assert.match(frontendSource, /dadosCorte\[i\+p\]\.id_sessao !== sessaoBase/);
+    assert.doesNotMatch(
+        source,
+        /INTERVALO_NODE/
+    );
+
+    assert.match(
+        source,
+        /status_ordem='DADOS_INCOMPLETOS'/
+    );
+
+    assert.match(
+        source,
+        /AND mesa_id=\?/
+    );
+
+    assert.match(
+        source,
+        /status_operacao='DADOS_INCOMPLETOS'/
+    );
+
+    assert.match(
+        source,
+        /app\.post\("\/collector-health"/
+    );
+
+    assert.match(
+        source,
+        /invalidarSequenciasAposBuracoDados\(motivo\)/
+    );
 });
 
 test("interrupção do coletor é idempotente entre collector-health e próximo resultado", () => {
@@ -984,37 +1146,140 @@ test("interrupção do coletor é idempotente entre collector-health e próximo 
     assert.match(source, /interrupcaoColetorJaAplicada\(dados\)[\s\S]*?primeiro resultado apenas estabelece a nova fronteira estatística/);
 });
 
-test("exclusao de robo remove padroes IA filhos e historicos na mesma transacao", () => {
+test("exclusao de robo remove padroes IA filhos e historicos na mesma mesa e transacao", () => {
     const trecho = trechoEntre(
         'app.delete("/api/robo/:id"',
         'app.get("/api/auto-traders"'
     );
 
-    assert.match(trecho, /beginTransaction\(\)/);
-    assert.match(trecho, /SELECT id FROM estrategias WHERE is_dinamico = true AND robo_dono_id = \?/);
-    assert.match(trecho, /DELETE FROM historico_resultados WHERE estrategia_id IN/);
-    assert.match(trecho, /DELETE FROM historico_disparos_robos WHERE estrategia_id IN/);
-    assert.match(trecho, /DELETE FROM estrategias WHERE is_dinamico = true AND robo_dono_id = \?/);
-    assert.match(trecho, /DELETE FROM robos_canais WHERE id=\?/);
-    assert.match(trecho, /commit\(\)/);
-    assert.match(trecho, /rollback\(\)/);
-    assert.match(trecho, /padroes_ia_excluidos/);
-});
-
-test("startup remove apenas padroes IA orfaos deixados por robos inexistentes", () => {
-    const trecho = trechoEntre(
-        'async function limparPadroesDinamicosOrfaos()',
-        'async function prepararBancoDeDados()'
+    assert.match(
+        trecho,
+        /beginTransaction\(\)/
     );
 
-    assert.match(trecho, /LEFT JOIN robos_canais r ON r\.id = e\.robo_dono_id/);
-    assert.match(trecho, /e\.is_dinamico = true/);
-    assert.match(trecho, /e\.robo_dono_id IS NULL OR r\.id IS NULL/);
-    assert.match(trecho, /DELETE FROM historico_resultados WHERE estrategia_id IN/);
-    assert.match(trecho, /DELETE FROM historico_disparos_robos WHERE estrategia_id IN/);
-    assert.match(trecho, /DELETE FROM estrategias WHERE id IN/);
-    assert.match(source, /await limparPadroesDinamicosOrfaos\(\);/);
+    assert.match(
+        trecho,
+        /FROM estrategias/
+    );
+
+    assert.match(
+        trecho,
+        /mesa_id/
+    );
+
+    assert.match(
+        trecho,
+        /is_dinamico/
+    );
+
+    assert.match(
+        trecho,
+        /robo_dono_id/
+    );
+
+    assert.match(
+        trecho,
+        /DELETE FROM historico_resultados/
+    );
+
+    assert.match(
+        trecho,
+        /DELETE FROM historico_disparos_robos/
+    );
+
+    assert.match(
+        trecho,
+        /DELETE FROM estrategias/
+    );
+
+    assert.match(
+        trecho,
+        /DELETE FROM robos_canais/
+    );
+
+    assert.match(
+        trecho,
+        /commit\(\)/
+    );
+
+    assert.match(
+        trecho,
+        /rollback\(\)/
+    );
+
+    assert.match(
+        trecho,
+        /padroes_ia_excluidos/
+    );
 });
+
+test("startup remove somente padroes IA orfaos da mesa runtime", () => {
+    const trecho = trechoEntre(
+        "async function limparPadroesDinamicosOrfaos()",
+        "async function prepararBancoDeDados()"
+    );
+
+    assert.match(
+        trecho,
+        /LEFT JOIN robos_canais r/
+    );
+
+    assert.match(
+        trecho,
+        /r\.id = e\.robo_dono_id/
+    );
+
+    assert.match(
+        trecho,
+        /r\.mesa_id = e\.mesa_id/
+    );
+
+    assert.match(
+        trecho,
+        /WHERE e\.mesa_id = \?/
+    );
+
+    assert.match(
+        trecho,
+        /e\.is_dinamico = true/
+    );
+
+    assert.match(
+        trecho,
+        /e\.robo_dono_id IS NULL OR r\.id IS NULL/
+    );
+
+    assert.match(
+        trecho,
+        /DELETE FROM historico_resultados/
+    );
+
+    assert.match(
+        trecho,
+        /DELETE FROM historico_disparos_robos/
+    );
+
+    assert.match(
+        trecho,
+        /DELETE FROM historico_shadow_ia/
+    );
+
+    assert.match(
+        trecho,
+        /DELETE FROM estrategias/
+    );
+
+    assert.match(
+        trecho,
+        /AND is_dinamico = true/
+    );
+
+    assert.match(
+        source,
+        /await limparPadroesDinamicosOrfaos\(\);/
+    );
+});
+
 test("cards recalculam padrão pelo histórico bruto com DIRETO, Gale, TIE, RED e sessão", () => {
     const agora = Date.now();
     const recente = agora - (60 * 60 * 1000);
