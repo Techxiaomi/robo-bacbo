@@ -11,6 +11,9 @@ const { prepararSchemaMesas } = require('./mesa_schema');
 const { prepararEscopoHistoricoMesaAtual } = require('./mesa_scope_migration');
 const { definirMesaRuntime } = require('./mesa_runtime_context');
 const {
+    instalarIntegridadeSomaResultados
+} = require('./mc27_result_sum_integrity');
+const {
     instalarMesaNoTransporteLive,
     confirmarContratoMesaTransporteRuntime
 } = require('./mesa_transport_context');
@@ -31,6 +34,11 @@ async function iniciar() {
         `MC22-Y-A | Runtime de data plane fixado em ${mesaRuntime.codigo} ` +
         `(${mesaRuntime.tipo_jogo}) | id=${mesaRuntime.id}.`
     );
+
+    // MC27: a soma do resultado e um dado canonico proprio. O ledger
+    // analitico legado deixa de representar "desconhecido" como zero e
+    // passa a ser reconciliado, por mesa, contra bacbo_rounds.
+    await instalarIntegridadeSomaResultados();
 
     instalarMesaNoTransporteLive();
 
