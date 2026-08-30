@@ -61,6 +61,15 @@ const controleDiarioAutoTrader = criarControleDiarioAutoTrader({
 });
 
 async function limparPadroesDinamicosOrfaos() {
+    const mesaRuntime = obterMesaRuntime();
+    const mesaId = Number(mesaRuntime.id);
+
+    if (!Number.isInteger(mesaId) || mesaId <= 0) {
+        throw new Error(
+            'MC22-V-B: mesa runtime invalida na limpeza IA'
+        );
+    }
+
     const conexao = await dbPool.getConnection();
     try {
         await conexao.beginTransaction();
@@ -68,38 +77,54 @@ async function limparPadroesDinamicosOrfaos() {
         const [orfaos] = await conexao.query(`
             SELECT e.id
             FROM estrategias e
-            LEFT JOIN robos_canais r ON r.id = e.robo_dono_id
-            WHERE e.is_dinamico = true
+            LEFT JOIN robos_canais r
+              ON r.id = e.robo_dono_id
+             AND r.mesa_id = e.mesa_id
+            WHERE e.mesa_id = ?
+              AND e.is_dinamico = true
               AND (e.robo_dono_id IS NULL OR r.id IS NULL)
-        `);
+            FOR UPDATE
+        `, [mesaId]);
 
         const ids = orfaos.map(row => String(row.id));
         if (ids.length > 0) {
             const placeholders = ids.map(() => '?').join(',');
             await conexao.query(
-                `DELETE FROM historico_resultados WHERE estrategia_id IN (${placeholders})`,
-                ids
+                `DELETE FROM historico_resultados
+                 WHERE mesa_id=?
+                   AND estrategia_id IN (${placeholders})`,
+                [mesaId, ...ids]
             );
             await conexao.query(
-                `DELETE FROM historico_disparos_robos WHERE estrategia_id IN (${placeholders})`,
-                ids
+                `DELETE FROM historico_disparos_robos
+                 WHERE mesa_id=?
+                   AND estrategia_id IN (${placeholders})`,
+                [mesaId, ...ids]
             );
             await conexao.query(
-                `DELETE FROM historico_shadow_ia WHERE estrategia_id IN (${placeholders})`,
-                ids
+                `DELETE FROM historico_shadow_ia
+                 WHERE mesa_id=?
+                   AND estrategia_id IN (${placeholders})`,
+                [mesaId, ...ids]
             );
             await conexao.query(
-                `DELETE FROM estrategias WHERE id IN (${placeholders}) AND is_dinamico = true`,
-                ids
+                `DELETE FROM estrategias
+                 WHERE mesa_id=?
+                   AND id IN (${placeholders})
+                   AND is_dinamico = true`,
+                [mesaId, ...ids]
             );
         }
 
         const [historicosOrfaos] = await conexao.query(`
             DELETE h
             FROM historico_disparos_robos h
-            LEFT JOIN robos_canais r ON r.id = h.robo_id
-            WHERE r.id IS NULL
-        `);
+            LEFT JOIN robos_canais r
+              ON r.id = h.robo_id
+             AND r.mesa_id = h.mesa_id
+            WHERE h.mesa_id = ?
+              AND r.id IS NULL
+        `, [mesaId]);
 
         await conexao.commit();
 
@@ -2334,12 +2359,21 @@ app.delete("/api/robo/:id", async (req, res) => {
     let padroesIaExcluidos = 0;
 
     try {
+        const mesaRuntime = obterMesaRuntime();
+        const mesaId = Number(mesaRuntime.id);
+
+        if (!Number.isInteger(mesaId) || mesaId <= 0) {
+            throw new Error(
+                'MC22-V-B: mesa runtime invalida ao excluir Robo/Canal'
+            );
+        }
+
         conexao = await dbPool.getConnection();
         await conexao.beginTransaction();
 
         const [robos] = await conexao.query(
-            'SELECT id FROM robos_canais WHERE id=? FOR UPDATE',
-            [roboId]
+            'SELECT id FROM robos_canais WHERE id=? AND mesa_id=? FOR UPDATE',
+            [roboId, mesaId]
         );
         if (robos.length === 0) {
             await conexao.rollback();
@@ -2347,24 +2381,36 @@ app.delete("/api/robo/:id", async (req, res) => {
         }
 
         const [padroesIa] = await conexao.query(
-            'SELECT id FROM estrategias WHERE is_dinamico = true AND robo_dono_id = ?',
-            [roboId]
+            `SELECT id
+             FROM estrategias
+             WHERE mesa_id=?
+               AND is_dinamico=true
+               AND robo_dono_id=?
+             FOR UPDATE`,
+            [mesaId, roboId]
         );
         const idsPadroes = padroesIa.map(row => String(row.id));
 
         if (idsPadroes.length > 0) {
             const placeholders = idsPadroes.map(() => '?').join(',');
             await conexao.query(
-                `DELETE FROM historico_resultados WHERE estrategia_id IN (${placeholders})`,
-                idsPadroes
+                `DELETE FROM historico_resultados
+                 WHERE mesa_id=?
+                   AND estrategia_id IN (${placeholders})`,
+                [mesaId, ...idsPadroes]
             );
             await conexao.query(
-                `DELETE FROM historico_disparos_robos WHERE estrategia_id IN (${placeholders})`,
-                idsPadroes
+                `DELETE FROM historico_disparos_robos
+                 WHERE mesa_id=?
+                   AND estrategia_id IN (${placeholders})`,
+                [mesaId, ...idsPadroes]
             );
             const [resultadoPadroes] = await conexao.query(
-                'DELETE FROM estrategias WHERE is_dinamico = true AND robo_dono_id = ?',
-                [roboId]
+                `DELETE FROM estrategias
+                 WHERE mesa_id=?
+                   AND is_dinamico=true
+                   AND robo_dono_id=?`,
+                [mesaId, roboId]
             );
             padroesIaExcluidos = Math.max(0, Number(resultadoPadroes.affectedRows) || 0);
         }
@@ -2373,15 +2419,33 @@ app.delete("/api/robo/:id", async (req, res) => {
         // Na exclusão definitiva do proprietário, remove também IDs IA já arquivados pelo TTL.
         const prefixoHistoricoIa = `ia_${roboId}_`;
         await conexao.query(
-            'DELETE FROM historico_resultados WHERE LEFT(estrategia_id, ?) = ?',
-            [prefixoHistoricoIa.length, prefixoHistoricoIa]
+            `DELETE FROM historico_resultados
+             WHERE mesa_id=?
+               AND LEFT(estrategia_id, ?) = ?`,
+            [mesaId, prefixoHistoricoIa.length, prefixoHistoricoIa]
         );
 
         // Ao excluir o Robô/Canal, seu histórico de distribuição também deixa de ter proprietário.
-        await conexao.query('DELETE FROM historico_shadow_ia WHERE robo_id=?', [roboId]);
-        await conexao.query('DELETE FROM historico_disparos_robos WHERE robo_id=?', [roboId]);
+        await conexao.query(
+            'DELETE FROM historico_shadow_ia WHERE mesa_id=? AND robo_id=?',
+            [mesaId, roboId]
+        );
+        await conexao.query(
+            'DELETE FROM historico_disparos_robos WHERE mesa_id=? AND robo_id=?',
+            [mesaId, roboId]
+        );
         await conexao.query('DELETE FROM destinatarios_robo WHERE robo_id=?', [roboId]);
-        await conexao.query('DELETE FROM robos_canais WHERE id=?', [roboId]);
+        const [resultadoRobo] = await conexao.query(
+            'DELETE FROM robos_canais WHERE id=? AND mesa_id=?',
+            [roboId, mesaId]
+        );
+
+        if (Number(resultadoRobo.affectedRows) !== 1) {
+            throw new Error(
+                `MC22-V-B: Robo/Canal ${roboId} deixou de pertencer ` +
+                `a mesa ${mesaRuntime.codigo} durante a exclusao`
+            );
+        }
 
         await conexao.commit();
     } catch (e) {
