@@ -9,6 +9,7 @@
     <script src="/socket.io/socket.io.js"></script>
     <script src="/realtime-ui-scheduler.js"></script>
     <script src="/dashboard-ui.js"></script>
+    <script src="/mesa-switcher.js"></script>
     <script src="/dom-ui2-transform.js"></script>
     <script src="/bacbo-result-map.js"></script>
     <script src="/backtest-ui3-transform.js"></script>
@@ -45,6 +46,9 @@
                 }
                 if (typeof window.atualizarDashboardValores !== 'function') {
                     throw new Error('Controlador do dashboard não carregado');
+                }
+                if (window.__mesaSwitcherReady !== true || typeof window.__mesaSwitcher?.mount !== 'function') {
+                    throw new Error('Switcher de mesa MC25 não carregado');
                 }
                 if (window.__domUi2Ready !== true || typeof window.otimizarScriptPrincipalUI2 !== 'function') {
                     throw new Error('Transformador DOM UI-2 não carregado');
@@ -97,6 +101,10 @@
                 const script = document.createElement('script');
                 script.textContent = scriptPrincipalOtimizado;
                 document.body.appendChild(script);
+
+                if (!window.__mesaSwitcher.mount()) {
+                    throw new Error('Switcher de mesa MC25 não encontrou o cabeçalho do painel');
+                }
 
                 const finalizarInicializacao = () => {
                     // O HTML-base foi montado depois do DOMContentLoaded original do loader.
