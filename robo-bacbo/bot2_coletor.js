@@ -1628,6 +1628,19 @@ async function carregarHistoricoGirosAnalitico() {
     console.log(`📚 Histórico analítico carregado: ${historicoGirosAnalitico.length} giros.`);
 }
 
+function mesaIdRuntimeApi() {
+    const mesaRuntime = obterMesaRuntime();
+    const mesaId = Number(mesaRuntime.id);
+
+    if (!Number.isInteger(mesaId) || mesaId <= 0) {
+        throw new Error(
+            'MC22-W-BC: mesa runtime invalida para API'
+        );
+    }
+
+    return mesaId;
+}
+
 // ==========================================
 // 5. ROTAS DE API
 // ==========================================
@@ -1646,7 +1659,11 @@ app.get("/api/saldo-global", async (req, res) => {
 
 app.get("/api/estrategias", async (req, res) => {
     try {
-        const [linhas] = await dbPool.query('SELECT * FROM estrategias ORDER BY id DESC');
+        const mesaId = mesaIdRuntimeApi();
+        const [linhas] = await dbPool.query(
+            'SELECT * FROM estrategias WHERE mesa_id=? ORDER BY id DESC',
+            [mesaId]
+        );
         const agoraMs = Date.now();
 
         res.json(linhas.map(est => ({
@@ -1661,9 +1678,10 @@ app.get("/api/estrategias", async (req, res) => {
 
 app.get("/api/dashboard-stats", async (req, res) => {
     try {
+        const mesaId = mesaIdRuntimeApi();
         const { robo_id, periodo = '24h', origem = 'TODAS' } = req.query;
-        let queryWhere = "WHERE 1=1";
-        let queryParams = [];
+        let queryWhere = "WHERE h.mesa_id=?";
+        let queryParams = [mesaId];
 
         if (periodo === '24h') queryWhere += " AND h.data_hora >= DATE_SUB(NOW(), INTERVAL 24 HOUR)";
         else if (periodo === 'hoje') queryWhere += " AND DATE(h.data_hora) = CURDATE()";
@@ -1676,7 +1694,9 @@ app.get("/api/dashboard-stats", async (req, res) => {
         const [linhas] = await dbPool.query(`
             SELECT h.id, h.tipo_resultado, h.nivel, h.multiplicador, h.data_hora
             FROM historico_disparos_robos h
-            LEFT JOIN estrategias e ON h.estrategia_id = e.id
+            LEFT JOIN estrategias e
+              ON h.estrategia_id = e.id
+             AND e.mesa_id = h.mesa_id
             ${queryWhere}
             ORDER BY h.data_hora ASC, h.id ASC
         `, queryParams);
@@ -1734,9 +1754,17 @@ app.get("/api/dashboard-stats", async (req, res) => {
 
 app.get("/api/historico-giros", async (req, res) => {
     try {
+        const mesaId = mesaIdRuntimeApi();
         let limit = parseInt(req.query.limit) || 1000;
         if (limit > 10000) limit = 10000;
-        const [linhas] = await dbPool.query(`SELECT resultado, multiplicador, data_hora, id_sessao FROM giros_recentes ORDER BY id DESC LIMIT ${limit}`);
+        const [linhas] = await dbPool.query(
+            `SELECT resultado, multiplicador, data_hora, id_sessao
+             FROM giros_recentes
+             WHERE mesa_id=?
+             ORDER BY id DESC
+             LIMIT ${limit}`,
+            [mesaId]
+        );
         res.json(linhas.reverse());
     } catch (e) {
         console.error('❌ GET /api/historico-giros falhou:', e.message);
@@ -1747,6 +1775,7 @@ app.get("/api/historico-giros", async (req, res) => {
 
 app.post("/api/oraculo/analisar", async (req, res) => {
     try {
+        const mesaId = mesaIdRuntimeApi();
         const gales = Number(req.body?.gales);
         const janela = String(req.body?.janela || '').trim().toLowerCase();
         const confiancaMinima = Number(req.body?.confianca_minima);
@@ -1794,8 +1823,14 @@ app.post("/api/oraculo/analisar", async (req, res) => {
 
         const sql =
             'SELECT id, resultado, id_sessao, UNIX_TIMESTAMP(data_hora) * 1000 AS timestamp_ms '
-            + 'FROM giros_recentes WHERE ' + janelasSql[janela] + ' ORDER BY id ASC';
-        const [linhas] = await dbPool.query(sql);
+            + 'FROM giros_recentes WHERE mesa_id=? AND ('
+            + janelasSql[janela]
+            + ') ORDER BY id ASC';
+
+        const [linhas] = await dbPool.query(
+            sql,
+            [mesaId]
+        );
         const historico = Array.isArray(linhas) ? linhas : [];
         const mesaAtual = extrairMesaAtual(historico, 20);
 
@@ -1846,12 +1881,20 @@ app.post("/api/oraculo/analisar", async (req, res) => {
 
 app.post("/api/simular-banca", async (req, res) => {
     try {
+        const mesaId = mesaIdRuntimeApi();
         const { tipo_alvo, alvo_id, banca_inicial, stake_principal, cobrir_empate, pct_empate, mult_gale, periodo, filtro_horario, hora_inicio, hora_fim } = req.body;
         let query = ""; let params = [];
 
-        if (tipo_alvo === 'ESTRATEGIA') { query = "SELECT tipo_resultado, nivel, multiplicador, data_hora, estrategia_id FROM historico_resultados WHERE estrategia_id = ?"; params.push(alvo_id); }
-        else if (tipo_alvo === 'ORIGEM') { query = "SELECT h.tipo_resultado, h.nivel, h.multiplicador, h.data_hora, h.estrategia_id FROM historico_resultados h JOIN estrategias e ON h.estrategia_id = e.id WHERE e.origem = ?"; params.push(alvo_id); }
-        else if (tipo_alvo === 'ROBO') { query = "SELECT tipo_resultado, nivel, multiplicador, data_hora, estrategia_id FROM historico_disparos_robos WHERE robo_id = ?"; params.push(alvo_id); }
+        if (tipo_alvo === 'ESTRATEGIA') {
+            query = "SELECT tipo_resultado, nivel, multiplicador, data_hora, estrategia_id FROM historico_resultados WHERE mesa_id=? AND estrategia_id=?";
+            params.push(mesaId, alvo_id);
+        } else if (tipo_alvo === 'ORIGEM') {
+            query = "SELECT h.tipo_resultado, h.nivel, h.multiplicador, h.data_hora, h.estrategia_id FROM historico_resultados h JOIN estrategias e ON h.estrategia_id=e.id AND e.mesa_id=h.mesa_id WHERE h.mesa_id=? AND e.origem=?";
+            params.push(mesaId, alvo_id);
+        } else if (tipo_alvo === 'ROBO') {
+            query = "SELECT tipo_resultado, nivel, multiplicador, data_hora, estrategia_id FROM historico_disparos_robos WHERE mesa_id=? AND robo_id=?";
+            params.push(mesaId, alvo_id);
+        }
 
         if (periodo === '24h') query += " AND data_hora >= DATE_SUB(NOW(), INTERVAL 24 HOUR)";
         else if (periodo === 'hoje') query += " AND DATE(data_hora) = CURDATE()";
@@ -1861,7 +1904,10 @@ app.post("/api/simular-banca", async (req, res) => {
         query += " ORDER BY data_hora ASC";
         const [linhas] = await dbPool.query(query, params);
 
-        const [estrategias] = await dbPool.query('SELECT id, gales FROM estrategias');
+        const [estrategias] = await dbPool.query(
+            'SELECT id, gales FROM estrategias WHERE mesa_id=?',
+            [mesaId]
+        );
         let estMap = {}; estrategias.forEach(e => { estMap[e.id] = e.gales; });
 
         let filtered = linhas;
@@ -1917,11 +1963,19 @@ app.post("/api/simular-banca", async (req, res) => {
 
 app.post("/api/novo-padrao", async (req, res) => {
     try {
+        const mesaId = mesaIdRuntimeApi();
         const { nome, origem, padrao, entrada, gales, protegerEmpate, ativo } = req.body;
         const padraoJson = JSON.stringify(padrao.split(',').map(s => s.trim()));
         const id = "padrao_" + Date.now();
         const tiesZerado = JSON.stringify({ direto: { '88x': 0, '25x': 0, '10x': 0, '6x': 0, '4x': 0 }, gale1: { '88x': 0, '25x': 0, '10x': 0, '6x': 0, '4x': 0 }, gale2: { '88x': 0, '25x': 0, '10x': 0, '6x': 0, '4x': 0 } });
-        await dbPool.query('INSERT INTO estrategias (id, nome, origem, padrao, entrada, gales, proteger_empate, ativo, green_direto, gale1, gale2, red, ties_json, is_dinamico) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, ?, false)', [id, nome, origem, padraoJson, entrada, parseInt(gales), protegerEmpate ? 1 : 0, ativo ? 1 : 0, tiesZerado]);
+        await dbPool.query(
+            'INSERT INTO estrategias (id, mesa_id, nome, origem, padrao, entrada, gales, proteger_empate, ativo, green_direto, gale1, gale2, red, ties_json, is_dinamico) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, ?, false)',
+            [
+                id, mesaId, nome, origem, padraoJson, entrada,
+                parseInt(gales), protegerEmpate ? 1 : 0,
+                ativo ? 1 : 0, tiesZerado
+            ]
+        );
         await carregarSistemasParaMemoria(); ioServer.emit('atualizar_interface'); res.json({ sucesso: true });
     } catch (erro) {
         console.error('❌ POST /api/novo-padrao falhou:', erro.message);
@@ -1931,9 +1985,25 @@ app.post("/api/novo-padrao", async (req, res) => {
 
 app.put("/api/estrategia/:id", async (req, res) => {
     try {
+        const mesaId = mesaIdRuntimeApi();
         const { nome, origem, padrao, entrada, gales, protegerEmpate, ativo } = req.body;
         const padraoJson = JSON.stringify(padrao.split(',').map(s => s.trim()));
-        await dbPool.query('UPDATE estrategias SET nome = ?, origem = ?, padrao = ?, entrada = ?, gales = ?, proteger_empate = ?, ativo = ? WHERE id = ? AND is_dinamico = false', [nome, origem, padraoJson, entrada, parseInt(gales), protegerEmpate ? 1 : 0, ativo ? 1 : 0, req.params.id]);
+        const [resultadoUpdate] = await dbPool.query(
+            'UPDATE estrategias SET nome=?, origem=?, padrao=?, entrada=?, gales=?, proteger_empate=?, ativo=? WHERE id=? AND mesa_id=? AND is_dinamico=false',
+            [
+                nome, origem, padraoJson, entrada, parseInt(gales),
+                protegerEmpate ? 1 : 0, ativo ? 1 : 0,
+                req.params.id, mesaId
+            ]
+        );
+
+        if (Number(resultadoUpdate.affectedRows) !== 1) {
+            return res.status(404).json({
+                sucesso: false,
+                erro: 'estrategia_nao_encontrada'
+            });
+        }
+
         await carregarSistemasParaMemoria(); ioServer.emit('atualizar_interface'); res.json({ sucesso: true });
     } catch (erro) {
         console.error(`❌ PUT /api/estrategia/${req.params.id} falhou:`, erro.message);
@@ -1943,9 +2013,10 @@ app.put("/api/estrategia/:id", async (req, res) => {
 
 app.delete("/api/estrategia/:id", async (req, res) => {
     try {
+        const mesaId = mesaIdRuntimeApi();
         const [existentes] = await dbPool.query(
-            'SELECT id, nome, is_dinamico FROM estrategias WHERE id=? LIMIT 1',
-            [req.params.id]
+            'SELECT id, nome, is_dinamico FROM estrategias WHERE id=? AND mesa_id=? LIMIT 1',
+            [req.params.id, mesaId]
         );
 
         if (existentes.length === 0) {
@@ -1975,7 +2046,8 @@ app.delete("/api/estrategia/:id", async (req, res) => {
         }
 
         await apagarEstrategiaEDados(
-            req.params.id
+            req.params.id,
+            mesaId
         );
 
         await carregarSistemasParaMemoria();
@@ -2005,9 +2077,16 @@ app.delete("/api/estrategia/:id", async (req, res) => {
     }
 });
 
-async function apagarEstrategiaEDados(id) {
-    await dbPool.query('DELETE FROM estrategias WHERE id = ?', [id]);
-    await dbPool.query('DELETE FROM historico_resultados WHERE estrategia_id = ?', [id]);
+async function apagarEstrategiaEDados(id, mesaId) {
+    await dbPool.query(
+        'DELETE FROM estrategias WHERE id=? AND mesa_id=?',
+        [id, mesaId]
+    );
+
+    await dbPool.query(
+        'DELETE FROM historico_resultados WHERE estrategia_id=? AND mesa_id=?',
+        [id, mesaId]
+    );
 }
 
 app.get("/api/origens", async (req, res) => { try { const [linhas] = await dbPool.query('SELECT * FROM origens ORDER BY nome ASC'); res.json(linhas); } catch(e) { console.error('❌ GET /api/origens falhou:', e.message); res.status(500).json([]); } });
@@ -2020,9 +2099,22 @@ app.delete("/api/origem/:id", async (req, res) => { try { await dbPool.query('DE
 // ==========================================
 app.get("/api/robos", async (req, res) => {
     try {
-        const [linhas] = await dbPool.query('SELECT * FROM robos_canais ORDER BY id DESC');
-        const [destinatarios] = await dbPool.query('SELECT * FROM destinatarios_robo');
-        const [countDinamicos] = await dbPool.query(`SELECT robo_dono_id, COUNT(id) AS qtd_total, SUM(ativo = true) AS qtd_ativos, SUM(ativo = false AND (ia_status='RESERVA' OR (ia_status IS NULL AND quarentena_restante=0))) AS qtd_reserva, SUM(ativo = false AND ia_status='SHADOW_HISTORICO') AS qtd_shadow_historico, SUM(ativo = false AND ia_status='SHADOW_LIVE') AS qtd_shadow_live, SUM(ativo = false AND (ia_status LIKE 'SHADOW_%' OR (ia_status IS NULL AND quarentena_restante>0))) AS qtd_sombra FROM estrategias WHERE is_dinamico = true GROUP BY robo_dono_id`);
+        const mesaId = mesaIdRuntimeApi();
+
+        const [linhas] = await dbPool.query(
+            'SELECT * FROM robos_canais WHERE mesa_id=? ORDER BY id DESC',
+            [mesaId]
+        );
+
+        const [destinatarios] = await dbPool.query(
+            `SELECT d.*
+             FROM destinatarios_robo d
+             JOIN robos_canais r
+               ON r.id=d.robo_id
+             WHERE r.mesa_id=?`,
+            [mesaId]
+        );
+        const [countDinamicos] = await dbPool.query(`SELECT robo_dono_id, COUNT(id) AS qtd_total, SUM(ativo = true) AS qtd_ativos, SUM(ativo = false AND (ia_status='RESERVA' OR (ia_status IS NULL AND quarentena_restante=0))) AS qtd_reserva, SUM(ativo = false AND ia_status='SHADOW_HISTORICO') AS qtd_shadow_historico, SUM(ativo = false AND ia_status='SHADOW_LIVE') AS qtd_shadow_live, SUM(ativo = false AND (ia_status LIKE 'SHADOW_%' OR (ia_status IS NULL AND quarentena_restante>0))) AS qtd_sombra FROM estrategias WHERE mesa_id=? AND is_dinamico = true GROUP BY robo_dono_id`, [mesaId]);
 
         // UX-002/003: estatísticas cronológicas dos robôs para os cards e máximas de sequência.
         const [historicoRobos] = await dbPool.query(`
@@ -2033,8 +2125,9 @@ app.get("/api/robos", async (req, res) => {
                 YEARWEEK(data_hora, 0) = YEARWEEK(CURDATE(), 0) AS is_semana,
                 YEAR(data_hora) = YEAR(CURDATE()) AND MONTH(data_hora) = MONTH(CURDATE()) AS is_mes
             FROM historico_disparos_robos
+            WHERE mesa_id=?
             ORDER BY robo_id ASC, data_hora ASC, id ASC
-        `);
+        `, [mesaId]);
 
         let mapRobos = {};
         let sequenciasRobos = {};
@@ -2141,11 +2234,25 @@ app.get("/api/robos", async (req, res) => {
 
 app.post("/api/robo", async (req, res) => {
     try {
+        const mesaId = mesaIdRuntimeApi();
         const { nome, tag, cor, telegram_token, telegram_chat_id, enviar_telegram, enviar_web, min_assert, stop_reds, ativo, config, destinatarios } = req.body;
         const configJson = JSON.stringify(config || {});
         const tokenNormalizado = typeof telegram_token === 'string' ? telegram_token.trim() : '';
         const chatPrincipal = typeof telegram_chat_id === 'string' ? telegram_chat_id.trim() : '';
-        const [result] = await dbPool.query(`INSERT INTO robos_canais (nome, tag_visual, cor_hex, telegram_token, telegram_chat_id, enviar_telegram, enviar_web, min_assertividade, stop_reds_seguidos, greens_consecutivos, ativo, config_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`, [nome, tag, cor, tokenNormalizado, chatPrincipal, enviar_telegram ? 1 : 0, enviar_web ? 1 : 0, min_assert, stop_reds, ativo ? 1 : 0, configJson]);
+        const [result] = await dbPool.query(
+            `INSERT INTO robos_canais
+                (mesa_id, nome, tag_visual, cor_hex, telegram_token,
+                 telegram_chat_id, enviar_telegram, enviar_web,
+                 min_assertividade, stop_reds_seguidos,
+                 greens_consecutivos, ativo, config_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+            [
+                mesaId, nome, tag, cor, tokenNormalizado,
+                chatPrincipal, enviar_telegram ? 1 : 0,
+                enviar_web ? 1 : 0, min_assert, stop_reds,
+                ativo ? 1 : 0, configJson
+            ]
+        );
         let roboId = result.insertId;
         if (destinatarios && Array.isArray(destinatarios)) { for (let d of destinatarios) { if (d.chat_id && d.chat_id.trim() !== '') await dbPool.query('INSERT INTO destinatarios_robo (robo_id, nome_cliente, chat_id) VALUES (?, ?, ?)', [roboId, d.nome_cliente || 'Cliente', d.chat_id.trim()]); } }
         await carregarSistemasParaMemoria();
@@ -2162,6 +2269,7 @@ app.post("/api/robo", async (req, res) => {
 
 app.put("/api/robo/:id", async (req, res) => {
     try {
+        const mesaId = mesaIdRuntimeApi();
         const { id } = req.params;
         const {
             nome, tag, cor, telegram_token, telegram_chat_id,
@@ -2176,8 +2284,8 @@ app.put("/api/robo/:id", async (req, res) => {
         const stopNovo = Math.max(0, Math.trunc(Number(stop_reds) || 0));
 
         const [existentes] = await dbPool.query(
-            'SELECT ativo, stop_reds_seguidos FROM robos_canais WHERE id=? LIMIT 1',
-            [id]
+            'SELECT ativo, stop_reds_seguidos FROM robos_canais WHERE id=? AND mesa_id=? LIMIT 1',
+            [id, mesaId]
         );
 
         if (existentes.length === 0) {
@@ -2200,12 +2308,12 @@ app.put("/api/robo/:id", async (req, res) => {
                      telegram_chat_id=?, enviar_telegram=?, enviar_web=?,
                      min_assertividade=?, stop_reds_seguidos=?, ativo=?,
                      config_json=?, reds_consecutivos=0
-                 WHERE id=?`,
+                 WHERE id=? AND mesa_id=?`,
                 [
                     nome, tag, cor, tokenRecebido, chatPrincipal,
                     enviar_telegram ? 1 : 0, enviar_web ? 1 : 0,
                     min_assert, stopNovo, novoAtivo ? 1 : 0,
-                    configJson, id
+                    configJson, id, mesaId
                 ]
             );
         } else {
@@ -2216,12 +2324,12 @@ app.put("/api/robo/:id", async (req, res) => {
                      telegram_chat_id=?, enviar_telegram=?, enviar_web=?,
                      min_assertividade=?, stop_reds_seguidos=?, ativo=?,
                      config_json=?
-                 WHERE id=?`,
+                 WHERE id=? AND mesa_id=?`,
                 [
                     nome, tag, cor, tokenRecebido, chatPrincipal,
                     enviar_telegram ? 1 : 0, enviar_web ? 1 : 0,
                     min_assert, stopNovo, novoAtivo ? 1 : 0,
-                    configJson, id
+                    configJson, id, mesaId
                 ]
             );
         }
@@ -2251,10 +2359,11 @@ app.put("/api/robo/:id", async (req, res) => {
                 await dbPool.query(
                     `SELECT COUNT(*) AS qtd
                      FROM estrategias
-                     WHERE is_dinamico=true
+                     WHERE mesa_id=?
+                       AND is_dinamico=true
                        AND robo_dono_id=?
                        AND ativo=true`,
-                    [id]
+                    [mesaId, id]
                 );
 
             const qtdAtivos = Math.max(
@@ -2288,10 +2397,14 @@ app.post("/api/robo/:id/testar-telegram", async (req, res) => {
     }
 
     try {
+        const mesaId = mesaIdRuntimeApi();
+
         const [robos] = await dbPool.query(
             `SELECT id, nome, telegram_token, telegram_chat_id
-             FROM robos_canais WHERE id=? LIMIT 1`,
-            [roboId]
+             FROM robos_canais
+             WHERE id=? AND mesa_id=?
+             LIMIT 1`,
+            [roboId, mesaId]
         );
         if (robos.length === 0) {
             return res.status(404).json({ sucesso: false, erro: 'robo_nao_encontrado' });
