@@ -1603,6 +1603,8 @@ function calcularDetalhesPadraoNoHistorico(est, dadosArr, agoraMs = Date.now()) 
 }
 
 async function carregarHistoricoGirosAnalitico() {
+    const mesaRuntime = obterMesaRuntime();
+
     const [linhas] = await dbPool.query(`
         SELECT
             id,
@@ -1611,8 +1613,9 @@ async function carregarHistoricoGirosAnalitico() {
             id_sessao,
             UNIX_TIMESTAMP(data_hora) * 1000 AS timestamp_ms
         FROM giros_recentes
+        WHERE mesa_id=?
         ORDER BY id ASC
-    `);
+    `, [mesaRuntime.id]);
 
     historicoGirosAnalitico = linhas.map(row => ({
         id: Number(row.id) || 0,
@@ -5202,7 +5205,19 @@ arbitroFinanceiroAutoTrader = criarArbitroFinanceiroAutoTrader({
 
 async function carregarSistemasParaMemoria() {
     try {
-        const [linhasEst] = await dbPool.query('SELECT * FROM estrategias WHERE ativo = true');
+        const mesaRuntime = obterMesaRuntime();
+        const mesaId = Number(mesaRuntime.id);
+
+        if (!Number.isInteger(mesaId) || mesaId <= 0) {
+            throw new Error(
+                'MC22-W-A: mesa runtime invalida ao carregar memoria'
+            );
+        }
+
+        const [linhasEst] = await dbPool.query(
+            'SELECT * FROM estrategias WHERE mesa_id=? AND ativo=true',
+            [mesaId]
+        );
         ESTRATEGIAS_MEMORIA = []; let novoEstado = {};
 
         linhasEst.forEach(db => {
@@ -5210,7 +5225,7 @@ async function carregarSistemasParaMemoria() {
             let tiesParsed = { direto:{}, gale1:{}, gale2:{} }; if (db.ties_json) { try { tiesParsed = JSON.parse(db.ties_json); } catch(e) {} }
 
             let est = {
-                id: db.id, nome: db.nome, origem: db.origem, padrao: padraoParsed, entrada: db.entrada,
+                id: db.id, mesa_id: Number(db.mesa_id), nome: db.nome, origem: db.origem, padrao: padraoParsed, entrada: db.entrada,
                 gales: db.gales, protegerEmpate: db.proteger_empate === 1, ativo: true, is_dinamico: db.is_dinamico === 1,
                 robo_dono_id: db.robo_dono_id, quarentena_restante: db.quarentena_restante || 0,
                 stats: { greenDireto: db.green_direto, gale1: db.gale1, gale2: db.gale2, red: db.red, ties: tiesParsed }
@@ -5221,8 +5236,23 @@ async function carregarSistemasParaMemoria() {
         estadoApostas = novoEstado;
         sincronizarLocksSinalComEstadoApostas();
 
-        const [linhasRobos] = await dbPool.query('SELECT * FROM robos_canais WHERE ativo = true');
-        const [destinatariosRobos] = await dbPool.query('SELECT robo_id, nome_cliente, chat_id FROM destinatarios_robo');
+        const [linhasRobos] = await dbPool.query(
+            'SELECT * FROM robos_canais WHERE mesa_id=? AND ativo=true',
+            [mesaId]
+        );
+
+        const [destinatariosRobos] = await dbPool.query(
+            `SELECT
+                d.robo_id,
+                d.nome_cliente,
+                d.chat_id
+             FROM destinatarios_robo d
+             JOIN robos_canais r
+               ON r.id=d.robo_id
+             WHERE r.mesa_id=?
+               AND r.ativo=true`,
+            [mesaId]
+        );
 
         ROBOS_MEMORIA = linhasRobos.map(r => {
             let confObj = { origens: [], avulsos: [], excecoes: [], auto_tuning: { ativo: false }, cooldown: { ativo: false } };
@@ -5245,13 +5275,16 @@ async function carregarSistemasParaMemoria() {
             return { ...r, config: confObj, destinatarios };
         });
 
-        const [linhasAT] = await dbPool.query('SELECT * FROM auto_traders');
+        const [linhasAT] = await dbPool.query(
+            'SELECT * FROM auto_traders WHERE mesa_id=?',
+            [mesaId]
+        );
         AUTO_TRADERS_MEMORIA = linhasAT.map(at => {
             let cfg = {}; try { cfg = JSON.parse(at.config_json); } catch(e) {}
             cfg = normalizarConfigAutoTrader(cfg);
             const estadoCiclo = normalizarEstadoCiclo(at);
             return {
-                id: at.id, nome: at.nome, ativo: at.ativo === 1, config: cfg,
+                id: at.id, mesa_id: Number(at.mesa_id), nome: at.nome, ativo: at.ativo === 1, config: cfg,
                 saldo_inicial: parseFloat(at.saldo_inicial), saldo_atual: parseFloat(at.saldo_atual),
                 status_operacao: at.status_operacao, entradas_feitas: at.entradas_feitas, pulos_restantes: estadoCiclo.pulos_restantes,
                 estado_ciclo: estadoCiclo.estado_ciclo,
