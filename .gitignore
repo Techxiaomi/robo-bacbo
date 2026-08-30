@@ -20,6 +20,7 @@ __pycache__/
 *.log
 logs/
 robo-sync-pilot/runtime/
+robo-bacbo/public/bacbo-map-snapshot.json
 .cache/
 .pytest_cache/
 coverage/

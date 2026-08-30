@@ -1,0 +1,330 @@
+'use strict';
+
+const fs = require('fs/promises');
+const path = require('path');
+const mysql = require('mysql2/promise');
+const { createClient } = require('redis');
+const { validarLiveRound } = require('./bacbo_payload_schema');
+const {
+    publicarRodadaLive,
+    publicarHistoricoRecuperado
+} = require('./bacbo_live_bus');
+
+const {
+    obterEscopoRedisMesa
+} = require('./mesa_redis_scope');
+
+const ESCOPO_REDIS_MESA =
+    obterEscopoRedisMesa();
+
+const MAX_ROUNDS = 1000;
+const SNAPSHOT_PATH = path.join(__dirname, 'public', 'bacbo-map-snapshot.json');
+const RETENTION_KEY =
+    ESCOPO_REDIS_MESA.recentRoundsKey;
+
+const HISTORY_KEY =
+    ESCOPO_REDIS_MESA.historyKey;
+
+const EVENTS_CHANNEL =
+    ESCOPO_REDIS_MESA.eventsChannel;
+
+let instalado = false;
+let pool = null;
+let reader = null;
+let subscriber = null;
+let rodadas = [];
+let persistencia = Promise.resolve();
+let filaEventos = Promise.resolve();
+let recoveryAtivo = false;
+
+function dbPool() {
+    if (pool) return pool;
+    pool = mysql.createPool({
+        host: process.env.DB_HOST,
+        port: Number(process.env.DB_PORT || 3306),
+        user: process.env.DB_USER,
+        password: process.env.DB_PASSWORD,
+        database: process.env.DB_NAME,
+        waitForConnections: true,
+        connectionLimit: 2,
+        queueLimit: 0
+    });
+    return pool;
+}
+
+function winner(valor) {
+    const bruto = String(valor || '').trim().toUpperCase();
+    if (bruto === 'PLAYER' || bruto === 'PLAYERWON' || bruto === 'P') return 'Player';
+    if (bruto === 'BANKER' || bruto === 'BANKERWON' || bruto === 'B') return 'Banker';
+    if (bruto === 'TIE' || bruto === 'TIEWON' || bruto === 'T') return 'Tie';
+    return '';
+}
+
+function numero(valor) {
+    const n = Number(valor);
+    return Number.isFinite(n) ? n : null;
+}
+
+function normalizarRound(item) {
+    if (!item || typeof item !== 'object') return null;
+    const tipo = winner(item.winner || item.type || item.vencedor || item.resultado);
+    const result = numero(item.result ?? item.resultado_soma ?? item.soma);
+    const instant = item.instant || item.data_hora || item.timestamp || null;
+    const ms = instant ? Date.parse(String(instant)) : NaN;
+    if (!tipo || result === null || !Number.isFinite(ms)) return null;
+    return {
+        uuid: String(item.uuid || item.round_uuid || '').trim(),
+        winner: tipo,
+        result,
+        instant: new Date(ms).toISOString(),
+        ms
+    };
+}
+
+function chaveRound(round) {
+    return round.uuid || `${round.instant}|${round.winner}|${round.result}`;
+}
+
+function ordenarELimitar(lista) {
+    const dedup = new Map();
+    for (const item of lista) {
+        const round = normalizarRound(item);
+        if (!round) continue;
+        dedup.set(chaveRound(round), round);
+    }
+    return [...dedup.values()]
+        .sort((a, b) => a.ms - b.ms || chaveRound(a).localeCompare(chaveRound(b)))
+        .slice(-MAX_ROUNDS);
+}
+
+function snapshotPublico() {
+    return {
+        version: 3,
+        updated_at: new Date().toISOString(),
+        rows: rodadas.map(({ uuid, winner: tipo, result, instant }) => ({
+            uuid,
+            winner: tipo,
+            result,
+            instant
+        }))
+    };
+}
+
+function persistirSnapshot() {
+    persistencia = persistencia
+        .then(async () => {
+            const conteudo = JSON.stringify(snapshotPublico());
+            await fs.writeFile(SNAPSHOT_PATH, conteudo, 'utf8');
+        })
+        .catch(erro => {
+            console.warn(`⚠️ Mapa Bac Bo: snapshot visual não pôde ser gravado: ${erro.message}`);
+        });
+    return persistencia;
+}
+
+async function hidratarBanco() {
+    try {
+        const [linhas] = await dbPool().query(
+            `SELECT uuid, winner, \`result\`, instant
+             FROM bacbo_rounds
+             WHERE mesa_id=?
+             ORDER BY instant DESC
+             LIMIT ?`,
+            [
+                ESCOPO_REDIS_MESA.mesaId,
+                MAX_ROUNDS
+            ]
+        );
+        if (Array.isArray(linhas) && linhas.length > 0) {
+            rodadas = ordenarELimitar(linhas.reverse());
+            return rodadas.length;
+        }
+    } catch (_) {}
+    return 0;
+}
+
+function parseJson(valor) {
+    try { return JSON.parse(String(valor || '')); } catch (_) { return null; }
+}
+
+function extrairArrayHistorico(valor) {
+    const parsed = typeof valor === 'string' ? parseJson(valor) : valor;
+    if (Array.isArray(parsed)) return parsed;
+    if (!parsed || typeof parsed !== 'object') return [];
+    for (const chave of ['history', 'data', 'results', 'rounds']) {
+        if (Array.isArray(parsed[chave])) return parsed[chave];
+    }
+    return [];
+}
+
+async function lerHistoricoRetido(cliente) {
+    if (!cliente) return [];
+    try {
+        const bruto = await cliente.get(HISTORY_KEY);
+        return extrairArrayHistorico(bruto);
+    } catch (_) {
+        return [];
+    }
+}
+
+async function hidratarRedis(cliente) {
+    const acumulado = [];
+    try {
+        const recentes = await cliente.lRange(RETENTION_KEY, 0, MAX_ROUNDS - 1);
+        for (const bruto of recentes.reverse()) {
+            const item = parseJson(bruto);
+            if (item) acumulado.push(item);
+        }
+    } catch (_) {}
+
+    acumulado.push(...await lerHistoricoRetido(cliente));
+
+    if (acumulado.length > 0) {
+        rodadas = ordenarELimitar([...rodadas, ...acumulado]);
+    }
+    return rodadas.length;
+}
+
+function payloadLive(mensagem) {
+    const raiz = parseJson(mensagem);
+    if (!raiz || typeof raiz !== 'object') return null;
+    const acao = String(raiz.action || '').toLowerCase();
+    if (acao === 'history_sync') return null;
+
+    for (const candidato of [raiz, raiz.data, raiz.payload, raiz.event]) {
+        if (!candidato || typeof candidato !== 'object' || Array.isArray(candidato)) continue;
+        if (candidato.uuid !== undefined && candidato.type !== undefined && candidato.result !== undefined) {
+            return candidato;
+        }
+    }
+    return null;
+}
+
+function incorporarLive(payload) {
+    const validacao = validarLiveRound(payload);
+    if (!validacao.ok) return false;
+
+    const roundValidado = validacao.round;
+    const round = {
+        uuid: roundValidado.uuid,
+        winner: roundValidado.winner,
+        result: roundValidado.result,
+        instant: roundValidado.instant,
+        ms: roundValidado.timestamp_ms
+    };
+
+    rodadas = ordenarELimitar([...rodadas, round]);
+
+    publicarRodadaLive(round);
+    void persistirSnapshot();
+    return true;
+}
+
+async function incorporarHistoricoRetido() {
+    const historicoBruto = await lerHistoricoRetido(reader);
+    const historico = ordenarELimitar(historicoBruto);
+    if (historico.length === 0) return false;
+
+    const antes = new Map(rodadas.map(round => [chaveRound(round), round]));
+    const tinhaHistorico = antes.size > 0;
+    const sobreposicao = historico.some(round => antes.has(chaveRound(round)));
+    const recuperadas = historico.filter(round => !antes.has(chaveRound(round)));
+
+    rodadas = ordenarELimitar([...rodadas, ...historico]);
+    await persistirSnapshot();
+
+    if (recoveryAtivo && recuperadas.length > 0) {
+        publicarHistoricoRecuperado(recuperadas, {
+            continuidade: !tinhaHistorico || sobreposicao,
+            janela: historico.length
+        });
+    }
+    return true;
+}
+
+function enfileirarEvento(tarefa) {
+    const executar = async () => tarefa();
+    filaEventos = filaEventos.then(executar, executar);
+    return filaEventos;
+}
+
+async function conectarRedis() {
+    const redisUrl = String(process.env.REDIS_URL || 'redis://127.0.0.1:6379').trim() || 'redis://127.0.0.1:6379';
+    const timeoutBruto = Number(process.env.REDIS_CONNECT_TIMEOUT_MS || 3000);
+    const connectTimeout = Number.isFinite(timeoutBruto)
+        ? Math.max(500, Math.min(15000, timeoutBruto))
+        : 3000;
+
+    reader = createClient({
+        url: redisUrl,
+        socket: { connectTimeout }
+    });
+    subscriber = reader.duplicate();
+
+    reader.on('error', erro => {
+        console.warn(`⚠️ Mapa Bac Bo: Redis visual reader indisponível: ${erro.message}`);
+    });
+    subscriber.on('error', erro => {
+        console.warn(`⚠️ Mapa Bac Bo: Redis visual subscriber indisponível: ${erro.message}`);
+    });
+
+    await reader.connect();
+    await subscriber.connect();
+    await hidratarRedis(reader);
+    await persistirSnapshot();
+
+    recoveryAtivo = true;
+    await subscriber.subscribe(EVENTS_CHANNEL, mensagem => {
+        const raiz = parseJson(mensagem);
+
+        const mesaCodigo =
+            String(raiz?.mesa_codigo || '')
+                .trim()
+                .toUpperCase();
+
+        if (
+            mesaCodigo !== ESCOPO_REDIS_MESA.codigo
+        ) {
+            return;
+        }
+
+        const acao =
+            String(raiz?.action || '')
+                .toLowerCase();
+
+        if (acao === 'history_sync') {
+            void enfileirarEvento(() => incorporarHistoricoRetido()).catch(erro => {
+                console.warn(`⚠️ Mapa Bac Bo: recovery visual falhou: ${erro.message}`);
+            });
+            return;
+        }
+
+        const live = payloadLive(mensagem);
+        if (live) {
+            void enfileirarEvento(() => incorporarLive(live)).catch(erro => {
+                console.warn(`⚠️ Mapa Bac Bo: rodada live visual falhou: ${erro.message}`);
+            });
+        }
+    });
+
+    // Fecha a janela entre a leitura inicial do Redis e a efetivação da assinatura Pub/Sub.
+    await enfileirarEvento(() => incorporarHistoricoRetido());
+}
+
+async function instalarBacboMapSnapshot() {
+    if (instalado) return true;
+    instalado = true;
+
+    await fs.mkdir(path.dirname(SNAPSHOT_PATH), { recursive: true });
+    await hidratarBanco();
+    await persistirSnapshot();
+
+    void conectarRedis().catch(erro => {
+        console.warn(`⚠️ Mapa Bac Bo: atualização em tempo real não iniciou: ${erro.message}`);
+    });
+
+    console.log(`🗺️ Mapa Bac Bo pronto | snapshot/recovery de até ${MAX_ROUNDS} rodada(s).`);
+    return true;
+}
+
+module.exports = { instalarBacboMapSnapshot };

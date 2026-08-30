@@ -1,3 +1,5 @@
+// MICRO-COMMIT 8: rodada_inicio imutável de nascimento.
+// MICRO-COMMIT 6: tolerância de consistência inicial para evitar falsos positivos.
 const mysql = require("mysql2/promise");
 const express = require("express");
 const path = require("path");
@@ -9,8 +11,29 @@ const {
 } = require("./tie_protection");
 const { Server } = require("socket.io");
 const { criarAutoPilotService } = require("./auto_pilot_ia");
+const { analisarOraculo, extrairMesaAtual, normalizarResultadoOraculo } = require("./oraculo_dinamico");
 const { criarControleDiarioAutoTrader } = require("./bug051b_daily_counter");
 const { criarIntegracaoContadorDiario } = require("./bug051b_integration");
+const {
+    normalizarConfigAutoTrader,
+    traderDentroHorarioExecucao,
+    formatarFaixasHorario,
+    normalizarEstadoCiclo,
+    estadoInicialCiclo,
+    configuracaoCicloMudou,
+    processarResultadoDormindo,
+    avaliarSinalOnda,
+    avancarAposSinalOperado,
+    aplicarEstadoCiclo
+} = require("./auto_trader");
+const { criarArbitroFinanceiroAutoTrader } = require("./auto_trader_round_arbiter");
+const { obterMesaRuntime } = require("./mesa_runtime_context");
+const {
+    nomeCookieEscopadoPorMesa
+} = require("./mesa_operational_scope");
+const {
+    afirmarMesaFinanceiraAutorizada
+} = require("./mesa_financial_scope");
 require("./env_loader").loadEnvFile(path.join(__dirname, "..", ".env"));
 
 // Erros globais realmente não tratados são fatais: continuar pode deixar estado financeiro incoerente.
@@ -44,6 +67,15 @@ const controleDiarioAutoTrader = criarControleDiarioAutoTrader({
 });
 
 async function limparPadroesDinamicosOrfaos() {
+    const mesaRuntime = obterMesaRuntime();
+    const mesaId = Number(mesaRuntime.id);
+
+    if (!Number.isInteger(mesaId) || mesaId <= 0) {
+        throw new Error(
+            'MC22-V-B: mesa runtime invalida na limpeza IA'
+        );
+    }
+
     const conexao = await dbPool.getConnection();
     try {
         await conexao.beginTransaction();
@@ -51,38 +83,54 @@ async function limparPadroesDinamicosOrfaos() {
         const [orfaos] = await conexao.query(`
             SELECT e.id
             FROM estrategias e
-            LEFT JOIN robos_canais r ON r.id = e.robo_dono_id
-            WHERE e.is_dinamico = true
+            LEFT JOIN robos_canais r
+              ON r.id = e.robo_dono_id
+             AND r.mesa_id = e.mesa_id
+            WHERE e.mesa_id = ?
+              AND e.is_dinamico = true
               AND (e.robo_dono_id IS NULL OR r.id IS NULL)
-        `);
+            FOR UPDATE
+        `, [mesaId]);
 
         const ids = orfaos.map(row => String(row.id));
         if (ids.length > 0) {
             const placeholders = ids.map(() => '?').join(',');
             await conexao.query(
-                `DELETE FROM historico_resultados WHERE estrategia_id IN (${placeholders})`,
-                ids
+                `DELETE FROM historico_resultados
+                 WHERE mesa_id=?
+                   AND estrategia_id IN (${placeholders})`,
+                [mesaId, ...ids]
             );
             await conexao.query(
-                `DELETE FROM historico_disparos_robos WHERE estrategia_id IN (${placeholders})`,
-                ids
+                `DELETE FROM historico_disparos_robos
+                 WHERE mesa_id=?
+                   AND estrategia_id IN (${placeholders})`,
+                [mesaId, ...ids]
             );
             await conexao.query(
-                `DELETE FROM historico_shadow_ia WHERE estrategia_id IN (${placeholders})`,
-                ids
+                `DELETE FROM historico_shadow_ia
+                 WHERE mesa_id=?
+                   AND estrategia_id IN (${placeholders})`,
+                [mesaId, ...ids]
             );
             await conexao.query(
-                `DELETE FROM estrategias WHERE id IN (${placeholders}) AND is_dinamico = true`,
-                ids
+                `DELETE FROM estrategias
+                 WHERE mesa_id=?
+                   AND id IN (${placeholders})
+                   AND is_dinamico = true`,
+                [mesaId, ...ids]
             );
         }
 
         const [historicosOrfaos] = await conexao.query(`
             DELETE h
             FROM historico_disparos_robos h
-            LEFT JOIN robos_canais r ON r.id = h.robo_id
-            WHERE r.id IS NULL
-        `);
+            LEFT JOIN robos_canais r
+              ON r.id = h.robo_id
+             AND r.mesa_id = h.mesa_id
+            WHERE h.mesa_id = ?
+              AND r.id IS NULL
+        `, [mesaId]);
 
         await conexao.commit();
 
@@ -107,6 +155,21 @@ async function limparPadroesDinamicosOrfaos() {
 
 async function prepararBancoDeDados() {
     try {
+        // MC22-T: em fresh install estas tabelas nascem depois
+        // da migration de escopo. O bootstrap ja fixou a mesa
+        // canonica antes de carregar este modulo.
+        const mesaRuntimeSchema = obterMesaRuntime();
+        const mesaIdSchema = Number(mesaRuntimeSchema.id);
+
+        if (
+            !Number.isInteger(mesaIdSchema)
+            || mesaIdSchema <= 0
+        ) {
+            throw new Error(
+                'MC22-T: mesa runtime invalida ao preparar schema canonico'
+            );
+        }
+
         await dbPool.query(`
             CREATE TABLE IF NOT EXISTS origens (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -117,6 +180,7 @@ async function prepararBancoDeDados() {
         await dbPool.query(`
             CREATE TABLE IF NOT EXISTS estrategias (
                 id VARCHAR(100) PRIMARY KEY,
+                mesa_id SMALLINT UNSIGNED NOT NULL,
                 nome VARCHAR(100),
                 origem VARCHAR(100),
                 padrao TEXT,
@@ -139,6 +203,7 @@ async function prepararBancoDeDados() {
         await dbPool.query(`
             CREATE TABLE IF NOT EXISTS historico_resultados (
                 id INT AUTO_INCREMENT PRIMARY KEY,
+                mesa_id SMALLINT UNSIGNED NOT NULL,
                 estrategia_id VARCHAR(100),
                 tipo_resultado VARCHAR(20),
                 nivel VARCHAR(20),
@@ -150,6 +215,7 @@ async function prepararBancoDeDados() {
         await dbPool.query(`
             CREATE TABLE IF NOT EXISTS historico_shadow_ia (
                 id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                mesa_id SMALLINT UNSIGNED NOT NULL,
                 estrategia_id VARCHAR(100) NOT NULL,
                 robo_id INT NOT NULL,
                 giro_resultado_id INT NOT NULL,
@@ -157,7 +223,7 @@ async function prepararBancoDeDados() {
                 nivel VARCHAR(20) DEFAULT 'DIRETO',
                 multiplicador VARCHAR(10) DEFAULT '',
                 data_hora DATETIME DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE KEY uq_shadow_estrategia_giro (estrategia_id, giro_resultado_id),
+                UNIQUE KEY uq_shadow_mesa_estrategia_giro (mesa_id, estrategia_id, giro_resultado_id),
                 INDEX idx_shadow_robo (robo_id),
                 INDEX idx_shadow_estrategia (estrategia_id)
             )
@@ -166,6 +232,7 @@ async function prepararBancoDeDados() {
         await dbPool.query(`
             CREATE TABLE IF NOT EXISTS giros_recentes (
                 id INT AUTO_INCREMENT PRIMARY KEY,
+                mesa_id SMALLINT UNSIGNED NOT NULL,
                 resultado VARCHAR(20),
                 p_d1 INT DEFAULT 0,
                 p_d2 INT DEFAULT 0,
@@ -181,6 +248,7 @@ async function prepararBancoDeDados() {
         await dbPool.query(`
             CREATE TABLE IF NOT EXISTS robos_canais (
                 id INT AUTO_INCREMENT PRIMARY KEY,
+                mesa_id SMALLINT UNSIGNED NOT NULL,
                 nome VARCHAR(100),
                 tag_visual VARCHAR(20),
                 cor_hex VARCHAR(10) DEFAULT '#007bff',
@@ -212,6 +280,7 @@ async function prepararBancoDeDados() {
         await dbPool.query(`
             CREATE TABLE IF NOT EXISTS historico_disparos_robos (
                 id INT AUTO_INCREMENT PRIMARY KEY,
+                mesa_id SMALLINT UNSIGNED NOT NULL,
                 robo_id INT,
                 estrategia_id VARCHAR(100),
                 tipo_resultado VARCHAR(20),
@@ -226,6 +295,7 @@ async function prepararBancoDeDados() {
         await dbPool.query(`
             CREATE TABLE IF NOT EXISTS auto_traders (
                 id INT AUTO_INCREMENT PRIMARY KEY,
+                mesa_id SMALLINT UNSIGNED NOT NULL,
                 nome VARCHAR(100),
                 ativo BOOLEAN DEFAULT false,
                 config_json TEXT,
@@ -234,6 +304,10 @@ async function prepararBancoDeDados() {
                 status_operacao VARCHAR(50) DEFAULT 'STANDBY',
                 entradas_feitas INT DEFAULT 0,
                 pulos_restantes INT DEFAULT 0,
+                estado_ciclo VARCHAR(20) DEFAULT 'DORMINDO',
+                reds_virtuais_observados INT DEFAULT 0,
+                sinais_operados_onda INT DEFAULT 0,
+                ciclos_concluidos INT DEFAULT 0,
                 data_contador_entradas VARCHAR(10) DEFAULT NULL,
                 reds_consecutivos INT DEFAULT 0,
                 stop_reds_pausado_ate BIGINT DEFAULT 0,
@@ -245,7 +319,9 @@ async function prepararBancoDeDados() {
         await dbPool.query(`
             CREATE TABLE IF NOT EXISTS auditoria_ordens (
                 id INT AUTO_INCREMENT PRIMARY KEY,
+                mesa_id SMALLINT UNSIGNED NOT NULL,
                 trader_id INT,
+                estrategia_id VARCHAR(100) DEFAULT NULL,
                 estrategia_nome VARCHAR(100),
                 fonte_sinal VARCHAR(100),
                 alvo VARCHAR(20),
@@ -296,6 +372,7 @@ async function prepararBancoDeDados() {
         await adicionarColuna("ALTER TABLE estrategias ADD COLUMN quarentena_restante INT DEFAULT 0");
         await adicionarColuna("ALTER TABLE estrategias ADD COLUMN ia_status VARCHAR(30) DEFAULT NULL");
         await adicionarColuna("ALTER TABLE historico_disparos_robos ADD COLUMN estrategia_origem VARCHAR(100) DEFAULT ''");
+        await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN estrategia_id VARCHAR(100) DEFAULT NULL");
         await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN executor_order_id VARCHAR(64) DEFAULT NULL");
         await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN valor_empate DECIMAL(12,2) DEFAULT 0");
         await adicionarColuna("ALTER TABLE auditoria_ordens ADD COLUMN executor_confirmacao_metodo VARCHAR(40) DEFAULT NULL");
@@ -310,6 +387,10 @@ async function prepararBancoDeDados() {
         await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN stop_reds_pausado_ate BIGINT DEFAULT 0");
         await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN trailing_pico_lucro DECIMAL(12,2) DEFAULT 0");
         await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN data_contador_entradas VARCHAR(10) DEFAULT NULL");
+        await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN estado_ciclo VARCHAR(20) DEFAULT 'DORMINDO'");
+        await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN reds_virtuais_observados INT DEFAULT 0");
+        await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN sinais_operados_onda INT DEFAULT 0");
+        await adicionarColuna("ALTER TABLE auto_traders ADD COLUMN ciclos_concluidos INT DEFAULT 0");
         await integracaoContadorDiario.inicializarDatasLegadas();
 
         // Corrige estados legados impossíveis: um trader desligado manualmente não pode permanecer OPERANDO/STANDBY.
@@ -317,7 +398,10 @@ async function prepararBancoDeDados() {
         await dbPool.query(
             `UPDATE auto_traders
              SET status_operacao='DESLIGADO'
-             WHERE ativo=false AND status_operacao IN ('OPERANDO', 'STANDBY')`
+             WHERE mesa_id=?
+               AND ativo=false
+               AND status_operacao IN ('OPERANDO', 'STANDBY')`,
+            [mesaIdSchema]
         );
 
         // BUG-012: padrões IA não podem sobreviver sem o Robô/Canal proprietário.
@@ -339,8 +423,23 @@ async function prepararBancoDeDados() {
 let ESTRATEGIAS_MEMORIA = [];
 let ROBOS_MEMORIA = [];
 let AUTO_TRADERS_MEMORIA = [];
+let arbitroFinanceiroAutoTrader = null;
 let historicoGirosAnalitico = [];
 let estadoApostas = {};
+
+// MICRO-COMMIT 2:
+// Um robô pode participar de somente um ciclo de sinal por vez.
+// Locks são independentes por robo.id, permitindo paralelismo entre robôs diferentes.
+const locksSinalPorRobo = new Map();
+
+// Quando um robô sai de um ciclo, grava a rodada em que voltou a escutar.
+// Um padrão novo só poderá ser reconhecido quando TODAS as suas casas tiverem
+// ocorrido depois dessa fronteira.
+const cursorRetomadaPorRobo = new Map();
+
+// Cursor monotônico das rodadas aceitas pelo Node nesta execução.
+let contadorRodadasSinal = 0;
+
 let estadoStandbyRobos = {};
 let idSessaoContinua = Date.now();
 let estadoContinuidadeColetor = {
@@ -583,7 +682,11 @@ const ADMIN_SESSION_TTL_MS = (
         ? adminSessionTtlMinutesConfig
         : 720
 ) * 60 * 1000;
-const ADMIN_SESSION_COOKIE = 'bacbo_admin_session';
+const ADMIN_SESSION_COOKIE =
+    nomeCookieEscopadoPorMesa(
+        'bacbo_admin_session',
+        process.env
+    );
 const adminCookieSecureConfig = String(process.env.ADMIN_COOKIE_SECURE || '').trim().toLowerCase();
 const ADMIN_COOKIE_SECURE = adminCookieSecureConfig === 'true'
     || (adminCookieSecureConfig !== 'false' && !hostNodeEhLoopback(NODE_HOST));
@@ -638,6 +741,28 @@ const BALANCE_SYNC_MAX_AGE_MS = (
         ? balanceSyncMaxAgeSecondsConfig
         : 90
 ) * 1000;
+const REDIS_URL = String(process.env.REDIS_URL || 'redis://127.0.0.1:6379').trim() || 'redis://127.0.0.1:6379';
+const redisConnectTimeoutConfig = Number(process.env.REDIS_CONNECT_TIMEOUT_MS || 3000);
+const REDIS_CONNECT_TIMEOUT_MS = (
+    Number.isFinite(redisConnectTimeoutConfig)
+    && redisConnectTimeoutConfig >= 500
+    && redisConnectTimeoutConfig <= 15000
+        ? redisConnectTimeoutConfig
+        : 3000
+);
+const balanceSyncResponseTimeoutConfig = Number(process.env.BALANCE_SYNC_RESPONSE_TIMEOUT_MS || 8000);
+const BALANCE_SYNC_RESPONSE_TIMEOUT_MS = (
+    Number.isFinite(balanceSyncResponseTimeoutConfig)
+    && balanceSyncResponseTimeoutConfig >= 1000
+    && balanceSyncResponseTimeoutConfig <= 30000
+        ? balanceSyncResponseTimeoutConfig
+        : 8000
+);
+let redisClient = null;
+let redisSubscriber = null;
+let redisSaldoAssinado = false;
+let redisSaldoInicializacaoPromise = null;
+const ESPERAS_ATUALIZACAO_SALDO_REDIS = new Set();
 
 function snapshotSaldoGlobal(agora = Date.now()) {
     const saldoValido = Number.isFinite(saldoGlobalCorretora) && saldoGlobalCorretora >= 0;
@@ -658,6 +783,279 @@ function snapshotSaldoGlobal(agora = Date.now()) {
 function obterSaldoGlobalFresco(agora = Date.now()) {
     const snapshot = snapshotSaldoGlobal(agora);
     return snapshot.fresco ? snapshot.saldo_atual : null;
+}
+
+function criarClientesRedisSaldo() {
+    if (redisClient && redisSubscriber) return;
+
+    const { createClient } = require('redis');
+    redisClient = createClient({
+        url: REDIS_URL,
+        socket: {
+            connectTimeout: REDIS_CONNECT_TIMEOUT_MS,
+            reconnectStrategy: () => false
+        }
+    });
+    redisSubscriber = redisClient.duplicate();
+
+    redisClient.on('error', erro => {
+        console.error('⚠️ Redis publisher do saldo:', erro.message);
+    });
+    redisSubscriber.on('error', erro => {
+        console.error('⚠️ Redis subscriber do saldo:', erro.message);
+    });
+    redisSubscriber.on('end', () => {
+        redisSaldoAssinado = false;
+    });
+}
+
+function criarEsperaAtualizacaoSaldoRedis() {
+    let ativa = true;
+    let resolverPromessa = null;
+    let rejeitarPromessa = null;
+    let timeoutId = null;
+
+    const promessa = new Promise((resolve, reject) => {
+        resolverPromessa = resolve;
+        rejeitarPromessa = reject;
+    });
+
+    const espera = {
+        resolver(snapshot) {
+            if (!ativa) return false;
+            ativa = false;
+            if (timeoutId) clearTimeout(timeoutId);
+            ESPERAS_ATUALIZACAO_SALDO_REDIS.delete(espera);
+            resolverPromessa(snapshot);
+            return true;
+        },
+        cancelar() {
+            if (!ativa) return false;
+            ativa = false;
+            if (timeoutId) clearTimeout(timeoutId);
+            ESPERAS_ATUALIZACAO_SALDO_REDIS.delete(espera);
+            return true;
+        }
+    };
+
+    timeoutId = setTimeout(() => {
+        if (!ativa) return;
+        ativa = false;
+        ESPERAS_ATUALIZACAO_SALDO_REDIS.delete(espera);
+        rejeitarPromessa(new Error(`Sem balance_update via Redis em ${BALANCE_SYNC_RESPONSE_TIMEOUT_MS}ms`));
+    }, BALANCE_SYNC_RESPONSE_TIMEOUT_MS);
+    if (timeoutId && typeof timeoutId.unref === 'function') timeoutId.unref();
+
+    ESPERAS_ATUALIZACAO_SALDO_REDIS.add(espera);
+    return { promessa, cancelar: espera.cancelar };
+}
+
+function resolverEsperasAtualizacaoSaldoRedis(snapshot) {
+    for (const espera of [...ESPERAS_ATUALIZACAO_SALDO_REDIS]) {
+        espera.resolver(snapshot);
+    }
+}
+
+async function aplicarSaldoGlobalRecebido(saldo, atualizadoEm = Date.now()) {
+    const saldoNumero = Number(saldo);
+    const timestampNumero = Number(atualizadoEm);
+    if (!Number.isFinite(saldoNumero) || saldoNumero < 0) {
+        throw new Error('balance_update invalido recebido via Redis');
+    }
+    if (!Number.isFinite(timestampNumero) || timestampNumero <= 0) {
+        throw new Error('timestamp de balance_update invalido');
+    }
+
+    const timestampConfirmado = Math.trunc(timestampNumero);
+    const mesaSaldo =
+        afirmarMesaFinanceiraAutorizada(
+            'balance_update'
+        );
+    const mesaIdSaldo = Number(mesaSaldo.id);
+
+    await dbPool.query(
+        'UPDATE auto_traders SET saldo_atual=? WHERE ativo=true AND mesa_id=?',
+        [saldoNumero, mesaIdSaldo]
+    );
+
+    saldoGlobalCorretora = saldoNumero;
+    saldoGlobalAtualizadoEm = timestampConfirmado;
+    await confirmarSaldosPosLiquidacao(saldoNumero, timestampConfirmado);
+
+    for (const trader of AUTO_TRADERS_MEMORIA) {
+        if (trader.ativo) trader.saldo_atual = saldoNumero;
+    }
+
+    const snapshot = snapshotSaldoGlobal(timestampConfirmado);
+    ioServer.emit('atualizar_interface');
+    return snapshot;
+}
+
+async function processarRespostaSaldoRedis(mensagem) {
+    let dados = null;
+    try {
+        dados = JSON.parse(String(mensagem || ''));
+    } catch (e) {
+        console.warn('⚠️ Resposta Redis de saldo ignorada: JSON invalido.');
+        return false;
+    }
+
+    if (!dados || dados.action !== 'balance_update') return false;
+
+    const saldo = Number(dados.balance);
+    if (!Number.isFinite(saldo) || saldo < 0) {
+        console.warn('⚠️ Resposta Redis balance_update ignorada: balance invalido.');
+        return false;
+    }
+
+    const snapshot = await aplicarSaldoGlobalRecebido(saldo, Date.now());
+    resolverEsperasAtualizacaoSaldoRedis(snapshot);
+    console.log(`💰 Saldo real atualizado via Redis: R$ ${saldo.toFixed(2)}.`);
+    return true;
+}
+
+async function garantirRedisSaldoPronto() {
+    if (
+        redisClient?.isReady === true
+        && redisSubscriber?.isReady === true
+        && redisSaldoAssinado
+    ) {
+        return true;
+    }
+
+    if (redisSaldoInicializacaoPromise) {
+        await redisSaldoInicializacaoPromise;
+        return true;
+    }
+
+    redisSaldoInicializacaoPromise = (async () => {
+        criarClientesRedisSaldo();
+
+        if (!redisClient.isOpen) {
+            await redisClient.connect();
+        }
+        if (!redisSubscriber.isOpen) {
+            await redisSubscriber.connect();
+        }
+        if (!redisSaldoAssinado) {
+            await redisSubscriber.subscribe('auto_trader_responses', mensagem => {
+                void processarRespostaSaldoRedis(mensagem).catch(erro => {
+                    console.error('⚠️ Falha ao processar balance_update recebido via Redis:', erro.message);
+                });
+            });
+            redisSaldoAssinado = true;
+        }
+    })();
+
+    try {
+        await redisSaldoInicializacaoPromise;
+        return true;
+    } finally {
+        redisSaldoInicializacaoPromise = null;
+    }
+}
+
+async function solicitarSincronizacaoSaldoRedis() {
+    afirmarMesaFinanceiraAutorizada(
+        'sync_balance'
+    );
+
+    await garantirRedisSaldoPronto();
+    const espera = criarEsperaAtualizacaoSaldoRedis();
+
+    try {
+        await redisClient.publish('auto_trader_commands', JSON.stringify({action: 'sync_balance'}));
+        return await espera.promessa;
+    } catch (e) {
+        espera.cancelar();
+        throw e;
+    }
+}
+
+// MC19:
+// Ativação financeira nunca reutiliza saldo vencido.
+// Se o cache global não estiver fresco, solicita uma
+// leitura física ao executor e só libera a operação
+// depois que o MESMO gate de freshness confirmar
+// o balance_update recebido.
+async function obterSaldoAutoTraderParaAtivacao() {
+    try {
+        afirmarMesaFinanceiraAutorizada(
+            'ativacao_auto_trader'
+        );
+    } catch (e) {
+        console.warn(
+            'AUTO-TRADER | ativacao financeira bloqueada:',
+            e.message
+        );
+
+        return {
+            ok: false,
+            saldo: null,
+            sincronizado_agora: false,
+            erro: String(
+                e?.code
+                || e?.message
+                || 'MESA_FINANCEIRA_NAO_AUTORIZADA'
+            )
+        };
+    }
+
+    const saldoJaFresco = obterSaldoGlobalFresco();
+
+    if (saldoJaFresco !== null) {
+        return {
+            ok: true,
+            saldo: saldoJaFresco,
+            sincronizado_agora: false,
+            erro: null
+        };
+    }
+
+    try {
+        await solicitarSincronizacaoSaldoRedis();
+
+        const saldoConfirmado =
+            obterSaldoGlobalFresco();
+
+        if (saldoConfirmado === null) {
+            console.warn(
+                '⚠️ AUTO-TRADER | sync de saldo respondeu, '
+                + 'mas o gate de freshness permaneceu fechado.'
+            );
+
+            return {
+                ok: false,
+                saldo: null,
+                sincronizado_agora: false,
+                erro: 'SALDO_NAO_FICOU_FRESCO'
+            };
+        }
+
+        return {
+            ok: true,
+            saldo: saldoConfirmado,
+            sincronizado_agora: true,
+            erro: null
+        };
+    } catch (e) {
+        console.warn(
+            '⚠️ AUTO-TRADER | sincronização automática '
+            + 'de saldo para ativação falhou:',
+            e.message
+        );
+
+        return {
+            ok: false,
+            saldo: null,
+            sincronizado_agora: false,
+            erro: String(
+                e && e.message
+                    ? e.message
+                    : 'SYNC_BALANCE_FALHOU'
+            )
+        };
+    }
 }
 
 function normalizarInterrupcaoColetorId(dados) {
@@ -810,6 +1208,10 @@ function erroResultadoExecucaoExecutor(resultado) {
 }
 
 async function enviarOrdemAoExecutor(alvo, valor, orderId = crypto.randomUUID(), apostas = null) {
+    afirmarMesaFinanceiraAutorizada(
+        'place_bet'
+    );
+
     const esperaExecucao = criarEsperaResultadoExecutor(orderId);
     let ultimoErro = null;
     let confirmacaoAceite = null;
@@ -965,71 +1367,173 @@ function classificarStatusFalhaEnvioExecutor(erro) {
 }
 
 async function criarIntencaoOrdem(queryable, dados) {
-    const orderId = String(dados.order_id || crypto.randomUUID());
+    const mesaRuntime = obterMesaRuntime();
+    const mesaId = Number(mesaRuntime.id);
+
+    if (!Number.isInteger(mesaId) || mesaId <= 0) {
+        throw new Error(
+            'MC22-X: mesa runtime invalida ao criar intencao financeira'
+        );
+    }
+
+    const orderId = String(
+        dados.order_id || crypto.randomUUID()
+    );
+
     const [resultado] = await queryable.query(
         `INSERT INTO auditoria_ordens
-            (trader_id, estrategia_nome, fonte_sinal, alvo, nivel, risco_total,
-             valor_entrada, valor_empate, executor_order_id, status_ordem)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PREPARANDO')`,
+            (mesa_id, trader_id, estrategia_id, estrategia_nome,
+             fonte_sinal, alvo, nivel, risco_total,
+             valor_entrada, valor_empate,
+             executor_order_id, status_ordem)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PREPARANDO')`,
         [
+            mesaId,
             dados.trader_id,
+            dados.estrategia_id ?? null,
             dados.estrategia_nome,
             dados.fonte_sinal,
             dados.alvo,
             dados.nivel,
             dados.risco_total,
             dados.valor_entrada,
-            Math.max(0, Number(dados.valor_empate) || 0),
+            Math.max(
+                0,
+                Number(dados.valor_empate) || 0
+            ),
             orderId
         ]
     );
 
     const auditoriaId = Number(resultado.insertId);
-    if (!Number.isInteger(auditoriaId) || auditoriaId <= 0) {
-        throw new Error('MySQL nao retornou ID valido para a intencao de ordem');
+
+    if (
+        !Number.isInteger(auditoriaId)
+        || auditoriaId <= 0
+    ) {
+        throw new Error(
+            'MySQL nao retornou ID valido para a intencao de ordem'
+        );
     }
 
-    return { auditoria_id: auditoriaId, order_id: orderId };
+    return {
+        auditoria_id: auditoriaId,
+        order_id: orderId,
+        mesa_id: mesaId
+    };
 }
 
-async function marcarIntencaoAposFalhaEnvio(auditoriaId, erro, contexto) {
-    const status = classificarStatusFalhaEnvioExecutor(erro);
+async function marcarIntencaoAposFalhaEnvio(
+    auditoriaId,
+    erro,
+    contexto
+) {
+    const mesaRuntime = obterMesaRuntime();
+    const status =
+        classificarStatusFalhaEnvioExecutor(erro);
+
     try {
         const [resultado] = await dbPool.query(
             `UPDATE auditoria_ordens
              SET status_ordem=?
-             WHERE id=? AND status_ordem='PREPARANDO'`,
-            [status, auditoriaId]
+             WHERE id=?
+               AND mesa_id=?
+               AND status_ordem='PREPARANDO'`,
+            [
+                status,
+                auditoriaId,
+                mesaRuntime.id
+            ]
         );
+
         if (Number(resultado.affectedRows) !== 1) {
-            console.error(`⚠️ ${contexto}: intenção ${auditoriaId} não estava PREPARANDO ao registrar ${status}.`);
+            console.error(
+                `${contexto}: intencao ${auditoriaId} ` +
+                `nao estava PREPARANDO na mesa ` +
+                `${mesaRuntime.codigo} ao registrar ${status}.`
+            );
         }
     } catch (persistenciaErro) {
         console.error(
-            `⚠️ ${contexto}: falha ao persistir ${status} na intenção ${auditoriaId}; `
-            + `PREPARANDO permanece como evidência conservadora:`,
+            `${contexto}: falha ao persistir ${status} ` +
+            `na intencao ${auditoriaId}; PREPARANDO permanece ` +
+            `como evidencia conservadora:`,
             persistenciaErro.message
         );
     }
+
     return status;
 }
 
-async function bloquearTraderAposExecucaoAmbigua(trader, statusFalha, contexto) {
-    if (statusFalha !== 'ENVIO_AMBIGUO' || !trader) return false;
-    trader.ativo = false;
-    trader.status_operacao = 'BLOQUEADO_AMBIGUIDADE';
+async function bloquearTraderAposExecucaoAmbigua(
+    trader,
+    statusFalha,
+    contexto
+) {
+    if (
+        statusFalha !== 'ENVIO_AMBIGUO'
+        || !trader
+    ) {
+        return false;
+    }
+
+    let mesaId;
+
     try {
-        await dbPool.query(
-            `UPDATE auto_traders SET ativo=false, status_operacao='BLOQUEADO_AMBIGUIDADE' WHERE id=?`,
-            [trader.id]
+        mesaId = mesaIdFinanceiroTrader(
+            trader,
+            'bloqueio por execucao ambigua'
         );
+    } catch (erroMesa) {
+        trader.ativo = false;
+        trader.status_operacao =
+            'BLOQUEADO_AMBIGUIDADE';
+
         console.error(
-            `🚨 Auto-Trader ${trader.id} bloqueado por execução financeira ambígua (${contexto}). `
-            + `Revise a conta da Evolution antes de reativar.`
+            `MC22-X: Trader ${trader.id} com ownership ` +
+            `de mesa invalido; bloqueado somente em memoria.`,
+            erroMesa.message
         );
+
+        return false;
+    }
+
+    trader.ativo = false;
+    trader.status_operacao =
+        'BLOQUEADO_AMBIGUIDADE';
+
+    try {
+        const [resultado] = await dbPool.query(
+            `UPDATE auto_traders
+             SET ativo=false,
+                 status_operacao='BLOQUEADO_AMBIGUIDADE'
+             WHERE id=?
+               AND mesa_id=?`,
+            [
+                trader.id,
+                mesaId
+            ]
+        );
+
+        if (Number(resultado.affectedRows) !== 1) {
+            throw new Error(
+                'Trader nao encontrado na mesa runtime'
+            );
+        }
+
+        console.error(
+            `Auto-Trader ${trader.id} bloqueado por ` +
+            `execucao financeira ambigua (${contexto}).`
+        );
+
         return true;
     } catch (erro) {
-        console.error(`🚨 Falha ao persistir bloqueio de segurança do Auto-Trader ${trader.id}:`, erro.message);
+        console.error(
+            `Falha ao persistir bloqueio de seguranca do ` +
+            `Auto-Trader ${trader.id}:`,
+            erro.message
+        );
+
         return false;
     }
 }
@@ -1249,6 +1753,8 @@ function calcularDetalhesPadraoNoHistorico(est, dadosArr, agoraMs = Date.now()) 
 }
 
 async function carregarHistoricoGirosAnalitico() {
+    const mesaRuntime = obterMesaRuntime();
+
     const [linhas] = await dbPool.query(`
         SELECT
             id,
@@ -1257,8 +1763,9 @@ async function carregarHistoricoGirosAnalitico() {
             id_sessao,
             UNIX_TIMESTAMP(data_hora) * 1000 AS timestamp_ms
         FROM giros_recentes
+        WHERE mesa_id=?
         ORDER BY id ASC
-    `);
+    `, [mesaRuntime.id]);
 
     historicoGirosAnalitico = linhas.map(row => ({
         id: Number(row.id) || 0,
@@ -1271,16 +1778,42 @@ async function carregarHistoricoGirosAnalitico() {
     console.log(`📚 Histórico analítico carregado: ${historicoGirosAnalitico.length} giros.`);
 }
 
+function mesaIdRuntimeApi() {
+    const mesaRuntime = obterMesaRuntime();
+    const mesaId = Number(mesaRuntime.id);
+
+    if (!Number.isInteger(mesaId) || mesaId <= 0) {
+        throw new Error(
+            'MC22-W-BC: mesa runtime invalida para API'
+        );
+    }
+
+    return mesaId;
+}
+
 // ==========================================
 // 5. ROTAS DE API
 // ==========================================
-app.get("/api/saldo-global", (req, res) => {
-    res.json(snapshotSaldoGlobal());
+app.get("/api/saldo-global", async (req, res) => {
+    try {
+        const snapshot = await solicitarSincronizacaoSaldoRedis();
+        return res.json(snapshot);
+    } catch (e) {
+        console.error('⚠️ GET /api/saldo-global: sincronização sob demanda via Redis falhou:', e.message);
+        return res.status(503).json({
+            ...snapshotSaldoGlobal(),
+            erro: 'sincronizacao_saldo_indisponivel'
+        });
+    }
 });
 
 app.get("/api/estrategias", async (req, res) => {
     try {
-        const [linhas] = await dbPool.query('SELECT * FROM estrategias ORDER BY id DESC');
+        const mesaId = mesaIdRuntimeApi();
+        const [linhas] = await dbPool.query(
+            'SELECT * FROM estrategias WHERE mesa_id=? ORDER BY id DESC',
+            [mesaId]
+        );
         const agoraMs = Date.now();
 
         res.json(linhas.map(est => ({
@@ -1295,9 +1828,10 @@ app.get("/api/estrategias", async (req, res) => {
 
 app.get("/api/dashboard-stats", async (req, res) => {
     try {
+        const mesaId = mesaIdRuntimeApi();
         const { robo_id, periodo = '24h', origem = 'TODAS' } = req.query;
-        let queryWhere = "WHERE 1=1";
-        let queryParams = [];
+        let queryWhere = "WHERE h.mesa_id=?";
+        let queryParams = [mesaId];
 
         if (periodo === '24h') queryWhere += " AND h.data_hora >= DATE_SUB(NOW(), INTERVAL 24 HOUR)";
         else if (periodo === 'hoje') queryWhere += " AND DATE(h.data_hora) = CURDATE()";
@@ -1310,7 +1844,9 @@ app.get("/api/dashboard-stats", async (req, res) => {
         const [linhas] = await dbPool.query(`
             SELECT h.id, h.tipo_resultado, h.nivel, h.multiplicador, h.data_hora
             FROM historico_disparos_robos h
-            LEFT JOIN estrategias e ON h.estrategia_id = e.id
+            LEFT JOIN estrategias e
+              ON h.estrategia_id = e.id
+             AND e.mesa_id = h.mesa_id
             ${queryWhere}
             ORDER BY h.data_hora ASC, h.id ASC
         `, queryParams);
@@ -1368,9 +1904,17 @@ app.get("/api/dashboard-stats", async (req, res) => {
 
 app.get("/api/historico-giros", async (req, res) => {
     try {
+        const mesaId = mesaIdRuntimeApi();
         let limit = parseInt(req.query.limit) || 1000;
         if (limit > 10000) limit = 10000;
-        const [linhas] = await dbPool.query(`SELECT resultado, multiplicador, data_hora, id_sessao FROM giros_recentes ORDER BY id DESC LIMIT ${limit}`);
+        const [linhas] = await dbPool.query(
+            `SELECT resultado, multiplicador, data_hora, id_sessao
+             FROM giros_recentes
+             WHERE mesa_id=?
+             ORDER BY id DESC
+             LIMIT ${limit}`,
+            [mesaId]
+        );
         res.json(linhas.reverse());
     } catch (e) {
         console.error('❌ GET /api/historico-giros falhou:', e.message);
@@ -1378,14 +1922,129 @@ app.get("/api/historico-giros", async (req, res) => {
     }
 });
 
+
+app.post("/api/oraculo/analisar", async (req, res) => {
+    try {
+        const mesaId = mesaIdRuntimeApi();
+        const gales = Number(req.body?.gales);
+        const janela = String(req.body?.janela || '').trim().toLowerCase();
+        const confiancaMinima = Number(req.body?.confianca_minima);
+        const janelasSql = {
+            '24h': 'data_hora >= DATE_SUB(NOW(), INTERVAL 24 HOUR)',
+            '48h': 'data_hora >= DATE_SUB(NOW(), INTERVAL 48 HOUR)',
+            '7d': 'data_hora >= DATE_SUB(NOW(), INTERVAL 7 DAY)'
+        };
+
+        if (!Number.isInteger(gales) || gales < 0 || gales > 2) {
+            return res.status(400).json({ erro: 'gales_invalidos', mensagem: 'Gales Permitidos deve ser 0, 1 ou 2.' });
+        }
+        if (!janelasSql[janela]) {
+            return res.status(400).json({ erro: 'janela_invalida', mensagem: 'Janela Histórica deve ser 24h, 48h ou 7d.' });
+        }
+        if (!Number.isFinite(confiancaMinima) || confiancaMinima < 0 || confiancaMinima > 100) {
+            return res.status(400).json({ erro: 'confianca_invalida', mensagem: 'Confiança Mínima deve estar entre 0 e 100.' });
+        }
+
+        const mesaClientePrevia =
+            (Array.isArray(req.body?.mesa_atual) ? req.body.mesa_atual : [])
+                .map(normalizarResultadoOraculo)
+                .filter(Boolean)
+                .slice(-20);
+
+        const empatesClienteUltimos5 =
+            mesaClientePrevia
+                .slice(-5)
+                .filter(item => item === 'T')
+                .length;
+
+        if (
+            mesaClientePrevia.length >= 5
+            && empatesClienteUltimos5 >= 2
+        ) {
+            return res.json({
+                status: 'REJEITADO',
+                motivo: 'MESA_INSTAVEL',
+                detalhe: 'EMPATES_EXCESSIVOS',
+                melhor_confianca: 0,
+                empates_ultimos_5: empatesClienteUltimos5,
+                mensagem: 'Mesa Instável: dois ou mais empates foram observados nos últimos cinco giros.'
+            });
+        }
+
+        const sql =
+            'SELECT id, resultado, id_sessao, UNIX_TIMESTAMP(data_hora) * 1000 AS timestamp_ms '
+            + 'FROM giros_recentes WHERE mesa_id=? AND ('
+            + janelasSql[janela]
+            + ') ORDER BY id ASC';
+
+        const [linhas] = await dbPool.query(
+            sql,
+            [mesaId]
+        );
+        const historico = Array.isArray(linhas) ? linhas : [];
+        const mesaAtual = extrairMesaAtual(historico, 20);
+
+        const mesaCliente = (Array.isArray(req.body?.mesa_atual) ? req.body.mesa_atual : [])
+            .map(normalizarResultadoOraculo)
+            .filter(Boolean)
+            .slice(-6);
+        const mesaCanonica6 = mesaAtual.slice(-6).map(item => item.resultado);
+        if (
+            mesaCliente.length >= 6
+            && mesaCanonica6.length >= 6
+            && mesaCliente.join(',') !== mesaCanonica6.join(',')
+        ) {
+            return res.json({
+                status: 'REJEITADO',
+                motivo: 'MESA_INSTAVEL',
+                detalhe: 'MESA_DESSINCRONIZADA',
+                melhor_confianca: 0,
+                mensagem: 'A mesa mudou entre o visor e o histórico canônico. Atualize e analise novamente.'
+            });
+        }
+
+        const resultado = analisarOraculo({
+            historico,
+            mesaAtual,
+            gales,
+            confiancaMinima
+        });
+
+        const confiancaLog = resultado.status === 'APROVADO'
+            ? resultado.confianca_wilson
+            : resultado.melhor_confianca;
+        console.log(
+            '🔮 ORÁCULO | ' + resultado.status
+            + ' | janela=' + janela
+            + ' | gales=' + gales
+            + ' | wilson=' + Number(confiancaLog || 0).toFixed(1) + '%'
+        );
+        return res.json(resultado);
+    } catch (e) {
+        console.error('❌ POST /api/oraculo/analisar falhou:', e.message);
+        return res.status(500).json({
+            erro: 'falha_oraculo',
+            mensagem: 'Não foi possível concluir a análise estatística sob demanda.'
+        });
+    }
+});
+
 app.post("/api/simular-banca", async (req, res) => {
     try {
+        const mesaId = mesaIdRuntimeApi();
         const { tipo_alvo, alvo_id, banca_inicial, stake_principal, cobrir_empate, pct_empate, mult_gale, periodo, filtro_horario, hora_inicio, hora_fim } = req.body;
         let query = ""; let params = [];
 
-        if (tipo_alvo === 'ESTRATEGIA') { query = "SELECT tipo_resultado, nivel, multiplicador, data_hora, estrategia_id FROM historico_resultados WHERE estrategia_id = ?"; params.push(alvo_id); }
-        else if (tipo_alvo === 'ORIGEM') { query = "SELECT h.tipo_resultado, h.nivel, h.multiplicador, h.data_hora, h.estrategia_id FROM historico_resultados h JOIN estrategias e ON h.estrategia_id = e.id WHERE e.origem = ?"; params.push(alvo_id); }
-        else if (tipo_alvo === 'ROBO') { query = "SELECT tipo_resultado, nivel, multiplicador, data_hora, estrategia_id FROM historico_disparos_robos WHERE robo_id = ?"; params.push(alvo_id); }
+        if (tipo_alvo === 'ESTRATEGIA') {
+            query = "SELECT tipo_resultado, nivel, multiplicador, data_hora, estrategia_id FROM historico_resultados WHERE mesa_id=? AND estrategia_id=?";
+            params.push(mesaId, alvo_id);
+        } else if (tipo_alvo === 'ORIGEM') {
+            query = "SELECT h.tipo_resultado, h.nivel, h.multiplicador, h.data_hora, h.estrategia_id FROM historico_resultados h JOIN estrategias e ON h.estrategia_id=e.id AND e.mesa_id=h.mesa_id WHERE h.mesa_id=? AND e.origem=?";
+            params.push(mesaId, alvo_id);
+        } else if (tipo_alvo === 'ROBO') {
+            query = "SELECT tipo_resultado, nivel, multiplicador, data_hora, estrategia_id FROM historico_disparos_robos WHERE mesa_id=? AND robo_id=?";
+            params.push(mesaId, alvo_id);
+        }
 
         if (periodo === '24h') query += " AND data_hora >= DATE_SUB(NOW(), INTERVAL 24 HOUR)";
         else if (periodo === 'hoje') query += " AND DATE(data_hora) = CURDATE()";
@@ -1395,7 +2054,10 @@ app.post("/api/simular-banca", async (req, res) => {
         query += " ORDER BY data_hora ASC";
         const [linhas] = await dbPool.query(query, params);
 
-        const [estrategias] = await dbPool.query('SELECT id, gales FROM estrategias');
+        const [estrategias] = await dbPool.query(
+            'SELECT id, gales FROM estrategias WHERE mesa_id=?',
+            [mesaId]
+        );
         let estMap = {}; estrategias.forEach(e => { estMap[e.id] = e.gales; });
 
         let filtered = linhas;
@@ -1451,11 +2113,19 @@ app.post("/api/simular-banca", async (req, res) => {
 
 app.post("/api/novo-padrao", async (req, res) => {
     try {
+        const mesaId = mesaIdRuntimeApi();
         const { nome, origem, padrao, entrada, gales, protegerEmpate, ativo } = req.body;
         const padraoJson = JSON.stringify(padrao.split(',').map(s => s.trim()));
         const id = "padrao_" + Date.now();
         const tiesZerado = JSON.stringify({ direto: { '88x': 0, '25x': 0, '10x': 0, '6x': 0, '4x': 0 }, gale1: { '88x': 0, '25x': 0, '10x': 0, '6x': 0, '4x': 0 }, gale2: { '88x': 0, '25x': 0, '10x': 0, '6x': 0, '4x': 0 } });
-        await dbPool.query('INSERT INTO estrategias (id, nome, origem, padrao, entrada, gales, proteger_empate, ativo, green_direto, gale1, gale2, red, ties_json, is_dinamico) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, ?, false)', [id, nome, origem, padraoJson, entrada, parseInt(gales), protegerEmpate ? 1 : 0, ativo ? 1 : 0, tiesZerado]);
+        await dbPool.query(
+            'INSERT INTO estrategias (id, mesa_id, nome, origem, padrao, entrada, gales, proteger_empate, ativo, green_direto, gale1, gale2, red, ties_json, is_dinamico) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, ?, false)',
+            [
+                id, mesaId, nome, origem, padraoJson, entrada,
+                parseInt(gales), protegerEmpate ? 1 : 0,
+                ativo ? 1 : 0, tiesZerado
+            ]
+        );
         await carregarSistemasParaMemoria(); ioServer.emit('atualizar_interface'); res.json({ sucesso: true });
     } catch (erro) {
         console.error('❌ POST /api/novo-padrao falhou:', erro.message);
@@ -1465,9 +2135,25 @@ app.post("/api/novo-padrao", async (req, res) => {
 
 app.put("/api/estrategia/:id", async (req, res) => {
     try {
+        const mesaId = mesaIdRuntimeApi();
         const { nome, origem, padrao, entrada, gales, protegerEmpate, ativo } = req.body;
         const padraoJson = JSON.stringify(padrao.split(',').map(s => s.trim()));
-        await dbPool.query('UPDATE estrategias SET nome = ?, origem = ?, padrao = ?, entrada = ?, gales = ?, proteger_empate = ?, ativo = ? WHERE id = ? AND is_dinamico = false', [nome, origem, padraoJson, entrada, parseInt(gales), protegerEmpate ? 1 : 0, ativo ? 1 : 0, req.params.id]);
+        const [resultadoUpdate] = await dbPool.query(
+            'UPDATE estrategias SET nome=?, origem=?, padrao=?, entrada=?, gales=?, proteger_empate=?, ativo=? WHERE id=? AND mesa_id=? AND is_dinamico=false',
+            [
+                nome, origem, padraoJson, entrada, parseInt(gales),
+                protegerEmpate ? 1 : 0, ativo ? 1 : 0,
+                req.params.id, mesaId
+            ]
+        );
+
+        if (Number(resultadoUpdate.affectedRows) !== 1) {
+            return res.status(404).json({
+                sucesso: false,
+                erro: 'estrategia_nao_encontrada'
+            });
+        }
+
         await carregarSistemasParaMemoria(); ioServer.emit('atualizar_interface'); res.json({ sucesso: true });
     } catch (erro) {
         console.error(`❌ PUT /api/estrategia/${req.params.id} falhou:`, erro.message);
@@ -1477,17 +2163,80 @@ app.put("/api/estrategia/:id", async (req, res) => {
 
 app.delete("/api/estrategia/:id", async (req, res) => {
     try {
-        await apagarEstrategiaEDados(req.params.id);
-        await carregarSistemasParaMemoria(); ioServer.emit('atualizar_interface'); res.json({ sucesso: true });
+        const mesaId = mesaIdRuntimeApi();
+        const [existentes] = await dbPool.query(
+            'SELECT id, nome, is_dinamico FROM estrategias WHERE id=? AND mesa_id=? LIMIT 1',
+            [req.params.id, mesaId]
+        );
+
+        if (existentes.length === 0) {
+            return res.status(404).json({
+                sucesso: false,
+                erro: 'estrategia_nao_encontrada',
+                mensagem: 'Padrão não encontrado.'
+            });
+        }
+
+        const estrategia = existentes[0];
+        const dinamico =
+            estrategia.is_dinamico === true
+            || estrategia.is_dinamico === 1
+            || estrategia.is_dinamico === '1';
+
+        // Padrões IA são propriedade do robô pai.
+        // A rota CRUD manual nunca pode removê-los.
+        if (dinamico) {
+            return res.status(409).json({
+                sucesso: false,
+                erro: 'padrao_dinamico_gerenciado_pelo_robo',
+                mensagem:
+                    'Padrões dinâmicos devem ser gerenciados '
+                    + 'pelo Robô IA pai.'
+            });
+        }
+
+        await apagarEstrategiaEDados(
+            req.params.id,
+            mesaId
+        );
+
+        await carregarSistemasParaMemoria();
+
+        ioServer.emit(
+            'atualizar_interface'
+        );
+
+        console.log(
+            `🗑️ PADRÃO MANUAL | ${req.params.id} — `
+            + `${estrategia.nome}: excluído pelo painel.`
+        );
+
+        return res.json({
+            sucesso: true
+        });
+
     } catch (erro) {
-        console.error(`❌ DELETE /api/estrategia/${req.params.id} falhou:`, erro.message);
-        res.status(500).json({ sucesso: false });
+        console.error(
+            `❌ DELETE /api/estrategia/${req.params.id} falhou:`,
+            erro.message
+        );
+
+        return res.status(500).json({
+            sucesso: false
+        });
     }
 });
 
-async function apagarEstrategiaEDados(id) {
-    await dbPool.query('DELETE FROM estrategias WHERE id = ?', [id]);
-    await dbPool.query('DELETE FROM historico_resultados WHERE estrategia_id = ?', [id]);
+async function apagarEstrategiaEDados(id, mesaId) {
+    await dbPool.query(
+        'DELETE FROM estrategias WHERE id=? AND mesa_id=?',
+        [id, mesaId]
+    );
+
+    await dbPool.query(
+        'DELETE FROM historico_resultados WHERE estrategia_id=? AND mesa_id=?',
+        [id, mesaId]
+    );
 }
 
 app.get("/api/origens", async (req, res) => { try { const [linhas] = await dbPool.query('SELECT * FROM origens ORDER BY nome ASC'); res.json(linhas); } catch(e) { console.error('❌ GET /api/origens falhou:', e.message); res.status(500).json([]); } });
@@ -1500,9 +2249,22 @@ app.delete("/api/origem/:id", async (req, res) => { try { await dbPool.query('DE
 // ==========================================
 app.get("/api/robos", async (req, res) => {
     try {
-        const [linhas] = await dbPool.query('SELECT * FROM robos_canais ORDER BY id DESC');
-        const [destinatarios] = await dbPool.query('SELECT * FROM destinatarios_robo');
-        const [countDinamicos] = await dbPool.query(`SELECT robo_dono_id, COUNT(id) AS qtd_total, SUM(ativo = true) AS qtd_ativos, SUM(ativo = false AND (ia_status='RESERVA' OR (ia_status IS NULL AND quarentena_restante=0))) AS qtd_reserva, SUM(ativo = false AND ia_status='SHADOW_HISTORICO') AS qtd_shadow_historico, SUM(ativo = false AND ia_status='SHADOW_LIVE') AS qtd_shadow_live, SUM(ativo = false AND (ia_status LIKE 'SHADOW_%' OR (ia_status IS NULL AND quarentena_restante>0))) AS qtd_sombra FROM estrategias WHERE is_dinamico = true GROUP BY robo_dono_id`);
+        const mesaId = mesaIdRuntimeApi();
+
+        const [linhas] = await dbPool.query(
+            'SELECT * FROM robos_canais WHERE mesa_id=? ORDER BY id DESC',
+            [mesaId]
+        );
+
+        const [destinatarios] = await dbPool.query(
+            `SELECT d.*
+             FROM destinatarios_robo d
+             JOIN robos_canais r
+               ON r.id=d.robo_id
+             WHERE r.mesa_id=?`,
+            [mesaId]
+        );
+        const [countDinamicos] = await dbPool.query(`SELECT robo_dono_id, COUNT(id) AS qtd_total, SUM(ativo = true) AS qtd_ativos, SUM(ativo = false AND (ia_status='RESERVA' OR (ia_status IS NULL AND quarentena_restante=0))) AS qtd_reserva, SUM(ativo = false AND ia_status='SHADOW_HISTORICO') AS qtd_shadow_historico, SUM(ativo = false AND ia_status='SHADOW_LIVE') AS qtd_shadow_live, SUM(ativo = false AND (ia_status LIKE 'SHADOW_%' OR (ia_status IS NULL AND quarentena_restante>0))) AS qtd_sombra FROM estrategias WHERE mesa_id=? AND is_dinamico = true GROUP BY robo_dono_id`, [mesaId]);
 
         // UX-002/003: estatísticas cronológicas dos robôs para os cards e máximas de sequência.
         const [historicoRobos] = await dbPool.query(`
@@ -1513,8 +2275,9 @@ app.get("/api/robos", async (req, res) => {
                 YEARWEEK(data_hora, 0) = YEARWEEK(CURDATE(), 0) AS is_semana,
                 YEAR(data_hora) = YEAR(CURDATE()) AND MONTH(data_hora) = MONTH(CURDATE()) AS is_mes
             FROM historico_disparos_robos
+            WHERE mesa_id=?
             ORDER BY robo_id ASC, data_hora ASC, id ASC
-        `);
+        `, [mesaId]);
 
         let mapRobos = {};
         let sequenciasRobos = {};
@@ -1621,11 +2384,25 @@ app.get("/api/robos", async (req, res) => {
 
 app.post("/api/robo", async (req, res) => {
     try {
+        const mesaId = mesaIdRuntimeApi();
         const { nome, tag, cor, telegram_token, telegram_chat_id, enviar_telegram, enviar_web, min_assert, stop_reds, ativo, config, destinatarios } = req.body;
         const configJson = JSON.stringify(config || {});
         const tokenNormalizado = typeof telegram_token === 'string' ? telegram_token.trim() : '';
         const chatPrincipal = typeof telegram_chat_id === 'string' ? telegram_chat_id.trim() : '';
-        const [result] = await dbPool.query(`INSERT INTO robos_canais (nome, tag_visual, cor_hex, telegram_token, telegram_chat_id, enviar_telegram, enviar_web, min_assertividade, stop_reds_seguidos, greens_consecutivos, ativo, config_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`, [nome, tag, cor, tokenNormalizado, chatPrincipal, enviar_telegram ? 1 : 0, enviar_web ? 1 : 0, min_assert, stop_reds, ativo ? 1 : 0, configJson]);
+        const [result] = await dbPool.query(
+            `INSERT INTO robos_canais
+                (mesa_id, nome, tag_visual, cor_hex, telegram_token,
+                 telegram_chat_id, enviar_telegram, enviar_web,
+                 min_assertividade, stop_reds_seguidos,
+                 greens_consecutivos, ativo, config_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+            [
+                mesaId, nome, tag, cor, tokenNormalizado,
+                chatPrincipal, enviar_telegram ? 1 : 0,
+                enviar_web ? 1 : 0, min_assert, stop_reds,
+                ativo ? 1 : 0, configJson
+            ]
+        );
         let roboId = result.insertId;
         if (destinatarios && Array.isArray(destinatarios)) { for (let d of destinatarios) { if (d.chat_id && d.chat_id.trim() !== '') await dbPool.query('INSERT INTO destinatarios_robo (robo_id, nome_cliente, chat_id) VALUES (?, ?, ?)', [roboId, d.nome_cliente || 'Cliente', d.chat_id.trim()]); } }
         await carregarSistemasParaMemoria();
@@ -1642,6 +2419,7 @@ app.post("/api/robo", async (req, res) => {
 
 app.put("/api/robo/:id", async (req, res) => {
     try {
+        const mesaId = mesaIdRuntimeApi();
         const { id } = req.params;
         const {
             nome, tag, cor, telegram_token, telegram_chat_id,
@@ -1656,8 +2434,8 @@ app.put("/api/robo/:id", async (req, res) => {
         const stopNovo = Math.max(0, Math.trunc(Number(stop_reds) || 0));
 
         const [existentes] = await dbPool.query(
-            'SELECT ativo, stop_reds_seguidos FROM robos_canais WHERE id=? LIMIT 1',
-            [id]
+            'SELECT ativo, stop_reds_seguidos FROM robos_canais WHERE id=? AND mesa_id=? LIMIT 1',
+            [id, mesaId]
         );
 
         if (existentes.length === 0) {
@@ -1680,12 +2458,12 @@ app.put("/api/robo/:id", async (req, res) => {
                      telegram_chat_id=?, enviar_telegram=?, enviar_web=?,
                      min_assertividade=?, stop_reds_seguidos=?, ativo=?,
                      config_json=?, reds_consecutivos=0
-                 WHERE id=?`,
+                 WHERE id=? AND mesa_id=?`,
                 [
                     nome, tag, cor, tokenRecebido, chatPrincipal,
                     enviar_telegram ? 1 : 0, enviar_web ? 1 : 0,
                     min_assert, stopNovo, novoAtivo ? 1 : 0,
-                    configJson, id
+                    configJson, id, mesaId
                 ]
             );
         } else {
@@ -1696,12 +2474,12 @@ app.put("/api/robo/:id", async (req, res) => {
                      telegram_chat_id=?, enviar_telegram=?, enviar_web=?,
                      min_assertividade=?, stop_reds_seguidos=?, ativo=?,
                      config_json=?
-                 WHERE id=?`,
+                 WHERE id=? AND mesa_id=?`,
                 [
                     nome, tag, cor, tokenRecebido, chatPrincipal,
                     enviar_telegram ? 1 : 0, enviar_web ? 1 : 0,
                     min_assert, stopNovo, novoAtivo ? 1 : 0,
-                    configJson, id
+                    configJson, id, mesaId
                 ]
             );
         }
@@ -1725,6 +2503,32 @@ app.put("/api/robo/:id", async (req, res) => {
         } catch (e) {
             console.error(`⚠️ Robô ${id}: remineração IA após edição falhou, configuração foi preservada:`, e.message);
         }
+
+        if (reativando) {
+            const [contagemReativada] =
+                await dbPool.query(
+                    `SELECT COUNT(*) AS qtd
+                     FROM estrategias
+                     WHERE mesa_id=?
+                       AND is_dinamico=true
+                       AND robo_dono_id=?
+                       AND ativo=true`,
+                    [mesaId, id]
+                );
+
+            const qtdAtivos = Math.max(
+                0,
+                Number(
+                    contagemReativada?.[0]?.qtd
+                ) || 0
+            );
+
+            console.log(
+                `🤖 Robô/Canal ${id} — ${nome}: reativado; `
+                + `${qtdAtivos} padrão(ões) dinâmico(s) ativo(s) liberado(s).`
+            );
+        }
+
         ioServer.emit('atualizar_robos');
         res.json({
             sucesso: true,
@@ -1743,10 +2547,14 @@ app.post("/api/robo/:id/testar-telegram", async (req, res) => {
     }
 
     try {
+        const mesaId = mesaIdRuntimeApi();
+
         const [robos] = await dbPool.query(
             `SELECT id, nome, telegram_token, telegram_chat_id
-             FROM robos_canais WHERE id=? LIMIT 1`,
-            [roboId]
+             FROM robos_canais
+             WHERE id=? AND mesa_id=?
+             LIMIT 1`,
+            [roboId, mesaId]
         );
         if (robos.length === 0) {
             return res.status(404).json({ sucesso: false, erro: 'robo_nao_encontrado' });
@@ -1817,12 +2625,21 @@ app.delete("/api/robo/:id", async (req, res) => {
     let padroesIaExcluidos = 0;
 
     try {
+        const mesaRuntime = obterMesaRuntime();
+        const mesaId = Number(mesaRuntime.id);
+
+        if (!Number.isInteger(mesaId) || mesaId <= 0) {
+            throw new Error(
+                'MC22-V-B: mesa runtime invalida ao excluir Robo/Canal'
+            );
+        }
+
         conexao = await dbPool.getConnection();
         await conexao.beginTransaction();
 
         const [robos] = await conexao.query(
-            'SELECT id FROM robos_canais WHERE id=? FOR UPDATE',
-            [roboId]
+            'SELECT id FROM robos_canais WHERE id=? AND mesa_id=? FOR UPDATE',
+            [roboId, mesaId]
         );
         if (robos.length === 0) {
             await conexao.rollback();
@@ -1830,24 +2647,36 @@ app.delete("/api/robo/:id", async (req, res) => {
         }
 
         const [padroesIa] = await conexao.query(
-            'SELECT id FROM estrategias WHERE is_dinamico = true AND robo_dono_id = ?',
-            [roboId]
+            `SELECT id
+             FROM estrategias
+             WHERE mesa_id=?
+               AND is_dinamico=true
+               AND robo_dono_id=?
+             FOR UPDATE`,
+            [mesaId, roboId]
         );
         const idsPadroes = padroesIa.map(row => String(row.id));
 
         if (idsPadroes.length > 0) {
             const placeholders = idsPadroes.map(() => '?').join(',');
             await conexao.query(
-                `DELETE FROM historico_resultados WHERE estrategia_id IN (${placeholders})`,
-                idsPadroes
+                `DELETE FROM historico_resultados
+                 WHERE mesa_id=?
+                   AND estrategia_id IN (${placeholders})`,
+                [mesaId, ...idsPadroes]
             );
             await conexao.query(
-                `DELETE FROM historico_disparos_robos WHERE estrategia_id IN (${placeholders})`,
-                idsPadroes
+                `DELETE FROM historico_disparos_robos
+                 WHERE mesa_id=?
+                   AND estrategia_id IN (${placeholders})`,
+                [mesaId, ...idsPadroes]
             );
             const [resultadoPadroes] = await conexao.query(
-                'DELETE FROM estrategias WHERE is_dinamico = true AND robo_dono_id = ?',
-                [roboId]
+                `DELETE FROM estrategias
+                 WHERE mesa_id=?
+                   AND is_dinamico=true
+                   AND robo_dono_id=?`,
+                [mesaId, roboId]
             );
             padroesIaExcluidos = Math.max(0, Number(resultadoPadroes.affectedRows) || 0);
         }
@@ -1856,15 +2685,33 @@ app.delete("/api/robo/:id", async (req, res) => {
         // Na exclusão definitiva do proprietário, remove também IDs IA já arquivados pelo TTL.
         const prefixoHistoricoIa = `ia_${roboId}_`;
         await conexao.query(
-            'DELETE FROM historico_resultados WHERE LEFT(estrategia_id, ?) = ?',
-            [prefixoHistoricoIa.length, prefixoHistoricoIa]
+            `DELETE FROM historico_resultados
+             WHERE mesa_id=?
+               AND LEFT(estrategia_id, ?) = ?`,
+            [mesaId, prefixoHistoricoIa.length, prefixoHistoricoIa]
         );
 
         // Ao excluir o Robô/Canal, seu histórico de distribuição também deixa de ter proprietário.
-        await conexao.query('DELETE FROM historico_shadow_ia WHERE robo_id=?', [roboId]);
-        await conexao.query('DELETE FROM historico_disparos_robos WHERE robo_id=?', [roboId]);
+        await conexao.query(
+            'DELETE FROM historico_shadow_ia WHERE mesa_id=? AND robo_id=?',
+            [mesaId, roboId]
+        );
+        await conexao.query(
+            'DELETE FROM historico_disparos_robos WHERE mesa_id=? AND robo_id=?',
+            [mesaId, roboId]
+        );
         await conexao.query('DELETE FROM destinatarios_robo WHERE robo_id=?', [roboId]);
-        await conexao.query('DELETE FROM robos_canais WHERE id=?', [roboId]);
+        const [resultadoRobo] = await conexao.query(
+            'DELETE FROM robos_canais WHERE id=? AND mesa_id=?',
+            [roboId, mesaId]
+        );
+
+        if (Number(resultadoRobo.affectedRows) !== 1) {
+            throw new Error(
+                `MC22-V-B: Robo/Canal ${roboId} deixou de pertencer ` +
+                `a mesa ${mesaRuntime.codigo} durante a exclusao`
+            );
+        }
 
         await conexao.commit();
     } catch (e) {
@@ -1897,9 +2744,16 @@ app.delete("/api/robo/:id", async (req, res) => {
 
 app.get("/api/auto-traders", async (req, res) => {
     try {
-        const [linhas] = await dbPool.query('SELECT * FROM auto_traders ORDER BY id DESC');
+        const mesaId = mesaIdRuntimeApi();
+
+        const [linhas] = await dbPool.query(
+            'SELECT * FROM auto_traders WHERE mesa_id=? ORDER BY id DESC',
+            [mesaId]
+        );
         let sanitizados = linhas.map(at => {
             let confObj = {}; try { confObj = JSON.parse(at.config_json); } catch(e) {}
+            confObj = normalizarConfigAutoTrader(confObj);
+            const estadoCiclo = normalizarEstadoCiclo(at);
             return {
                 id: at.id,
                 nome: at.nome,
@@ -1909,7 +2763,11 @@ app.get("/api/auto-traders", async (req, res) => {
                 saldo_atual: parseFloat(at.saldo_atual),
                 status_operacao: at.status_operacao,
                 entradas_feitas: at.entradas_feitas,
-                pulos_restantes: at.pulos_restantes,
+                pulos_restantes: estadoCiclo.pulos_restantes,
+                estado_ciclo: estadoCiclo.estado_ciclo,
+                reds_virtuais_observados: estadoCiclo.reds_virtuais_observados,
+                sinais_operados_onda: estadoCiclo.sinais_operados_onda,
+                ciclos_concluidos: estadoCiclo.ciclos_concluidos,
                 data_contador_entradas: String(at.data_contador_entradas || ''),
                 reds_consecutivos: Math.max(0, Number(at.reds_consecutivos) || 0),
                 stop_reds_pausado_ate: Math.max(0, Number(at.stop_reds_pausado_ate) || 0),
@@ -1922,57 +2780,122 @@ app.get("/api/auto-traders", async (req, res) => {
 
 app.post("/api/auto-trader", async (req, res) => {
     try {
+        const mesaId = mesaIdRuntimeApi();
         const { nome, ativo, config } = req.body;
-        const configJson = JSON.stringify(config || {});
+        const configNormalizada = normalizarConfigAutoTrader(config || {});
+        const configJson = JSON.stringify(configNormalizada);
         const novoAtivo = ativo === true || ativo === 1;
         if (novoAtivo) {
-            const politicaEmpate = validarPoliticaProtecao(config || {});
+            const politicaEmpate = validarPoliticaProtecao(configNormalizada);
             if (!politicaEmpate.ok) {
                 return res.status(400).json({ sucesso: false, erro: 'protecao_empate_invalida', mensagem: politicaEmpate.motivo });
             }
         }
-        const saldoFresco = obterSaldoGlobalFresco();
+        let saldoBaseline = 0;
+        let saldoSincronizadoAgora = false;
 
-        if (novoAtivo && saldoFresco === null) {
-            return res.status(409).json({
+        if (novoAtivo) {
+            const gateSaldo =
+                await obterSaldoAutoTraderParaAtivacao();
+
+            if (!gateSaldo.ok) {
+                return res.status(409).json({
+                    sucesso: false,
+                    erro: 'saldo_global_indisponivel',
+                    mensagem:
+                        'Não foi possível confirmar um saldo real recente. '
+                        + 'O Auto-Trader permaneceu desligado.',
+                    detalhe: gateSaldo.erro
+                });
+            }
+
+            saldoBaseline = gateSaldo.saldo;
+            saldoSincronizadoAgora =
+                gateSaldo.sincronizado_agora;
+        }
+
+        const statusInicial =
+            novoAtivo
+                ? 'STANDBY'
+                : 'DESLIGADO';
+        const dataContadorEntradas = controleDiarioAutoTrader.dataOperacional();
+        const estadoCiclo = estadoInicialCiclo();
+        await dbPool.query(
+            `INSERT INTO auto_traders
+                (mesa_id, nome, ativo, config_json,
+                 saldo_inicial, saldo_atual, status_operacao,
+                 entradas_feitas, pulos_restantes,
+                 estado_ciclo, reds_virtuais_observados,
+                 sinais_operados_onda, ciclos_concluidos,
+                 data_contador_entradas)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
+            [
+                mesaId,
+                nome,
+                novoAtivo ? 1 : 0,
+                configJson,
+                saldoBaseline,
+                saldoBaseline,
+                statusInicial,
+                estadoCiclo.pulos_restantes,
+                estadoCiclo.estado_ciclo,
+                estadoCiclo.reds_virtuais_observados,
+                estadoCiclo.sinais_operados_onda,
+                estadoCiclo.ciclos_concluidos,
+                dataContadorEntradas
+            ]
+        );
+        await carregarSistemasParaMemoria();
+        res.json({
+            sucesso: true,
+            saldo_inicial: saldoBaseline,
+            saldo_sincronizado_agora: saldoSincronizadoAgora
+        });
+    } catch (e) {
+        console.error('❌ POST /api/auto-trader falhou:', e.message);
+
+        if (
+            e
+            && e.code === 'BUG051D_CONFIG_INVALIDA'
+        ) {
+            return res.status(400).json({
                 sucesso: false,
-                erro: 'saldo_global_indisponivel',
-                mensagem: 'Saldo real ausente ou desatualizado. Aguarde a sincronização da página antes de ativar o Auto-Trader.'
+                erro: 'configuracao_auto_trader_invalida',
+                campo: e.campo_configuracao || null,
+                mensagem: String(
+                    e.message ||
+                    'Configuração Auto-Trader inválida'
+                ).replace(
+                    /^Configuração Auto-Trader rejeitada:\s*/,
+                    ''
+                )
             });
         }
 
-        const saldoBaseline = novoAtivo ? saldoFresco : 0;
-        const statusInicial = novoAtivo ? 'STANDBY' : 'DESLIGADO';
-        const dataContadorEntradas = controleDiarioAutoTrader.dataOperacional();
-        await dbPool.query(
-            `INSERT INTO auto_traders (nome, ativo, config_json, saldo_inicial, saldo_atual, status_operacao, entradas_feitas, pulos_restantes, data_contador_entradas)
-             VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?)`,
-            [nome, novoAtivo ? 1 : 0, configJson, saldoBaseline, saldoBaseline, statusInicial, dataContadorEntradas]
-        );
-        await carregarSistemasParaMemoria();
-        res.json({ sucesso: true, saldo_inicial: saldoBaseline });
-    } catch (e) {
-        console.error('❌ POST /api/auto-trader falhou:', e.message);
-        res.status(500).json({ sucesso: false });
+        res.status(500).json({
+            sucesso: false
+        });
     }
 });
 
 app.put("/api/auto-trader/:id", async (req, res) => {
     try {
+        const mesaId = mesaIdRuntimeApi();
         const { id } = req.params;
         const { nome, ativo, config } = req.body;
-        const configJson = JSON.stringify(config || {});
+        const configNova = normalizarConfigAutoTrader(config || {});
+        const configJson = JSON.stringify(configNova);
         const novoAtivo = ativo === true || ativo === 1;
         if (novoAtivo) {
-            const politicaEmpate = validarPoliticaProtecao(config || {});
+            const politicaEmpate = validarPoliticaProtecao(configNova);
             if (!politicaEmpate.ok) {
                 return res.status(400).json({ sucesso: false, erro: 'protecao_empate_invalida', mensagem: politicaEmpate.motivo });
             }
         }
 
         const [existentes] = await dbPool.query(
-            'SELECT ativo, config_json, status_operacao FROM auto_traders WHERE id=? LIMIT 1',
-            [id]
+            'SELECT ativo, config_json, status_operacao FROM auto_traders WHERE id=? AND mesa_id=? LIMIT 1',
+            [id, mesaId]
         );
         if (existentes.length === 0) {
             return res.status(404).json({ sucesso: false, erro: 'auto_trader_nao_encontrado' });
@@ -1980,11 +2903,12 @@ app.put("/api/auto-trader/:id", async (req, res) => {
 
         let configAnterior = {};
         try { configAnterior = JSON.parse(existentes[0].config_json || '{}'); } catch(e) {}
-        const configNova = config || {};
+        configAnterior = normalizarConfigAutoTrader(configAnterior);
         const trailingAnteriorAtivo = configAnterior.trailing_stop === true;
         const trailingNovoAtivo = configNova.trailing_stop === true;
         const trailingAnteriorRecuo = Math.max(0, Number(configAnterior.trailing_recuo) || 0);
         const trailingNovoRecuo = Math.max(0, Number(configNova.trailing_recuo) || 0);
+        const cicloConfigMudou = configuracaoCicloMudou(configAnterior, configNova);
         const trailingConfigMudou =
             trailingAnteriorAtivo !== trailingNovoAtivo
             || trailingAnteriorRecuo !== trailingNovoRecuo;
@@ -1992,24 +2916,41 @@ app.put("/api/auto-trader/:id", async (req, res) => {
         const estavaAtivo = existentes[0].ativo === true || existentes[0].ativo === 1;
         const reativando = !estavaAtivo && novoAtivo;
         const desligando = estavaAtivo && !novoAtivo;
+        let saldoSincronizadoAgora = false;
 
         if (reativando) {
-            const saldoFresco = obterSaldoGlobalFresco();
-            if (saldoFresco === null) {
+            const gateSaldo =
+                await obterSaldoAutoTraderParaAtivacao();
+
+            if (!gateSaldo.ok) {
                 return res.status(409).json({
                     sucesso: false,
                     erro: 'saldo_global_indisponivel',
-                    mensagem: 'Saldo real ausente ou desatualizado. Aguarde a sincronização da página antes de reativar o Auto-Trader.'
+                    mensagem:
+                        'Não foi possível confirmar um saldo real recente. '
+                        + 'O Auto-Trader permaneceu desligado.',
+                    detalhe: gateSaldo.erro
                 });
             }
 
+            const saldoFresco = gateSaldo.saldo;
+            saldoSincronizadoAgora =
+                gateSaldo.sincronizado_agora;
+
+            const estadoCiclo = estadoInicialCiclo();
             await dbPool.query(
                 `UPDATE auto_traders
                  SET nome=?, ativo=true, config_json=?, saldo_inicial=?, saldo_atual=?,
                      status_operacao='STANDBY',
-                     reds_consecutivos=0, stop_reds_pausado_ate=0, trailing_pico_lucro=0
-                 WHERE id=?`,
-                [nome, configJson, saldoFresco, saldoFresco, id]
+                     reds_consecutivos=0, stop_reds_pausado_ate=0, trailing_pico_lucro=0,
+                     estado_ciclo=?, reds_virtuais_observados=?, sinais_operados_onda=?,
+                     ciclos_concluidos=?, pulos_restantes=?
+                 WHERE id=? AND mesa_id=?`,
+                [
+                    nome, configJson, saldoFresco, saldoFresco, estadoCiclo.estado_ciclo,
+                    estadoCiclo.reds_virtuais_observados, estadoCiclo.sinais_operados_onda,
+                    estadoCiclo.ciclos_concluidos, estadoCiclo.pulos_restantes, id, mesaId
+                ]
             );
         } else if (desligando) {
             if (trailingConfigMudou) {
@@ -2017,45 +2958,155 @@ app.put("/api/auto-trader/:id", async (req, res) => {
                     `UPDATE auto_traders
                      SET nome=?, ativo=false, config_json=?,
                          status_operacao='DESLIGADO', trailing_pico_lucro=0
-                     WHERE id=?`,
-                    [nome, configJson, id]
+                     WHERE id=? AND mesa_id=?`,
+                    [nome, configJson, id, mesaId]
                 );
             } else {
                 await dbPool.query(
                     `UPDATE auto_traders
                      SET nome=?, ativo=false, config_json=?, status_operacao='DESLIGADO'
-                     WHERE id=?`,
-                    [nome, configJson, id]
+                     WHERE id=? AND mesa_id=?`,
+                    [nome, configJson, id, mesaId]
+                );
+            }
+        } else if (cicloConfigMudou) {
+            const estadoCiclo = estadoInicialCiclo();
+            if (trailingConfigMudou) {
+                await dbPool.query(
+                    `UPDATE auto_traders
+                     SET nome=?, ativo=?, config_json=?, trailing_pico_lucro=0,
+                         estado_ciclo=?, reds_virtuais_observados=?, sinais_operados_onda=?,
+                         ciclos_concluidos=?, pulos_restantes=?
+                     WHERE id=? AND mesa_id=?`,
+                    [
+                        nome, novoAtivo ? 1 : 0, configJson, estadoCiclo.estado_ciclo,
+                        estadoCiclo.reds_virtuais_observados, estadoCiclo.sinais_operados_onda,
+                        estadoCiclo.ciclos_concluidos, estadoCiclo.pulos_restantes, id, mesaId
+                    ]
+                );
+            } else {
+                await dbPool.query(
+                    `UPDATE auto_traders
+                     SET nome=?, ativo=?, config_json=?, estado_ciclo=?, reds_virtuais_observados=?,
+                         sinais_operados_onda=?, ciclos_concluidos=?, pulos_restantes=?
+                     WHERE id=? AND mesa_id=?`,
+                    [
+                        nome, novoAtivo ? 1 : 0, configJson, estadoCiclo.estado_ciclo,
+                        estadoCiclo.reds_virtuais_observados, estadoCiclo.sinais_operados_onda,
+                        estadoCiclo.ciclos_concluidos, estadoCiclo.pulos_restantes, id, mesaId
+                    ]
                 );
             }
         } else {
             if (trailingConfigMudou) {
                 await dbPool.query(
-                    'UPDATE auto_traders SET nome=?, ativo=?, config_json=?, trailing_pico_lucro=0 WHERE id=?',
-                    [nome, novoAtivo ? 1 : 0, configJson, id]
+                    'UPDATE auto_traders SET nome=?, ativo=?, config_json=?, trailing_pico_lucro=0 WHERE id=? AND mesa_id=?',
+                    [nome, novoAtivo ? 1 : 0, configJson, id, mesaId]
                 );
             } else {
                 await dbPool.query(
-                    'UPDATE auto_traders SET nome=?, ativo=?, config_json=? WHERE id=?',
-                    [nome, novoAtivo ? 1 : 0, configJson, id]
+                    'UPDATE auto_traders SET nome=?, ativo=?, config_json=? WHERE id=? AND mesa_id=?',
+                    [nome, novoAtivo ? 1 : 0, configJson, id, mesaId]
                 );
             }
         }
 
         await carregarSistemasParaMemoria();
-        res.json({ sucesso: true, baseline_recapturado: reativando });
+        res.json({
+            sucesso: true,
+            baseline_recapturado: reativando,
+            ciclo_resetado: reativando || cicloConfigMudou,
+            saldo_sincronizado_agora: saldoSincronizadoAgora
+        });
     } catch (e) {
-        console.error(`❌ PUT /api/auto-trader/${req.params.id} falhou:`, e.message);
-        res.status(500).json({ sucesso: false });
+        console.error(
+            `❌ PUT /api/auto-trader/${req.params.id} falhou:`,
+            e.message
+        );
+
+        if (
+            e
+            && e.code === 'BUG051D_CONFIG_INVALIDA'
+        ) {
+            return res.status(400).json({
+                sucesso: false,
+                erro: 'configuracao_auto_trader_invalida',
+                campo: e.campo_configuracao || null,
+                mensagem: String(
+                    e.message ||
+                    'Configuração Auto-Trader inválida'
+                ).replace(
+                    /^Configuração Auto-Trader rejeitada:\s*/,
+                    ''
+                )
+            });
+        }
+
+        res.status(500).json({
+            sucesso: false
+        });
     }
 });
 
 app.delete("/api/auto-trader/:id", async (req, res) => {
-    try { await dbPool.query('DELETE FROM auto_traders WHERE id=?', [req.params.id]); await carregarSistemasParaMemoria(); res.json({ sucesso: true }); } catch (e) { console.error(`❌ DELETE /api/auto-trader/${req.params.id} falhou:`, e.message); res.status(500).json({ sucesso: false }); }
+    try {
+        const mesaId = mesaIdRuntimeApi();
+
+        const [resultado] = await dbPool.query(
+            'DELETE FROM auto_traders WHERE id=? AND mesa_id=?',
+            [req.params.id, mesaId]
+        );
+
+        if (Number(resultado.affectedRows) !== 1) {
+            return res.status(404).json({
+                sucesso: false,
+                erro: 'auto_trader_nao_encontrado'
+            });
+        }
+
+        await carregarSistemasParaMemoria();
+
+        return res.json({
+            sucesso: true
+        });
+    } catch (e) {
+        console.error(
+            `DELETE /api/auto-trader/${req.params.id} falhou:`,
+            e.message
+        );
+
+        return res.status(500).json({
+            sucesso: false
+        });
+    }
 });
 
 app.get("/api/auditoria-ordens/:trader_id", async (req, res) => {
-    try { const [ordens] = await dbPool.query(`SELECT * FROM auditoria_ordens WHERE trader_id = ? ORDER BY id DESC LIMIT 500`, [req.params.trader_id]); res.json(ordens); } catch (e) { console.error(`❌ GET /api/auditoria-ordens/${req.params.trader_id} falhou:`, e.message); res.status(500).json([]); }
+    try {
+        const mesaId = mesaIdRuntimeApi();
+
+        const [ordens] = await dbPool.query(
+            `SELECT *
+             FROM auditoria_ordens
+             WHERE trader_id=?
+               AND mesa_id=?
+             ORDER BY id DESC
+             LIMIT 500`,
+            [
+                req.params.trader_id,
+                mesaId
+            ]
+        );
+
+        return res.json(ordens);
+    } catch (e) {
+        console.error(
+            `GET /api/auditoria-ordens/${req.params.trader_id} falhou:`,
+            e.message
+        );
+
+        return res.status(500).json([]);
+    }
 });
 
 // ==========================================
@@ -2063,6 +3114,9 @@ app.get("/api/auditoria-ordens/:trader_id", async (req, res) => {
 // ==========================================
 
 async function ativarAutoTradersAguardandoMesa() {
+    const mesaRuntime = obterMesaRuntime();
+    const mesaId = Number(mesaRuntime.id);
+
     const aguardandoMesa = AUTO_TRADERS_MEMORIA.filter(
         trader => trader.ativo && trader.status_operacao === 'STANDBY'
     );
@@ -2072,10 +3126,32 @@ async function ativarAutoTradersAguardandoMesa() {
     const ids = aguardandoMesa.map(trader => trader.id);
     const placeholders = ids.map(() => '?').join(',');
 
-    await dbPool.query(
-        `UPDATE auto_traders SET status_operacao = 'OPERANDO' WHERE ativo = true AND status_operacao = 'STANDBY' AND id IN (${placeholders})`,
-        ids
+    for (const trader of aguardandoMesa) {
+        if (Number(trader.mesa_id) !== mesaId) {
+            throw new Error(
+                `MC22-X: Trader ${trader.id} fora da mesa runtime na ativacao`
+            );
+        }
+    }
+
+    const [resultadoAtivacao] = await dbPool.query(
+        `UPDATE auto_traders
+         SET status_operacao='OPERANDO'
+         WHERE mesa_id=?
+           AND ativo=true
+           AND status_operacao='STANDBY'
+           AND id IN (${placeholders})`,
+        [mesaId, ...ids]
     );
+
+    if (
+        Number(resultadoAtivacao.affectedRows)
+        !== ids.length
+    ) {
+        throw new Error(
+            'MC22-X: ativacao STANDBY incompleta na mesa runtime'
+        );
+    }
 
     aguardandoMesa.forEach(trader => {
         trader.status_operacao = 'OPERANDO';
@@ -2170,8 +3246,12 @@ function rotacionarSessaoAposInterrupcao(dados) {
 async function invalidarSequenciasAposBuracoDados(motivo) {
     let sinaisInvalidados = 0;
 
-    for (const estado of Object.values(estadoApostas)) {
+    for (const [estrategiaId, estado] of Object.entries(estadoApostas)) {
         if (!estado || !estado.aguardandoResultado) continue;
+
+        // A interrupção encerra a escuta anterior e cria uma nova fronteira.
+        liberarLocksSinalDoEstado(estrategiaId, estado);
+
         estado.aguardandoResultado = false;
         estado.galeAtual = 0;
         estado.robosWebInscritos = [];
@@ -2181,27 +3261,232 @@ async function invalidarSequenciasAposBuracoDados(motivo) {
         sinaisInvalidados++;
     }
 
-    const [pendentes] = await dbPool.query(`SELECT DISTINCT trader_id FROM auditoria_ordens WHERE status_ordem = 'PENDENTE'`);
-    const traderIds = [...new Set(pendentes.map(row => Number(row.trader_id)).filter(Number.isFinite))];
+    const mesaRuntime = obterMesaRuntime();
+    const conexao = await dbPool.getConnection();
+    let traderIds = [];
 
-    if (traderIds.length > 0) {
-        const placeholders = traderIds.map(() => '?').join(',');
-        const conexao = await dbPool.getConnection();
-        try {
-            await conexao.beginTransaction();
-            await conexao.query(`UPDATE auditoria_ordens SET status_ordem='DADOS_INCOMPLETOS' WHERE status_ordem='PENDENTE'`);
-            await conexao.query(`UPDATE auto_traders SET ativo=false, status_operacao='DADOS_INCOMPLETOS' WHERE id IN (${placeholders})`, traderIds);
-            await conexao.commit();
-        } catch (e) {
-            try { await conexao.rollback(); } catch (rollbackError) { console.error('❌ Rollback falhou ao tratar buraco de dados:', rollbackError.message); }
-            throw e;
-        } finally {
-            conexao.release();
+    try {
+        await conexao.beginTransaction();
+
+        // MC22-S:
+        // Mantem a mesma ordem de locks do caminho financeiro:
+        // primeiro Auto-Trader, depois auditoria.
+        const [tradersMesa] = await conexao.query(
+            `SELECT id, mesa_id
+             FROM auto_traders
+             WHERE mesa_id=?
+             ORDER BY id ASC
+             FOR UPDATE`,
+            [mesaRuntime.id]
+        );
+
+        const traderIdsMesa = new Set();
+
+        for (const trader of tradersMesa) {
+            const traderId = Number(trader.id);
+            const traderMesaId = Number(trader.mesa_id);
+
+            if (
+                !Number.isInteger(traderId)
+                || traderId <= 0
+                || traderMesaId !== Number(mesaRuntime.id)
+            ) {
+                throw new Error(
+                    'MC22-S: Trader invalido na mesa runtime'
+                );
+            }
+
+            traderIdsMesa.add(traderId);
         }
 
-        const idsBloqueados = new Set(traderIds.map(String));
+        // So depois de travar os proprietarios financeiros
+        // trava o conjunto PENDENTE da mesa.
+        const [ordensPendentes] = await conexao.query(
+            `SELECT id, trader_id
+             FROM auditoria_ordens
+             WHERE mesa_id=?
+               AND status_ordem='PENDENTE'
+             ORDER BY id ASC
+             FOR UPDATE`,
+            [mesaRuntime.id]
+        );
+
+        const ordemIds = [];
+        const traderIdsPorOrdem = [];
+
+        for (const ordem of ordensPendentes) {
+            const ordemId = Number(ordem.id);
+            const traderId = Number(ordem.trader_id);
+
+            if (
+                !Number.isInteger(ordemId)
+                || ordemId <= 0
+            ) {
+                throw new Error(
+                    'MC22-S: auditoria PENDENTE com ID invalido'
+                );
+            }
+
+            if (
+                !Number.isInteger(traderId)
+                || traderId <= 0
+            ) {
+                throw new Error(
+                    `MC22-S: ordem ${ordemId} sem Trader valido`
+                );
+            }
+
+            if (!traderIdsMesa.has(traderId)) {
+                throw new Error(
+                    `MC22-S: Trader ${traderId} da ordem ${ordemId} ` +
+                    `nao pertence a mesa ${mesaRuntime.codigo}`
+                );
+            }
+
+            ordemIds.push(ordemId);
+            traderIdsPorOrdem.push(traderId);
+        }
+
+        traderIds = [
+            ...new Set(traderIdsPorOrdem)
+        ];
+
+        if (ordemIds.length > 0) {
+            const placeholdersOrdens =
+                ordemIds.map(() => '?').join(',');
+
+            const [resultadoOrdens] =
+                await conexao.query(
+                    `UPDATE auditoria_ordens
+                     SET status_ordem='DADOS_INCOMPLETOS'
+                     WHERE id IN (${placeholdersOrdens})
+                       AND mesa_id=?
+                       AND status_ordem='PENDENTE'`,
+                    [
+                        ...ordemIds,
+                        mesaRuntime.id
+                    ]
+                );
+
+            if (
+                Number(resultadoOrdens.affectedRows)
+                !== ordemIds.length
+            ) {
+                throw new Error(
+                    `MC22-S: esperadas ${ordemIds.length} ` +
+                    `ordens invalidadas; afetadas ` +
+                    `${resultadoOrdens.affectedRows}`
+                );
+            }
+
+            const placeholdersTraders =
+                traderIds.map(() => '?').join(',');
+
+            await conexao.query(
+                `UPDATE auto_traders
+                 SET ativo=false,
+                     status_operacao='DADOS_INCOMPLETOS'
+                 WHERE mesa_id=?
+                   AND id IN (${placeholdersTraders})`,
+                [
+                    mesaRuntime.id,
+                    ...traderIds
+                ]
+            );
+
+            const [tradersBloqueados] =
+                await conexao.query(
+                    `SELECT id, mesa_id, ativo, status_operacao
+                     FROM auto_traders
+                     WHERE mesa_id=?
+                       AND id IN (${placeholdersTraders})
+                     ORDER BY id ASC
+                     FOR UPDATE`,
+                    [
+                        mesaRuntime.id,
+                        ...traderIds
+                    ]
+                );
+
+            if (
+                tradersBloqueados.length
+                !== traderIds.length
+            ) {
+                throw new Error(
+                    'MC22-S: conjunto de Traders bloqueados incompleto'
+                );
+            }
+
+            for (const trader of tradersBloqueados) {
+                const mesaCorreta =
+                    Number(trader.mesa_id)
+                    === Number(mesaRuntime.id);
+
+                const estaDesligado =
+                    Number(trader.ativo) === 0;
+
+                const statusCorreto =
+                    String(trader.status_operacao)
+                    === 'DADOS_INCOMPLETOS';
+
+                if (
+                    !mesaCorreta
+                    || !estaDesligado
+                    || !statusCorreto
+                ) {
+                    throw new Error(
+                        `MC22-S: Trader ${trader.id} nao ficou ` +
+                        `bloqueado corretamente na mesa ` +
+                        `${mesaRuntime.codigo}`
+                    );
+                }
+            }
+        }
+
+        // Segunda barreira fail-closed antes do COMMIT.
+        const [pendentesRestantes] =
+            await conexao.query(
+                `SELECT id
+                 FROM auditoria_ordens
+                 WHERE mesa_id=?
+                   AND status_ordem='PENDENTE'
+                 LIMIT 1
+                 FOR UPDATE`,
+                [mesaRuntime.id]
+            );
+
+        if (pendentesRestantes.length > 0) {
+            throw new Error(
+                `MC22-S: ainda existe ordem PENDENTE na mesa ` +
+                `${mesaRuntime.codigo} apos invalidacao`
+            );
+        }
+
+        await conexao.commit();
+    } catch (e) {
+        try {
+            await conexao.rollback();
+        } catch (rollbackError) {
+            console.error(
+                'Rollback falhou ao tratar buraco de dados:',
+                rollbackError.message
+            );
+        }
+
+        throw e;
+    } finally {
+        conexao.release();
+    }
+
+    if (traderIds.length > 0) {
+        const idsBloqueados =
+            new Set(traderIds.map(String));
+
         for (const trader of AUTO_TRADERS_MEMORIA) {
-            if (!idsBloqueados.has(String(trader.id))) continue;
+            if (!idsBloqueados.has(String(trader.id))) {
+                continue;
+            }
+
             trader.ativo = false;
             trader.status_operacao = 'DADOS_INCOMPLETOS';
         }
@@ -2219,14 +3504,24 @@ function nivelHistoricoResultado(galeAtual) {
 }
 
 async function registrarHistoricoResultadoEstrategia(est, tipoResultado, galeAtual, multiplicador, timestampColeta) {
+    const mesaRuntime = obterMesaRuntime();
     const timestampMs = Number(timestampColeta);
     const timestampSegundos = Number.isFinite(timestampMs) && timestampMs > 0
         ? timestampMs / 1000
         : Date.now() / 1000;
 
     await dbPool.query(
-        `INSERT INTO historico_resultados (estrategia_id, tipo_resultado, nivel, multiplicador, data_hora) VALUES (?, ?, ?, ?, FROM_UNIXTIME(?))`,
-        [est.id, tipoResultado, nivelHistoricoResultado(galeAtual), multiplicador || '', timestampSegundos]
+        `INSERT INTO historico_resultados
+            (mesa_id, estrategia_id, tipo_resultado, nivel, multiplicador, data_hora)
+         VALUES (?, ?, ?, ?, ?, FROM_UNIXTIME(?))`,
+        [
+            mesaRuntime.id,
+            est.id,
+            tipoResultado,
+            nivelHistoricoResultado(galeAtual),
+            multiplicador || '',
+            timestampSegundos
+        ]
     );
 }
 
@@ -2343,6 +3638,171 @@ function autoTraderAutorizaEstrategia(config, est, robos = []) {
     return !est.is_dinamico && fontes.includes(String(est.origem || '').trim());
 }
 
+function autoTraderParticipouDoSinal(trader, est, estado) {
+    const idsSelecionados = idsRobosSelecionadosAutoTrader(trader && trader.config, ROBOS_MEMORIA);
+    const robosSinal = unirRobosInscritos(
+        Array.isArray(estado && estado.robosCiclo) ? estado.robosCiclo : [],
+        Array.isArray(estado && estado.robosInscritos) ? estado.robosInscritos : []
+    );
+    const idsSinal = robosSinal.map(robo => Number(robo.id)).filter(Number.isFinite);
+
+    if (idsSelecionados.size > 0 && idsSinal.length > 0) {
+        return idsSinal.some(id => idsSelecionados.has(id));
+    }
+
+    return autoTraderAutorizaEstrategia(trader && trader.config, est, ROBOS_MEMORIA);
+}
+
+function mesaIdFinanceiroTrader(
+    trader,
+    contexto = 'operacao financeira'
+) {
+    const mesaRuntime = obterMesaRuntime();
+    const mesaId = Number(mesaRuntime.id);
+    const traderMesaId = Number(trader?.mesa_id);
+
+    if (
+        !Number.isInteger(mesaId)
+        || mesaId <= 0
+        || !Number.isInteger(traderMesaId)
+        || traderMesaId !== mesaId
+    ) {
+        throw new Error(
+            `MC22-X: Trader ${trader?.id ?? 'n/a'} nao pertence ` +
+            `a mesa runtime em ${contexto}`
+        );
+    }
+
+    return mesaId;
+}
+
+async function persistirEstadoCicloAutoTrader(trader, estadoBruto, { autoStop = false } = {}) {
+    const mesaId = mesaIdFinanceiroTrader(
+        trader,
+        'persistir estado de ciclo'
+    );
+
+    const estado = normalizarEstadoCiclo(estadoBruto || {});
+    const desligarPorCiclos = autoStop === true && trader && trader.ativo === true;
+
+    if (desligarPorCiclos) {
+        await dbPool.query(
+            `UPDATE auto_traders
+             SET ativo=false, status_operacao='LIMITE_CICLOS', estado_ciclo=?,
+                 reds_virtuais_observados=?, sinais_operados_onda=?, ciclos_concluidos=?, pulos_restantes=?
+             WHERE id=? AND mesa_id=?`,
+            [
+                estado.estado_ciclo,
+                estado.reds_virtuais_observados,
+                estado.sinais_operados_onda,
+                estado.ciclos_concluidos,
+                estado.pulos_restantes,
+                trader.id,
+                mesaId
+            ]
+        );
+    } else {
+        await dbPool.query(
+            `UPDATE auto_traders
+             SET estado_ciclo=?, reds_virtuais_observados=?, sinais_operados_onda=?,
+                 ciclos_concluidos=?, pulos_restantes=?
+             WHERE id=? AND mesa_id=?`,
+            [
+                estado.estado_ciclo,
+                estado.reds_virtuais_observados,
+                estado.sinais_operados_onda,
+                estado.ciclos_concluidos,
+                estado.pulos_restantes,
+                trader.id,
+                mesaId
+            ]
+        );
+    }
+
+    aplicarEstadoCiclo(trader, estado);
+    if (desligarPorCiclos) {
+        trader.ativo = false;
+        trader.status_operacao = 'LIMITE_CICLOS';
+    }
+    return estado;
+}
+
+async function processarResultadoVirtualAutoTraders(est, estado, tipoResultado) {
+    let alterados = 0;
+    for (const trader of AUTO_TRADERS_MEMORIA) {
+        if (!trader.ativo) continue;
+        if (!['OPERANDO', 'STANDBY'].includes(String(trader.status_operacao || ''))) continue;
+        if (!autoTraderParticipouDoSinal(trader, est, estado)) continue;
+
+        const avaliacao = processarResultadoDormindo(trader, tipoResultado);
+        if (!avaliacao.mudou) continue;
+
+        await persistirEstadoCicloAutoTrader(trader, avaliacao.estado);
+        alterados++;
+        if (avaliacao.acordou) {
+            console.log(
+                `🌊 Auto-Trader ${trader.id}: gatilho de REDs virtuais atingido; `
+                + `máquina avançou para ONDA_ATIVA.`
+            );
+        } else if (String(tipoResultado || '').toUpperCase() === 'RED') {
+            const gatilho = Math.max(0, Number(trader.config && trader.config.gatilho_reds_virtuais) || 0);
+            console.log(
+                `🌙 Auto-Trader ${trader.id}: RED virtual observado `
+                + `(${trader.reds_virtuais_observados}/${gatilho}).`
+            );
+        }
+    }
+
+    if (alterados > 0) ioServer.emit('atualizar_interface');
+    return alterados;
+}
+
+async function prepararEntradaCicloAutoTrader(trader) {
+    const decisao = avaliarSinalOnda(trader);
+    if (decisao.auto_stop) {
+        await persistirEstadoCicloAutoTrader(trader, decisao.estado, { autoStop: true });
+        console.log(`🔁 Auto-Trader ${trader.id}: limite de ciclos já atingido; motor desligado.`);
+        ioServer.emit('atualizar_interface');
+        return false;
+    }
+
+    if (decisao.persistir) {
+        await persistirEstadoCicloAutoTrader(trader, decisao.estado);
+    }
+
+    if (!decisao.permitido) return false;
+    return true;
+}
+
+async function concluirSinalOperadoAutoTrader(trader, tipoResultado) {
+    const progresso = avancarAposSinalOperado(trader);
+    if (progresso.mudou) {
+        const autoStopEfetivo = progresso.auto_stop === true && trader.ativo === true;
+        await persistirEstadoCicloAutoTrader(trader, progresso.estado, { autoStop: autoStopEfetivo });
+
+        if (progresso.ciclo_concluido) {
+            console.log(
+                `🌊 Auto-Trader ${trader.id}: onda concluída; `
+                + `ciclos=${progresso.estado.ciclos_concluidos}.`
+            );
+        }
+        if (autoStopEfetivo) {
+            console.log(
+                `🔁 Auto-Trader ${trader.id}: limite de ciclos concluídos atingido. `
+                + `Motor desligado até reativação manual.`
+            );
+            ioServer.emit('atualizar_interface');
+        }
+    }
+
+    console.log(
+        `Auto-Trader ${trader.id}: sinal operado encerrado como ${tipoResultado}. `
+        + `Estado=${trader.estado_ciclo}, sinais_onda=${trader.sinais_operados_onda}, `
+        + `ciclos=${trader.ciclos_concluidos}, pulos=${trader.pulos_restantes}.`
+    );
+    return progresso;
+}
+
 function avaliarStopRedsRobo(robo, tipoResultado) {
     const limite = Math.max(0, Math.trunc(Number(robo && robo.stop_reds_seguidos) || 0));
     const redsAtuais = Math.max(0, Math.trunc(Number(robo && robo.reds_consecutivos) || 0));
@@ -2434,9 +3894,20 @@ async function persistirProtecaoRobo(robo, estado, greens, reds = robo.reds_cons
 
     await dbPool.query(
         `UPDATE robos_canais
-         SET greens_consecutivos=?, reds_consecutivos=?, standby_ate=?, historico_reds_json=?
-         WHERE id=?`,
-        [greensNormalizado, redsNormalizado, standbyAte, historicoJson, robo.id]
+         SET greens_consecutivos=?,
+             reds_consecutivos=?,
+             standby_ate=?,
+             historico_reds_json=?
+         WHERE id=?
+           AND mesa_id=?`,
+        [
+            greensNormalizado,
+            redsNormalizado,
+            standbyAte,
+            historicoJson,
+            robo.id,
+            obterMesaRuntime().id
+        ]
     );
 
     aplicarProtecaoRoboEmMemoria(
@@ -2513,10 +3984,18 @@ async function processarResultadoProtecaoRobos(estado, tipoResultado, timestampC
             try {
                 await dbPool.query(
                     `UPDATE robos_canais
-                     SET ativo=false, greens_consecutivos=0, reds_consecutivos=?,
-                         standby_ate=0, historico_reds_json='[]'
-                     WHERE id=?`,
-                    [stopReds.reds_consecutivos, robo.id]
+                     SET ativo=false,
+                         greens_consecutivos=0,
+                         reds_consecutivos=?,
+                         standby_ate=0,
+                         historico_reds_json='[]'
+                     WHERE id=?
+                       AND mesa_id=?`,
+                    [
+                        stopReds.reds_consecutivos,
+                        robo.id,
+                        obterMesaRuntime().id
+                    ]
                 );
 
                 aplicarProtecaoRoboEmMemoria(
@@ -2696,22 +4175,652 @@ function unirRobosInscritos(...listas) {
     return [...unicos.values()];
 }
 
-function ciclosAtivosPorRobo() {
-    const ciclos = new Map();
-    for (const [estrategiaId, estado] of Object.entries(estadoApostas || {})) {
-        if (!estado || estado.aguardandoResultado !== true) continue;
-        const robosCiclo = Array.isArray(estado.robosCiclo) && estado.robosCiclo.length > 0
-            ? estado.robosCiclo
-            : (Array.isArray(estado.robosInscritos) ? estado.robosInscritos : []);
-        for (const robo of robosCiclo) {
-            if (!robo || robo.id === undefined || robo.id === null) continue;
-            ciclos.set(String(robo.id), {
-                estrategia_id: String(estrategiaId),
-                gale_atual: Math.max(0, Number(estado.galeAtual) || 0)
-            });
+function chaveLockSinalRobo(roboOuId) {
+    const id = roboOuId && typeof roboOuId === 'object'
+        ? roboOuId.id
+        : roboOuId;
+
+    if (id === undefined || id === null) return '';
+    return String(id);
+}
+
+function robosDoEstadoSinal(estado) {
+    if (!estado) return [];
+
+    const ciclo = Array.isArray(estado.robosCiclo)
+        ? estado.robosCiclo
+        : [];
+
+    const inscritos = Array.isArray(estado.robosInscritos)
+        ? estado.robosInscritos
+        : [];
+
+    return unirRobosInscritos(ciclo, inscritos);
+}
+
+function adquirirLocksSinalRobos(robos, estrategiaId) {
+    const participantes = unirRobosInscritos(
+        Array.isArray(robos) ? robos : []
+    );
+
+    if (participantes.length === 0) return false;
+
+    // Aquisição atômica: primeiro valida TODOS, depois grava TODOS.
+    for (const robo of participantes) {
+        const id = chaveLockSinalRobo(robo);
+        if (!id || locksSinalPorRobo.has(id)) {
+            return false;
         }
     }
-    return ciclos;
+
+    for (const robo of participantes) {
+        const id = chaveLockSinalRobo(robo);
+
+        locksSinalPorRobo.set(id, {
+            estrategia_id: String(estrategiaId),
+            gale_atual: 0,
+            rodada_inicio: contadorRodadasSinal
+        });
+    }
+
+    return true;
+}
+
+function atualizarGaleLocksSinal(estado, estrategiaId) {
+    const galeAtual = Math.max(
+        0,
+        Math.trunc(Number(estado?.galeAtual) || 0)
+    );
+
+    for (const robo of robosDoEstadoSinal(estado)) {
+        const id = chaveLockSinalRobo(robo);
+        if (!id) continue;
+
+        const lock = locksSinalPorRobo.get(id);
+        if (!lock) continue;
+        if (String(lock.estrategia_id) !== String(estrategiaId)) continue;
+
+        locksSinalPorRobo.set(id, {
+            ...lock,
+            gale_atual: galeAtual
+        });
+    }
+}
+
+function liberarLocksSinalDoEstado(
+    estrategiaId,
+    estado,
+    { rearmarCursor = true } = {}
+) {
+    const participantes = robosDoEstadoSinal(estado);
+
+    for (const robo of participantes) {
+        const id = chaveLockSinalRobo(robo);
+        if (!id) continue;
+
+        const lock = locksSinalPorRobo.get(id);
+        const pertenceAoCiclo = lockPertenceAoCicloSinal(
+            estrategiaId,
+            estado,
+            lock
+        );
+
+        // Nunca libera nem rearma o cursor de um lock que pertença a outro ciclo.
+        if (pertenceAoCiclo) {
+            locksSinalPorRobo.delete(id);
+        }
+
+        if (rearmarCursor && pertenceAoCiclo) {
+            cursorRetomadaPorRobo.set(id, contadorRodadasSinal);
+        }
+    }
+}
+
+function roboPodeAvaliarPadraoAposCursor(roboId, tamanhoPadrao) {
+    const id = chaveLockSinalRobo(roboId);
+    if (!id) return false;
+
+    if (!cursorRetomadaPorRobo.has(id)) {
+        // Robô que nunca saiu de um lock continua usando o histórico normal.
+        return true;
+    }
+
+    const tamanho = Math.max(
+        1,
+        Math.trunc(Number(tamanhoPadrao) || 1)
+    );
+
+    const rodadaRetomada = Math.max(
+        0,
+        Number(cursorRetomadaPorRobo.get(id)) || 0
+    );
+
+    const rodadasNovas = Math.max(
+        0,
+        contadorRodadasSinal - rodadaRetomada
+    );
+
+    // Nenhuma casa do padrão pode ter sido formada enquanto o robô estava surdo.
+    return rodadasNovas >= tamanho;
+}
+
+// MICRO-COMMIT 4: snapshot imutável de inscritos por ciclo.
+// O primeiro acesso operacional a um estado ativo congela o
+// conjunto de robôs daquele ciclo. Alterações posteriores nas
+// listas mutáveis não mudam retroativamente Gale, liberação
+// ou finalização.
+const robosDoEstadoSinalSemSnapshot = robosDoEstadoSinal;
+const snapshotsInscricaoSinalPorEstado = new WeakMap();
+
+function estrategiaIdDoEstadoSinal(estado) {
+    if (!estado || typeof estado !== 'object') return null;
+
+    for (const [estrategiaId, estadoAtual] of Object.entries(estadoApostas)) {
+        if (estadoAtual === estado) {
+            return String(estrategiaId);
+        }
+    }
+
+    return null;
+}
+
+function criarSnapshotInscricaoSinal(estrategiaId, estado) {
+    if (!estado || typeof estado !== 'object') {
+        return null;
+    }
+
+    const estrategiaChave =
+        estrategiaId === null || estrategiaId === undefined
+            ? ''
+            : String(estrategiaId);
+
+    if (!estrategiaChave) {
+        return null;
+    }
+
+    const existente =
+        snapshotsInscricaoSinalPorEstado.get(estado);
+
+    if (existente) {
+        if (
+            existente.estrategia_id !== estrategiaChave
+        ) {
+            console.error(
+                `🚨 Snapshot de ciclo divergente | ` +
+                `snapshot=${existente.estrategia_id} | ` +
+                `estado=${estrategiaChave}.`
+            );
+
+            return null;
+        }
+
+        return existente;
+    }
+
+    const participantesAtuais =
+        robosDoEstadoSinalSemSnapshot(estado);
+
+    const porId = new Map();
+
+    for (const robo of participantesAtuais) {
+        const id = chaveLockSinalRobo(robo);
+
+        if (!id) continue;
+
+        if (!porId.has(id)) {
+            porId.set(id, robo);
+        }
+    }
+
+    if (porId.size === 0) {
+        return null;
+    }
+
+    const robos = Object.freeze(
+        Array.from(porId.values())
+    );
+
+    const ids = Object.freeze(
+        Array.from(porId.keys())
+    );
+
+    const snapshot = Object.freeze({
+        estrategia_id: estrategiaChave,
+        rodada_inicio: Math.max(
+            0,
+            Math.trunc(Number(contadorRodadasSinal) || 0)
+        ),
+        robos,
+        ids
+    });
+
+    snapshotsInscricaoSinalPorEstado.set(
+        estado,
+        snapshot
+    );
+
+    return snapshot;
+}
+
+function robosDoEstadoSinalIsolado(estrategiaId, estado) {
+    const snapshot = criarSnapshotInscricaoSinal(
+        estrategiaId,
+        estado
+    );
+
+    return snapshot
+        ? snapshot.robos
+        : [];
+}
+
+function limparSnapshotInscricaoSinal(estrategiaId, estado) {
+    if (!estado || typeof estado !== 'object') {
+        return false;
+    }
+
+    const snapshot =
+        snapshotsInscricaoSinalPorEstado.get(estado);
+
+    if (!snapshot) {
+        return false;
+    }
+
+    if (
+        snapshot.estrategia_id !== String(estrategiaId)
+    ) {
+        console.error(
+            `🚨 Tentativa de limpar snapshot de outro ciclo | ` +
+            `snapshot=${snapshot.estrategia_id} | ` +
+            `solicitante=${estrategiaId}.`
+        );
+
+        return false;
+    }
+
+    snapshotsInscricaoSinalPorEstado.delete(
+        estado
+    );
+
+    return true;
+}
+
+// Compatibilidade com os helpers já existentes.
+//
+// liberarLocksSinalDoEstado,
+// atualizarGaleLocksSinal e
+// sincronizarLocksSinalComEstadoApostas
+// continuam usando robosDoEstadoSinal normalmente.
+//
+// Para um estado ativo, porém, esta camada passa a devolver
+// sempre o mesmo conjunto congelado de participantes.
+robosDoEstadoSinal = function robosDoEstadoSinalComSnapshot(estado) {
+    if (!estado || typeof estado !== 'object') {
+        return robosDoEstadoSinalSemSnapshot(estado);
+    }
+
+    const existente =
+        snapshotsInscricaoSinalPorEstado.get(estado);
+
+    if (existente) {
+        return existente.robos;
+    }
+
+    if (estado.aguardandoResultado !== true) {
+        return robosDoEstadoSinalSemSnapshot(estado);
+    }
+
+    const estrategiaId =
+        estrategiaIdDoEstadoSinal(estado);
+
+    if (!estrategiaId) {
+        return [];
+    }
+
+    const snapshot = criarSnapshotInscricaoSinal(
+        estrategiaId,
+        estado
+    );
+
+    return snapshot
+        ? snapshot.robos
+        : [];
+};
+
+// MICRO-COMMIT 5: identidade de geração por rodada_inicio.
+//
+// MC3 isolou lock/estado por robô e estratégia.
+// MC4 congelou os participantes de cada estado.
+//
+// MC5 fecha o caso ABA:
+// ciclos diferentes podem reutilizar a mesma estratégia.
+// Portanto estrategia_id sozinho não prova ownership.
+//
+// rodada_inicio passa a funcionar como fencing token da geração.
+function rodadaInicioSnapshotSinal(estrategiaId, estado) {
+    if (!estado || typeof estado !== 'object') {
+        return null;
+    }
+
+    const snapshot =
+        snapshotsInscricaoSinalPorEstado.get(estado) ||
+        criarSnapshotInscricaoSinal(
+            estrategiaId,
+            estado
+        );
+
+    if (!snapshot) {
+        return null;
+    }
+
+    if (
+        snapshot.estrategia_id !== String(estrategiaId)
+    ) {
+        return null;
+    }
+
+    const rodadaInicio =
+        Number(snapshot.rodada_inicio);
+
+    if (!Number.isFinite(rodadaInicio)) {
+        return null;
+    }
+
+    return Math.max(
+        0,
+        Math.trunc(rodadaInicio)
+    );
+}
+
+function lockPertenceAoCicloSinal(
+    estrategiaId,
+    estado,
+    lock
+) {
+    if (!lock) {
+        return false;
+    }
+
+    if (
+        String(lock.estrategia_id) !==
+        String(estrategiaId)
+    ) {
+        return false;
+    }
+
+    const rodadaInicioEstado =
+        rodadaInicioSnapshotSinal(
+            estrategiaId,
+            estado
+        );
+
+    if (rodadaInicioEstado === null) {
+        return false;
+    }
+
+    const rodadaInicioLock =
+        Number(lock.rodada_inicio);
+
+    // Lock incompleto, legado ou corrompido:
+    // nunca é tratado como pertencente ao ciclo atual.
+    if (!Number.isFinite(rodadaInicioLock)) {
+        return false;
+    }
+
+    // MICRO-COMMIT 8: Tolerância de rodada_inicio para avanço de Gales (até 3 rodadas)
+    const diffRodadas = Math.abs(
+        Math.max(0, Math.trunc(rodadaInicioLock)) - rodadaInicioEstado
+    );
+    return diffRodadas <= 3;
+}
+
+// MICRO-COMMIT 7: tolerância operacional de defasagem de Gale.
+// O fencing de geração continua estrito. Apenas a sincronização operacional
+// de gale_atual admite uma defasagem máxima de UMA transição para trás.
+//
+// MICRO-COMMIT 3: isolamento de estado/transições.
+// Cada estado ativo só pode avançar quando TODOS os robôs do seu ciclo ainda
+// possuem o lock da mesma estratégia e do mesmo nível de Gale.
+function estadoSinalComLocksConsistentes(estrategiaId, estado) {
+    if (!estado || estado.aguardandoResultado !== true) return false;
+    if (estadoApostas[String(estrategiaId)] !== estado) return false;
+
+    const participantes = robosDoEstadoSinalIsolado(estrategiaId, estado);
+    if (participantes.length === 0) return false;
+
+    // Fencing de geração com tolerância de recém-nascido (MC6):
+    // Se o ciclo acabou de nascer (galeAtual 0 e sem locks populados ainda por atraso assíncrono),
+    // damos uma breve tolerância em vez de invalidar abruptamente em fail-closed.
+    const geracaoConsistente = participantes.every(robo => {
+        const id = chaveLockSinalRobo(robo);
+        if (!id) return false;
+        const lock = locksSinalPorRobo.get(id);
+        if (!lock && Number(estado.galeAtual || 0) === 0) {
+            return true; // Tolera ausência momentânea no exato milissegundo de disparo
+        }
+        return lockPertenceAoCicloSinal(
+            estrategiaId,
+            estado,
+            lock
+        );
+    });
+
+    if (!geracaoConsistente) return false;
+
+    const galeAtual = Math.max(
+        0,
+        Math.trunc(Number(estado.galeAtual) || 0)
+    );
+
+    return participantes.every(robo => {
+        const id = chaveLockSinalRobo(robo);
+        if (!id) return false;
+
+        const lock = locksSinalPorRobo.get(id);
+
+        // MC6 já autorizava esta tolerância na barreira de geração,
+        // mas a validação abaixo a anulava imediatamente.
+        //
+        // Em DIRETO, ausência momentânea do lock continua sendo
+        // tolerada somente enquanto galeAtual === 0.
+        if (!lock) {
+            return galeAtual === 0;
+        }
+
+        // Segurança estrutural NÃO é negociável:
+        // um lock existente precisa continuar pertencendo à mesma
+        // estratégia E à mesma rodada_inicio do snapshot.
+        if (
+            !lockPertenceAoCicloSinal(
+                estrategiaId,
+                estado,
+                lock
+            )
+        ) {
+            return false;
+        }
+
+        const galeLock = Math.max(
+            0,
+            Math.trunc(Number(lock.gale_atual) || 0)
+        );
+
+        // Estado e lock sincronizados: situação normal.
+        if (galeLock === galeAtual) {
+            return true;
+        }
+
+        // Tolerância operacional estritamente limitada:
+        //
+        // estado G1 + lock G0 -> aceita
+        // estado G2 + lock G1 -> aceita
+        //
+        // O lock só pode estar UMA transição ATRÁS.
+        // Lock adiantado ou dois níveis atrasado continua falhando.
+        return (
+            galeAtual > 0 &&
+            galeLock === (galeAtual - 1)
+        );
+    });
+}
+
+function invalidarEstadoSinalInconsistente(
+    estrategiaId,
+    estado,
+    motivo = 'LOCK_ESTADO_DIVERGENTE'
+) {
+    if (!estado) return false;
+
+    // liberarLocksSinalDoEstado só remove locks realmente pertencentes
+    // a esta estratégia. Locks de outros ciclos permanecem intocados.
+    liberarLocksSinalDoEstado(estrategiaId, estado);
+    limparSnapshotInscricaoSinal(estrategiaId, estado);
+
+    estado.aguardandoResultado = false;
+    estado.galeAtual = 0;
+    estado.robosWebInscritos = [];
+    estado.robosTelegramInscritos = [];
+    estado.robosInscritos = [];
+    estado.telegramEntradaPromise = null;
+
+    console.error(
+        `🚨 Ciclo de sinal invalidado em modo fail-closed | estratégia=${estrategiaId} | motivo=${motivo}.`
+    );
+
+    return true;
+}
+
+function avancarGaleEstadoSinal(
+    estrategiaId,
+    estado,
+    limiteGales
+) {
+    if (
+        !estadoSinalComLocksConsistentes(
+            estrategiaId,
+            estado
+        )
+    ) {
+        return false;
+    }
+
+    const atual = Math.max(
+        0,
+        Math.trunc(Number(estado.galeAtual) || 0)
+    );
+
+    const limite = Math.max(
+        0,
+        Math.trunc(Number(limiteGales) || 0)
+    );
+
+    if (atual >= limite) {
+        return false;
+    }
+
+    estado.galeAtual = atual + 1;
+
+    atualizarGaleLocksSinal(
+        estado,
+        estrategiaId
+    );
+
+    // Confirma que estado e locks avançaram juntos.
+    return estadoSinalComLocksConsistentes(
+        estrategiaId,
+        estado
+    );
+}
+
+function finalizarEstadoSinal(
+    estrategiaId,
+    estado
+) {
+    if (
+        !estadoSinalComLocksConsistentes(
+            estrategiaId,
+            estado
+        )
+    ) {
+        return false;
+    }
+
+    estado.aguardandoResultado = false;
+
+    liberarLocksSinalDoEstado(
+        estrategiaId,
+        estado
+    );
+    limparSnapshotInscricaoSinal(estrategiaId, estado);
+
+    estado.galeAtual = 0;
+
+    return true;
+}
+
+function sincronizarLocksSinalComEstadoApostas() {
+    const idsAtivos = new Set();
+
+    for (const [estrategiaId, estado] of Object.entries(estadoApostas || {})) {
+        if (!estado || estado.aguardandoResultado !== true) continue;
+
+        const galeAtual = Math.max(
+            0,
+            Math.trunc(Number(estado.galeAtual) || 0)
+        );
+
+        for (const robo of robosDoEstadoSinal(estado)) {
+            const id = chaveLockSinalRobo(robo);
+            if (!id) continue;
+
+            idsAtivos.add(id);
+
+            const existente = locksSinalPorRobo.get(id);
+
+            if (!existente) {
+                locksSinalPorRobo.set(id, {
+                    estrategia_id: String(estrategiaId),
+                    gale_atual: galeAtual,
+                    rodada_inicio: contadorRodadasSinal
+                });
+            } else if (
+                String(existente.estrategia_id) !== String(estrategiaId)
+            ) {
+                console.error(
+                    `🚨 Conflito de lock preservado | robô=${id} | ` +
+                    `lock=${existente.estrategia_id} | estado=${estrategiaId}. ` +
+                    'O lock existente não será sobrescrito.'
+                );
+
+                continue;
+            } else if (
+                Math.max(
+                    0,
+                    Math.trunc(Number(existente.gale_atual) || 0)
+                ) !== galeAtual
+            ) {
+                // Mesma estratégia: o estado persistido em memória é
+                // a fonte do nível corrente.
+                locksSinalPorRobo.set(id, {
+                    ...existente,
+                    gale_atual: galeAtual
+                });
+            }
+        }
+    }
+
+    // Caso uma recarga de memória elimine um estado antigo, o lock não pode
+    // sobreviver órfão. A remoção também estabelece o cursor de retomada.
+    for (const id of [...locksSinalPorRobo.keys()]) {
+        if (idsAtivos.has(id)) continue;
+
+        locksSinalPorRobo.delete(id);
+        cursorRetomadaPorRobo.set(id, contadorRodadasSinal);
+    }
+}
+
+function ciclosAtivosPorRobo() {
+    sincronizarLocksSinalComEstadoApostas();
+    return new Map(locksSinalPorRobo);
 }
 
 async function selecionarRobosParaEstrategia(est, historicoLiveCanonico) {
@@ -2736,6 +4845,15 @@ async function selecionarRobosParaEstrategia(est, historicoLiveCanonico) {
             bloqueados.push({ ...snapshotPublicoRobo(robo), ...ciclo });
             return false;
         }
+
+        const tamanhoPadrao = Array.isArray(est.padrao)
+            ? est.padrao.length
+            : 0;
+
+        if (!roboPodeAvaliarPadraoAposCursor(robo.id, tamanhoPadrao)) {
+            return false;
+        }
+
         return true;
     });
 
@@ -2826,12 +4944,16 @@ function montarMensagemTelegram(tipo, est, estado, robo, extras = {}) {
         linhas.push(`💰 Entrada: ${rotuloEntradaTelegram(est.entrada)}`);
     }
 
-    if (tipo === 'GREEN' && extras.resultado === 'TIE' && config.detalhar_empates !== false && extras.multiplicador) {
+    // MC9: o multiplicador do empate sempre segue no payload bruto.
+    // O presenter incorpora esse valor ao título final.
+    if (tipo === 'GREEN' && extras.resultado === 'TIE' && extras.multiplicador) {
         linhas.push(`✨ Multiplicador: ${extras.multiplicador}`);
     }
 
+    // MC9: todo GREEN carrega somente a etapa em que foi concluído.
+    // A semântica visual "Entrada: Principal/Gale N" pertence ao presenter.
     if (tipo === 'GREEN') {
-        linhas.push(`🏁 Resultado: ${extras.resultado === 'TIE' ? 'PROTEÇÃO NO EMPATE' : rotuloNivelTelegram(estado.galeAtual)}`);
+        linhas.push(`🏁 Resultado: ${rotuloNivelTelegram(estado.galeAtual)}`);
     }
 
     if (['ENTRADA', 'GREEN', 'RED'].includes(tipo)) {
@@ -3008,16 +5130,18 @@ function emitirAlertaWebRobo(tipo, est, estado, extras = {}) {
 async function registrarHistoricoRobosInscritos(est, estado, tipoResultado, galeAtual, multiplicador, timestampColeta) {
     if (!estado || !Array.isArray(estado.robosInscritos) || estado.robosInscritos.length === 0) return;
 
+    const mesaRuntime = obterMesaRuntime();
     const timestampMs = Number(timestampColeta);
     const timestampSegundos = Number.isFinite(timestampMs) && timestampMs > 0
         ? timestampMs / 1000
         : Date.now() / 1000;
 
-    const placeholders = estado.robosInscritos.map(() => '(?,?,?,?,?,?,FROM_UNIXTIME(?))').join(',');
+    const placeholders = estado.robosInscritos.map(() => '(?,?,?,?,?,?,?,FROM_UNIXTIME(?))').join(',');
     const params = [];
 
     for (const robo of estado.robosInscritos) {
         params.push(
+            mesaRuntime.id,
             robo.id,
             est.id,
             tipoResultado,
@@ -3030,30 +5154,10 @@ async function registrarHistoricoRobosInscritos(est, estado, tipoResultado, gale
 
     await dbPool.query(
         `INSERT INTO historico_disparos_robos
-            (robo_id, estrategia_id, tipo_resultado, nivel, multiplicador, estrategia_origem, data_hora)
+            (mesa_id, robo_id, estrategia_id, tipo_resultado, nivel, multiplicador, estrategia_origem, data_hora)
          VALUES ${placeholders}`,
         params
     );
-}
-
-function horarioParaMinutos(valor, padrao) {
-    const texto = String(valor || padrao).trim();
-    const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(texto);
-    if (!match) return null;
-    return (Number(match[1]) * 60) + Number(match[2]);
-}
-
-function traderDentroHorarioExecucao(config, agora = new Date()) {
-    const cf = config || {};
-    const inicio = horarioParaMinutos(cf.hora_inicio, '00:00');
-    const fim = horarioParaMinutos(cf.hora_fim, '23:59');
-
-    if (inicio === null || fim === null) return false;
-    if (inicio === fim) return true;
-
-    const minutoAtual = (agora.getHours() * 60) + agora.getMinutes();
-    if (inicio < fim) return minutoAtual >= inicio && minutoAtual <= fim;
-    return minutoAtual >= inicio || minutoAtual <= fim;
 }
 
 function avaliarStopRedsAutoTrader(trader, tipoResultado, agora = Date.now()) {
@@ -3142,6 +5246,11 @@ function aplicarEstadoStopRedsTraderEmMemoria(trader, avaliacao) {
 }
 
 async function processarResultadoStopRedsAutoTrader(trader, tipoResultado, timestampResultado) {
+    const mesaId = mesaIdFinanceiroTrader(
+        trader,
+        'processar Stop Reds'
+    );
+
     const avaliacao = avaliarStopRedsAutoTrader(trader, tipoResultado, timestampResultado);
     const redsAnteriores = Math.max(0, Number(trader.reds_consecutivos) || 0);
     const pausaAnterior = Math.max(0, Number(trader.stop_reds_pausado_ate) || 0);
@@ -3157,22 +5266,22 @@ async function processarResultadoStopRedsAutoTrader(trader, tipoResultado, times
             await dbPool.query(
                 `UPDATE auto_traders
                  SET ativo=false, status_operacao='STOP_REDS', reds_consecutivos=?, stop_reds_pausado_ate=0
-                 WHERE id=?`,
-                [avaliacao.reds_consecutivos, trader.id]
+                 WHERE id=? AND mesa_id=?`,
+                [avaliacao.reds_consecutivos, trader.id, mesaId]
             );
         } else if (avaliacao.acao === 'PAUSAR') {
             await dbPool.query(
                 `UPDATE auto_traders
                  SET status_operacao='STOP_REDS_PAUSA', reds_consecutivos=0, stop_reds_pausado_ate=?
-                 WHERE id=?`,
-                [avaliacao.stop_reds_pausado_ate, trader.id]
+                 WHERE id=? AND mesa_id=?`,
+                [avaliacao.stop_reds_pausado_ate, trader.id, mesaId]
             );
         } else {
             await dbPool.query(
                 `UPDATE auto_traders
                  SET reds_consecutivos=?, stop_reds_pausado_ate=0
-                 WHERE id=?`,
-                [avaliacao.reds_consecutivos, trader.id]
+                 WHERE id=? AND mesa_id=?`,
+                [avaliacao.reds_consecutivos, trader.id, mesaId]
             );
         }
 
@@ -3200,6 +5309,10 @@ async function processarResultadoStopRedsAutoTrader(trader, tipoResultado, times
 }
 
 async function rearmarAutoTradersStopRedsPausados(agora = Date.now()) {
+    const mesaId = Number(
+        obterMesaRuntime().id
+    );
+
     const agoraMs = Number(agora);
     const referencia = Number.isFinite(agoraMs) && agoraMs > 0 ? Math.trunc(agoraMs) : Date.now();
     const prontos = AUTO_TRADERS_MEMORIA.filter(trader => {
@@ -3215,12 +5328,26 @@ async function rearmarAutoTradersStopRedsPausados(agora = Date.now()) {
     const ids = prontos.map(trader => trader.id);
     const placeholders = ids.map(() => '?').join(',');
 
-    await dbPool.query(
+    const [resultadoRearme] = await dbPool.query(
         `UPDATE auto_traders
-         SET status_operacao='STANDBY', reds_consecutivos=0, stop_reds_pausado_ate=0
-         WHERE ativo=true AND status_operacao='STOP_REDS_PAUSA' AND id IN (${placeholders})`,
-        ids
+         SET status_operacao='STANDBY',
+             reds_consecutivos=0,
+             stop_reds_pausado_ate=0
+         WHERE mesa_id=?
+           AND ativo=true
+           AND status_operacao='STOP_REDS_PAUSA'
+           AND id IN (${placeholders})`,
+        [mesaId, ...ids]
     );
+
+    if (
+        Number(resultadoRearme.affectedRows)
+        !== ids.length
+    ) {
+        throw new Error(
+            'MC22-X: rearmamento Stop Reds incompleto na mesa runtime'
+        );
+    }
 
     for (const trader of prontos) {
         trader.status_operacao = 'STANDBY';
@@ -3334,21 +5461,24 @@ function avaliarLimitesFinanceirosTrader(trader, snapshotSaldo) {
 }
 
 async function traderPossuiLiquidacaoPendente(traderId) {
+    const mesaRuntime = obterMesaRuntime();
     const [linhas] = await dbPool.query(
         `SELECT id
          FROM auditoria_ordens
          WHERE trader_id=?
+           AND mesa_id=?
            AND status_ordem IN ('WIN','LOSS','TIE')
            AND resultado_confirmado_em IS NOT NULL
            AND saldo_pos_confirmado_em IS NULL
          ORDER BY id DESC
          LIMIT 1`,
-        [traderId]
+        [traderId, mesaRuntime.id]
     );
     return linhas.length > 0;
 }
 
 async function confirmarSaldosPosLiquidacao(saldo, sincronizadoEm = Date.now()) {
+    const mesaRuntime = obterMesaRuntime();
     const saldoNumero = Number(saldo);
     const syncMs = Number(sincronizadoEm);
     if (
@@ -3364,12 +5494,13 @@ async function confirmarSaldosPosLiquidacao(saldo, sincronizadoEm = Date.now()) 
     const [linhas] = await dbPool.query(
         `SELECT id
          FROM auditoria_ordens
-         WHERE status_ordem IN ('WIN','LOSS','TIE')
+         WHERE mesa_id=?
+           AND status_ordem IN ('WIN','LOSS','TIE')
            AND resultado_confirmado_em IS NOT NULL
            AND resultado_confirmado_em < ?
            AND saldo_pos_confirmado_em IS NULL
          ORDER BY id ASC`,
-        [syncConfirmadoEm]
+        [mesaRuntime.id, syncConfirmadoEm]
     );
 
     const ids = linhas
@@ -3382,9 +5513,10 @@ async function confirmarSaldosPosLiquidacao(saldo, sincronizadoEm = Date.now()) 
         `UPDATE auditoria_ordens
          SET saldo_pos=?, saldo_pos_confirmado_em=?
          WHERE id IN (${placeholders})
+           AND mesa_id=?
            AND saldo_pos_confirmado_em IS NULL
            AND resultado_confirmado_em < ?`,
-        [saldoNumero, syncConfirmadoEm, ...ids, syncConfirmadoEm]
+        [saldoNumero, syncConfirmadoEm, ...ids, mesaRuntime.id, syncConfirmadoEm]
     );
 
     const confirmadas = Math.max(0, Number(resultado.affectedRows) || 0);
@@ -3398,8 +5530,21 @@ async function confirmarSaldosPosLiquidacao(saldo, sincronizadoEm = Date.now()) 
 }
 
 async function autorizarNovaEntradaFinanceiraTrader(trader) {
+    const mesaId = mesaIdFinanceiroTrader(
+        trader,
+        'autorizar nova entrada'
+    );
+
     if (!(await integracaoContadorDiario.garantirAntesDaEntrada(trader))) {
         return false;
+    }
+
+    if (arbitroFinanceiroAutoTrader) {
+        const abertas = await arbitroFinanceiroAutoTrader.listarOrdensFinanceirasEmAbertoTrader(trader.id);
+        if (abertas.length > 0) {
+            console.warn(`⛔ MC21 SINGLE-FLIGHT | Trader ${trader.id}: nova entrada bloqueada por ordem/intenção financeira aberta.`);
+            return false;
+        }
     }
 
     if (await traderPossuiLiquidacaoPendente(trader.id)) {
@@ -3423,8 +5568,8 @@ async function autorizarNovaEntradaFinanceiraTrader(trader) {
     if (picoAvaliado > picoAnterior) {
         try {
             await dbPool.query(
-                'UPDATE auto_traders SET trailing_pico_lucro=? WHERE id=?',
-                [picoAvaliado, trader.id]
+                'UPDATE auto_traders SET trailing_pico_lucro=? WHERE id=? AND mesa_id=?',
+                [picoAvaliado, trader.id, mesaId]
             );
             trader.trailing_pico_lucro = picoAvaliado;
         } catch (e) {
@@ -3446,8 +5591,8 @@ async function autorizarNovaEntradaFinanceiraTrader(trader) {
 
     try {
         await dbPool.query(
-            'UPDATE auto_traders SET ativo=false, status_operacao=?, saldo_atual=? WHERE id=?',
-            [avaliacao.motivo, trader.saldo_atual, trader.id]
+            'UPDATE auto_traders SET ativo=false, status_operacao=?, saldo_atual=? WHERE id=? AND mesa_id=?',
+            [avaliacao.motivo, trader.saldo_atual, trader.id, mesaId]
         );
     } catch (e) {
         console.error(`❌ Falha ao persistir ${avaliacao.motivo} do trader ${trader.id}:`, e.message);
@@ -3478,9 +5623,38 @@ async function autorizarNovaEntradaFinanceiraTrader(trader) {
     return false;
 }
 
+arbitroFinanceiroAutoTrader = criarArbitroFinanceiroAutoTrader({
+    dbPool,
+    crypto,
+    log: console,
+    listarTraders: () => AUTO_TRADERS_MEMORIA,
+    autoTraderParticipouDoSinal,
+    traderDentroHorarioExecucao,
+    formatarFaixasHorario,
+    prepararEntradaCicloAutoTrader,
+    autorizarNovaEntradaFinanceiraTrader,
+    calcularPlanoAposta,
+    criarIntencaoOrdem,
+    enviarOrdemAoExecutor,
+    marcarIntencaoAposFalhaEnvio,
+    bloquearTraderAposExecucaoAmbigua
+});
+
 async function carregarSistemasParaMemoria() {
     try {
-        const [linhasEst] = await dbPool.query('SELECT * FROM estrategias WHERE ativo = true');
+        const mesaRuntime = obterMesaRuntime();
+        const mesaId = Number(mesaRuntime.id);
+
+        if (!Number.isInteger(mesaId) || mesaId <= 0) {
+            throw new Error(
+                'MC22-W-A: mesa runtime invalida ao carregar memoria'
+            );
+        }
+
+        const [linhasEst] = await dbPool.query(
+            'SELECT * FROM estrategias WHERE mesa_id=? AND ativo=true',
+            [mesaId]
+        );
         ESTRATEGIAS_MEMORIA = []; let novoEstado = {};
 
         linhasEst.forEach(db => {
@@ -3488,7 +5662,7 @@ async function carregarSistemasParaMemoria() {
             let tiesParsed = { direto:{}, gale1:{}, gale2:{} }; if (db.ties_json) { try { tiesParsed = JSON.parse(db.ties_json); } catch(e) {} }
 
             let est = {
-                id: db.id, nome: db.nome, origem: db.origem, padrao: padraoParsed, entrada: db.entrada,
+                id: db.id, mesa_id: Number(db.mesa_id), nome: db.nome, origem: db.origem, padrao: padraoParsed, entrada: db.entrada,
                 gales: db.gales, protegerEmpate: db.proteger_empate === 1, ativo: true, is_dinamico: db.is_dinamico === 1,
                 robo_dono_id: db.robo_dono_id, quarentena_restante: db.quarentena_restante || 0,
                 stats: { greenDireto: db.green_direto, gale1: db.gale1, gale2: db.gale2, red: db.red, ties: tiesParsed }
@@ -3497,9 +5671,25 @@ async function carregarSistemasParaMemoria() {
             novoEstado[est.id] = estadoApostas[est.id] || { aguardandoResultado: false, galeAtual: 0, robosCiclo: [], robosInscritos: [], mensagensEntrada: [], mensagensGale: [] };
         });
         estadoApostas = novoEstado;
+        sincronizarLocksSinalComEstadoApostas();
 
-        const [linhasRobos] = await dbPool.query('SELECT * FROM robos_canais WHERE ativo = true');
-        const [destinatariosRobos] = await dbPool.query('SELECT robo_id, nome_cliente, chat_id FROM destinatarios_robo');
+        const [linhasRobos] = await dbPool.query(
+            'SELECT * FROM robos_canais WHERE mesa_id=? AND ativo=true',
+            [mesaId]
+        );
+
+        const [destinatariosRobos] = await dbPool.query(
+            `SELECT
+                d.robo_id,
+                d.nome_cliente,
+                d.chat_id
+             FROM destinatarios_robo d
+             JOIN robos_canais r
+               ON r.id=d.robo_id
+             WHERE r.mesa_id=?
+               AND r.ativo=true`,
+            [mesaId]
+        );
 
         ROBOS_MEMORIA = linhasRobos.map(r => {
             let confObj = { origens: [], avulsos: [], excecoes: [], auto_tuning: { ativo: false }, cooldown: { ativo: false } };
@@ -3522,13 +5712,22 @@ async function carregarSistemasParaMemoria() {
             return { ...r, config: confObj, destinatarios };
         });
 
-        const [linhasAT] = await dbPool.query('SELECT * FROM auto_traders');
+        const [linhasAT] = await dbPool.query(
+            'SELECT * FROM auto_traders WHERE mesa_id=?',
+            [mesaId]
+        );
         AUTO_TRADERS_MEMORIA = linhasAT.map(at => {
-            let cfg = {}; try { cfg = JSON.parse(at.config_json); } catch(e){}
+            let cfg = {}; try { cfg = JSON.parse(at.config_json); } catch(e) {}
+            cfg = normalizarConfigAutoTrader(cfg);
+            const estadoCiclo = normalizarEstadoCiclo(at);
             return {
-                id: at.id, nome: at.nome, ativo: at.ativo === 1, config: cfg,
+                id: at.id, mesa_id: Number(at.mesa_id), nome: at.nome, ativo: at.ativo === 1, config: cfg,
                 saldo_inicial: parseFloat(at.saldo_inicial), saldo_atual: parseFloat(at.saldo_atual),
-                status_operacao: at.status_operacao, entradas_feitas: at.entradas_feitas, pulos_restantes: at.pulos_restantes,
+                status_operacao: at.status_operacao, entradas_feitas: at.entradas_feitas, pulos_restantes: estadoCiclo.pulos_restantes,
+                estado_ciclo: estadoCiclo.estado_ciclo,
+                reds_virtuais_observados: estadoCiclo.reds_virtuais_observados,
+                sinais_operados_onda: estadoCiclo.sinais_operados_onda,
+                ciclos_concluidos: estadoCiclo.ciclos_concluidos,
                 data_contador_entradas: String(at.data_contador_entradas || ''),
                 reds_consecutivos: Math.max(0, Number(at.reds_consecutivos) || 0),
                 stop_reds_pausado_ate: Math.max(0, Number(at.stop_reds_pausado_ate) || 0),
@@ -3592,6 +5791,21 @@ app.post("/collector-health", async (req, res) => {
         }
 
         const dados = req.body || {};
+        const mesaRuntimeSaude = obterMesaRuntime();
+        const mesaCodigoSaude =
+            String(dados.mesa_codigo || '')
+                .trim()
+                .toUpperCase();
+
+        if (
+            !mesaCodigoSaude
+            || mesaCodigoSaude !== mesaRuntimeSaude.codigo
+        ) {
+            return res.status(409).json({
+                erro: 'collector-health pertence a outra mesa'
+            });
+        }
+
         if (String(dados.evento || '').trim().toUpperCase() !== 'INTERRUPCAO') {
             return res.status(400).json({ erro: "evento de saude invalido" });
         }
@@ -3668,9 +5882,17 @@ app.post("/receber-sinal", async (req, res) => {
                 if (!vencedor) return res.status(400).json({ erro: "saldo_atual invalido" });
             } else {
                 try {
+                    const mesaSaldoRecebido =
+                        afirmarMesaFinanceiraAutorizada(
+                            'balance_update_http'
+                        );
+
                     await dbPool.query(
-                        'UPDATE auto_traders SET saldo_atual=? WHERE ativo=true',
-                        [saldoRecebido]
+                        'UPDATE auto_traders SET saldo_atual=? WHERE ativo=true AND mesa_id=?',
+                        [
+                            saldoRecebido,
+                            mesaSaldoRecebido.id
+                        ]
                     );
 
                     saldoGlobalCorretora = saldoRecebido;
@@ -3749,7 +5971,7 @@ app.post("/receber-sinal", async (req, res) => {
         let p2 = (dados.dados_jogador && dados.dados_jogador.length > 1) ? parseInt(dados.dados_jogador[1]) : 0;
         let b1 = (dados.dados_banca && dados.dados_banca.length > 0) ? parseInt(dados.dados_banca[0]) : 0;
         let b2 = (dados.dados_banca && dados.dados_banca.length > 1) ? parseInt(dados.dados_banca[1]) : 0;
-        let nEmp = 0; let mult = "4x";
+        let nEmp = 0; let mult = "";
 
         if (vencedor === "Tie") {
             nEmp = parseInt(dados.pontos_jogador); if (isNaN(nEmp) || nEmp === 0) nEmp = p1 + p2;
@@ -3761,6 +5983,10 @@ app.post("/receber-sinal", async (req, res) => {
         let totalP = (p1 + p2).toString().padStart(2, '0'); let totalB = (b1 + b2).toString().padStart(2, '0');
         console.log(`\n====================================\n🔥 Vencedor: ${logNomeVencedor}\n🔵 Jogador : ${totalP} | 🔴 Banca: ${totalB}\n====================================\n`);
 
+        // Cursor live independente do banco: toda rodada aceita pelo pipeline
+        // avança exatamente uma posição.
+        contadorRodadasSinal++;
+
         let giroPersistidoParaIA = false;
         let giroIdPersistidoParaIA = 0;
         try {
@@ -3768,7 +5994,24 @@ app.post("/receber-sinal", async (req, res) => {
             const timestampGiroAnalitico = Number.isFinite(timestampColetaNumero) && timestampColetaNumero > 0
                 ? timestampColetaNumero
                 : Date.now();
-            const [resultadoInsertGiro] = await dbPool.query('INSERT INTO giros_recentes (resultado, p_d1, p_d2, b_d1, b_d2, numero_empate, multiplicador, id_sessao, data_hora) VALUES (?,?,?,?,?,?,?,?,FROM_UNIXTIME(?))', [vencedor, p1, p2, b1, b2, nEmp, mult, idSessaoContinua, timestampGiroAnalitico / 1000]);
+            const mesaRuntimeGiro = obterMesaRuntime();
+            const [resultadoInsertGiro] = await dbPool.query(
+                `INSERT INTO giros_recentes
+                    (mesa_id, resultado, p_d1, p_d2, b_d1, b_d2, numero_empate, multiplicador, id_sessao, data_hora)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, FROM_UNIXTIME(?))`,
+                [
+                    mesaRuntimeGiro.id,
+                    vencedor,
+                    p1,
+                    p2,
+                    b1,
+                    b2,
+                    nEmp,
+                    mult,
+                    idSessaoContinua,
+                    timestampGiroAnalitico / 1000
+                ]
+            );
             giroIdPersistidoParaIA = Number(resultadoInsertGiro.insertId) || 0;
             historicoGirosAnalitico.push({
                 id: giroIdPersistidoParaIA,
@@ -3790,11 +6033,23 @@ app.post("/receber-sinal", async (req, res) => {
             }
         }
 
-        let sinalFinalizadoAgora = false;
-
         for (let est of ESTRATEGIAS_MEMORIA) {
             let st = estadoApostas[est.id];
             if (st && st.aguardandoResultado) {
+                if (
+                    !estadoSinalComLocksConsistentes(
+                        est.id,
+                        st
+                    )
+                ) {
+                    invalidarEstadoSinalInconsistente(
+                        est.id,
+                        st
+                    );
+
+                    continue;
+                }
+
                 let finalizar = false;
                 let isTie = (vencedor==='Tie');
 
@@ -3835,11 +6090,17 @@ app.post("/receber-sinal", async (req, res) => {
                         console.error(`⚠️ Falha inesperada no envio Telegram GREEN da estratégia ${est.id}:`, e.message);
                     });
 
+                    try {
+                        await processarResultadoVirtualAutoTraders(est, st, isTie ? 'TIE' : 'GREEN');
+                    } catch (e) {
+                        console.error(`⚠️ Auto-Trader: falha ao processar resultado virtual ${isTie ? 'TIE' : 'GREEN'} de ${est.id}:`, e.message);
+                    }
+
                     if (est.quarentena_restante <= 0) {
                         for (let trader of AUTO_TRADERS_MEMORIA) {
                             let cf = trader.config;
                             if (trader.ativo && (trader.status_operacao === 'OPERANDO' || trader.status_operacao === 'STANDBY') && autoTraderAutorizaEstrategia(cf, est, ROBOS_MEMORIA)) {
-                                const [pendentes] = await dbPool.query(`SELECT id, valor_entrada, valor_empate FROM auditoria_ordens WHERE trader_id = ? AND status_ordem = 'PENDENTE' LIMIT 1`, [trader.id]);
+                                const [pendentes] = await dbPool.query(`SELECT id, valor_entrada, valor_empate FROM auditoria_ordens WHERE trader_id = ? AND estrategia_id = ? AND mesa_id = ? AND status_ordem = 'PENDENTE' LIMIT 1`, [trader.id, est.id, Number(dados.mesa_id)]);
                                 if (pendentes.length > 0) {
                                     let vEntrada = parseFloat(pendentes[0].valor_entrada);
                                     let vEmpate = Math.max(0, Number(pendentes[0].valor_empate) || 0);
@@ -3852,24 +6113,35 @@ app.post("/receber-sinal", async (req, res) => {
                                     });
                                     try {
                                         const resultadoConfirmadoEm = Date.now();
-                                        await dbPool.query(
+                                        const [resultadoFechamentoFinal] = await dbPool.query(
                                             `UPDATE auditoria_ordens
                                              SET status_ordem = ?, lucro_prejuizo = ?, saldo_pos = NULL,
                                                  resultado_confirmado_em = ?, saldo_pos_confirmado_em = NULL,
                                                  placar_mesa = ?
-                                             WHERE id = ?`,
+                                             WHERE id = ? AND mesa_id = ? AND status_ordem = 'PENDENTE'`,
                                             [
                                                 isTie ? 'TIE' : 'WIN',
                                                 vLucro,
                                                 resultadoConfirmadoEm,
                                                 `[P:${p1+p2} B:${b1+b2}]`,
-                                                pendentes[0].id
+                                                pendentes[0].id,
+                                                Number(dados.mesa_id)
                                             ]
                                         );
+                                        if (Number(resultadoFechamentoFinal.affectedRows) !== 1) {
+                                            throw new Error(
+                                                `MC22-P: ordem ${pendentes[0].id} nao pode ser fechada ` +
+                                                `como ${isTie ? 'TIE' : 'WIN'} na mesa ${dados.mesa_id}`
+                                            );
+                                        }
                                         await processarResultadoStopRedsAutoTrader(
                                             trader,
                                             isTie ? 'TIE' : 'GREEN',
                                             dados.timestamp_coleta
+                                        );
+                                        await concluirSinalOperadoAutoTrader(
+                                            trader,
+                                            isTie ? 'TIE' : 'GREEN'
                                         );
                                     } catch(e) {
                                         console.error(`❌ Falha ao fechar ordem ${pendentes[0].id} como ${isTie ? 'TIE' : 'WIN'} do trader ${trader.id}:`, e.message);
@@ -3881,7 +6153,22 @@ app.post("/receber-sinal", async (req, res) => {
                     finalizar = true;
                 } else {
                     if (st.galeAtual < est.gales) {
-                        st.galeAtual++;
+                        if (
+                            !avancarGaleEstadoSinal(
+                                est.id,
+                                st,
+                                est.gales
+                            )
+                        ) {
+                            invalidarEstadoSinalInconsistente(
+                                est.id,
+                                st,
+                                'FALHA_TRANSICAO_GALE'
+                            );
+
+                            continue;
+                        }
+
                         const extrasGale = { nivel: st.galeAtual };
                         emitirAlertaWebRobo('GALE', est, st, extrasGale);
                         void enviarTelegramParaInscritos('GALE', est, st, extrasGale).catch(e => {
@@ -3891,7 +6178,7 @@ app.post("/receber-sinal", async (req, res) => {
                             for (let trader of AUTO_TRADERS_MEMORIA) {
                                 let cf = trader.config;
                                 if (trader.ativo && trader.status_operacao === 'OPERANDO' && autoTraderAutorizaEstrategia(cf, est, ROBOS_MEMORIA)) {
-                                    const [pendentes] = await dbPool.query(`SELECT id, risco_total, valor_entrada, valor_empate FROM auditoria_ordens WHERE trader_id = ? AND status_ordem = 'PENDENTE' LIMIT 1`, [trader.id]);
+                                    const [pendentes] = await dbPool.query(`SELECT id, risco_total, valor_entrada, valor_empate FROM auditoria_ordens WHERE trader_id = ? AND estrategia_id = ? AND mesa_id = ? AND status_ordem = 'PENDENTE' LIMIT 1`, [trader.id, est.id, Number(dados.mesa_id)]);
                                     if (pendentes.length > 0) {
                                         let riscoAntigo = parseFloat(pendentes[0].risco_total);
                                         const pnlEtapaAnterior = calcularPnLEtapa({
@@ -3916,14 +6203,28 @@ app.post("/receber-sinal", async (req, res) => {
                                         try {
                                             conexaoGale = await dbPool.getConnection();
                                             await conexaoGale.beginTransaction();
-                                            await conexaoGale.query(
+                                            const [etapaAnteriorFechada] = await conexaoGale.query(
                                                 `UPDATE auditoria_ordens
                                                  SET status_ordem='LOSS', lucro_prejuizo=?, saldo_pos=?, placar_mesa=?
-                                                 WHERE id=?`,
-                                                [pnlEtapaAnterior, trader.saldo_atual, `[P:${p1+p2} B:${b1+b2}]`, pendentes[0].id]
+                                                 WHERE id=? AND mesa_id=? AND status_ordem='PENDENTE'`,
+                                                [
+                                                    pnlEtapaAnterior,
+                                                    trader.saldo_atual,
+                                                    `[P:${p1+p2} B:${b1+b2}]`,
+                                                    pendentes[0].id,
+                                                    Number(dados.mesa_id)
+                                                ]
                                             );
+                                            if (Number(etapaAnteriorFechada.affectedRows) !== 1) {
+                                                throw new Error(
+                                                    `MC22-Q: etapa anterior ${pendentes[0].id} nao pode ser fechada ` +
+                                                    `para GALE na mesa ${dados.mesa_id}`
+                                                );
+                                            }
+
                                             intencaoGale = await criarIntencaoOrdem(conexaoGale, {
                                                 trader_id: trader.id,
+                                                estrategia_id: est.id,
                                                 estrategia_nome: est.nome,
                                                 fonte_sinal: est.origem,
                                                 alvo: alvoPython,
@@ -3933,6 +6234,16 @@ app.post("/receber-sinal", async (req, res) => {
                                                 valor_empate: valorEmpateGale,
                                                 order_id: ordemExecutorIdGale
                                             });
+
+                                            if (
+                                                Number(intencaoGale.mesa_id)
+                                                !== Number(dados.mesa_id)
+                                            ) {
+                                                throw new Error(
+                                                    'MC22-X: intencao GALE nasceu fora da mesa da rodada'
+                                                );
+                                            }
+
                                             await conexaoGale.commit();
                                         } catch(e) {
                                             if (conexaoGale) {
@@ -3965,7 +6276,8 @@ app.post("/receber-sinal", async (req, res) => {
                                                  SET status_ordem='PENDENTE', executor_confirmacao_metodo=?,
                                                      executor_saldo_antes=?, executor_saldo_depois=?,
                                                      executor_debito_observado=?, execucao_confirmada_em=?
-                                                 WHERE id=? AND executor_order_id=? AND status_ordem='PREPARANDO'`,
+                                                 WHERE id=? AND executor_order_id=? AND status_ordem='PREPARANDO'
+                                                   AND mesa_id=?`,
                                                 [
                                                     evidenciaGale.metodo,
                                                     evidenciaGale.saldo_antes,
@@ -3973,7 +6285,8 @@ app.post("/receber-sinal", async (req, res) => {
                                                     evidenciaGale.debito_observado,
                                                     evidenciaGale.confirmada_em,
                                                     intencaoGale.auditoria_id,
-                                                    ordemExecutorIdGale
+                                                    ordemExecutorIdGale,
+                                                    Number(dados.mesa_id)
                                                 ]
                                             );
                                             if (Number(auditoriaAtualizada.affectedRows) !== 1) {
@@ -4041,11 +6354,17 @@ app.post("/receber-sinal", async (req, res) => {
                             console.error(`⚠️ Falha inesperada no envio Telegram RED/proteção da estratégia ${est.id}:`, e.message);
                         });
 
+                        try {
+                            await processarResultadoVirtualAutoTraders(est, st, 'RED');
+                        } catch (e) {
+                            console.error(`⚠️ Auto-Trader: falha ao processar resultado virtual RED de ${est.id}:`, e.message);
+                        }
+
                         if (est.quarentena_restante <= 0) {
                             for (let trader of AUTO_TRADERS_MEMORIA) {
                                 let cf = trader.config;
                                 if (trader.ativo && (trader.status_operacao === 'OPERANDO' || trader.status_operacao === 'STANDBY') && autoTraderAutorizaEstrategia(cf, est, ROBOS_MEMORIA)) {
-                                    const [pendentes] = await dbPool.query(`SELECT id, valor_entrada, valor_empate FROM auditoria_ordens WHERE trader_id = ? AND status_ordem = 'PENDENTE' LIMIT 1`, [trader.id]);
+                                    const [pendentes] = await dbPool.query(`SELECT id, valor_entrada, valor_empate FROM auditoria_ordens WHERE trader_id = ? AND estrategia_id = ? AND mesa_id = ? AND status_ordem = 'PENDENTE' LIMIT 1`, [trader.id, est.id, Number(dados.mesa_id)]);
                                     if (pendentes.length > 0) {
                                         let prejuizo = calcularPnLEtapa({
                                             resultado: vencedor,
@@ -4056,24 +6375,32 @@ app.post("/receber-sinal", async (req, res) => {
                                         });
                                         try {
                                             const resultadoConfirmadoEm = Date.now();
-                                            await dbPool.query(
+                                            const [resultadoFechamentoRedFinal] = await dbPool.query(
                                                 `UPDATE auditoria_ordens
                                                  SET status_ordem = 'LOSS', lucro_prejuizo = ?, saldo_pos = NULL,
                                                      resultado_confirmado_em = ?, saldo_pos_confirmado_em = NULL,
                                                      placar_mesa = ?
-                                                 WHERE id = ?`,
+                                                 WHERE id = ? AND mesa_id = ? AND status_ordem = 'PENDENTE'`,
                                                 [
                                                     prejuizo,
                                                     resultadoConfirmadoEm,
                                                     `[P:${p1+p2} B:${b1+b2}]`,
-                                                    pendentes[0].id
+                                                    pendentes[0].id,
+                                                    Number(dados.mesa_id)
                                                 ]
                                             );
+                                            if (Number(resultadoFechamentoRedFinal.affectedRows) !== 1) {
+                                                throw new Error(
+                                                    `MC22-P: ordem ${pendentes[0].id} nao pode ser fechada ` +
+                                                    `como LOSS na mesa ${dados.mesa_id}`
+                                                );
+                                            }
                                             await processarResultadoStopRedsAutoTrader(
                                                 trader,
                                                 'RED',
                                                 dados.timestamp_coleta
                                             );
+                                            await concluirSinalOperadoAutoTrader(trader, 'RED');
                                         } catch(e) {
                                             console.error(`❌ Falha ao fechar ordem LOSS ${pendentes[0].id} do trader ${trader.id}:`, e.message);
                                         }
@@ -4085,9 +6412,23 @@ app.post("/receber-sinal", async (req, res) => {
                     }
                 }
                 if (finalizar) {
-                    st.aguardandoResultado = false;
-                    st.galeAtual = 0;
-                    sinalFinalizadoAgora = true;
+                    // GREEN, TIE protegido ou RED final encerram somente ESTE ciclo.
+                    // O cursor do(s) robô(s) liberado(s) nasce nesta rodada; outros
+                    // robôs permanecem livres para avaliar seus próprios padrões.
+                    if (
+                        !finalizarEstadoSinal(
+                            est.id,
+                            st
+                        )
+                    ) {
+                        invalidarEstadoSinalInconsistente(
+                            est.id,
+                            st,
+                            'FALHA_FINALIZACAO_ESTADO'
+                        );
+
+                        continue;
+                    }
 
                     if (est.is_dinamico) {
                         try {
@@ -4102,8 +6443,6 @@ app.post("/receber-sinal", async (req, res) => {
             }
         }
 
-        if (sinalFinalizadoAgora) return;
-
         const maiorPadraoLive = ESTRATEGIAS_MEMORIA.reduce((maior, est) => {
             const tamanho = Array.isArray(est?.padrao) ? est.padrao.length : 0;
             return Math.max(maior, tamanho);
@@ -4115,11 +6454,18 @@ app.post("/receber-sinal", async (req, res) => {
             return;
         }
         const historicoLiveCanonico = estadoLiveCanonico.history;
+        const oportunidadesFinanceirasAutoTraderRodada =
+            arbitroFinanceiroAutoTrader.criarMapaRodada(contadorRodadasSinal);
 
-        let ocupado = Object.values(estadoApostas).some(e => e.aguardandoResultado);
-        if (!ocupado) {
+        {
+            // Não existe mais lock global. Estratégias diferentes podem abrir
+            // ciclos simultâneos desde que os robôs envolvidos estejam livres.
             for (let est of ESTRATEGIAS_MEMORIA) {
                 if (!est.ativo) continue;
+
+                // estadoApostas continua indexado por estratégia; uma estratégia
+                // já ativa nunca pode ser sobrescrita por um segundo ciclo.
+                if (estadoApostas[est.id]?.aguardandoResultado) continue;
                 if (historicoLiveCanonico.length >= est.padrao.length) {
                     let ult = historicoLiveCanonico.slice(-est.padrao.length);
                     let matchCores = ult.every((val, i) => val.resultado === est.padrao[i]);
@@ -4143,10 +6489,21 @@ app.post("/receber-sinal", async (req, res) => {
                             continue;
                         }
 
+                        const robosCiclo = unirRobosInscritos(selecaoRobos.todos);
+
+                        // Última barreira antes da publicação. Como o pipeline de
+                        // resultados é FIFO, esta aquisição é determinística.
+                        if (!adquirirLocksSinalRobos(robosCiclo, est.id)) {
+                            console.log(
+                                `🔒 Sinal ${est.id} suprimido: lock de robô mudou antes da aquisição.`
+                            );
+                            continue;
+                        }
+
                         estadoApostas[est.id] = {
                             aguardandoResultado: true,
                             galeAtual: 0,
-                            robosCiclo: unirRobosInscritos(selecaoRobos.todos),
+                            robosCiclo,
                             robosWebInscritos: selecaoRobos.web,
                             robosTelegramInscritos: [],
                             robosInscritos: unirRobosInscritos(selecaoRobos.todos),
@@ -4160,161 +6517,32 @@ app.post("/receber-sinal", async (req, res) => {
                         estadoSinal.telegramEntradaPromise = inscreverRobosTelegramEntrada(est, estadoSinal, selecaoRobos.telegram);
 
                         if (est.quarentena_restante <= 0) {
-                            for (let trader of AUTO_TRADERS_MEMORIA) {
-                                let cf = trader.config;
-                                if (trader.ativo && trader.status_operacao === 'OPERANDO' && autoTraderAutorizaEstrategia(cf, est, ROBOS_MEMORIA)) {
-
-                                    const robosAutorizadores = robosAutoTraderAutorizadores(cf, est, ROBOS_MEMORIA);
-                                    const descricaoAutorizadores = robosAutorizadores.length > 0
-                                        ? robosAutorizadores.map(robo => `${robo.id}:${robo.nome}`).join(', ')
-                                        : `configuração legada:${String(est.origem || '').trim()}`;
-
-                                    console.log(
-                                        `🎯 Auto-Trader ${trader.id} (${trader.nome}) autorizado para o sinal `
-                                        + `${est.id} pelo(s) robô(s) ativo(s) ${descricaoAutorizadores}.`
+                            for (const trader of AUTO_TRADERS_MEMORIA) {
+                                if (
+                                    trader.ativo
+                                    && trader.status_operacao === 'OPERANDO'
+                                    && autoTraderParticipouDoSinal(trader, est, estadoSinal)
+                                ) {
+                                    arbitroFinanceiroAutoTrader.registrarCandidato(
+                                        oportunidadesFinanceirasAutoTraderRodada,
+                                        trader,
+                                        est,
+                                        estadoSinal
                                     );
-
-                                    if (!traderDentroHorarioExecucao(cf)) {
-                                        console.log(`Trader ${trader.id} fora da janela de execucao (${cf.hora_inicio || '00:00'}-${cf.hora_fim || '23:59'}). Nova entrada ignorada.`);
-                                        continue;
-                                    }
-
-                                    if (!(await autorizarNovaEntradaFinanceiraTrader(trader))) {
-                                        continue;
-                                    }
-
-                                    if (cf.limite_entradas && trader.entradas_feitas >= cf.limite_entradas) {
-                                        trader.status_operacao = 'META_ATINGIDA';
-                                        try {
-                                            await dbPool.query('UPDATE auto_traders SET status_operacao=? WHERE id=?', ['META_ATINGIDA', trader.id]);
-                                        } catch(e) {
-                                            console.error(`❌ Falha ao persistir META_ATINGIDA do trader ${trader.id}:`, e.message);
-                                        }
-                                        continue;
-                                    }
-
-                                    if (cf.modo_camuflagem === 'PULOS') {
-                                        if (trader.pulos_restantes > 0) {
-                                            trader.pulos_restantes--;
-                                            try { await dbPool.query('UPDATE auto_traders SET pulos_restantes=? WHERE id=?', [trader.pulos_restantes, trader.id]); } catch(e) { console.error(`❌ Falha ao persistir pulos_restantes do trader ${trader.id}:`, e.message); }
-                                            continue;
-                                        } else {
-                                            let pMin = cf.camuflagem_pulos_min || 1;
-                                            let pMax = cf.camuflagem_pulos_max || 3;
-                                            trader.pulos_restantes = Math.floor(Math.random() * (pMax - pMin + 1)) + pMin;
-                                            try { await dbPool.query('UPDATE auto_traders SET pulos_restantes=? WHERE id=?', [trader.pulos_restantes, trader.id]); } catch(e) { console.error(`❌ Falha ao persistir novo ciclo de pulos do trader ${trader.id}:`, e.message); }
-                                        }
-                                    }
-
-                                    const planoDireto = calcularPlanoAposta(cf, est, 0);
-                                    if (!planoDireto.ok) {
-                                        console.error(`❌ Entrada do trader ${trader.id} bloqueada: ${planoDireto.motivo}`);
-                                        continue;
-                                    }
-                                    let valorArredondado = planoDireto.valor_principal;
-                                    let valorEmpateDireto = planoDireto.valor_empate;
-                                    let alvoPython = planoDireto.apostas[0].alvo;
-
-                                    const ordemExecutorIdDireto = crypto.randomUUID();
-                                    let intencaoDireto = null;
-                                    try {
-                                        intencaoDireto = await criarIntencaoOrdem(dbPool, {
-                                            trader_id: trader.id,
-                                            estrategia_nome: est.nome,
-                                            fonte_sinal: est.origem,
-                                            alvo: alvoPython,
-                                            nivel: 'DIRETO',
-                                            risco_total: planoDireto.exposicao_etapa,
-                                            valor_entrada: valorArredondado,
-                                            valor_empate: valorEmpateDireto,
-                                            order_id: ordemExecutorIdDireto
-                                        });
-                                    } catch(e) {
-                                        console.error(
-                                            `❌ Ordem DIRETO do trader ${trader.id} bloqueada: `
-                                            + `falha ao persistir intenção PREPARANDO antes do executor:`,
-                                            e.message
-                                        );
-                                        continue;
-                                    }
-
-                                    let executorConfirmouDireto = false;
-                                    try {
-                                        const confirmacaoExecutorDireto = await enviarOrdemAoExecutor(
-                                            alvoPython,
-                                            valorArredondado,
-                                            ordemExecutorIdDireto,
-                                            planoDireto.apostas
-                                        );
-                                        executorConfirmouDireto = true;
-                                        const evidenciaDireto = confirmacaoExecutorDireto.execucao.confirmacao;
-
-                                        const conexao = await dbPool.getConnection();
-                                        try {
-                                            await conexao.beginTransaction();
-                                            const novasEntradas = trader.entradas_feitas + 1;
-                                            await conexao.query('UPDATE auto_traders SET entradas_feitas=? WHERE id=?', [novasEntradas, trader.id]);
-                                            const [auditoriaAtualizada] = await conexao.query(
-                                                `UPDATE auditoria_ordens
-                                                 SET status_ordem='PENDENTE', executor_confirmacao_metodo=?,
-                                                     executor_saldo_antes=?, executor_saldo_depois=?,
-                                                     executor_debito_observado=?, execucao_confirmada_em=?
-                                                 WHERE id=? AND executor_order_id=? AND status_ordem='PREPARANDO'`,
-                                                [
-                                                    evidenciaDireto.metodo,
-                                                    evidenciaDireto.saldo_antes,
-                                                    evidenciaDireto.saldo_depois,
-                                                    evidenciaDireto.debito_observado,
-                                                    evidenciaDireto.confirmada_em,
-                                                    intencaoDireto.auditoria_id,
-                                                    ordemExecutorIdDireto
-                                                ]
-                                            );
-                                            if (Number(auditoriaAtualizada.affectedRows) !== 1) {
-                                                throw new Error('Intenção PREPARANDO DIRETO não encontrada após ACK do executor');
-                                            }
-                                            await conexao.commit();
-                                            trader.entradas_feitas = novasEntradas;
-                                        } catch(e) {
-                                            try { await conexao.rollback(); } catch(rollbackError) { console.error(`❌ Rollback falhou para o trader ${trader.id}:`, rollbackError.message); }
-                                            throw e;
-                                        } finally {
-                                            conexao.release();
-                                        }
-                                    } catch(e) {
-                                        if (executorConfirmouDireto) {
-                                            console.error(
-                                                `⚠️ Ordem DIRETO confirmada pelo executor (${ordemExecutorIdDireto}), `
-                                                + `mas a intenção ${intencaoDireto.auditoria_id} não avançou para PENDENTE; `
-                                                + `PREPARANDO foi preservado para reconciliação:`,
-                                                e.message
-                                            );
-                                        } else {
-                                            const statusFalha = await marcarIntencaoAposFalhaEnvio(
-                                                intencaoDireto.auditoria_id,
-                                                e,
-                                                `DIRETO do trader ${trader.id}`
-                                            );
-                                            await bloquearTraderAposExecucaoAmbigua(
-                                                trader,
-                                                statusFalha,
-                                                'DIRETO'
-                                            );
-                                            console.error(
-                                                `❌ Ordem DIRETO não confirmada para o trader ${trader.id}; `
-                                                + `intenção ${intencaoDireto.auditoria_id} marcada ${statusFalha}:`,
-                                                e.message
-                                            );
-                                        }
-                                    }
                                 }
                             }
                         }
-                        break;
                     }
                 }
             }
         }
+
+        // MC21: somente sinais realmente admitidos pelos locks MC1-MC8
+        // chegam à decisão financeira. Aleatoriedade é consumida uma vez
+        // por oportunidade agregada, nunca por sinal bruto concorrente.
+        await arbitroFinanceiroAutoTrader.processarRodada(
+            oportunidadesFinanceirasAutoTraderRodada
+        );
     } catch(erroGeral) {
         console.error('🔥 Falha no processamento de /receber-sinal após o ACK:', erroGeral);
     } finally {

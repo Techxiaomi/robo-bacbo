@@ -665,7 +665,7 @@
         .bk-bola { 
             width: 22px; 
             height: 22px; 
-            border-radius: 50%; 
+            border-radius: 50%;
             display: flex; 
             align-items: center; 
             justify-content: center; 
@@ -1623,7 +1623,7 @@
                 
                 <div class="robo-nav-tabs" style="border-bottom-color:#28a745;">
                     <button class="robo-nav-btn ativo" style="color:#28a745; border-color:#28a745;" id="btn-at-tab-gestao" onclick="mudarAbaAT('gestao')">💰 Gestão de Fichas</button>
-                    <button class="robo-nav-btn" id="btn-at-tab-camuflagem" onclick="mudarAbaAT('camuflagem')">👻 Camuflagem</button>
+                    <button class="robo-nav-btn" id="btn-at-tab-camuflagem" onclick="mudarAbaAT('camuflagem')">🎛️ Camuflagem e Estratégia</button>
                     <button class="robo-nav-btn" id="btn-at-tab-risco" onclick="mudarAbaAT('risco')">🛡️ Limites de Risco</button>
                     <button class="robo-nav-btn" id="btn-at-tab-fontes" onclick="mudarAbaAT('fontes')">📡 Fontes de Sinal</button>
                 </div>
@@ -1683,23 +1683,29 @@
                     </div>
                 </div>
                 
-                <!-- CAMUFLAGEM -->
+                <!-- CAMUFLAGEM E ESTRATÉGIA -->
                 <div id="at-tab-camuflagem" class="robo-tab-content">
                     <div style="background:#1a1a1a; padding:15px; border-radius:8px; border:1px solid #333; margin-bottom:15px;">
-                        <h4 style="margin:0 0 10px 0; font-size:12px; color:#17a2b8; text-transform:uppercase;">Evasão de Algoritmo</h4>
-                        <div class="form-group" style="margin-bottom:15px;">
-                            <select id="at-camuflagem" onchange="toggleConfigCamuflagem()">
-                                <option value="TODAS">Entrar em Todos os Sinais (Sem Camuflagem)</option>
-                                <option value="PULOS">Pulos Randômicos (Modo Humano)</option>
-                            </select>
-                        </div>
+                        <h4 style="margin:0 0 8px 0; font-size:12px; color:#17a2b8; text-transform:uppercase;">1. Gatilho de Início</h4>
+                        <div class="form-group"><label>REDs virtuais antes de acordar:</label><input type="number" id="at-gatilho-reds-virtuais" value="0" min="0"><span style="font-size:9px; color:#666;">0 = operar imediatamente.</span></div>
+                    </div>
+                    <div style="background:#1a1a1a; padding:15px; border-radius:8px; border:1px solid #333; margin-bottom:15px;">
+                        <h4 style="margin:0 0 8px 0; font-size:12px; color:#17a2b8; text-transform:uppercase;">2. Duração da Onda</h4>
+                        <div class="form-group"><label>Sinais operados por onda:</label><input type="number" id="at-sinais-por-onda" value="0" min="0"><span style="font-size:9px; color:#666;">0 = onda infinita.</span></div>
+                    </div>
+                    <div style="background:#1a1a1a; padding:15px; border-radius:8px; border:1px solid #333; margin-bottom:15px;">
+                        <h4 style="margin:0 0 8px 0; font-size:12px; color:#17a2b8; text-transform:uppercase;">3. Aleatoriedade</h4>
+                        <div class="form-group" style="margin-bottom:10px;"><label>Tipo:</label><select id="at-tipo-aleatoriedade" onchange="toggleEstrategiaAutoTrader()"><option value="NENHUMA">Nenhuma — operar todos os sinais da onda</option><option value="PULOS">Pulos entre entradas</option><option value="PROBABILIDADE">Probabilidade por sinal</option></select></div>
                         <div id="box-at-pulos" style="display:none; padding:10px; background:#111; border-radius:6px; border:1px dashed #17a2b8;">
-                            <p style="font-size:11px; color:#ccc; margin-top:0;">O robô vai sortear um número e pular essa quantidade exata de sinais válidos antes de fazer a próxima execução.</p>
-                            <div style="display:flex; gap:15px;">
-                                <div class="form-group" style="flex:1;"><label>Pular no Mínimo:</label><input type="number" id="at-pulo-min" value="1" min="1"></div>
-                                <div class="form-group" style="flex:1;"><label>Pular no Máximo:</label><input type="number" id="at-pulo-max" value="3" min="1"></div>
-                            </div>
+                            <div style="display:flex; gap:15px;"><div class="form-group" style="flex:1;"><label>Pulo mínimo:</label><input type="number" id="at-pulo-min" value="1" min="1"></div><div class="form-group" style="flex:1;"><label>Pulo máximo:</label><input type="number" id="at-pulo-max" value="3" min="1"></div></div>
                         </div>
+                        <div id="box-at-probabilidade" style="display:none; padding:10px; background:#111; border-radius:6px; border:1px dashed #17a2b8;">
+                            <div class="form-group"><label>Chance de entrada (%):</label><input type="number" id="at-chance-entrada-pct" value="100" min="1" max="100"></div>
+                        </div>
+                    </div>
+                    <div style="background:#1a1a1a; padding:15px; border-radius:8px; border:1px solid #333; margin-bottom:15px;">
+                        <h4 style="margin:0 0 8px 0; font-size:12px; color:#17a2b8; text-transform:uppercase;">4. Limite de Ciclos</h4>
+                        <div class="form-group"><label>Ondas completas antes de auto-desligar:</label><input type="number" id="at-limite-ciclos" value="0" min="0"><span style="font-size:9px; color:#666;">0 = sem limite.</span></div>
                     </div>
                     <div style="background:#1a1a1a; padding:15px; border-radius:8px; border:1px solid #333; margin-bottom:15px;">
                         <h4 style="margin:0 0 10px 0; font-size:12px; color:#aaa; text-transform:uppercase;">Limitação de Volume Diário</h4>
@@ -1736,8 +1742,10 @@
                         </div>
                     </div>
                     <div style="background:#1a1a1a; padding:15px; border-radius:8px; border:1px solid #333; margin-bottom:15px;">
-                        <h4 style="margin:0 0 10px 0; font-size:12px; color:#aaa; text-transform:uppercase;">Horário de Execução</h4>
-                        <div style="display:flex; gap:15px;"><div class="form-group" style="flex:1;"><label>Ligar motor às:</label><input type="time" id="at-hora-inicio" value="00:00"></div><div class="form-group" style="flex:1;"><label>Desligar motor às:</label><input type="time" id="at-hora-fim" value="23:59"></div></div>
+                        <h4 style="margin:0 0 8px 0; font-size:12px; color:#aaa; text-transform:uppercase;">Horários de Execução</h4>
+                        <p style="font-size:10px; color:#777; margin:0 0 10px 0;">O motor pode operar em qualquer uma das faixas abaixo. Faixas que cruzam meia-noite também são aceitas.</p>
+                        <div id="at-faixas-horario"></div>
+                        <button type="button" class="btn" style="background:#17a2b8; height:30px; font-size:11px; margin-top:8px;" onclick="adicionarFaixaHorarioAutoTrader()">+ Adicionar Faixa</button>
                     </div>
                 </div>
                 
@@ -2462,7 +2470,53 @@
             if (val) val.style.display = modo === 'VALOR' ? 'flex' : 'none';
             atualizarPreviewProtecaoEmpateAutoTrader();
         }
-        function toggleConfigCamuflagem() { let modo = document.getElementById('at-camuflagem').value; let boxPulos = document.getElementById('box-at-pulos'); if (modo === 'PULOS') boxPulos.style.display = 'block'; else boxPulos.style.display = 'none'; }
+        function toggleEstrategiaAutoTrader() {
+            const tipo = document.getElementById('at-tipo-aleatoriedade')?.value || 'NENHUMA';
+            const boxPulos = document.getElementById('box-at-pulos');
+            const boxProbabilidade = document.getElementById('box-at-probabilidade');
+            if (boxPulos) boxPulos.style.display = tipo === 'PULOS' ? 'block' : 'none';
+            if (boxProbabilidade) boxProbabilidade.style.display = tipo === 'PROBABILIDADE' ? 'block' : 'none';
+        }
+
+        function horaValidaAutoTrader(valor) {
+            return /^([01]\d|2[0-3]):([0-5]\d)$/.test(String(valor || '').trim());
+        }
+
+        function adicionarFaixaHorarioAutoTrader(inicio = '08:00', fim = '18:00') {
+            const box = document.getElementById('at-faixas-horario');
+            if (!box) return;
+            const inicioSeguro = horaValidaAutoTrader(inicio) ? String(inicio) : '08:00';
+            const fimSeguro = horaValidaAutoTrader(fim) ? String(fim) : '18:00';
+            const linha = document.createElement('div');
+            linha.className = 'at-faixa-horario';
+            linha.style.cssText = 'display:flex; gap:10px; align-items:flex-end; background:#111; padding:10px; border-radius:6px; border:1px solid #333; margin-bottom:8px;';
+            linha.innerHTML = `<div class="form-group" style="flex:1; margin:0;"><label>Início:</label><input type="time" class="at-faixa-inicio" value="${inicioSeguro}"></div><div class="form-group" style="flex:1; margin:0;"><label>Fim:</label><input type="time" class="at-faixa-fim" value="${fimSeguro}"></div><button type="button" class="btn" style="background:#ff7777; height:34px; padding:0 10px;" onclick="this.closest('.at-faixa-horario').remove()">🗑️</button>`;
+            box.appendChild(linha);
+        }
+
+        function renderizarFaixasHorarioAutoTrader(faixas) {
+            const box = document.getElementById('at-faixas-horario');
+            if (!box) return;
+            box.innerHTML = '';
+            const lista = Array.isArray(faixas) ? faixas.filter(f => horaValidaAutoTrader(f?.inicio) && horaValidaAutoTrader(f?.fim)) : [];
+            const efetivas = lista.length > 0 ? lista : [{ inicio: '00:00', fim: '23:59' }];
+            efetivas.forEach(faixa => adicionarFaixaHorarioAutoTrader(faixa.inicio, faixa.fim));
+        }
+
+        function faixasHorarioConfigAutoTrader(config) {
+            const cf = config || {};
+            if (Array.isArray(cf.faixas_horario) && cf.faixas_horario.length > 0) return cf.faixas_horario;
+            return [{ inicio: horaValidaAutoTrader(cf.hora_inicio) ? cf.hora_inicio : '00:00', fim: horaValidaAutoTrader(cf.hora_fim) ? cf.hora_fim : '23:59' }];
+        }
+
+        function coletarFaixasHorarioAutoTrader() {
+            return Array.from(document.querySelectorAll('#at-faixas-horario .at-faixa-horario'))
+                .map(linha => ({
+                    inicio: linha.querySelector('.at-faixa-inicio')?.value || '',
+                    fim: linha.querySelector('.at-faixa-fim')?.value || ''
+                }))
+                .filter(faixa => horaValidaAutoTrader(faixa.inicio) && horaValidaAutoTrader(faixa.fim));
+        }
         function toggleTrailingStopAutoTrader() {
             const ativo = document.getElementById('at-trailing-stop')?.checked === true;
             const input = document.getElementById('at-trailing-recuo');
@@ -2507,27 +2561,83 @@
             }
         }
 
-        function abrirFormularioAutoTrader() {
+        async function atualizarFontesAutoTrader(fontesAtivas = []) {
+            const box = document.getElementById('at-lista-fontes');
+
+            if (box) {
+                box.innerHTML = '<span style="color:#17a2b8;">⏳ Atualizando robôs ativos...</span>';
+            }
+
+            try {
+                const res = await fetch(
+                    '/api/robos?_t=' + Date.now(),
+                    { cache: 'no-store' }
+                );
+
+                if (!res.ok) {
+                    throw new Error('HTTP ' + res.status);
+                }
+
+                const dados = await res.json();
+
+                if (!Array.isArray(dados)) {
+                    throw new Error(
+                        'Resposta de /api/robos não é uma lista'
+                    );
+                }
+
+                robosGlobais = dados;
+
+                renderizarCheckboxFontesAT(
+                    fontesAtivas
+                );
+
+                return true;
+            } catch (e) {
+                console.error(
+                    '❌ Auto-Trader: falha ao atualizar fontes de sinal:',
+                    e
+                );
+
+                if (box) {
+                    box.innerHTML =
+                        '<span style="color:#ff7777;">' +
+                        'Não foi possível carregar os robôs ativos. ' +
+                        'Feche o formulário e tente novamente.' +
+                        '</span>';
+                }
+
+                return false;
+            }
+        }
+
+        async function abrirFormularioAutoTrader() {
             autoTraderEditandoId = null; document.getElementById('at-titulo').innerText = "💸 Cadastrar Motor de Execução";
-            document.getElementById('at-nome').value = ''; document.getElementById('at-ativo').checked = true; document.getElementById('at-saldo-visor').innerText = "R$ 0,00"; document.getElementById('at-saldo-visor').style.color = '#fff'; document.getElementById('at-stake').value = "10.00"; document.getElementById('at-gale1').value = "2.0"; document.getElementById('at-gale2').value = "4.0"; document.getElementById('at-camuflagem').value = "TODAS"; toggleConfigCamuflagem(); document.getElementById('at-pulo-min').value = "1"; document.getElementById('at-pulo-max').value = "3"; document.getElementById('at-max-entradas').value = "15"; document.getElementById('at-stop-win').value = "100.00"; document.getElementById('at-trailing-stop').checked = true; document.getElementById('at-trailing-recuo').value = "0.00"; toggleTrailingStopAutoTrader(); document.getElementById('at-stop-loss').value = "250.00"; document.getElementById('at-hora-inicio').value = "00:00"; document.getElementById('at-hora-fim').value = "23:59";
+            document.getElementById('at-nome').value = ''; document.getElementById('at-ativo').checked = true; document.getElementById('at-saldo-visor').innerText = "R$ 0,00"; document.getElementById('at-saldo-visor').style.color = '#fff'; document.getElementById('at-stake').value = "10.00"; document.getElementById('at-gale1').value = "2.0"; document.getElementById('at-gale2').value = "4.0";
+            document.getElementById('at-gatilho-reds-virtuais').value = "0"; document.getElementById('at-sinais-por-onda').value = "0"; document.getElementById('at-tipo-aleatoriedade').value = "NENHUMA"; document.getElementById('at-pulo-min').value = "1"; document.getElementById('at-pulo-max').value = "3"; document.getElementById('at-chance-entrada-pct').value = "100"; document.getElementById('at-limite-ciclos').value = "0"; toggleEstrategiaAutoTrader();
+            document.getElementById('at-max-entradas').value = "15"; document.getElementById('at-stop-win').value = "100.00"; document.getElementById('at-trailing-stop').checked = true; document.getElementById('at-trailing-recuo').value = "0.00"; toggleTrailingStopAutoTrader(); document.getElementById('at-stop-loss').value = "250.00";
+            renderizarFaixasHorarioAutoTrader([{ inicio: '00:00', fim: '23:59' }]);
             document.getElementById('at-tie-modo').value = 'PERCENTUAL'; document.getElementById('at-tie-percent').value = ''; document.getElementById('at-tie-valor').value = ''; toggleProtecaoEmpateAutoTrader();
             document.getElementById('at-stop-reds').value = "0";
             document.getElementById('at-stop-reds-acao').value = "PAUSAR";
             document.getElementById('at-stop-reds-pausa').value = "60";
             toggleStopRedsAutoTrader();
-            mudarAbaAT('gestao'); renderizarCheckboxFontesAT([]); document.getElementById('modal-autotrader').style.display = 'flex';
+            mudarAbaAT('gestao'); document.getElementById('modal-autotrader').style.display = 'flex'; await atualizarFontesAutoTrader([]);
         }
 
-        function prepararEdicaoAutoTrader(id) {
+        async function prepararEdicaoAutoTrader(id) {
             let at = autoTradersGlobais.find(x => x.id === id); if (!at) return;
             autoTraderEditandoId = at.id; let cf = at.config;
-            document.getElementById('at-titulo').innerText = "✏️ Editar Motor de Execução"; document.getElementById('at-nome').value = at.nome; document.getElementById('at-ativo').checked = at.ativo; document.getElementById('at-saldo-visor').innerText = `R$ ${parseFloat(at.saldo_atual).toFixed(2).replace('.',',')}`; document.getElementById('at-saldo-visor').style.color = '#28a745'; document.getElementById('at-stake').value = (cf.stake_inicial || 10).toFixed(2); document.getElementById('at-gale1').value = cf.gale_1_mult || 2.0; document.getElementById('at-gale2').value = cf.gale_2_mult || 4.0; document.getElementById('at-camuflagem').value = cf.modo_camuflagem || 'TODAS'; toggleConfigCamuflagem(); document.getElementById('at-pulo-min').value = cf.camuflagem_pulos_min || 1; document.getElementById('at-pulo-max').value = cf.camuflagem_pulos_max || 3; document.getElementById('at-max-entradas').value = cf.limite_entradas || 15; document.getElementById('at-stop-win').value = (cf.stop_win || 100).toFixed(2); document.getElementById('at-trailing-stop').checked = cf.trailing_stop !== false; document.getElementById('at-trailing-recuo').value = Math.max(0, Number(cf.trailing_recuo) || 0).toFixed(2); toggleTrailingStopAutoTrader(); document.getElementById('at-stop-loss').value = (cf.stop_loss || 250).toFixed(2); document.getElementById('at-hora-inicio').value = cf.hora_inicio || "00:00"; document.getElementById('at-hora-fim').value = cf.hora_fim || "23:59";
+            document.getElementById('at-titulo').innerText = "✏️ Editar Motor de Execução"; document.getElementById('at-nome').value = at.nome; document.getElementById('at-ativo').checked = at.ativo; document.getElementById('at-saldo-visor').innerText = `R$ ${parseFloat(at.saldo_atual).toFixed(2).replace('.',',')}`; document.getElementById('at-saldo-visor').style.color = '#28a745'; document.getElementById('at-stake').value = (cf.stake_inicial || 10).toFixed(2); document.getElementById('at-gale1').value = cf.gale_1_mult || 2.0; document.getElementById('at-gale2').value = cf.gale_2_mult || 4.0;
+            document.getElementById('at-gatilho-reds-virtuais').value = Math.max(0, Number(cf.gatilho_reds_virtuais) || 0); document.getElementById('at-sinais-por-onda').value = Math.max(0, Number(cf.sinais_por_onda) || 0); document.getElementById('at-tipo-aleatoriedade').value = cf.tipo_aleatoriedade || (cf.modo_camuflagem === 'PULOS' ? 'PULOS' : 'NENHUMA'); document.getElementById('at-pulo-min').value = Math.max(1, Number(cf.pulo_min ?? cf.camuflagem_pulos_min) || 1); document.getElementById('at-pulo-max').value = Math.max(1, Number(cf.pulo_max ?? cf.camuflagem_pulos_max) || 3); document.getElementById('at-chance-entrada-pct').value = Math.min(100, Math.max(1, Number(cf.chance_entrada_pct) || 100)); document.getElementById('at-limite-ciclos').value = Math.max(0, Number(cf.limite_ciclos) || 0); toggleEstrategiaAutoTrader();
+            document.getElementById('at-max-entradas').value = cf.limite_entradas || 15; document.getElementById('at-stop-win').value = (cf.stop_win || 100).toFixed(2); document.getElementById('at-trailing-stop').checked = cf.trailing_stop !== false; document.getElementById('at-trailing-recuo').value = Math.max(0, Number(cf.trailing_recuo) || 0).toFixed(2); toggleTrailingStopAutoTrader(); document.getElementById('at-stop-loss').value = (cf.stop_loss || 250).toFixed(2);
+            renderizarFaixasHorarioAutoTrader(faixasHorarioConfigAutoTrader(cf));
             document.getElementById('at-tie-modo').value = String(cf.tie_stake_mode || 'PERCENTUAL').toUpperCase() === 'VALOR' ? 'VALOR' : 'PERCENTUAL'; document.getElementById('at-tie-percent').value = Number(cf.tie_stake_percent) > 0 ? Number(cf.tie_stake_percent) : ''; document.getElementById('at-tie-valor').value = Number(cf.tie_stake_value) > 0 ? Number(cf.tie_stake_value).toFixed(2) : ''; toggleProtecaoEmpateAutoTrader();
             document.getElementById('at-stop-reds').value = Math.max(0, Number(cf.stop_reds_seguidos) || 0);
             document.getElementById('at-stop-reds-acao').value = String(cf.stop_reds_acao || 'PAUSAR').toUpperCase() === 'DESLIGAR' ? 'DESLIGAR' : 'PAUSAR';
             document.getElementById('at-stop-reds-pausa').value = Math.max(1, Number(cf.stop_reds_pausa_min) || 60);
             toggleStopRedsAutoTrader();
-            mudarAbaAT('gestao'); renderizarCheckboxFontesAT(cf.fontes_sinal || []); document.getElementById('modal-autotrader').style.display = 'flex';
+            mudarAbaAT('gestao'); document.getElementById('modal-autotrader').style.display = 'flex'; await atualizarFontesAutoTrader(cf.fontes_sinal || []);
         }
 
         function fecharFormularioAutoTrader() { document.getElementById('modal-autotrader').style.display = 'none'; }
@@ -2572,6 +2682,19 @@
                 return alert('Defina a política financeira da proteção no empate antes de ativar o Auto-Trader.');
             }
 
+            const tipoAleatoriedade = document.getElementById('at-tipo-aleatoriedade').value || 'NENHUMA';
+            const puloMin = Math.max(1, parseInt(document.getElementById('at-pulo-min').value) || 1);
+            const puloMax = Math.max(1, parseInt(document.getElementById('at-pulo-max').value) || 1);
+            const chanceEntrada = Math.min(100, Math.max(1, parseFloat(document.getElementById('at-chance-entrada-pct').value) || 100));
+            const faixasHorario = coletarFaixasHorarioAutoTrader();
+            if (faixasHorario.length === 0) return alert('Adicione ao menos uma faixa de horário válida.');
+            if (tipoAleatoriedade === 'PULOS' && puloMax < puloMin) {
+                return alert('O pulo máximo não pode ser menor que o pulo mínimo.');
+            }
+            if (tipoAleatoriedade === 'PROBABILIDADE' && (chanceEntrada < 1 || chanceEntrada > 100)) {
+                return alert('A chance de entrada deve ficar entre 1 e 100%.');
+            }
+
             const payload = {
                 nome,
                 ativo: ativoAT,
@@ -2582,9 +2705,13 @@
                     tie_stake_mode: tieModo,
                     tie_stake_percent: tiePercent,
                     tie_stake_value: tieValor,
-                    modo_camuflagem: document.getElementById('at-camuflagem').value,
-                    camuflagem_pulos_min: parseInt(document.getElementById('at-pulo-min').value) || 1,
-                    camuflagem_pulos_max: parseInt(document.getElementById('at-pulo-max').value) || 3,
+                    gatilho_reds_virtuais: Math.max(0, parseInt(document.getElementById('at-gatilho-reds-virtuais').value) || 0),
+                    sinais_por_onda: Math.max(0, parseInt(document.getElementById('at-sinais-por-onda').value) || 0),
+                    tipo_aleatoriedade: tipoAleatoriedade,
+                    pulo_min: puloMin,
+                    pulo_max: puloMax,
+                    chance_entrada_pct: chanceEntrada,
+                    limite_ciclos: Math.max(0, parseInt(document.getElementById('at-limite-ciclos').value) || 0),
                     limite_entradas: parseInt(document.getElementById('at-max-entradas').value) || 15,
                     stop_win: parseFloat(document.getElementById('at-stop-win').value) || 100.0,
                     trailing_stop: document.getElementById('at-trailing-stop').checked,
@@ -2593,8 +2720,7 @@
                     stop_reds_seguidos: Math.max(0, parseInt(document.getElementById('at-stop-reds').value) || 0),
                     stop_reds_acao: document.getElementById('at-stop-reds-acao').value === 'DESLIGAR' ? 'DESLIGAR' : 'PAUSAR',
                     stop_reds_pausa_min: Math.max(1, parseInt(document.getElementById('at-stop-reds-pausa').value) || 60),
-                    hora_inicio: document.getElementById('at-hora-inicio').value,
-                    hora_fim: document.getElementById('at-hora-fim').value,
+                    faixas_horario: faixasHorario,
                     fontes_sinal: Array.from(document.querySelectorAll('.chk-at-fonte:checked')).map(i => i.value)
                 }
             };
@@ -2627,27 +2753,76 @@
         async function carregarAutoTraders() { try { const res = await fetch('/api/auto-traders?_t=' + Date.now()); autoTradersGlobais = await res.json(); renderizarCardsAutoTraders(); } catch(e){} }
 
         async function toggleAutoTraderRapido(id, check) {
-            const at = autoTradersGlobais.find(x => x.id === id);
-            if (!at) return;
+            const at =
+                autoTradersGlobais.find(
+                    x => x.id === id
+                );
 
-            const novoAtivo = !!check.checked;
+            if (!at || !check) return;
+
+            const novoAtivo =
+                !!check.checked;
+
+            const slider =
+                check.nextElementSibling;
+
+            check.disabled = true;
+
+            if (slider) {
+                slider.style.opacity = '0.55';
+                slider.style.cursor = 'wait';
+            }
+
             try {
-                const res = await fetch(`/api/auto-trader/${id}`, {
-                    method: 'PUT',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ ...at, ativo: novoAtivo })
-                });
+                const res =
+                    await fetch(
+                        `/api/auto-trader/${id}`,
+                        {
+                            method: 'PUT',
+                            headers: {
+                                'Content-Type':
+                                    'application/json'
+                            },
+                            body: JSON.stringify({
+                                ...at,
+                                ativo: novoAtivo
+                            })
+                        }
+                    );
 
                 let resposta = {};
-                try { resposta = await res.json(); } catch (e) {}
+
+                try {
+                    resposta =
+                        await res.json();
+                } catch (e) {}
+
                 if (!res.ok) {
-                    throw new Error(resposta.mensagem || 'Falha ao atualizar o Auto-Trader.');
+                    throw new Error(
+                        resposta.mensagem
+                        || 'Falha ao atualizar o Auto-Trader.'
+                    );
                 }
 
                 await carregarAutoTraders();
             } catch(e) {
-                check.checked = !novoAtivo;
-                alert(e.message || 'Erro ao atualizar o Auto-Trader.');
+                // Fail-closed visual:
+                // se a confirmação do backend não chegou,
+                // o switch volta à posição anterior.
+                check.checked =
+                    !novoAtivo;
+
+                alert(
+                    e.message
+                    || 'Erro ao atualizar o Auto-Trader.'
+                );
+            } finally {
+                check.disabled = false;
+
+                if (slider) {
+                    slider.style.opacity = '';
+                    slider.style.cursor = '';
+                }
             }
         }
 
@@ -2677,6 +2852,7 @@
                 else if (at.status_operacao === 'STOP_REDS_PAUSA' && at.ativo) tagStatus = `<span style="background:#fd7e14; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">STOP REDS - ${pausaStopRedsMin > 0 ? `PAUSADO (${pausaStopRedsMin} min)` : 'REARMANDO'}</span>`;
                 else if (at.status_operacao === 'DADOS_INCOMPLETOS') tagStatus = `<span style="background:#b02a37; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">⚠️ DADOS INCOMPLETOS</span>`;
                 else if (at.status_operacao === 'BLOQUEADO_AMBIGUIDADE') tagStatus = `<span style="background:#7f1d1d; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">🚨 BLOQUEADO - ACEITE AMBÍGUO</span>`;
+                else if (at.status_operacao === 'LIMITE_CICLOS') tagStatus = `<span style="background:#6f42c1; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">🔁 LIMITE DE CICLOS ATINGIDO</span>`;
                 else if (!at.ativo) tagStatus = `<span style="background:#555; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">🔴 DESLIGADO</span>`;
                 else if (at.status_operacao === 'STANDBY') tagStatus = `<span style="background:#ffc107; color:black; padding:2px 8px; border-radius:4px; font-size:10px;">🟡 AGUARDANDO MESA</span>`;
                 else if (at.status_operacao === 'META_ATINGIDA') tagStatus = `<span style="background:#17a2b8; color:white; padding:2px 8px; border-radius:4px; font-size:10px;">💤 META DO DIA BATIDA</span>`;
@@ -2690,7 +2866,15 @@
                 } else if (cf.trailing_stop) {
                     trailingHTML = `<div style="font-size:10px; color:#ffc107; margin-top:2px;">↳ Trailing habilitado, mas ainda sem recuo configurado.</div>`;
                 }
-                let camuflagemHTML = (cf.modo_camuflagem === 'PULOS') ? `<span style="display:inline-block; margin-top:5px; background:#111; padding:4px 8px; border-radius:4px; border:1px solid #333; font-size:11px;">🕵️ Camuflagem: Pulará <strong>${at.pulos_restantes}</strong> ordens.</span>` : '';
+                const estadoCiclo = String(at.estado_ciclo || 'DORMINDO') === 'ONDA_ATIVA' ? 'ONDA_ATIVA' : 'DORMINDO';
+                const gatilhoVirtual = Math.max(0, Number(cf.gatilho_reds_virtuais) || 0);
+                const sinaisOnda = Math.max(0, Number(cf.sinais_por_onda) || 0);
+                const limiteCiclos = Math.max(0, Number(cf.limite_ciclos) || 0);
+                const aleatoriedade = String(cf.tipo_aleatoriedade || 'NENHUMA');
+                const gatilhoTexto = gatilhoVirtual > 0 ? `${Math.max(0, Number(at.reds_virtuais_observados) || 0)}/${gatilhoVirtual}` : 'imediato';
+                const ondaTexto = `${Math.max(0, Number(at.sinais_operados_onda) || 0)}/${sinaisOnda > 0 ? sinaisOnda : '∞'}`;
+                const ciclosTexto = `${Math.max(0, Number(at.ciclos_concluidos) || 0)}/${limiteCiclos > 0 ? limiteCiclos : '∞'}`;
+                let cicloHTML = `<div style="margin-top:6px; background:#111; padding:6px 8px; border-radius:4px; border:1px solid #333; font-size:10px; color:#aaa;">🎛️ <strong style="color:${estadoCiclo === 'ONDA_ATIVA' ? '#28a745' : '#ffc107'};">${estadoCiclo === 'ONDA_ATIVA' ? 'ONDA ATIVA' : 'DORMINDO'}</strong> | REDs gatilho: ${gatilhoTexto} | Onda: ${ondaTexto} | Ciclos: ${ciclosTexto} | Aleatoriedade: ${aleatoriedade}${aleatoriedade === 'PULOS' ? ` (${Math.max(0, Number(at.pulos_restantes) || 0)} pulo(s) restante(s))` : ''}</div>`;
                 let strFontes = (cf.fontes_sinal || []).map(f => {
                     const rotulo = rotuloFonteAutoTrader(f);
                     const fonteRobo = /^(?:ROBO|AUTO_PILOT_IA):/i.test(String(f || '')) || rotulo.includes('[AUTO]');
@@ -2726,7 +2910,7 @@
                             </div>
                         </div>
                         <div style="margin-top:20px; border-top:1px dashed #333; padding-top:15px; display:flex; justify-content:space-between; align-items:flex-end; flex-wrap:wrap; gap:10px;">
-                            <div><div style="font-size:12px; margin-bottom:5px;">📊 Volume: <strong>${at.entradas_feitas} / ${cf.limite_entradas||'∞'} Execuções</strong></div><div style="margin-bottom:5px;">📡 Escutando: ${strFontes || '<span style="color:#666; font-size:11px;">Sem robôs vinculados</span>'}</div>${camuflagemHTML}</div>
+                            <div><div style="font-size:12px; margin-bottom:5px;">📊 Volume: <strong>${at.entradas_feitas} / ${cf.limite_entradas||'∞'} Execuções</strong></div><div style="margin-bottom:5px;">📡 Escutando: ${strFontes || '<span style="color:#666; font-size:11px;">Sem robôs vinculados</span>'}</div>${cicloHTML}</div>
                             <button class="btn" style="background:#fff; color:#000; box-shadow: 0 4px 10px rgba(255,255,255,0.2);" onclick="gerarRelatorioPDF(${at.id})">📄 Gerar Auditoria PDF</button>
                         </div>
                     </div>
@@ -3058,7 +3242,196 @@
         function salvarConfig() { localStorage.setItem('threshGreen', document.getElementById('cfg-green').value); localStorage.setItem('threshYellow', document.getElementById('cfg-yellow').value); toggleModalConfig(false); aplicarFiltrosEOrdenar(); atualizarDashboardValores(); }
         function getCor(pctStr) { if (pctStr === '-') return '#aaa'; let pct = parseFloat(pctStr); let gVal = parseFloat(localStorage.getItem('threshGreen') || 80); let yVal = parseFloat(localStorage.getItem('threshYellow') || 50); if (pct >= gVal) return '#28a745'; if (pct >= yVal) return '#ffc107'; return '#ff7777'; }
 
-        async function toggleEstrategiaRapido(id, check) { let e = estrategiasGlobais.find(x => x.id.toString() === id.toString()); if (!e) return; let nA = check.checked; try { await fetch(`/api/estrategia/${id}`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({...e, padrao: e.padrao.join(','), ativo: nA}) }); e.ativo = nA; aplicarFiltrosEOrdenar(); } catch(err) { check.checked = !nA; } }
+        function serializarPadraoEstrategiaParaApi(est) {
+            const bruto = est?.padrao;
+
+            if (Array.isArray(bruto)) {
+                return bruto.join(',');
+            }
+
+            if (typeof bruto === 'string') {
+                const texto = bruto.trim();
+                if (!texto) return '';
+
+                try {
+                    const convertido = JSON.parse(texto);
+
+                    if (Array.isArray(convertido)) {
+                        return convertido.join(',');
+                    }
+                } catch (_) {}
+
+                // Também aceita o formato legado:
+                // Player,Banker,Tie
+                return texto;
+            }
+
+            return '';
+        }
+
+        function estrategiaProtegeEmpate(est) {
+            const valor = est?.proteger_empate;
+
+            return (
+                valor === true
+                || valor === 1
+                || valor === '1'
+            );
+        }
+
+        async function toggleEstrategiaRapido(id, check) {
+            const estrategia = estrategiasGlobais.find(
+                item => String(item.id) === String(id)
+            );
+
+            if (!estrategia) {
+                check.checked = !check.checked;
+                alert('Estratégia não encontrada. Atualize a página.');
+                return;
+            }
+
+            if (estrategiaEhDinamica(estrategia)) {
+                check.checked =
+                    estrategia.ativo === true
+                    || estrategia.ativo === 1;
+
+                alert(
+                    'Padrões dinâmicos são gerenciados pelo Robô IA pai.'
+                );
+                return;
+            }
+
+            const novoAtivo = !!check.checked;
+            check.disabled = true;
+
+            try {
+                const respostaHttp = await fetch(
+                    `/api/estrategia/${encodeURIComponent(id)}`,
+                    {
+                        method: 'PUT',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            nome: estrategia.nome,
+                            origem: estrategia.origem,
+                            padrao:
+                                serializarPadraoEstrategiaParaApi(
+                                    estrategia
+                                ),
+                            entrada: estrategia.entrada,
+                            gales: estrategia.gales,
+                            protegerEmpate:
+                                estrategiaProtegeEmpate(
+                                    estrategia
+                                ),
+                            ativo: novoAtivo
+                        })
+                    }
+                );
+
+                let resposta = {};
+
+                try {
+                    resposta = await respostaHttp.json();
+                } catch (_) {}
+
+                if (
+                    !respostaHttp.ok
+                    || resposta.sucesso !== true
+                ) {
+                    throw new Error(
+                        resposta.mensagem
+                        || 'Backend não confirmou a alteração.'
+                    );
+                }
+
+                // Recarrega o estado canônico do backend.
+                await inicializarSistema();
+
+            } catch (erro) {
+                check.checked = !novoAtivo;
+
+                console.error(
+                    `❌ UI PADRÕES | falha ao ${novoAtivo ? 'ativar' : 'desativar'} ${id}:`,
+                    erro
+                );
+
+                alert(
+                    'Não foi possível alterar o estado do padrão. '
+                    + 'A alteração foi revertida.'
+                );
+            } finally {
+                check.disabled = false;
+            }
+        }
+
+        async function excluirEstrategia(id) {
+            const estrategia = estrategiasGlobais.find(
+                item => String(item.id) === String(id)
+            );
+
+            if (!estrategia) {
+                alert(
+                    'Estratégia não encontrada. Atualize a página.'
+                );
+                return;
+            }
+
+            if (estrategiaEhDinamica(estrategia)) {
+                alert(
+                    'Padrões dinâmicos pertencem ao Robô IA e '
+                    + 'não podem ser excluídos individualmente.'
+                );
+                return;
+            }
+
+            if (
+                !confirm(
+                    `Excluir permanentemente o padrão "${estrategia.nome}"?`
+                )
+            ) {
+                return;
+            }
+
+            try {
+                const respostaHttp = await fetch(
+                    `/api/estrategia/${encodeURIComponent(id)}`,
+                    {
+                        method: 'DELETE'
+                    }
+                );
+
+                let resposta = {};
+
+                try {
+                    resposta = await respostaHttp.json();
+                } catch (_) {}
+
+                if (
+                    !respostaHttp.ok
+                    || resposta.sucesso !== true
+                ) {
+                    throw new Error(
+                        resposta.mensagem
+                        || 'Backend não confirmou a exclusão.'
+                    );
+                }
+
+                await inicializarSistema();
+
+            } catch (erro) {
+                console.error(
+                    `❌ UI PADRÕES | falha ao excluir ${id}:`,
+                    erro
+                );
+
+                alert(
+                    erro?.message
+                    || 'Não foi possível excluir o padrão.'
+                );
+            }
+        }
         function abrirFormularioNova() { mudarAbaPrincipal('padroes'); estrategiaEditandoId = null; document.getElementById('titulo-formulario').innerText = "Cadastrar Nova Estratégia"; document.getElementById('nome').value = ''; document.getElementById('gales').value = '0'; document.getElementById('entrada').value = 'Player'; document.getElementById('proteger_empate').checked = false; document.getElementById('ativo').checked = true; limparPadraoModal(); document.getElementById('modal-cadastro').style.display = 'flex'; }
         function fecharFormulario() { document.getElementById('modal-cadastro').style.display = 'none'; }
         function prepararEdicao(id) { const est = estrategiasGlobais.find(e => e.id === id); if (!est) return; estrategiaEditandoId = est.id; document.getElementById('titulo-formulario').innerText = "✏️ Editar Estratégia"; document.getElementById('nome').value = est.nome; let selO = document.getElementById('origem'); if (Array.from(selO.options).some(o => o.value === est.origem)) { selO.value = est.origem; } document.getElementById('entrada').value = est.entrada; document.getElementById('gales').value = est.gales; document.getElementById('proteger_empate').checked = est.proteger_empate === 1; document.getElementById('ativo').checked = est.ativo === 1 || est.ativo === true; limparPadraoModal(); try { JSON.parse(est.padrao).forEach(j => adicionarNoPadraoModal(j)); } catch(e) {} document.getElementById('modal-cadastro').style.display = 'flex'; }

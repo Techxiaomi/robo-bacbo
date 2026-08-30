@@ -6,43 +6,102 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const backendPath = path.join(__dirname, '..', 'bot2_coletor.js');
+const fonte = fs.readFileSync(backendPath, 'utf8');
 
-function extrairFuncao(fonte, nome, proximoMarcador) {
-    const inicio = fonte.indexOf(`async function ${nome}(`);
-    assert.notEqual(inicio, -1, `${nome} deve existir no backend`);
-    const fim = fonte.indexOf(proximoMarcador, inicio);
-    assert.notEqual(fim, -1, `marcador final de ${nome} deve existir`);
-    return fonte.slice(inicio, fim);
+function blocoEntre(inicio, fim) {
+    const posInicio = fonte.indexOf(inicio);
+    assert.notEqual(
+        posInicio,
+        -1,
+        'marcador inicial precisa existir: ' + inicio
+    );
+
+    const posFim = fonte.indexOf(fim, posInicio);
+    assert.notEqual(
+        posFim,
+        -1,
+        'marcador final precisa existir: ' + fim
+    );
+
+    return fonte.slice(posInicio, posFim);
 }
 
-test('padrão IA calcula assertividade pela janela bruta do robô proprietário', () => {
-    const fonte = fs.readFileSync(backendPath, 'utf8');
-    const bloco = extrairFuncao(
-        fonte,
-        'calcularAssertividadePersistidaEstrategia',
-        '\nfunction roboSintonizaEstrategia'
-    );
+test(
+    'Auto Pilot calcula assertividade pela RAM live canonica',
+    () => {
+        const bloco = blocoEntre(
+            'function calcularAssertividadeLiveCanonica(',
+            '\nfunction roboSintonizaEstrategia'
+        );
 
-    assert.match(bloco, /if \(est && est\.is_dinamico\)/);
-    assert.match(bloco, /ROBOS_MEMORIA\.find/);
-    assert.match(bloco, /auto_tuning\?\.range/);
-    assert.match(bloco, /historicoGirosAnalitico\.slice\(-rangeDinamico\)/);
-    assert.match(bloco, /calcularDetalhesPadraoNoHistorico\s*\(/);
-    assert.match(bloco, /dadosDinamicos/);
-    assert.match(bloco, /Date\.now\(\)/);
-    assert.match(bloco, /\)\.geral/);
-    assert.match(bloco, /contarTiesLegados\(detalhes\.ties\)/);
-});
+        assert.match(
+            bloco,
+            /Array\.isArray\(historicoLiveCanonico\)/
+        );
 
-test('padrões manuais preservam caminho histórico persistido', () => {
-    const fonte = fs.readFileSync(backendPath, 'utf8');
-    const bloco = extrairFuncao(
-        fonte,
-        'calcularAssertividadePersistidaEstrategia',
-        '\nfunction roboSintonizaEstrategia'
-    );
+        assert.match(
+            bloco,
+            /resultado:\s*String\(giro\?\.resultado/
+        );
 
-    assert.match(bloco, /SELECT green_direto, gale1, gale2, red, ties_json FROM estrategias/);
-    assert.match(bloco, /FROM historico_resultados/);
-    assert.match(bloco, /GROUP BY tipo_resultado/);
-});
+        assert.match(
+            bloco,
+            /multiplicador:\s*String\(giro\?\.multiplicador/
+        );
+
+        assert.match(
+            bloco,
+            /calcularDetalhesPadraoNoHistorico\s*\(/
+        );
+
+        assert.match(
+            bloco,
+            /contarTiesLegados\(detalhes\.ties\)/
+        );
+
+        assert.doesNotMatch(
+            bloco,
+            /dbPool\.query/
+        );
+
+        assert.doesNotMatch(
+            fonte,
+            /calcularAssertividadePersistidaEstrategia/
+        );
+    }
+);
+
+test(
+    'selecao de robos usa o historico live canonico',
+    () => {
+        assert.match(
+            fonte,
+            /async function selecionarRobosParaEstrategia\(est, historicoLiveCanonico\)/
+        );
+
+        assert.match(
+            fonte,
+            /const assertividade = calcularAssertividadeLiveCanonica\(est, historicoLiveCanonico\)/
+        );
+
+        assert.match(
+            fonte,
+            /integracaoContadorDiario\.obterHistoricoCanonicoLive\(/
+        );
+
+        assert.match(
+            fonte,
+            /estadoLiveCanonico\.pronto !== true/
+        );
+
+        assert.match(
+            fonte,
+            /const historicoLiveCanonico = estadoLiveCanonico\.history/
+        );
+
+        assert.match(
+            fonte,
+            /selecionarRobosParaEstrategia\(est, historicoLiveCanonico\)/
+        );
+    }
+);

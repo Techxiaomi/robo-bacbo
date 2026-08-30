@@ -4,6 +4,9 @@ const fs = require("node:fs");
 const path = require("node:path");
 const http = require("node:http");
 const { performance } = require("node:perf_hooks");
+const {
+    nomeArquivoEscopadoPorMesa
+} = require("./mesa_operational_scope");
 
 let instalado = false;
 let intervaloAtivo = null;
@@ -84,7 +87,13 @@ function configMetricasOperacionais(opcoes = {}) {
 
     return {
         enabled: booleanoConfig(env.OPERATIONS_METRICS_ENABLED, true),
-        filePath: path.join(metricsDir, path.basename(nomeBruto)),
+        filePath: path.join(
+            metricsDir,
+            nomeArquivoEscopadoPorMesa(
+                nomeBruto,
+                env
+            )
+        ),
         intervalMs: inteiroConfig(env.OPERATIONS_METRICS_INTERVAL_SECONDS, 15, 5, 300) * 1000,
         maxSamples: inteiroConfig(env.OPERATIONS_METRICS_MAX_SAMPLES, 2048, 128, 10000),
         maxRoutes: inteiroConfig(env.OPERATIONS_METRICS_MAX_ROUTES, 64, 16, 256),

@@ -5,6 +5,14 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { criarAutoPilotService } = require('../auto_pilot_ia');
+const { definirMesaRuntime } = require('../mesa_runtime_context');
+
+definirMesaRuntime({
+    id: 1,
+    codigo: 'BACBO_INT',
+    nome: 'Bac Bo Internacional',
+    tipo_jogo: 'BACBO'
+});
 
 function criarDbRoboDesativado() {
     const chamadas = [];
@@ -12,7 +20,7 @@ function criarDbRoboDesativado() {
         chamadas,
         async query(sql, params) {
             chamadas.push({ sql: String(sql), params });
-            if (String(sql).includes('SELECT * FROM robos_canais WHERE id=? LIMIT 1')) {
+            if (String(sql).includes('SELECT * FROM robos_canais WHERE id=? AND mesa_id=? LIMIT 1')) {
                 return [[{
                     id: 1,
                     nome: 'IA teste',
@@ -23,7 +31,7 @@ function criarDbRoboDesativado() {
             if (String(sql).includes('UPDATE estrategias SET ativo=false')) {
                 return [{ affectedRows: 2 }];
             }
-            if (String(sql).includes('SELECT id, config_json FROM robos_canais WHERE ativo=true')) {
+            if (String(sql).includes('SELECT id, config_json FROM robos_canais WHERE mesa_id=? AND ativo=true')) {
                 return [[]];
             }
             throw new Error(`SQL inesperado no fake: ${sql}`);
@@ -75,7 +83,7 @@ test('mudança forçada durante sinal fica pendente e é aplicada no próximo gi
 test('backend reavalia descarte live depois de finalizar padrão dinâmico', () => {
     const backend = fs.readFileSync(path.join(__dirname, '..', 'bot2_coletor.js'), 'utf8');
     assert.match(backend, /est\.is_dinamico[\s\S]{0,400}autoPilotIA\.reavaliarDescarteEstrategia\(est\.id\)/);
-    assert.match(backend, /DELETE FROM historico_resultados WHERE LEFT\(estrategia_id, \?\) = \?/);
+    assert.match(backend, /DELETE FROM historico_resultados\s+WHERE mesa_id=\?\s+AND LEFT\(estrategia_id, \?\) = \?/);
 });
 
 test('motor preserva reputação live ao expirar definição do padrão', () => {

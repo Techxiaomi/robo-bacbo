@@ -3,6 +3,8 @@
 const LIMITE_DECIMAL_DINHEIRO = 9_999_999_999.99;
 const LIMITE_MULTIPLICADOR_GALE = 1000;
 const LIMITE_PULOS = 1000;
+const LIMITE_CONTADOR_ESTRATEGIA = 1_000_000;
+const TIPOS_ALEATORIEDADE = new Set(['NENHUMA', 'PULOS', 'PROBABILIDADE']);
 
 function falha(campo, motivo) {
     return { ok: false, campo, motivo: `${campo}: ${motivo}` };
@@ -24,6 +26,102 @@ function multiploDeCinco(valor) {
 function horarioValido(valor) {
     return typeof valor === 'string'
         && /^([01]\d|2[0-3]):[0-5]\d$/.test(valor);
+}
+
+function validarEstrategiaAleatoriedade(config) {
+    const usaContratoModerno = [
+        'tipo_aleatoriedade',
+        'gatilho_reds_virtuais',
+        'sinais_por_onda',
+        'pulo_min',
+        'pulo_max',
+        'chance_entrada_pct',
+        'limite_ciclos'
+    ].some(campo => Object.prototype.hasOwnProperty.call(config, campo));
+
+    if (!usaContratoModerno) {
+        if (config.modo_camuflagem !== 'TODAS' && config.modo_camuflagem !== 'PULOS') {
+            return falha('modo_camuflagem', 'deve ser TODAS ou PULOS');
+        }
+        if (config.modo_camuflagem === 'PULOS') {
+            const minimo = config.camuflagem_pulos_min;
+            const maximo = config.camuflagem_pulos_max;
+            if (!inteiroEstrito(minimo) || minimo < 1 || minimo > LIMITE_PULOS) {
+                return falha('camuflagem_pulos_min', 'deve ser inteiro entre 1 e 1000');
+            }
+            if (!inteiroEstrito(maximo) || maximo < minimo || maximo > LIMITE_PULOS) {
+                return falha(
+                    'camuflagem_pulos_max',
+                    'deve ser inteiro maior ou igual ao mínimo e menor ou igual a 1000'
+                );
+            }
+        }
+        return null;
+    }
+
+    const tipo = String(config.tipo_aleatoriedade || '').trim().toUpperCase();
+    if (!TIPOS_ALEATORIEDADE.has(tipo)) {
+        return falha('tipo_aleatoriedade', 'deve ser NENHUMA, PULOS ou PROBABILIDADE');
+    }
+
+    for (const campo of ['gatilho_reds_virtuais', 'sinais_por_onda', 'limite_ciclos']) {
+        const valor = config[campo];
+        if (!inteiroEstrito(valor) || valor < 0 || valor > LIMITE_CONTADOR_ESTRATEGIA) {
+            return falha(campo, `deve ser inteiro entre 0 e ${LIMITE_CONTADOR_ESTRATEGIA}`);
+        }
+    }
+
+    if (!inteiroEstrito(config.pulo_min) || config.pulo_min < 1 || config.pulo_min > LIMITE_PULOS) {
+        return falha('pulo_min', 'deve ser inteiro entre 1 e 1000');
+    }
+    if (!inteiroEstrito(config.pulo_max) || config.pulo_max < config.pulo_min || config.pulo_max > LIMITE_PULOS) {
+        return falha('pulo_max', 'deve ser inteiro maior ou igual ao mínimo e menor ou igual a 1000');
+    }
+
+    if (!numeroEstrito(config.chance_entrada_pct) || config.chance_entrada_pct < 1 || config.chance_entrada_pct > 100) {
+        return falha('chance_entrada_pct', 'deve ser número entre 1 e 100');
+    }
+
+    return null;
+}
+
+function validarHorarios(config) {
+    if (Array.isArray(config.faixas_horario)) {
+        if (config.faixas_horario.length === 0) {
+            return falha('faixas_horario', 'deve conter ao menos uma faixa');
+        }
+        if (config.faixas_horario.length > 100) {
+            return falha('faixas_horario', 'não pode conter mais de 100 faixas');
+        }
+
+        for (let i = 0; i < config.faixas_horario.length; i++) {
+            const faixa = config.faixas_horario[i];
+            if (!faixa || typeof faixa !== 'object' || Array.isArray(faixa)) {
+                return falha(`faixas_horario[${i}]`, 'deve ser um objeto com inicio e fim');
+            }
+            if (!horarioValido(faixa.inicio)) {
+                return falha(
+                    `faixas_horario[${i}].inicio`,
+                    'deve usar o formato HH:MM entre 00:00 e 23:59'
+                );
+            }
+            if (!horarioValido(faixa.fim)) {
+                return falha(
+                    `faixas_horario[${i}].fim`,
+                    'deve usar o formato HH:MM entre 00:00 e 23:59'
+                );
+            }
+        }
+        return null;
+    }
+
+    if (!horarioValido(config.hora_inicio)) {
+        return falha('hora_inicio', 'deve usar o formato HH:MM entre 00:00 e 23:59');
+    }
+    if (!horarioValido(config.hora_fim)) {
+        return falha('hora_fim', 'deve usar o formato HH:MM entre 00:00 e 23:59');
+    }
+    return null;
 }
 
 function validarConfiguracaoAutoTrader(config) {
@@ -94,22 +192,8 @@ function validarConfiguracaoAutoTrader(config) {
         }
     }
 
-    if (config.modo_camuflagem !== 'TODAS' && config.modo_camuflagem !== 'PULOS') {
-        return falha('modo_camuflagem', 'deve ser TODAS ou PULOS');
-    }
-    if (config.modo_camuflagem === 'PULOS') {
-        const minimo = config.camuflagem_pulos_min;
-        const maximo = config.camuflagem_pulos_max;
-        if (!inteiroEstrito(minimo) || minimo < 1 || minimo > LIMITE_PULOS) {
-            return falha('camuflagem_pulos_min', 'deve ser inteiro entre 1 e 1000');
-        }
-        if (!inteiroEstrito(maximo) || maximo < minimo || maximo > LIMITE_PULOS) {
-            return falha(
-                'camuflagem_pulos_max',
-                'deve ser inteiro maior ou igual ao mínimo e menor ou igual a 1000'
-            );
-        }
-    }
+    const erroAleatoriedade = validarEstrategiaAleatoriedade(config);
+    if (erroAleatoriedade) return erroAleatoriedade;
 
     if (!inteiroEstrito(config.limite_entradas) || config.limite_entradas < 1) {
         return falha('limite_entradas', 'deve ser inteiro maior ou igual a 1');
@@ -133,22 +217,15 @@ function validarConfiguracaoAutoTrader(config) {
     if (typeof config.trailing_stop !== 'boolean') {
         return falha('trailing_stop', 'deve ser booleano');
     }
-    if (config.trailing_stop === true) {
-        if (
-            !numeroEstrito(config.trailing_recuo)
-            || config.trailing_recuo <= 0
-            || config.trailing_recuo > LIMITE_DECIMAL_DINHEIRO
-        ) {
-            return falha(
-                'trailing_recuo',
-                'com Trailing Stop ativo deve ser número maior que zero dentro do limite financeiro'
-            );
-        }
-    } else if (
-        config.trailing_recuo !== undefined
-        && (!numeroEstrito(config.trailing_recuo) || config.trailing_recuo < 0)
+    if (
+        !numeroEstrito(config.trailing_recuo)
+        || config.trailing_recuo < 0
+        || config.trailing_recuo > LIMITE_DECIMAL_DINHEIRO
     ) {
-        return falha('trailing_recuo', 'quando informado deve ser número maior ou igual a zero');
+        return falha(
+            'trailing_recuo',
+            'deve ser número maior ou igual a zero dentro do limite financeiro; zero mantém o Trailing Stop não armado'
+        );
     }
 
     if (
@@ -173,12 +250,8 @@ function validarConfiguracaoAutoTrader(config) {
         }
     }
 
-    if (!horarioValido(config.hora_inicio)) {
-        return falha('hora_inicio', 'deve usar o formato HH:MM entre 00:00 e 23:59');
-    }
-    if (!horarioValido(config.hora_fim)) {
-        return falha('hora_fim', 'deve usar o formato HH:MM entre 00:00 e 23:59');
-    }
+    const erroHorarios = validarHorarios(config);
+    if (erroHorarios) return erroHorarios;
 
     if (!Array.isArray(config.fontes_sinal)) {
         return falha('fontes_sinal', 'deve ser uma lista');

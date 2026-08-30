@@ -20,9 +20,9 @@ function blocoEntre(fonte, inicioTexto, fimTexto) {
 
 test('Shadow Live possui histórico próprio e idempotente no MySQL', () => {
     assert.match(backend, /CREATE TABLE IF NOT EXISTS historico_shadow_ia/);
-    assert.match(backend, /UNIQUE KEY uq_shadow_estrategia_giro \(estrategia_id, giro_resultado_id\)/);
+    assert.match(backend, /UNIQUE KEY uq_shadow_mesa_estrategia_giro \(mesa_id, estrategia_id, giro_resultado_id\)/);
     assert.match(backend, /ALTER TABLE estrategias ADD COLUMN ia_status VARCHAR\(30\) DEFAULT NULL/);
-    assert.match(backend, /DELETE FROM historico_shadow_ia WHERE robo_id=\?/);
+    assert.match(backend, /DELETE FROM historico_shadow_ia WHERE mesa_id=\? AND robo_id=\?/);
 });
 
 test('giro persistido entrega seu ID ao paper trading antes da próxima decisão', () => {

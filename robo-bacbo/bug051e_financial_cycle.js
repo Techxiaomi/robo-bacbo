@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const { obterMesaRuntime } = require('./mesa_runtime_context');
 
 const GUARDA_CICLO_INSTALADA = Symbol.for('robo-bacbo.bug051e.guarda-ciclo');
 const CONEXAO_CICLO_INSTALADA = Symbol.for('robo-bacbo.bug051e.conexao-ciclo');
@@ -157,8 +158,17 @@ function prepararInsertComCiclo(sqlNormalizado, parametros, estado) {
     };
 }
 
-async function executarBuscaPendenteExata(executarBase, match, parametros, rest, estado) {
-    if (!Array.isArray(parametros) || parametros.length < 1) {
+async function executarBuscaPendenteExata(
+    executarBase,
+    match,
+    parametros,
+    rest,
+    estado
+) {
+    if (
+        !Array.isArray(parametros)
+        || parametros.length < 1
+    ) {
         return executarBase(
             `SELECT ${match[1]} FROM auditoria_ordens WHERE 1=0`,
             [],
@@ -166,43 +176,111 @@ async function executarBuscaPendenteExata(executarBase, match, parametros, rest,
         );
     }
 
+    const mesaRuntime = obterMesaRuntime();
     const traderId = String(parametros[0]);
-    const cicloId = String(estado.ativosPorTrader.get(traderId) || '');
+
+    const cicloId = String(
+        estado.ativosPorTrader.get(traderId) || ''
+    );
+
     if (!cicloId) {
         console.error(
-            `⛔ BUG-051E | trader=${traderId} | ordem corrente bloqueada | `
-            + 'ciclo_id ativo ausente; consulta PENDENTE não será degradada para busca por trader.'
+            `BUG-051E | trader=${traderId} | ` +
+            `ciclo_id ativo ausente; busca PENDENTE bloqueada.`
         );
+
         return [[], []];
     }
 
-    const sqlExato = `SELECT ${match[1]} FROM auditoria_ordens `
-        + `WHERE trader_id = ? AND ciclo_id = ? AND status_ordem = 'PENDENTE' `
-        + 'ORDER BY id DESC LIMIT 2';
-    const resultado = await executarBase(sqlExato, [parametros[0], cicloId], ...rest);
-    const linhas = Array.isArray(resultado) && Array.isArray(resultado[0])
-        ? resultado[0]
-        : [];
+    const sqlExato =
+        `SELECT ${match[1]} FROM auditoria_ordens ` +
+        `WHERE trader_id=? AND mesa_id=? ` +
+        `AND ciclo_id=? AND status_ordem='PENDENTE' ` +
+        `ORDER BY id DESC LIMIT 2`;
+
+    const resultado = await executarBase(
+        sqlExato,
+        [
+            parametros[0],
+            mesaRuntime.id,
+            cicloId
+        ],
+        ...rest
+    );
+
+    const linhas =
+        Array.isArray(resultado)
+        && Array.isArray(resultado[0])
+            ? resultado[0]
+            : [];
 
     if (linhas.length > 1) {
         console.error(
-            `🚨 BUG-051E | trader=${traderId} | ciclo_id=${cicloId} | `
-            + `${linhas.length} ordens PENDENTE encontradas no mesmo ciclo; operação bloqueada por ambiguidade.`
+            `BUG-051E | trader=${traderId} | ` +
+            `ciclo_id=${cicloId} | ` +
+            `${linhas.length} ordens PENDENTE na mesma mesa/ciclo.`
         );
-        return [[], Array.isArray(resultado) ? resultado[1] : []];
+
+        return [
+            [],
+            Array.isArray(resultado)
+                ? resultado[1]
+                : []
+        ];
     }
 
     return resultado;
 }
 
+function indiceParametroWhereId(sqlNormalizado) {
+    const sql = String(sqlNormalizado || '');
+    const whereIndex = sql.search(/\bwhere\b/i);
+
+    if (whereIndex < 0) return -1;
+
+    const trechoWhere = sql.slice(whereIndex);
+    const matchId = /\bid\s*=\s*\?/i.exec(
+        trechoWhere
+    );
+
+    if (!matchId) return -1;
+
+    const posPergunta =
+        whereIndex
+        + matchId.index
+        + matchId[0].lastIndexOf('?');
+
+    return (
+        sql.slice(0, posPergunta).match(/\?/g)
+        || []
+    ).length;
+}
+
 function terminalConfirmado(sqlNormalizado) {
-    return /^update\s+auditoria_ordens\s+set\s+/i.test(sqlNormalizado)
-        && /resultado_confirmado_em\s*=\s*\?/i.test(sqlNormalizado)
-        && /where\s+id\s*=\s*\?$/i.test(sqlNormalizado);
+    return (
+        /^update\s+auditoria_ordens\s+set\s+/i
+            .test(sqlNormalizado)
+        && /resultado_confirmado_em\s*=\s*\?/i
+            .test(sqlNormalizado)
+        && indiceParametroWhereId(sqlNormalizado) >= 0
+    );
 }
 
 function invalidacaoGlobalPendentes(sqlNormalizado) {
-    return /^update\s+auditoria_ordens\s+set\s+status_ordem\s*=\s*['"]DADOS_INCOMPLETOS['"]\s+where\s+status_ordem\s*=\s*['"]PENDENTE['"]$/i.test(sqlNormalizado);
+    const sql = String(sqlNormalizado || '');
+
+    return (
+        /^update\s+auditoria_ordens\s+set\s+/i
+            .test(sql)
+        && /status_ordem\s*=\s*['"]DADOS_INCOMPLETOS['"]/i
+            .test(sql)
+        && /status_ordem\s*=\s*['"]PENDENTE['"]/i
+            .test(sql)
+        && (
+            !/\bmesa_id\b/i.test(sql)
+            || /mesa_id\s*=\s*\?/i.test(sql)
+        )
+    );
 }
 
 function instalarWrapperQuery(queryable, queryOriginal, estado) {
@@ -261,8 +339,16 @@ function instalarWrapperQuery(queryable, queryOriginal, estado) {
 
         if (terminalConfirmado(sqlNormalizado) && Array.isArray(parametros) && parametros.length > 0) {
             const pacote = resultadoQuery(resultado) || {};
-            const auditoriaId = String(parametros[parametros.length - 1]);
-            const referencia = estado.ordensPorId.get(auditoriaId);
+            const indiceAuditoriaId =
+                indiceParametroWhereId(sqlNormalizado);
+
+            const auditoriaId =
+                indiceAuditoriaId >= 0
+                    ? String(parametros[indiceAuditoriaId])
+                    : '';
+
+            const referencia =
+                estado.ordensPorId.get(auditoriaId);
             if (referencia && Number(pacote.affectedRows) === 1) {
                 console.log(
                     `🔒 CICLO FINANCEIRO | trader=${referencia.traderId} | `
@@ -344,8 +430,189 @@ function criarIntegracaoCicloFinanceiro({ dbPool }) {
         }
     }
 
+    async function garantirIndiceMesaCiclo() {
+        try {
+            await dbPool.query(
+                `ALTER TABLE auditoria_ordens
+                 ADD INDEX idx_auditoria_mesa_trader_ciclo_status
+                 (mesa_id, trader_id, ciclo_id, status_ordem)`
+            );
+        } catch (erro) {
+            if (
+                !(
+                    erro
+                    && (
+                        erro.code === 'ER_DUP_KEYNAME'
+                        || Number(erro.errno) === 1061
+                    )
+                )
+            ) {
+                throw erro;
+            }
+        }
+    }
+
+    async function reconciliarRestart() {
+        const mesaRuntime = obterMesaRuntime();
+        const mesaId = Number(mesaRuntime.id);
+
+        if (!Number.isInteger(mesaId) || mesaId <= 0) {
+            throw criarErroCiclo(
+                'mesa runtime invalida na reconciliacao de restart'
+            );
+        }
+
+        await garantirIndiceMesaCiclo();
+
+        const conexao =
+            await dbPool.getConnection();
+
+        try {
+            await conexao.beginTransaction();
+
+            const [orfas] = await conexao.query(
+                `SELECT
+                    id,
+                    trader_id,
+                    status_ordem,
+                    executor_order_id,
+                    nivel,
+                    ciclo_id
+                 FROM auditoria_ordens
+                 WHERE mesa_id=?
+                   AND status_ordem
+                       IN ('PREPARANDO', 'PENDENTE')
+                 ORDER BY id ASC
+                 FOR UPDATE`,
+                [mesaId]
+            );
+
+            const traderIds = [];
+
+            for (const ordem of orfas) {
+                const traderId =
+                    Number(ordem.trader_id);
+
+                if (
+                    !Number.isInteger(traderId)
+                    || traderId <= 0
+                ) {
+                    throw criarErroCiclo(
+                        `ordem ${ordem.id} sem trader valido`
+                    );
+                }
+
+                traderIds.push(traderId);
+            }
+
+            const traderIdsUnicos = [
+                ...new Set(traderIds)
+            ];
+
+            if (orfas.length > 0) {
+                if (traderIdsUnicos.length > 0) {
+                    const placeholders =
+                        traderIdsUnicos
+                            .map(() => '?')
+                            .join(',');
+
+                    const [tradersMesa] =
+                        await conexao.query(
+                            `SELECT id
+                             FROM auto_traders
+                             WHERE mesa_id=?
+                               AND id IN (${placeholders})
+                             ORDER BY id ASC
+                             FOR UPDATE`,
+                            [
+                                mesaId,
+                                ...traderIdsUnicos
+                            ]
+                        );
+
+                    if (
+                        tradersMesa.length
+                        !== traderIdsUnicos.length
+                    ) {
+                        throw criarErroCiclo(
+                            'restart encontrou Trader fora da mesa runtime'
+                        );
+                    }
+                }
+
+                const [ordensAtualizadas] =
+                    await conexao.query(
+                        `UPDATE auditoria_ordens
+                         SET status_ordem='RESTART_INTERROMPIDO'
+                         WHERE mesa_id=?
+                           AND status_ordem
+                               IN ('PREPARANDO', 'PENDENTE')`,
+                        [mesaId]
+                    );
+
+                if (
+                    Number(ordensAtualizadas.affectedRows)
+                    !== orfas.length
+                ) {
+                    throw criarErroCiclo(
+                        'quantidade de ordens de restart divergente'
+                    );
+                }
+
+                if (traderIdsUnicos.length > 0) {
+                    const placeholders =
+                        traderIdsUnicos
+                            .map(() => '?')
+                            .join(',');
+
+                    const [tradersAtualizados] =
+                        await conexao.query(
+                            `UPDATE auto_traders
+                             SET ativo=false,
+                                 status_operacao='RESTART_INTERROMPIDO'
+                             WHERE mesa_id=?
+                               AND id IN (${placeholders})`,
+                            [
+                                mesaId,
+                                ...traderIdsUnicos
+                            ]
+                        );
+
+                    if (
+                        Number(tradersAtualizados.affectedRows)
+                        !== traderIdsUnicos.length
+                    ) {
+                        throw criarErroCiclo(
+                            'bloqueio de Traders no restart incompleto'
+                        );
+                    }
+                }
+            }
+
+            await conexao.commit();
+
+            estado.ativosPorTrader.clear();
+            estado.ordensPorId.clear();
+
+            return {
+                ordens: orfas.length,
+                traders: traderIdsUnicos.length,
+                mesa_id: mesaId
+            };
+        } catch (erro) {
+            try {
+                await conexao.rollback();
+            } catch (rollbackErro) {}
+
+            throw erro;
+        } finally {
+            conexao.release();
+        }
+    }
+
     const api = {
         inicializarSchema,
+        reconciliarRestart,
         estado
     };
 

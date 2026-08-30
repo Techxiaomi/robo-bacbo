@@ -1,0 +1,137 @@
+name: Temporary bacbo_events bot2 patch
+
+on:
+  push:
+    branches:
+      - agent/balance-sync-redis-node
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/balance-sync-redis-node
+          fetch-depth: 0
+
+      - name: Patch bot2 Redis subscriber
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f'{label}: expected 1 occurrence, found {count}')
+              return text.replace(old, new, 1)
+
+          bot_path = Path('robo-bacbo/bot2_coletor.js')
+          bot = bot_path.read_text(encoding='utf-8')
+
+          bot = replace_once(
+              bot,
+              "let redisSubscriber = null;\nlet redisSaldoAssinado = false;\nlet redisSaldoInicializacaoPromise = null;",
+              "let redisSubscriber = null;\nlet redisSaldoAssinado = false;\nlet redisBacboEventosAssinado = false;\nlet redisReconexaoTimer = null;\nlet redisBacboSeq = 0;\nconst REDIS_BACBO_SESSION = `tipminer-bacbo-events-${process.pid}-${Date.now()}`;\nlet redisSaldoInicializacaoPromise = null;",
+              'redis state'
+          )
+
+          bot = replace_once(
+              bot,
+              "    redisSubscriber.on('end', () => {\n        redisSaldoAssinado = false;\n    });\n}",
+              "    redisClient.on('end', () => {\n        agendarReconexaoRedisNode();\n    });\n    redisSubscriber.on('end', () => {\n        redisSaldoAssinado = false;\n        redisBacboEventosAssinado = false;\n        agendarReconexaoRedisNode();\n    });\n}\n\nfunction agendarReconexaoRedisNode() {\n    if (redisReconexaoTimer) return;\n    redisReconexaoTimer = setTimeout(() => {\n        redisReconexaoTimer = null;\n        void garantirRedisSaldoPronto().catch(erro => {\n            console.error('⚠️ Redis Node indisponivel; nova tentativa agendada:', erro.message);\n            agendarReconexaoRedisNode();\n        });\n    }, 2000);\n    if (redisReconexaoTimer && typeof redisReconexaoTimer.unref === 'function') redisReconexaoTimer.unref();\n}\n\nfunction normalizarVencedorBacboRedis(valor) {\n    const texto = String(valor ?? '').trim().toUpperCase();\n    if (!texto) return '';\n    if (texto === 'P' || texto.includes('PLAYER') || texto === 'JOGADOR' || texto === 'AZUL') return 'Player';\n    if (texto === 'B' || texto.includes('BANKER') || texto === 'BANCA' || texto === 'VERMELHO') return 'Banker';\n    if (texto === 'T' || texto.includes('TIE') || texto === 'DRAW' || texto === 'EMPATE') return 'Tie';\n    return '';\n}\n\nfunction timestampBacboRedis(valor) {\n    const numero = Number(valor);\n    if (Number.isFinite(numero) && numero > 0) {\n        return numero >= 1e12 ? Math.trunc(numero) : Math.trunc(numero * 1000);\n    }\n    const parsed = Date.parse(String(valor || ''));\n    return Number.isFinite(parsed) ? parsed : Date.now();\n}\n\nfunction normalizarRodadaBacboRedis(dados) {\n    if (!dados || typeof dados !== 'object' || Array.isArray(dados)) return null;\n    const vencedor = normalizarVencedorBacboRedis(dados.result ?? dados.type);\n    if (!vencedor) return null;\n\n    return {\n        vencedor,\n        resultado: vencedor,\n        winner: vencedor,\n        dados_jogador: [],\n        dados_banca: [],\n        coletor_sessao: REDIS_BACBO_SESSION,\n        coletor_seq: ++redisBacboSeq,\n        timestamp_coleta: timestampBacboRedis(dados.instant),\n        fonte: 'TipMiner',\n        redis_channel: 'bacbo_events',\n        tipminer_uuid: dados.uuid ?? null,\n        tipminer_type: dados.type ?? null,\n        tipminer_result: dados.result ?? null,\n        tipminer_instant: dados.instant ?? null\n    };\n}\n\nfunction criarReqInternaBacboRedis(dados) {\n    return {\n        body: dados,\n        get(nome) {\n            return String(nome || '').toLowerCase() === 'x-internal-token' ? INTERNAL_API_TOKEN : '';\n        }\n    };\n}\n\nfunction criarResInternaBacboRedis() {\n    return {\n        headersSent: false,\n        statusCode: 200,\n        corpo: null,\n        status(codigo) { this.statusCode = Number(codigo) || 500; return this; },\n        json(corpo) { this.corpo = corpo; this.headersSent = true; return corpo; }\n    };\n}",
+              'redis reconnect and bacbo mapping'
+          )
+
+          bot = replace_once(
+              bot,
+              "        redisClient?.isReady === true\n        && redisSubscriber?.isReady === true\n        && redisSaldoAssinado",
+              "        redisClient?.isReady === true\n        && redisSubscriber?.isReady === true\n        && redisSaldoAssinado\n        && redisBacboEventosAssinado",
+              'redis ready check'
+          )
+
+          bot = replace_once(
+              bot,
+              "            await redisSubscriber.subscribe('auto_trader_responses', mensagem => {\n                void processarRespostaSaldoRedis(mensagem).catch(erro => {\n                    console.error('⚠️ Falha ao processar balance_update recebido via Redis:', erro.message);\n                });\n            });\n            redisSaldoAssinado = true;\n        }",
+              "            await redisSubscriber.subscribe('auto_trader_responses', mensagem => {\n                void processarRespostaSaldoRedis(mensagem).catch(erro => {\n                    console.error('⚠️ Falha ao processar balance_update recebido via Redis:', erro.message);\n                });\n            });\n            redisSaldoAssinado = true;\n        }\n\n        if (!redisBacboEventosAssinado) {\n            await redisSubscriber.subscribe('bacbo_events', (mensagem) => {\n                try {\n                    const evento = JSON.parse(mensagem);\n                    if (evento.action === 'live_round' && evento.data) {\n                        const dadosRodada = normalizarRodadaBacboRedis(evento.data);\n                        if (!dadosRodada) {\n                            console.warn('⚠️ bacbo_events ignorado: live_round sem vencedor valido.');\n                            return;\n                        }\n                        void processarReceberSinal(\n                            criarReqInternaBacboRedis(dadosRodada),\n                            criarResInternaBacboRedis()\n                        ).catch(erro => {\n                            console.error('Erro ao processar bacbo_events:', erro.message);\n                        });\n                    }\n                } catch (erro) {\n                    console.error('Erro ao processar bacbo_events:', erro.message);\n                }\n            });\n            redisBacboEventosAssinado = true;\n            console.log('🎧 Node inscrito no Redis bacbo_events; live_round ligado ao motor principal.');\n        }",
+              'bacbo_events subscription'
+          )
+
+          bot = replace_once(
+              bot,
+              'app.post("/receber-sinal", async (req, res) => {',
+              'async function processarReceberSinal(req, res) {',
+              'name receive-signal handler'
+          )
+
+          bot = replace_once(
+              bot,
+              "    } finally {\n        if (liberarTurnoResultado) {\n            liberarTurnoResultado();\n        }\n    }\n});\n\nasync function iniciarApp() {",
+              "    } finally {\n        if (liberarTurnoResultado) {\n            liberarTurnoResultado();\n        }\n    }\n}\n\napp.post(\"/receber-sinal\", processarReceberSinal);\n\nasync function iniciarApp() {",
+              'register named receive-signal handler'
+          )
+
+          bot = replace_once(
+              bot,
+              "    backendPronto = true;\n    console.log(\"✅ Backend inicializado e pronto para atender APIs.\");",
+              "    backendPronto = true;\n    try {\n        await garantirRedisSaldoPronto();\n    } catch (e) {\n        console.error('⚠️ Redis Node nao conectou no startup:', e.message);\n        agendarReconexaoRedisNode();\n    }\n    console.log(\"✅ Backend inicializado e pronto para atender APIs.\");",
+              'start Redis subscription at bootstrap'
+          )
+
+          bot_path.write_text(bot, encoding='utf-8')
+
+          bridge_path = Path('robo-bacbo/redis_executor_bridge.js')
+          bridge = bridge_path.read_text(encoding='utf-8')
+          bridge = replace_once(
+              bridge,
+              "const TIPMINER_REDIS_CHANNEL = 'bacbo_events';\nconst STATUS_VALIDOS",
+              "const TIPMINER_REDIS_CHANNEL = 'bacbo_events';\nconst TIPMINER_INGRESS_OWNED_BY_BOT2 = true;\nconst STATUS_VALIDOS",
+              'bridge ownership flag'
+          )
+          bridge = replace_once(
+              bridge,
+              "        && clienteRedisPronto(tipMinerSubscriber)\n        && subscriber.__bacboBetResultSubscribed\n        && tipMinerSubscriber.__bacboEventsSubscribed",
+              "        && subscriber.__bacboBetResultSubscribed\n        && (TIPMINER_INGRESS_OWNED_BY_BOT2 || (\n            clienteRedisPronto(tipMinerSubscriber)\n            && tipMinerSubscriber.__bacboEventsSubscribed\n        ))",
+              'bridge ready ownership'
+          )
+          bridge = replace_once(
+              bridge,
+              "        if (!tipMinerSubscriber) {",
+              "        if (!TIPMINER_INGRESS_OWNED_BY_BOT2 && !tipMinerSubscriber) {",
+              'disable bridge bacbo subscriber creation'
+          )
+          bridge = replace_once(
+              bridge,
+              "        await conectarClienteRedis(tipMinerSubscriber);",
+              "        if (!TIPMINER_INGRESS_OWNED_BY_BOT2) {\n            await conectarClienteRedis(tipMinerSubscriber);\n        }",
+              'disable bridge bacbo subscriber connect'
+          )
+          bridge = replace_once(
+              bridge,
+              "        if (!tipMinerSubscriber.__bacboEventsSubscribed) {",
+              "        if (!TIPMINER_INGRESS_OWNED_BY_BOT2 && !tipMinerSubscriber.__bacboEventsSubscribed) {",
+              'disable bridge bacbo subscribe'
+          )
+          bridge_path.write_text(bridge, encoding='utf-8')
+          PY
+
+      - name: Validate JavaScript syntax and ownership
+        run: |
+          node --check robo-bacbo/bot2_coletor.js
+          node --check robo-bacbo/redis_executor_bridge.js
+          grep -F "redisSubscriber.subscribe('bacbo_events'" robo-bacbo/bot2_coletor.js
+          grep -F "app.post(\"/receber-sinal\", processarReceberSinal);" robo-bacbo/bot2_coletor.js
+
+      - name: Commit final patch and remove temporary workflow
+        run: |
+          git rm -- .github/workflows/temp-bacbo-events-bot2.yml
+          git add -- robo-bacbo/bot2_coletor.js robo-bacbo/redis_executor_bridge.js
+          git diff --check --cached
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "fix: processar bacbo_events diretamente no bot2"
+          git push origin HEAD:agent/balance-sync-redis-node

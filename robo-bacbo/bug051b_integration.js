@@ -6,6 +6,7 @@ const express = require('express');
 const { criarBarreiraSaldoFrescoStops } = require('./bug051c_balance_barrier');
 const { validarConfiguracaoAutoTrader } = require('./bug051d_config_validation');
 const { criarIntegracaoCicloFinanceiro } = require('./bug051e_financial_cycle');
+const { obterMesaRuntime } = require('./mesa_runtime_context');
 
 const GUARDA_CONFIG_INSTALADA = Symbol.for('robo-bacbo.bug051d.guarda-config');
 const CONTEXTO_LEDGER_REQUEST = new AsyncLocalStorage();
@@ -347,53 +348,119 @@ function multiplicadorTieRoad(score) {
 }
 
 async function carregarCaudaLedgerRoad() {
-    if (!estadoLedgerRoad.dbPool || !estadoLedgerRoad.schemaPronto) return [];
-    const [linhas] = await estadoLedgerRoad.dbPool.query(
-        `SELECT id, resultado, p_d1, p_d2, b_d1, b_d2,
-                player_score_road, banker_score_road, id_sessao
-         FROM giros_recentes
-         ORDER BY id DESC
-         LIMIT ${LIMITE_RECONCILIACAO_LEDGER}`
-    );
+    if (
+        !estadoLedgerRoad.dbPool
+        || !estadoLedgerRoad.schemaPronto
+    ) {
+        return [];
+    }
+
+    const mesaRuntime = obterMesaRuntime();
+
+    const [linhas] =
+        await estadoLedgerRoad.dbPool.query(
+            `SELECT
+                id,
+                resultado,
+                p_d1,
+                p_d2,
+                b_d1,
+                b_d2,
+                player_score_road,
+                banker_score_road,
+                id_sessao
+             FROM giros_recentes
+             WHERE mesa_id=?
+             ORDER BY id DESC
+             LIMIT ${LIMITE_RECONCILIACAO_LEDGER}`,
+            [mesaRuntime.id]
+        );
+
     return linhas
         .map(normalizarLinhaLedgerRoad)
         .filter(Boolean)
         .reverse();
 }
 
-async function persistirRoadRecovery(snapshotCronologico, idSessao, dados) {
-    const history = Array.isArray(snapshotCronologico) ? snapshotCronologico : [];
+async function persistirRoadRecovery(
+    snapshotCronologico,
+    idSessao,
+    dados
+) {
+    const history =
+        Array.isArray(snapshotCronologico)
+            ? snapshotCronologico
+            : [];
+
     if (history.length === 0) return 0;
-    if (!estadoLedgerRoad.dbPool || !estadoLedgerRoad.schemaPronto) {
-        throw new Error('ledger ROAD ainda nao inicializado');
+
+    if (
+        !estadoLedgerRoad.dbPool
+        || !estadoLedgerRoad.schemaPronto
+    ) {
+        throw new Error(
+            'ledger ROAD ainda nao inicializado'
+        );
     }
 
-    const sessaoColetor = String(dados?.coletor_sessao || '').trim().slice(0, 64);
-    const timestampNumero = Number(dados?.timestamp_coleta);
-    const timestampSegundos = Number.isFinite(timestampNumero) && timestampNumero > 0
-        ? timestampNumero / 1000
-        : Date.now() / 1000;
+    const mesaRuntime = obterMesaRuntime();
+
+    const sessaoColetor =
+        String(dados?.coletor_sessao || '')
+            .trim()
+            .slice(0, 64);
+
+    const timestampNumero =
+        Number(dados?.timestamp_coleta);
+
+    const timestampSegundos =
+        Number.isFinite(timestampNumero)
+        && timestampNumero > 0
+            ? timestampNumero / 1000
+            : Date.now() / 1000;
+
     const placeholders = history
-        .map(() => '(?,?,?,?,?,?,?,?,?,?,?,?,?,?,FROM_UNIXTIME(?))')
+        .map(
+            () =>
+                '(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,FROM_UNIXTIME(?))'
+        )
         .join(',');
+
     const params = [];
 
     for (const item of history) {
-        const resultado = resultadoLiveRoad(item.winner);
-        const playerScore = numeroRoad(item.playerScore);
-        const bankerScore = numeroRoad(item.bankerScore);
-        if (!resultado || playerScore === null || bankerScore === null) {
-            throw new Error('snapshot ROAD contem item invalido durante o backfill');
+        const resultado =
+            resultadoLiveRoad(item.winner);
+
+        const playerScore =
+            numeroRoad(item.playerScore);
+
+        const bankerScore =
+            numeroRoad(item.bankerScore);
+
+        if (
+            !resultado
+            || playerScore === null
+            || bankerScore === null
+        ) {
+            throw new Error(
+                'snapshot ROAD contem item invalido durante o backfill'
+            );
         }
+
         const tie = resultado === 'Tie';
+
         params.push(
+            mesaRuntime.id,
             resultado,
             0,
             0,
             0,
             0,
             tie ? playerScore : 0,
-            tie ? multiplicadorTieRoad(playerScore) : '',
+            tie
+                ? multiplicadorTieRoad(playerScore)
+                : '',
             null,
             null,
             sessaoColetor || null,
@@ -405,29 +472,53 @@ async function persistirRoadRecovery(snapshotCronologico, idSessao, dados) {
         );
     }
 
-    const conexao = await estadoLedgerRoad.dbPool.getConnection();
+    const conexao =
+        await estadoLedgerRoad.dbPool.getConnection();
+
     try {
         await conexao.beginTransaction();
+
         await conexao.query(
             `INSERT INTO giros_recentes
-                (resultado, p_d1, p_d2, b_d1, b_d2, numero_empate, multiplicador,
-                 round_id, coletor_seq, coletor_sessao, id_sessao, origem,
-                 player_score_road, banker_score_road, data_hora)
+                (
+                    mesa_id,
+                    resultado,
+                    p_d1,
+                    p_d2,
+                    b_d1,
+                    b_d2,
+                    numero_empate,
+                    multiplicador,
+                    round_id,
+                    coletor_seq,
+                    coletor_sessao,
+                    id_sessao,
+                    origem,
+                    player_score_road,
+                    banker_score_road,
+                    data_hora
+                )
              VALUES ${placeholders}`,
             params
         );
+
         await conexao.commit();
     } catch (erro) {
-        try { await conexao.rollback(); } catch (rollbackErro) {}
+        try {
+            await conexao.rollback();
+        } catch (_) {}
+
         throw erro;
     } finally {
         conexao.release();
     }
 
     console.log(
-        `🧾 ROAD RECOVERY | ${history.length} rodada(s) recuperada(s) no ledger | `
-        + `id_sessao=${idSessao} | round_id=NULL`
+        `ROAD RECOVERY | ${history.length} rodada(s) ` +
+        `recuperada(s) na mesa ${mesaRuntime.codigo} | ` +
+        `id_sessao=${idSessao}.`
     );
+
     return history.length;
 }
 
@@ -798,8 +889,32 @@ async function responderCollectorRoadCanonico(req, res) {
         return true;
     }
 
-    const dados = req.body && typeof req.body === 'object' ? req.body : {};
-    const history = Array.isArray(dados.history) ? dados.history : null;
+    const dados =
+        req.body && typeof req.body === 'object'
+            ? req.body
+            : {};
+
+    const mesaRuntime = obterMesaRuntime();
+    const mesaIdRecebida = Number(dados.mesa_id);
+    const mesaCodigoRecebida =
+        String(dados.mesa_codigo || '')
+            .trim()
+            .toUpperCase();
+
+    if (
+        mesaIdRecebida !== Number(mesaRuntime.id)
+        || mesaCodigoRecebida !== mesaRuntime.codigo
+    ) {
+        res.status(409).json({
+            erro: 'snapshot road pertence a outra mesa'
+        });
+        return true;
+    }
+
+    const history =
+        Array.isArray(dados.history)
+            ? dados.history
+            : null;
     const sessao = String(dados.coletor_sessao || '').trim();
     const timestamp = Number(dados.timestamp_coleta);
 
@@ -851,12 +966,49 @@ function agendarReconciliacaoIncrementalLedger(giroIncremental) {
 }
 
 function processarReceberSinalCanonico(req) {
-    if (req.method !== 'POST' || req.path !== '/receber-sinal') return false;
-    if (!tokenInternoValidoRoad(req)) return false;
-    const dados = req.body && typeof req.body === 'object' ? req.body : {};
-    const giroIncremental = normalizarGiroIncrementalRoad(dados);
-    const atualizado = orientarOuAtualizarEstadoCanonicoComIncremental(dados);
-    agendarReconciliacaoIncrementalLedger(giroIncremental);
+    if (
+        req.method !== 'POST'
+        || req.path !== '/receber-sinal'
+    ) {
+        return false;
+    }
+
+    if (!tokenInternoValidoRoad(req)) {
+        return false;
+    }
+
+    const dados =
+        req.body && typeof req.body === 'object'
+            ? req.body
+            : {};
+
+    const mesaRuntime = obterMesaRuntime();
+
+    if (
+        Number(dados.mesa_id)
+            !== Number(mesaRuntime.id)
+        || String(dados.mesa_codigo || '')
+            .trim()
+            .toUpperCase()
+            !== mesaRuntime.codigo
+    ) {
+        throw new Error(
+            'MC22-Y-A: incremental ROAD pertence a outra mesa'
+        );
+    }
+
+    const giroIncremental =
+        normalizarGiroIncrementalRoad(dados);
+
+    const atualizado =
+        orientarOuAtualizarEstadoCanonicoComIncremental(
+            dados
+        );
+
+    agendarReconciliacaoIncrementalLedger(
+        giroIncremental
+    );
+
     return atualizado;
 }
 
@@ -988,53 +1140,127 @@ function enriquecerCreateGirosRecentes(sql) {
 
 function enriquecerInsertGiroRecente(sql, params) {
     const sqlNormalizado = normalizarSql(sql);
-    const minusculo = sqlNormalizado.toLowerCase();
-    const parametros = Array.isArray(params) ? params : [];
+    const minusculo =
+        sqlNormalizado.toLowerCase();
 
-    if (!minusculo.startsWith('insert into giros_recentes')) {
+    const parametros =
+        Array.isArray(params)
+            ? params
+            : [];
+
+    if (
+        !minusculo.startsWith(
+            'insert into giros_recentes'
+        )
+    ) {
         return { sql, params };
     }
 
-    if (minusculo.includes('round_id') || minusculo.includes('coletor_seq') || minusculo.includes('coletor_sessao')) {
+    const possuiMesa =
+        /\bmesa_id\b/i.test(sqlNormalizado);
+
+    const possuiMetadadosRoad =
+        minusculo.includes('round_id')
+        || minusculo.includes('coletor_seq')
+        || minusculo.includes('coletor_sessao');
+
+    if (possuiMetadadosRoad) {
+        if (!possuiMesa) {
+            throw new Error(
+                'MC22-Y-A: INSERT ROAD com metadados sem mesa_id'
+            );
+        }
+
         return { sql, params };
     }
 
-    if (parametros.length !== 9) {
-        return { sql, params };
+    const mesaRuntime = obterMesaRuntime();
+
+    const base =
+        possuiMesa
+            ? parametros.slice(1)
+            : parametros;
+
+    if (base.length !== 9) {
+        throw new Error(
+            `MC22-Y-A: INSERT giros_recentes inesperado ` +
+            `(${parametros.length} parametros)`
+        );
     }
 
-    const metadados = normalizarMetadadosLedger(CONTEXTO_LEDGER_REQUEST.getStore());
-    const idSessaoOriginal = parametros[7];
-    const idSessaoOriginalNumero = numeroRoad(idSessaoOriginal);
-    const idSessaoOverrideNumero = numeroRoad(estadoLedgerRoad.idSessaoOverride);
-    const referenciaBotNumero = numeroRoad(estadoLedgerRoad.idSessaoBotReferencia);
-    let idSessaoEfetiva = idSessaoOriginal;
+    const mesaId =
+        possuiMesa
+            ? Number(parametros[0])
+            : Number(mesaRuntime.id);
+
+    if (
+        !Number.isInteger(mesaId)
+        || mesaId !== Number(mesaRuntime.id)
+    ) {
+        throw new Error(
+            'MC22-Y-A: INSERT live pertence a outra mesa'
+        );
+    }
+
+    const metadados =
+        normalizarMetadadosLedger(
+            CONTEXTO_LEDGER_REQUEST.getStore()
+        );
+
+    const idSessaoOriginal = base[7];
+
+    const idSessaoOriginalNumero =
+        numeroRoad(idSessaoOriginal);
+
+    const idSessaoOverrideNumero =
+        numeroRoad(
+            estadoLedgerRoad.idSessaoOverride
+        );
+
+    const referenciaBotNumero =
+        numeroRoad(
+            estadoLedgerRoad.idSessaoBotReferencia
+        );
+
+    let idSessaoEfetiva =
+        idSessaoOriginal;
 
     if (idSessaoOverrideNumero !== null) {
-        if (referenciaBotNumero === null && idSessaoOriginalNumero !== null) {
-            estadoLedgerRoad.idSessaoBotReferencia = idSessaoOriginalNumero;
-            idSessaoEfetiva = estadoLedgerRoad.idSessaoOverride;
+        if (
+            referenciaBotNumero === null
+            && idSessaoOriginalNumero !== null
+        ) {
+            estadoLedgerRoad.idSessaoBotReferencia =
+                idSessaoOriginalNumero;
+
+            idSessaoEfetiva =
+                estadoLedgerRoad.idSessaoOverride;
         } else if (
             referenciaBotNumero !== null
             && idSessaoOriginalNumero !== null
-            && idSessaoOriginalNumero !== referenciaBotNumero
+            && idSessaoOriginalNumero
+                !== referenciaBotNumero
         ) {
-            console.log(
-                `🧭 ROAD RECOVERY | rotação nativa do Node detectada `
-                + `(${referenciaBotNumero}->${idSessaoOriginalNumero}); override ROAD liberado.`
-            );
             estadoLedgerRoad.idSessaoOverride = null;
-            estadoLedgerRoad.idSessaoBotReferencia = idSessaoOriginalNumero;
-            idSessaoEfetiva = idSessaoOriginal;
+            estadoLedgerRoad.idSessaoBotReferencia =
+                idSessaoOriginalNumero;
+
+            idSessaoEfetiva =
+                idSessaoOriginal;
         } else {
-            idSessaoEfetiva = estadoLedgerRoad.idSessaoOverride;
+            idSessaoEfetiva =
+                estadoLedgerRoad.idSessaoOverride;
         }
-    } else if (idSessaoOriginalNumero !== null) {
-        estadoLedgerRoad.idSessaoBotReferencia = idSessaoOriginalNumero;
+    } else if (
+        idSessaoOriginalNumero !== null
+    ) {
+        estadoLedgerRoad.idSessaoBotReferencia =
+            idSessaoOriginalNumero;
     }
 
     const novosParametros = [
-        ...parametros.slice(0, 7),
+        mesaId,
+        ...base.slice(0, 7),
         metadados.round_id,
         metadados.coletor_seq,
         metadados.coletor_sessao,
@@ -1042,11 +1268,17 @@ function enriquecerInsertGiroRecente(sql, params) {
         ORIGEM_LIVE,
         null,
         null,
-        parametros[8]
+        base[8]
     ];
 
     return {
-        sql: 'INSERT INTO giros_recentes (resultado, p_d1, p_d2, b_d1, b_d2, numero_empate, multiplicador, round_id, coletor_seq, coletor_sessao, id_sessao, origem, player_score_road, banker_score_road, data_hora) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,FROM_UNIXTIME(?))',
+        sql:
+            'INSERT INTO giros_recentes ' +
+            '(mesa_id, resultado, p_d1, p_d2, b_d1, b_d2, ' +
+            'numero_empate, multiplicador, round_id, coletor_seq, ' +
+            'coletor_sessao, id_sessao, origem, player_score_road, ' +
+            'banker_score_road, data_hora) ' +
+            'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,FROM_UNIXTIME(?))',
         params: novosParametros
     };
 }
@@ -1242,14 +1474,35 @@ function criarIntegracaoContadorDiario({ controleDiarioAutoTrader, dbPool, ioSer
     async function inicializarDatasLegadas() {
         estadoLedgerRoad.schemaPronto = false;
         await cicloFinanceiro.inicializarSchema();
+
+        const reconciliacao = await cicloFinanceiro.reconciliarRestart();
+        if (reconciliacao.ordens > 0) {
+            console.warn(
+                `🛡️ RESTART FINANCEIRO | ${reconciliacao.ordens} ordem(ns) interrompida(s) | `
+                + `${reconciliacao.traders} Auto-Trader(s) bloqueado(s).`
+            );
+        }
+
         await inicializarLedgerForense(dbPool);
-        const hoje = controleDiarioAutoTrader.dataOperacional();
+
+        const mesaRuntime = obterMesaRuntime();
+        const hoje =
+            controleDiarioAutoTrader.dataOperacional();
+
         await dbPool.query(
             `UPDATE auto_traders
              SET data_contador_entradas=?
-             WHERE data_contador_entradas IS NULL OR data_contador_entradas=''`,
-            [hoje]
+             WHERE mesa_id=?
+               AND (
+                   data_contador_entradas IS NULL
+                   OR data_contador_entradas=''
+               )`,
+            [
+                hoje,
+                mesaRuntime.id
+            ]
         );
+
         estadoLedgerRoad.schemaPronto = true;
         return hoje;
     }
