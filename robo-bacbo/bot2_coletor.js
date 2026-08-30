@@ -217,7 +217,7 @@ async function prepararBancoDeDados() {
                 nivel VARCHAR(20) DEFAULT 'DIRETO',
                 multiplicador VARCHAR(10) DEFAULT '',
                 data_hora DATETIME DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE KEY uq_shadow_estrategia_giro (estrategia_id, giro_resultado_id),
+                UNIQUE KEY uq_shadow_mesa_estrategia_giro (mesa_id, estrategia_id, giro_resultado_id),
                 INDEX idx_shadow_robo (robo_id),
                 INDEX idx_shadow_estrategia (estrategia_id)
             )

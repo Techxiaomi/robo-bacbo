@@ -56,6 +56,202 @@ async function obterColunaMesa(conexao, tabela) {
     return Array.isArray(linhas) && linhas.length === 1 ? linhas[0] : null;
 }
 
+
+const INDICE_SHADOW_ANTIGO = 'uq_shadow_estrategia_giro';
+const INDICE_SHADOW_MESA = 'uq_shadow_mesa_estrategia_giro';
+
+async function obterIndicePorNome(conexao, tabela, indice) {
+    const [linhas] = await conexao.query(
+        `SELECT INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, COLUMN_NAME
+         FROM information_schema.STATISTICS
+         WHERE TABLE_SCHEMA = DATABASE()
+           AND TABLE_NAME = ?
+           AND INDEX_NAME = ?
+         ORDER BY SEQ_IN_INDEX ASC`,
+        [tabela, indice]
+    );
+
+    if (!Array.isArray(linhas) || linhas.length === 0) {
+        return null;
+    }
+
+    return {
+        nome: String(linhas[0].INDEX_NAME || ''),
+        unico: linhas.every(
+            row => Number(row.NON_UNIQUE) === 0
+        ),
+        colunas: linhas.map(
+            row => String(row.COLUMN_NAME || '')
+        )
+    };
+}
+
+function indiceTemAssinatura(indice, colunas) {
+    if (!indice || indice.unico !== true) return false;
+    if (!Array.isArray(indice.colunas)) return false;
+    if (indice.colunas.length !== colunas.length) return false;
+
+    return colunas.every(
+        (coluna, i) => indice.colunas[i] === coluna
+    );
+}
+
+async function garantirUnicidadeShadowPorMesa(conexao) {
+    const tabela = 'historico_shadow_ia';
+
+    if (!(await tabelaExiste(conexao, tabela))) {
+        console.warn(
+            'MC22-V-C | historico_shadow_ia ainda ausente; ' +
+            'constraint sera criada pelo schema canonico.'
+        );
+
+        return {
+            migrada: false,
+            motivo: 'TABELA_AUSENTE'
+        };
+    }
+
+    const colunaMesa = await obterColunaMesa(conexao, tabela);
+
+    if (!colunaMesa) {
+        const erro = new Error(
+            'MC22-V-C: historico_shadow_ia sem mesa_id'
+        );
+        erro.code = 'SHADOW_MESA_ID_AUSENTE';
+        throw erro;
+    }
+
+    let antigo = await obterIndicePorNome(
+        conexao,
+        tabela,
+        INDICE_SHADOW_ANTIGO
+    );
+
+    let atual = await obterIndicePorNome(
+        conexao,
+        tabela,
+        INDICE_SHADOW_MESA
+    );
+
+    if (
+        antigo
+        && !indiceTemAssinatura(
+            antigo,
+            ['estrategia_id', 'giro_resultado_id']
+        )
+    ) {
+        const erro = new Error(
+            'MC22-V-C: indice shadow legado possui assinatura inesperada'
+        );
+        erro.code = 'SHADOW_INDICE_LEGADO_INESPERADO';
+        throw erro;
+    }
+
+    if (
+        atual
+        && !indiceTemAssinatura(
+            atual,
+            ['mesa_id', 'estrategia_id', 'giro_resultado_id']
+        )
+    ) {
+        const erro = new Error(
+            'MC22-V-C: indice shadow por mesa possui assinatura inesperada'
+        );
+        erro.code = 'SHADOW_INDICE_MESA_INESPERADO';
+        throw erro;
+    }
+
+    if (!atual) {
+        const [[duplicados]] = await conexao.query(
+            `SELECT COUNT(*) AS total
+             FROM (
+                 SELECT
+                     mesa_id,
+                     estrategia_id,
+                     giro_resultado_id
+                 FROM historico_shadow_ia
+                 GROUP BY
+                     mesa_id,
+                     estrategia_id,
+                     giro_resultado_id
+                 HAVING COUNT(*) > 1
+             ) AS grupos_duplicados`
+        );
+
+        if (Number(duplicados?.total || 0) !== 0) {
+            const erro = new Error(
+                'MC22-V-C: historico_shadow_ia possui duplicidade por mesa'
+            );
+            erro.code = 'SHADOW_DUPLICIDADE_POR_MESA';
+            throw erro;
+        }
+
+        await conexao.query(
+            `ALTER TABLE historico_shadow_ia
+             ADD UNIQUE KEY uq_shadow_mesa_estrategia_giro
+             (mesa_id, estrategia_id, giro_resultado_id)`
+        );
+
+        atual = await obterIndicePorNome(
+            conexao,
+            tabela,
+            INDICE_SHADOW_MESA
+        );
+
+        if (
+            !indiceTemAssinatura(
+                atual,
+                ['mesa_id', 'estrategia_id', 'giro_resultado_id']
+            )
+        ) {
+            const erro = new Error(
+                'MC22-V-C: nova constraint shadow nao foi confirmada'
+            );
+            erro.code = 'SHADOW_INDICE_MESA_NAO_CONFIRMADO';
+            throw erro;
+        }
+    }
+
+    // A antiga so e removida depois de confirmar a nova.
+    if (antigo) {
+        await conexao.query(
+            `ALTER TABLE historico_shadow_ia
+             DROP INDEX uq_shadow_estrategia_giro`
+        );
+    }
+
+    const antigoFinal = await obterIndicePorNome(
+        conexao,
+        tabela,
+        INDICE_SHADOW_ANTIGO
+    );
+
+    const atualFinal = await obterIndicePorNome(
+        conexao,
+        tabela,
+        INDICE_SHADOW_MESA
+    );
+
+    if (
+        antigoFinal
+        || !indiceTemAssinatura(
+            atualFinal,
+            ['mesa_id', 'estrategia_id', 'giro_resultado_id']
+        )
+    ) {
+        const erro = new Error(
+            'MC22-V-C: estado final da constraint shadow invalido'
+        );
+        erro.code = 'SHADOW_CONSTRAINT_FINAL_INVALIDA';
+        throw erro;
+    }
+
+    return {
+        migrada: true,
+        indice: INDICE_SHADOW_MESA
+    };
+}
+
 async function garantirMesaIdTabela(conexao, tabela, mesaId, fase) {
     if (!(await tabelaExiste(conexao, tabela))) {
         // Em instalação totalmente nova, bot2_coletor ainda criará suas tabelas depois
@@ -127,6 +323,16 @@ async function prepararEscopoHistoricoMesaAtual(mesaPersistida) {
             + `${historicasMigradas}/${TABELAS_HISTORICAS_MC22C.length} tabela(s).`
         );
 
+        const shadowUnicidade =
+            await garantirUnicidadeShadowPorMesa(conexao);
+
+        if (shadowUnicidade.migrada) {
+            console.log(
+                `MC22-V-C | Shadow IA com unicidade por mesa: ` +
+                `${shadowUnicidade.indice}.`
+            );
+        }
+
         const operacionais = [];
         for (const tabela of TABELAS_OPERACIONAIS_MC22F) {
             operacionais.push(await garantirMesaIdTabela(conexao, tabela, mesa.id, 'MC22-F'));
@@ -151,6 +357,7 @@ async function prepararEscopoHistoricoMesaAtual(mesaPersistida) {
 
         return {
             historicas,
+            shadowUnicidade,
             operacionais,
             financeiras
         };
