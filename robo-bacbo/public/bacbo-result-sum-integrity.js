@@ -146,7 +146,10 @@
             if (can.uuid) cell.dataset.mc27RoundUuid = can.uuid;
             vincularTooltip(cell);
 
-            if (numerico) {
+            if (
+                numerico
+                && String(cell.textContent || '').trim() !== String(can.soma)
+            ) {
                 cell.textContent = String(can.soma);
             }
         });
@@ -210,8 +213,7 @@
 
         observer.observe(document.body, {
             childList: true,
-            subtree: true,
-            characterData: true
+            subtree: true
         });
     }
 
