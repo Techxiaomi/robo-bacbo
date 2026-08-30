@@ -2811,27 +2811,232 @@ async function invalidarSequenciasAposBuracoDados(motivo) {
         sinaisInvalidados++;
     }
 
-    const [pendentes] = await dbPool.query(`SELECT DISTINCT trader_id FROM auditoria_ordens WHERE status_ordem = 'PENDENTE'`);
-    const traderIds = [...new Set(pendentes.map(row => Number(row.trader_id)).filter(Number.isFinite))];
+    const mesaRuntime = obterMesaRuntime();
+    const conexao = await dbPool.getConnection();
+    let traderIds = [];
 
-    if (traderIds.length > 0) {
-        const placeholders = traderIds.map(() => '?').join(',');
-        const conexao = await dbPool.getConnection();
-        try {
-            await conexao.beginTransaction();
-            await conexao.query(`UPDATE auditoria_ordens SET status_ordem='DADOS_INCOMPLETOS' WHERE status_ordem='PENDENTE'`);
-            await conexao.query(`UPDATE auto_traders SET ativo=false, status_operacao='DADOS_INCOMPLETOS' WHERE id IN (${placeholders})`, traderIds);
-            await conexao.commit();
-        } catch (e) {
-            try { await conexao.rollback(); } catch (rollbackError) { console.error('❌ Rollback falhou ao tratar buraco de dados:', rollbackError.message); }
-            throw e;
-        } finally {
-            conexao.release();
+    try {
+        await conexao.beginTransaction();
+
+        // MC22-S:
+        // Mantem a mesma ordem de locks do caminho financeiro:
+        // primeiro Auto-Trader, depois auditoria.
+        const [tradersMesa] = await conexao.query(
+            `SELECT id, mesa_id
+             FROM auto_traders
+             WHERE mesa_id=?
+             ORDER BY id ASC
+             FOR UPDATE`,
+            [mesaRuntime.id]
+        );
+
+        const traderIdsMesa = new Set();
+
+        for (const trader of tradersMesa) {
+            const traderId = Number(trader.id);
+            const traderMesaId = Number(trader.mesa_id);
+
+            if (
+                !Number.isInteger(traderId)
+                || traderId <= 0
+                || traderMesaId !== Number(mesaRuntime.id)
+            ) {
+                throw new Error(
+                    'MC22-S: Trader invalido na mesa runtime'
+                );
+            }
+
+            traderIdsMesa.add(traderId);
         }
 
-        const idsBloqueados = new Set(traderIds.map(String));
+        // So depois de travar os proprietarios financeiros
+        // trava o conjunto PENDENTE da mesa.
+        const [ordensPendentes] = await conexao.query(
+            `SELECT id, trader_id
+             FROM auditoria_ordens
+             WHERE mesa_id=?
+               AND status_ordem='PENDENTE'
+             ORDER BY id ASC
+             FOR UPDATE`,
+            [mesaRuntime.id]
+        );
+
+        const ordemIds = [];
+        const traderIdsPorOrdem = [];
+
+        for (const ordem of ordensPendentes) {
+            const ordemId = Number(ordem.id);
+            const traderId = Number(ordem.trader_id);
+
+            if (
+                !Number.isInteger(ordemId)
+                || ordemId <= 0
+            ) {
+                throw new Error(
+                    'MC22-S: auditoria PENDENTE com ID invalido'
+                );
+            }
+
+            if (
+                !Number.isInteger(traderId)
+                || traderId <= 0
+            ) {
+                throw new Error(
+                    `MC22-S: ordem ${ordemId} sem Trader valido`
+                );
+            }
+
+            if (!traderIdsMesa.has(traderId)) {
+                throw new Error(
+                    `MC22-S: Trader ${traderId} da ordem ${ordemId} ` +
+                    `nao pertence a mesa ${mesaRuntime.codigo}`
+                );
+            }
+
+            ordemIds.push(ordemId);
+            traderIdsPorOrdem.push(traderId);
+        }
+
+        traderIds = [
+            ...new Set(traderIdsPorOrdem)
+        ];
+
+        if (ordemIds.length > 0) {
+            const placeholdersOrdens =
+                ordemIds.map(() => '?').join(',');
+
+            const [resultadoOrdens] =
+                await conexao.query(
+                    `UPDATE auditoria_ordens
+                     SET status_ordem='DADOS_INCOMPLETOS'
+                     WHERE id IN (${placeholdersOrdens})
+                       AND mesa_id=?
+                       AND status_ordem='PENDENTE'`,
+                    [
+                        ...ordemIds,
+                        mesaRuntime.id
+                    ]
+                );
+
+            if (
+                Number(resultadoOrdens.affectedRows)
+                !== ordemIds.length
+            ) {
+                throw new Error(
+                    `MC22-S: esperadas ${ordemIds.length} ` +
+                    `ordens invalidadas; afetadas ` +
+                    `${resultadoOrdens.affectedRows}`
+                );
+            }
+
+            const placeholdersTraders =
+                traderIds.map(() => '?').join(',');
+
+            await conexao.query(
+                `UPDATE auto_traders
+                 SET ativo=false,
+                     status_operacao='DADOS_INCOMPLETOS'
+                 WHERE mesa_id=?
+                   AND id IN (${placeholdersTraders})`,
+                [
+                    mesaRuntime.id,
+                    ...traderIds
+                ]
+            );
+
+            const [tradersBloqueados] =
+                await conexao.query(
+                    `SELECT id, mesa_id, ativo, status_operacao
+                     FROM auto_traders
+                     WHERE mesa_id=?
+                       AND id IN (${placeholdersTraders})
+                     ORDER BY id ASC
+                     FOR UPDATE`,
+                    [
+                        mesaRuntime.id,
+                        ...traderIds
+                    ]
+                );
+
+            if (
+                tradersBloqueados.length
+                !== traderIds.length
+            ) {
+                throw new Error(
+                    'MC22-S: conjunto de Traders bloqueados incompleto'
+                );
+            }
+
+            for (const trader of tradersBloqueados) {
+                const mesaCorreta =
+                    Number(trader.mesa_id)
+                    === Number(mesaRuntime.id);
+
+                const estaDesligado =
+                    Number(trader.ativo) === 0;
+
+                const statusCorreto =
+                    String(trader.status_operacao)
+                    === 'DADOS_INCOMPLETOS';
+
+                if (
+                    !mesaCorreta
+                    || !estaDesligado
+                    || !statusCorreto
+                ) {
+                    throw new Error(
+                        `MC22-S: Trader ${trader.id} nao ficou ` +
+                        `bloqueado corretamente na mesa ` +
+                        `${mesaRuntime.codigo}`
+                    );
+                }
+            }
+        }
+
+        // Segunda barreira fail-closed antes do COMMIT.
+        const [pendentesRestantes] =
+            await conexao.query(
+                `SELECT id
+                 FROM auditoria_ordens
+                 WHERE mesa_id=?
+                   AND status_ordem='PENDENTE'
+                 LIMIT 1
+                 FOR UPDATE`,
+                [mesaRuntime.id]
+            );
+
+        if (pendentesRestantes.length > 0) {
+            throw new Error(
+                `MC22-S: ainda existe ordem PENDENTE na mesa ` +
+                `${mesaRuntime.codigo} apos invalidacao`
+            );
+        }
+
+        await conexao.commit();
+    } catch (e) {
+        try {
+            await conexao.rollback();
+        } catch (rollbackError) {
+            console.error(
+                'Rollback falhou ao tratar buraco de dados:',
+                rollbackError.message
+            );
+        }
+
+        throw e;
+    } finally {
+        conexao.release();
+    }
+
+    if (traderIds.length > 0) {
+        const idsBloqueados =
+            new Set(traderIds.map(String));
+
         for (const trader of AUTO_TRADERS_MEMORIA) {
-            if (!idsBloqueados.has(String(trader.id))) continue;
+            if (!idsBloqueados.has(String(trader.id))) {
+                continue;
+            }
+
             trader.ativo = false;
             trader.status_operacao = 'DADOS_INCOMPLETOS';
         }
