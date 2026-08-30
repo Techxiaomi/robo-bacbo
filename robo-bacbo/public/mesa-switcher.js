@@ -29,116 +29,159 @@
         const style = document.createElement('style');
         style.id = 'mc25-mesa-switcher-style';
         style.textContent = `
-            .mc25-mesa-strip {
-                flex-basis: 100%;
+            .topo-header {
+                gap: 10px !important;
+                padding-bottom: 10px !important;
+                margin-bottom: 16px !important;
+            }
+
+            .topo-header > h1 {
+                flex: 1 1 100%;
                 width: 100%;
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-                gap: 14px;
-                padding: 10px 12px;
-                border: 1px solid #3a3a3a;
-                border-left: 5px solid var(--mc25-mesa-accent, #6c757d);
-                border-radius: 8px;
-                background: #181818;
-                box-shadow: 0 3px 10px rgba(0,0,0,0.25);
-            }
-
-            .mc25-mesa-strip[data-mesa="BACBO_INT"] {
-                --mc25-mesa-accent: #28a745;
-            }
-
-            .mc25-mesa-strip[data-mesa="BACBO_BR"] {
-                --mc25-mesa-accent: #17a2b8;
-            }
-
-            .mc25-mesa-identidade {
-                display: flex;
-                flex-direction: column;
-                gap: 2px;
+                flex-wrap: wrap;
+                gap: 6px;
                 min-width: 0;
             }
 
-            .mc25-mesa-kicker {
-                color: #888;
-                font-size: 9px;
-                font-weight: 800;
-                letter-spacing: 1.2px;
-                text-transform: uppercase;
+            .topo-header > h1 .versao-tag {
+                margin-left: 4px;
             }
 
-            .mc25-mesa-nome {
-                display: flex;
-                align-items: center;
-                gap: 8px;
-                flex-wrap: wrap;
-                font-size: 15px;
-                font-weight: 800;
-                color: #fff;
+            .topo-header > h1 .gear-icon {
+                margin-left: 4px;
             }
 
-            .mc25-mesa-codigo {
+            .topo-header > div {
+                width: 100%;
+                justify-content: flex-start;
+            }
+
+            .mc26-mesa-inline {
+                --mc26-mesa-accent: #6c757d;
                 display: inline-flex;
                 align-items: center;
-                padding: 2px 7px;
-                border-radius: 999px;
-                background: #252525;
-                border: 1px solid #444;
-                color: var(--mc25-mesa-accent, #ccc);
-                font-size: 10px;
-                letter-spacing: .5px;
+                gap: 6px;
+                min-width: 0;
+                margin-left: 6px;
+                padding: 3px 5px;
+                border: 1px solid #3a3a3a;
+                border-left: 3px solid var(--mc26-mesa-accent);
+                border-radius: 7px;
+                background: #181818;
+                box-shadow: 0 2px 7px rgba(0,0,0,0.22);
+                font-size: 12px;
+                line-height: 1;
             }
 
-            .mc25-mesa-financeiro {
-                font-size: 11px;
-                font-weight: 700;
-                color: #bbb;
+            .mc26-mesa-inline[data-mesa="BACBO_INT"] {
+                --mc26-mesa-accent: #28a745;
             }
 
-            .mc25-mesa-controls {
-                display: flex;
+            .mc26-mesa-inline[data-mesa="BACBO_BR"] {
+                --mc26-mesa-accent: #f59e0b;
+            }
+
+            .mc26-mesa-codigo {
+                display: inline-flex;
                 align-items: center;
-                gap: 8px;
-                flex-wrap: wrap;
-                justify-content: flex-end;
+                height: 26px;
+                padding: 0 8px;
+                border-radius: 999px;
+                background: #232323;
+                border: 1px solid #444;
+                color: var(--mc26-mesa-accent);
+                font-size: 10px;
+                font-weight: 900;
+                letter-spacing: .45px;
+                white-space: nowrap;
             }
 
-            .mc25-mesa-controls label {
-                color: #888;
+            .mc26-mesa-financeiro {
+                display: inline-flex;
+                align-items: center;
+                height: 26px;
+                padding: 0 7px;
+                border-radius: 999px;
+                border: 1px solid #3c3c3c;
+                background: #111;
+                color: #d0d0d0;
                 font-size: 10px;
                 font-weight: 800;
-                text-transform: uppercase;
-                letter-spacing: .8px;
+                white-space: nowrap;
+            }
+
+            .mc26-mesa-inline[data-mesa="BACBO_INT"] .mc26-mesa-financeiro {
+                color: #7ee394;
+                border-color: rgba(40,167,69,.55);
+            }
+
+            .mc26-mesa-inline[data-mesa="BACBO_BR"] .mc26-mesa-financeiro {
+                color: #ffd17a;
+                border-color: rgba(245,158,11,.6);
             }
 
             #mesa-runtime-select {
-                min-width: 220px;
-                height: 34px;
+                width: auto;
+                min-width: 188px;
+                height: 28px;
                 margin: 0;
-                padding: 0 10px;
+                padding: 0 28px 0 9px;
                 border-radius: 6px;
-                border: 1px solid var(--mc25-mesa-accent, #555);
+                border: 1px solid var(--mc26-mesa-accent);
                 background: #101010;
                 color: #fff;
-                font-size: 12px;
-                font-weight: 700;
+                font-size: 11px;
+                font-weight: 800;
                 cursor: pointer;
             }
 
-            body.mc25-mesa-br #nav-btn-autotrader:disabled {
-                opacity: .65;
-                cursor: not-allowed !important;
-                filter: grayscale(1);
+            .mc26-sr-only {
+                position: absolute !important;
+                width: 1px !important;
+                height: 1px !important;
+                padding: 0 !important;
+                margin: -1px !important;
+                overflow: hidden !important;
+                clip: rect(0, 0, 0, 0) !important;
+                white-space: nowrap !important;
+                border: 0 !important;
             }
 
-            @media (max-width: 768px) {
-                .mc25-mesa-strip {
-                    align-items: stretch;
-                    flex-direction: column;
+            #nav-btn-dashboard,
+            #nav-btn-padroes,
+            #nav-btn-robos,
+            #nav-btn-autotrader,
+            #nav-btn-backtest,
+            #nav-btn-oraculo {
+                padding-left: 14px !important;
+                padding-right: 14px !important;
+            }
+
+            body.mc25-mesa-br #nav-btn-autotrader:disabled {
+                opacity: .82;
+                cursor: not-allowed !important;
+                filter: grayscale(.4);
+                border: 1px solid rgba(245,158,11,.6);
+                color: #ffd17a !important;
+            }
+
+            @media (max-width: 900px) {
+                .mc26-mesa-inline {
+                    flex: 1 1 100%;
+                    margin-left: 0;
+                    margin-top: 4px;
                 }
 
-                .mc25-mesa-controls {
-                    justify-content: stretch;
+                #mesa-runtime-select {
+                    flex: 1 1 auto;
+                    min-width: 170px;
+                }
+            }
+
+            @media (max-width: 520px) {
+                .mc26-mesa-inline {
+                    width: 100%;
+                    flex-wrap: wrap;
                 }
 
                 #mesa-runtime-select {
@@ -193,13 +236,46 @@
         window.location.assign(url.toString());
     }
 
+    function compactarBotoesNavegacao() {
+        const rotulos = Object.freeze({
+            'nav-btn-dashboard': '📊 Dashboard',
+            'nav-btn-padroes': '⚙️ Padrões',
+            'nav-btn-robos': '🤖 Robôs',
+            'nav-btn-backtest': '🔬 Backtest'
+        });
+
+        for (const [id, texto] of Object.entries(rotulos)) {
+            const botao = document.getElementById(id);
+            if (botao) botao.textContent = texto;
+        }
+    }
+
+    function observarRotuloOraculo() {
+        const aplicar = () => {
+            const botao = document.getElementById('nav-btn-oraculo');
+            if (!botao) return false;
+            botao.textContent = '🔮 Oráculo';
+            return true;
+        };
+
+        if (aplicar() || !document.body || typeof MutationObserver !== 'function') return;
+
+        const observer = new MutationObserver(() => {
+            if (aplicar()) observer.disconnect();
+        });
+
+        observer.observe(document.body, {
+            childList: true,
+            subtree: true
+        });
+
+        window.setTimeout(() => observer.disconnect(), 15000);
+    }
+
     function protegerAutoTraderNaBr(mesa) {
         const botao = document.getElementById('nav-btn-autotrader');
         if (!botao) return;
 
-        if (!botao.dataset.mc25TextoOriginal) {
-            botao.dataset.mc25TextoOriginal = botao.textContent || '';
-        }
         if (!botao.dataset.mc25OnclickOriginal) {
             botao.dataset.mc25OnclickOriginal = botao.getAttribute('onclick') || '';
         }
@@ -207,7 +283,7 @@
         if (mesa?.codigo === 'BACBO_BR') {
             botao.disabled = true;
             botao.removeAttribute('onclick');
-            botao.textContent = '🔒 Auto-Trader (BR bloqueado)';
+            botao.textContent = '🔒 Trader';
             botao.title = 'Execução financeira não autorizada para BACBO_BR.';
             botao.style.background = '#444';
             botao.style.boxShadow = 'none';
@@ -215,8 +291,8 @@
         }
 
         botao.disabled = false;
-        botao.textContent = botao.dataset.mc25TextoOriginal;
-        botao.title = '';
+        botao.textContent = '💸 Trader';
+        botao.title = 'Abrir módulo Trader da mesa BACBO_INT.';
         botao.style.background = '#28a745';
         botao.style.boxShadow = '0 0 8px rgba(40,167,69,0.5)';
         if (botao.dataset.mc25OnclickOriginal) {
@@ -224,42 +300,44 @@
         }
     }
 
-    function montarStrip(mesa) {
+    function montarHeaderCompacto(mesa) {
         const header = document.querySelector('.topo-header');
-        if (!header || !mesa) return false;
+        const headerTitulo = header?.querySelector('h1');
+        if (!header || !headerTitulo || !mesa) return false;
 
-        let strip = document.getElementById('mesa-runtime-switcher');
-        if (!strip) {
-            strip = document.createElement('div');
-            strip.id = 'mesa-runtime-switcher';
-            strip.className = 'mc25-mesa-strip';
-            header.insertBefore(strip, header.firstChild);
+        let switcher = document.getElementById('mesa-runtime-switcher');
+        if (!switcher) {
+            switcher = document.createElement('span');
+            switcher.id = 'mesa-runtime-switcher';
+            switcher.className = 'mc26-mesa-inline';
+            switcher.setAttribute('aria-label', 'Mesa operacional e alternador de mesa');
+
+            const versao = headerTitulo.querySelector('.versao-tag');
+            if (versao?.nextSibling) {
+                headerTitulo.insertBefore(switcher, versao.nextSibling);
+            } else {
+                headerTitulo.appendChild(switcher);
+            }
         }
 
-        strip.dataset.mesa = mesa.codigo;
-        strip.innerHTML = `
-            <div class="mc25-mesa-identidade">
-                <span class="mc25-mesa-kicker">Mesa operacional</span>
-                <div class="mc25-mesa-nome">
-                    <span>${mesa.nome}</span>
-                    <span class="mc25-mesa-codigo">${mesa.codigo}</span>
-                </div>
-                <span class="mc25-mesa-financeiro">
-                    ${mesa.financeiro
-                        ? '💰 Execução financeira disponível nesta mesa'
-                        : '🔒 Execução financeira bloqueada nesta mesa'}
-                </span>
-            </div>
-            <div class="mc25-mesa-controls">
-                <label for="mesa-runtime-select">Alternar mesa</label>
-                <select id="mesa-runtime-select" aria-label="Alternar mesa operacional">
-                    <option value="BACBO_INT">Internacional · BACBO_INT</option>
-                    <option value="BACBO_BR">Brasil · BACBO_BR</option>
-                </select>
-            </div>
+        const descricaoFinanceira = mesa.financeiro
+            ? 'Execução financeira disponível nesta mesa'
+            : 'Execução financeira bloqueada nesta mesa';
+
+        switcher.dataset.mesa = mesa.codigo;
+        switcher.innerHTML = `
+            <span class="mc26-mesa-codigo" title="Mesa operacional: ${mesa.nome}">${mesa.codigo}</span>
+            <span class="mc26-mesa-financeiro" title="${descricaoFinanceira}">
+                ${mesa.financeiro ? '💰 Ativo' : '🔒 Bloqueado'}
+            </span>
+            <label for="mesa-runtime-select" class="mc26-sr-only">Alternar mesa</label>
+            <select id="mesa-runtime-select" aria-label="Alternar mesa operacional" title="Alternar mesa operacional">
+                <option value="BACBO_INT">Internacional · BACBO_INT</option>
+                <option value="BACBO_BR">Brasil · BACBO_BR</option>
+            </select>
         `;
 
-        const select = strip.querySelector('#mesa-runtime-select');
+        const select = switcher.querySelector('#mesa-runtime-select');
         select.value = mesa.codigo;
         select.addEventListener('change', event => {
             void trocarMesa(event.target.value);
@@ -282,8 +360,10 @@
         document.body.classList.toggle('mc25-mesa-br', mesa.codigo === 'BACBO_BR');
         document.title = `[${mesa.sigla}] Inteligência Bac Bo`;
 
-        const montou = montarStrip(mesa);
+        const montou = montarHeaderCompacto(mesa);
+        compactarBotoesNavegacao();
         protegerAutoTraderNaBr(mesa);
+        observarRotuloOraculo();
         return montou;
     }
 
