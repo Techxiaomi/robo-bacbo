@@ -5971,7 +5971,7 @@ app.post("/receber-sinal", async (req, res) => {
         let p2 = (dados.dados_jogador && dados.dados_jogador.length > 1) ? parseInt(dados.dados_jogador[1]) : 0;
         let b1 = (dados.dados_banca && dados.dados_banca.length > 0) ? parseInt(dados.dados_banca[0]) : 0;
         let b2 = (dados.dados_banca && dados.dados_banca.length > 1) ? parseInt(dados.dados_banca[1]) : 0;
-        let nEmp = 0; let mult = "4x";
+        let nEmp = 0; let mult = "";
 
         if (vencedor === "Tie") {
             nEmp = parseInt(dados.pontos_jogador); if (isNaN(nEmp) || nEmp === 0) nEmp = p1 + p2;
