@@ -18,8 +18,8 @@ load_env_file(os.path.join(PROJECT_ROOT, ".env"))
 # ====================================================================
 # CONFIGURACAO REDIS-ONLY DO EXECUTOR
 # ====================================================================
-VERSAO_ROBO = "v1.6.18"
-NOME_ATUALIZACAO = "Place Bet Redis + Confirmacao Financeira"
+VERSAO_ROBO = "v1.6.19"
+NOME_ATUALIZACAO = "MC24 Gate DOM Acionavel + Transporte Composto"
 
 URL_CASSINO = os.getenv("CASINO_GAME_URL", "")
 URL_HOME_CASSINO = os.getenv("CASINO_HOME_URL", "")
@@ -921,26 +921,48 @@ def localizar_frame_mesa(page):
     return None
 
 
-def aguardar_janela_apostas_aberta(page):
-    frame = localizar_frame_mesa(page)
-    if frame is None:
-        raise ErroExecucaoAposta(
-            "Frame da mesa indisponivel antes do gate de apostas",
-            ambigua=False,
+def aguardar_janela_apostas_aberta(page, planos):
+    """
+    Gate financeiro MC24.
+
+    Nao infere fechamento porque os dados comecaram a se mover.
+    Nao libera por mera existencia/visibilidade de uma ficha.
+
+    A janela so e considerada utilizavel quando TODO o plano financeiro
+    (fichas necessarias + todos os alvos) esta acionavel no DOM.
+    """
+    prazo = (
+        time.monotonic()
+        + (float(BETTING_WINDOW_TIMEOUT_MS) / 1000.0)
+    )
+
+    while time.monotonic() <= prazo:
+        if pagina_indica_conexao_caida(page):
+            raise ErroExecucaoAposta(
+                "Conexao da mesa indisponivel enquanto aguardava janela apostavel",
+                ambigua=False,
+            )
+
+        frame = localizar_frame_aposta(
+            page,
+            planos,
         )
 
-    try:
-        frame.wait_for_selector(
-            BETTING_CHIP_SELECTOR,
-            state="visible",
-            timeout=BETTING_WINDOW_TIMEOUT_MS,
-        )
-    except PlaywrightTimeoutError as e:
-        raise ErroJanelaApostasTimeout(
-            f"JANELA_FECHADA_TIMEOUT: nenhuma ficha ficou visivel em {BETTING_WINDOW_TIMEOUT_MS}ms"
-        ) from e
+        if frame is not None:
+            return frame
 
-    return frame
+        try:
+            fechar_popup_inatividade(page)
+        except Exception as e:
+            if erro_driver_playwright(e):
+                raise
+
+        page.wait_for_timeout(50)
+
+    raise ErroJanelaApostasTimeout(
+        "JANELA_FECHADA_TIMEOUT: plano financeiro nao ficou "
+        f"integralmente acionavel em {BETTING_WINDOW_TIMEOUT_MS}ms"
+    )
 
 
 def _texto_saldo_home_valido(texto):
@@ -1256,7 +1278,104 @@ def localizar_ficha(frame, valor_ficha):
     return None
 
 
+def ficha_explicitamente_selecionada(elemento):
+    """
+    Reconhece somente evidencias DOM explicitas de ficha ja selecionada.
+
+    Importante:
+    uma ficha selecionada pode estar disabled para impedir novo clique.
+    Nessa situacao ela esta pronta para uso e nao deve ser reclicada.
+    """
+    if elemento is None:
+        return False
+
+    try:
+        return bool(
+            elemento.evaluate(
+                """el => {
+                    const classe = String(el.className || '');
+                    const estado = String(
+                        el.getAttribute('data-state') || ''
+                    ).toLowerCase();
+
+                    const verdadeiro = valor =>
+                        String(valor || '').toLowerCase() === 'true';
+
+                    const classeSelecionada =
+                        /(^|[-_\\s])(selected|active|checked)($|[-_\\s])/i
+                        .test(classe);
+
+                    return (
+                        verdadeiro(el.getAttribute('aria-pressed'))
+                        || verdadeiro(el.getAttribute('aria-selected'))
+                        || verdadeiro(el.getAttribute('data-selected'))
+                        || verdadeiro(el.getAttribute('data-is-selected'))
+                        || verdadeiro(el.getAttribute('data-active'))
+                        || ['selected', 'active', 'checked'].includes(estado)
+                        || classeSelecionada
+                    );
+                }"""
+            )
+        )
+
+    except Exception as e:
+        if erro_driver_playwright(e):
+            raise
+        return False
+
+
 def localizar_frame_aposta(page, planos):
+    """
+    Localiza somente um frame em que TODO o plano esteja pronto
+    para uma interacao financeira real.
+
+    Regra:
+    - alvo precisa estar visivel, Playwright-actionable e passar hit-test;
+    - ficha ainda nao selecionada precisa passar trial=True;
+    - ficha explicitamente JA selecionada e aceita sem reclique.
+    """
+
+    def elemento_acionavel(
+        elemento,
+        exigir_hit_test=False,
+        aceitar_selecionada=False,
+    ):
+        if elemento is None:
+            return False
+
+        try:
+            if not elemento.is_visible():
+                return False
+
+            if (
+                aceitar_selecionada
+                and ficha_explicitamente_selecionada(elemento)
+            ):
+                return True
+
+            elemento.click(
+                trial=True,
+                timeout=350,
+            )
+
+            if exigir_hit_test:
+                ponto = resolver_ponto_seguro_alvo(
+                    elemento
+                )
+
+                if (
+                    not isinstance(ponto, dict)
+                    or ponto.get("ok") is not True
+                ):
+                    return False
+
+            return True
+
+        except Exception as e:
+            if erro_driver_playwright(e):
+                raise
+            return False
+
     try:
         frames = list(page.frames)
     except Exception as e:
@@ -1266,18 +1385,40 @@ def localizar_frame_aposta(page, planos):
 
     for frame in frames:
         completo = True
+
         for plano in planos:
-            if primeiro_elemento_dom_visivel(frame.locator(f"[data-role='{plano['seletor_alvo']}']")) is None:
+            alvo = primeiro_elemento_dom_visivel(
+                frame.locator(
+                    f"[data-role='{plano['seletor_alvo']}']"
+                )
+            )
+
+            if not elemento_acionavel(
+                alvo,
+                exigir_hit_test=True,
+            ):
                 completo = False
                 break
+
             for ficha, _ in plano["cliques_necessarios"]:
-                if localizar_ficha(frame, ficha) is None:
+                ficha_elemento = localizar_ficha(
+                    frame,
+                    ficha,
+                )
+
+                if not elemento_acionavel(
+                    ficha_elemento,
+                    aceitar_selecionada=True,
+                ):
                     completo = False
                     break
+
             if not completo:
                 break
+
         if completo:
             return frame
+
     return None
 
 
@@ -1391,7 +1532,7 @@ def executar_place_bet(page, dados):
 
     # Gate financeiro real: a ordem pode chegar antes da janela, mas nenhum clique
     # ocorre enquanto a Evolution nao expuser uma ficha de aposta visivel no DOM.
-    frame = aguardar_janela_apostas_aberta(page)
+    frame = aguardar_janela_apostas_aberta(page, planos)
 
     # O saldo-base e lido somente apos a abertura da janela, imediatamente antes
     # da validacao dos controles e dos cliques financeiros.
@@ -1412,8 +1553,9 @@ def executar_place_bet(page, dados):
                 if ficha_elemento is None:
                     raise RuntimeError(f"Ficha R$ {ficha} indisponivel")
                 if ficha_corrente != int(ficha):
-                    ficha_elemento.click(force=True, timeout=2000)
-                    page.wait_for_timeout(120)
+                    if not ficha_explicitamente_selecionada(ficha_elemento):
+                        ficha_elemento.click(timeout=1200)
+                        page.wait_for_timeout(120)
                     ficha_corrente = int(ficha)
 
                 for _ in range(int(qtd)):

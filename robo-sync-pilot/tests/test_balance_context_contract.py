@@ -276,13 +276,29 @@ class BalanceContextContractTests(
         )
 
         self.assertIn(
-            "localizar_frame_mesa(page)",
+            "localizar_frame_aposta(page, planos)",
             corpo,
         )
 
         self.assertNotIn(
             "localizar_frame_saldo_mesa(page)",
             corpo,
+        )
+
+        frame_aposta = ast.unparse(
+            funcao(
+                "localizar_frame_aposta"
+            )
+        )
+
+        self.assertNotIn(
+            "CASINO_BALANCE_SELECTOR",
+            frame_aposta,
+        )
+
+        self.assertNotIn(
+            "localizar_frame_saldo_mesa",
+            frame_aposta,
         )
 
     def test_sync_balance_respeita_contexto(self):
