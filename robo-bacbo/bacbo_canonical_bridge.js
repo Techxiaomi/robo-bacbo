@@ -1,6 +1,7 @@
 'use strict';
 
 const mysql = require('mysql2/promise');
+const { obterMesaRuntime } = require('./mesa_runtime_context');
 
 const MAX_HISTORY = 1000;
 const MATCH_TOLERANCE_MS = 1500;
@@ -139,9 +140,11 @@ function gerarSessaoRecuperacao(idAnterior = null) {
 
 async function garantirLedgerAnalitico() {
     const db = dbPool();
+
     await db.query(`
         CREATE TABLE IF NOT EXISTS giros_recentes (
             id INT AUTO_INCREMENT PRIMARY KEY,
+            mesa_id SMALLINT UNSIGNED NOT NULL,
             resultado VARCHAR(20),
             p_d1 INT DEFAULT 0,
             p_d2 INT DEFAULT 0,
@@ -155,18 +158,44 @@ async function garantirLedgerAnalitico() {
     `);
 }
 
-async function giroJaExiste(db, round) {
-    const inicio = (round.timestamp_ms - MATCH_TOLERANCE_MS) / 1000;
-    const fim = (round.timestamp_ms + MATCH_TOLERANCE_MS) / 1000;
+async function giroJaExiste(
+    db,
+    round,
+    mesaId
+) {
+    const inicio =
+        (round.timestamp_ms - MATCH_TOLERANCE_MS) / 1000;
+
+    const fim =
+        (round.timestamp_ms + MATCH_TOLERANCE_MS) / 1000;
+
     const [linhas] = await db.query(
         `SELECT id
          FROM giros_recentes
-         WHERE resultado=?
-           AND data_hora BETWEEN FROM_UNIXTIME(?) AND FROM_UNIXTIME(?)
-         ORDER BY ABS(TIMESTAMPDIFF(MICROSECOND, data_hora, FROM_UNIXTIME(?))) ASC, id ASC
+         WHERE mesa_id=?
+           AND resultado=?
+           AND data_hora
+               BETWEEN FROM_UNIXTIME(?)
+               AND FROM_UNIXTIME(?)
+         ORDER BY
+            ABS(
+                TIMESTAMPDIFF(
+                    MICROSECOND,
+                    data_hora,
+                    FROM_UNIXTIME(?)
+                )
+            ) ASC,
+            id ASC
          LIMIT 1`,
-        [round.winner, inicio, fim, round.timestamp_ms / 1000]
+        [
+            mesaId,
+            round.winner,
+            inicio,
+            fim,
+            round.timestamp_ms / 1000
+        ]
     );
+
     return linhas.length > 0;
 }
 
@@ -190,18 +219,22 @@ function localizarAncora(snapshot, ultimo) {
 }
 
 async function reconciliarHistoricoAnaliticoInterno(rounds) {
+    const mesaRuntime = obterMesaRuntime();
+    const mesaId = Number(mesaRuntime.id);
     const snapshot = ordenarUnicos(rounds);
     if (snapshot.length === 0) return { recuperados: 0, motivo: 'snapshot_vazio' };
 
     await garantirLedgerAnalitico();
     const db = dbPool();
-    const [ultimos] = await db.query(`
-        SELECT id, resultado, id_sessao,
-               UNIX_TIMESTAMP(data_hora) * 1000 AS timestamp_ms
-        FROM giros_recentes
-        ORDER BY data_hora DESC, id DESC
-        LIMIT 1
-    `);
+    const [ultimos] = await db.query(
+        `SELECT id, resultado, id_sessao,
+                UNIX_TIMESTAMP(data_hora) * 1000 AS timestamp_ms
+         FROM giros_recentes
+         WHERE mesa_id=?
+         ORDER BY data_hora DESC, id DESC
+         LIMIT 1`,
+        [mesaId]
+    );
 
     const ultimo = ultimos[0] || null;
     const primeiraTs = snapshot[0].timestamp_ms;
@@ -243,16 +276,35 @@ async function reconciliarHistoricoAnaliticoInterno(rounds) {
     try {
         await conexao.beginTransaction();
         for (const round of candidatos) {
-            if (await giroJaExiste(conexao, round)) continue;
+            if (
+                await giroJaExiste(
+                    conexao,
+                    round,
+                    mesaId
+                )
+            ) {
+                continue;
+            }
             const tie = round.winner === 'Tie';
             await conexao.query(
                 `INSERT INTO giros_recentes
-                    (resultado, p_d1, p_d2, b_d1, b_d2, numero_empate, multiplicador, id_sessao, data_hora)
-                 VALUES (?, 0, 0, 0, 0, ?, ?, ?, FROM_UNIXTIME(?))`,
+                    (mesa_id, resultado,
+                     p_d1, p_d2, b_d1, b_d2,
+                     numero_empate, multiplicador,
+                     id_sessao, data_hora)
+                 VALUES (
+                    ?, ?, 0, 0, 0, 0,
+                    ?, ?, ?, FROM_UNIXTIME(?)
+                 )`,
                 [
+                    mesaId,
                     round.winner,
-                    tie ? Math.trunc(round.result) : 0,
-                    tie ? multiplicadorTie(round.result) : '',
+                    tie
+                        ? Math.trunc(round.result)
+                        : 0,
+                    tie
+                        ? multiplicadorTie(round.result)
+                        : '',
                     idSessao,
                     round.timestamp_ms / 1000
                 ]

@@ -3848,9 +3848,20 @@ async function persistirProtecaoRobo(robo, estado, greens, reds = robo.reds_cons
 
     await dbPool.query(
         `UPDATE robos_canais
-         SET greens_consecutivos=?, reds_consecutivos=?, standby_ate=?, historico_reds_json=?
-         WHERE id=?`,
-        [greensNormalizado, redsNormalizado, standbyAte, historicoJson, robo.id]
+         SET greens_consecutivos=?,
+             reds_consecutivos=?,
+             standby_ate=?,
+             historico_reds_json=?
+         WHERE id=?
+           AND mesa_id=?`,
+        [
+            greensNormalizado,
+            redsNormalizado,
+            standbyAte,
+            historicoJson,
+            robo.id,
+            obterMesaRuntime().id
+        ]
     );
 
     aplicarProtecaoRoboEmMemoria(
@@ -3927,10 +3938,18 @@ async function processarResultadoProtecaoRobos(estado, tipoResultado, timestampC
             try {
                 await dbPool.query(
                     `UPDATE robos_canais
-                     SET ativo=false, greens_consecutivos=0, reds_consecutivos=?,
-                         standby_ate=0, historico_reds_json='[]'
-                     WHERE id=?`,
-                    [stopReds.reds_consecutivos, robo.id]
+                     SET ativo=false,
+                         greens_consecutivos=0,
+                         reds_consecutivos=?,
+                         standby_ate=0,
+                         historico_reds_json='[]'
+                     WHERE id=?
+                       AND mesa_id=?`,
+                    [
+                        stopReds.reds_consecutivos,
+                        robo.id,
+                        obterMesaRuntime().id
+                    ]
                 );
 
                 aplicarProtecaoRoboEmMemoria(
@@ -5726,6 +5745,21 @@ app.post("/collector-health", async (req, res) => {
         }
 
         const dados = req.body || {};
+        const mesaRuntimeSaude = obterMesaRuntime();
+        const mesaCodigoSaude =
+            String(dados.mesa_codigo || '')
+                .trim()
+                .toUpperCase();
+
+        if (
+            !mesaCodigoSaude
+            || mesaCodigoSaude !== mesaRuntimeSaude.codigo
+        ) {
+            return res.status(409).json({
+                erro: 'collector-health pertence a outra mesa'
+            });
+        }
+
         if (String(dados.evento || '').trim().toUpperCase() !== 'INTERRUPCAO') {
             return res.status(400).json({ erro: "evento de saude invalido" });
         }
