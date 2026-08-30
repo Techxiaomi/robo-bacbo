@@ -379,7 +379,7 @@ test("BUG-033: painel lista somente robôs ativos e não renderiza origens", () 
     );
 });
 
-test("BUG-046 atual: executor aguarda DOM apostavel e confirma aceite financeiro", () => {
+test("MC24-A: executor exige plano DOM acionavel e confirma aceite financeiro", () => {
     assert.match(
         executorPythonSource,
         /BETTING_WINDOW_TIMEOUT_MS = 14000/
@@ -402,7 +402,22 @@ test("BUG-046 atual: executor aguarda DOM apostavel e confirma aceite financeiro
 
     assert.match(
         executorPythonSource,
-        /frame\.wait_for_selector\([\s\S]*?BETTING_CHIP_SELECTOR[\s\S]*?state="visible"[\s\S]*?timeout=BETTING_WINDOW_TIMEOUT_MS/
+        /def aguardar_janela_apostas_aberta\(page, planos\):/
+    );
+
+    assert.match(
+        executorPythonSource,
+        /def localizar_frame_aposta\(page, planos\):[\s\S]*?trial=True[\s\S]*?resolver_ponto_seguro_alvo/
+    );
+
+    assert.match(
+        executorPythonSource,
+        /def ficha_explicitamente_selecionada\(elemento\):/
+    );
+
+    assert.doesNotMatch(
+        executorPythonSource,
+        /frame\.wait_for_selector\([\s\S]*?BETTING_CHIP_SELECTOR/
     );
 
     assert.match(

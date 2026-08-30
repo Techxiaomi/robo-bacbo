@@ -1236,9 +1236,14 @@ async function enviarOrdemAoExecutor(alvo, valor, orderId = crypto.randomUUID(),
                 const resposta = await fetch(EXECUTOR_URL, {
                     method: 'POST',
                     headers: headersInternos(),
-                    body: JSON.stringify(Array.isArray(apostas) && apostas.length > 0
-                        ? { order_id: orderId, apostas }
-                        : { order_id: orderId, alvo, valor }),
+                    body: JSON.stringify({
+                        order_id: orderId,
+                        alvo,
+                        valor,
+                        ...(Array.isArray(apostas) && apostas.length > 0
+                            ? { apostas }
+                            : {})
+                    }),
                     signal: controller.signal
                 });
 

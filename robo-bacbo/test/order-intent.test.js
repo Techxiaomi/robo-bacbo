@@ -115,8 +115,8 @@ test("5xx sem aceita=false continua ambiguo, repete o mesmo ID e aceita callback
     assert.equal(corpos[0].order_id, corpos[1].order_id);
     assert.deepEqual(corpos[0].apostas, plano);
     assert.deepEqual(corpos[1], corpos[0]);
-    assert.equal(corpos[0].alvo, undefined);
-    assert.equal(corpos[0].valor, undefined);
+    assert.equal(corpos[0].alvo, "PlayerWon");
+    assert.equal(corpos[0].valor, 15);
 });
 
 test("callback EXECUTADA pode chegar antes do ACK HTTP", async () => {
