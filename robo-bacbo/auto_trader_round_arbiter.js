@@ -106,11 +106,20 @@ function criarArbitroFinanceiroAutoTrader(deps = {}) {
             `SELECT mesa_id
              FROM auto_traders
              WHERE id=?
+               AND mesa_id=?
              LIMIT 1`,
-            [Number(traderId)]
+            [
+                Number(traderId),
+                mesaRuntime.id
+            ]
         );
-        if (!Array.isArray(linhas) || linhas.length !== 1) return false;
-        return Number(linhas[0].mesa_id) === Number(mesaRuntime.id);
+
+        return (
+            Array.isArray(linhas)
+            && linhas.length === 1
+            && Number(linhas[0].mesa_id)
+                === Number(mesaRuntime.id)
+        );
     }
 
     async function listarOrdensFinanceirasEmAbertoTrader(traderId) {
@@ -248,8 +257,12 @@ function criarArbitroFinanceiroAutoTrader(deps = {}) {
                     `SELECT mesa_id
                      FROM auto_traders
                      WHERE id=?
+                       AND mesa_id=?
                      FOR UPDATE`,
-                    [trader.id]
+                    [
+                        trader.id,
+                        mesaRuntime.id
+                    ]
                 );
                 if (
                     !Array.isArray(traderMesa)
@@ -272,16 +285,13 @@ function criarArbitroFinanceiroAutoTrader(deps = {}) {
                     order_id: ordemExecutorIdDireto
                 });
 
-                const [intencaoVinculada] = await conexaoIntencao.query(
-                    `UPDATE auditoria_ordens
-                     SET mesa_id=?
-                     WHERE id=?
-                       AND trader_id=?
-                       AND status_ordem='PREPARANDO'`,
-                    [mesaRuntime.id, intencaoDireto.auditoria_id, trader.id]
-                );
-                if (Number(intencaoVinculada.affectedRows) !== 1) {
-                    throw new Error('Intenção DIRETO não pôde ser vinculada atomicamente à mesa atual');
+                if (
+                    Number(intencaoDireto.mesa_id)
+                    !== Number(mesaRuntime.id)
+                ) {
+                    throw new Error(
+                        'MC22-X: intencao DIRETO nasceu fora da mesa runtime'
+                    );
                 }
 
                 await conexaoIntencao.commit();

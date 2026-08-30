@@ -34,11 +34,19 @@ function criarControleDiarioAutoTrader({ dbPool, timezone }) {
             throw new Error('Auto-Trader invalido para controle diario');
         }
 
+        const mesaId = Number(trader.mesa_id);
+
+        if (!Number.isInteger(mesaId) || mesaId <= 0) {
+            throw new Error(
+                'MC22-X: Auto-Trader sem mesa_id no controle diario'
+            );
+        }
+
         const hoje = dataOperacional(agora);
         const dataPersistida = String(trader.data_contador_entradas || '').trim();
         if (dataPersistida === hoje) return false;
 
-        await dbPool.query(
+        const [resultado] = await dbPool.query(
             `UPDATE auto_traders
              SET entradas_feitas=0,
                  pulos_restantes=0,
@@ -47,9 +55,20 @@ function criarControleDiarioAutoTrader({ dbPool, timezone }) {
                      WHEN status_operacao='META_ATINGIDA' THEN 'STANDBY'
                      ELSE status_operacao
                  END
-             WHERE id=?`,
-            [hoje, trader.id]
+             WHERE id=?
+               AND mesa_id=?`,
+            [
+                hoje,
+                trader.id,
+                mesaId
+            ]
         );
+
+        if (Number(resultado.affectedRows) !== 1) {
+            throw new Error(
+                'MC22-X: reset diario nao encontrou Trader na mesa'
+            );
+        }
 
         trader.entradas_feitas = 0;
         trader.pulos_restantes = 0;

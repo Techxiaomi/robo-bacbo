@@ -6,6 +6,7 @@ const express = require('express');
 const { criarBarreiraSaldoFrescoStops } = require('./bug051c_balance_barrier');
 const { validarConfiguracaoAutoTrader } = require('./bug051d_config_validation');
 const { criarIntegracaoCicloFinanceiro } = require('./bug051e_financial_cycle');
+const { obterMesaRuntime } = require('./mesa_runtime_context');
 
 const GUARDA_CONFIG_INSTALADA = Symbol.for('robo-bacbo.bug051d.guarda-config');
 const CONTEXTO_LEDGER_REQUEST = new AsyncLocalStorage();
@@ -1252,13 +1253,25 @@ function criarIntegracaoContadorDiario({ controleDiarioAutoTrader, dbPool, ioSer
         }
 
         await inicializarLedgerForense(dbPool);
-        const hoje = controleDiarioAutoTrader.dataOperacional();
+
+        const mesaRuntime = obterMesaRuntime();
+        const hoje =
+            controleDiarioAutoTrader.dataOperacional();
+
         await dbPool.query(
             `UPDATE auto_traders
              SET data_contador_entradas=?
-             WHERE data_contador_entradas IS NULL OR data_contador_entradas=''`,
-            [hoje]
+             WHERE mesa_id=?
+               AND (
+                   data_contador_entradas IS NULL
+                   OR data_contador_entradas=''
+               )`,
+            [
+                hoje,
+                mesaRuntime.id
+            ]
         );
+
         estadoLedgerRoad.schemaPronto = true;
         return hoje;
     }
