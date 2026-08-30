@@ -46,10 +46,10 @@ class MC22ZDPreactivationGuardTests(
                 "mesa_teste_2",
                 {
                     "TIPMINER_BACBO_ROUND_ID":
-                        "round-teste-2"
+                        "11111111-1111-4111-8111-111111111111"
                 },
             ),
-            "round-teste-2",
+            "11111111-1111-4111-8111-111111111111",
         )
 
     def test_round_explicito_tambem_substitui_default_int(
@@ -60,11 +60,41 @@ class MC22ZDPreactivationGuardTests(
                 "BACBO_INT",
                 {
                     "TIPMINER_BACBO_ROUND_ID":
-                        "round-int-explicito"
+                        "22222222-2222-4222-8222-222222222222"
                 },
             ),
-            "round-int-explicito",
+            "22222222-2222-4222-8222-222222222222",
         )
+
+    def test_round_explicito_invalido_falha_fechado(
+        self,
+    ):
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "TIPMINER_BACBO_ROUND_ID invalido",
+        ):
+            resolver_tipminer_round_id(
+                "MESA_TESTE_2",
+                {
+                    "TIPMINER_BACBO_ROUND_ID":
+                        "round-invalido"
+                },
+            )
+
+    def test_nao_padrao_rejeita_round_da_int(
+        self,
+    ):
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "nao pode reutilizar",
+        ):
+            resolver_tipminer_round_id(
+                "MESA_TESTE_2",
+                {
+                    "TIPMINER_BACBO_ROUND_ID":
+                        TIPMINER_ROUND_ID_PADRAO
+                },
+            )
 
 
 if __name__ == "__main__":

@@ -57,6 +57,11 @@ test('MC22-Z-E: BACBO_BR e identidade conhecida em pre-ativacao', () => {
     );
 
     assert.equal(
+        br.runtime_ativacao_explicita,
+        true
+    );
+
+    assert.equal(
         br.ativo_persistido,
         false
     );
@@ -71,7 +76,7 @@ test('MC22-Z-E: selecionar BACBO_BR continua fail-closed no runtime', () => {
                 erro => (
                     erro
                     && erro.code
-                        === 'MESA_RUNTIME_NAO_HABILITADA'
+                        === 'MESA_RUNTIME_ATIVACAO_EXPLICITA_AUSENTE'
                 )
             );
         }
@@ -117,12 +122,17 @@ test('MC22-Z-E: schema cadastra catalogo e for?a pre-ativacao inativa', () => {
 
     assert.match(
         source,
-        /runtime_habilitado !== true/
+        /runtime_ativacao_explicita !== true/
     );
 
     assert.match(
         source,
         /SET ativo=false/
+    );
+
+    assert.match(
+        source,
+        /MESA_PERSISTIDA_INATIVA/
     );
 });
 

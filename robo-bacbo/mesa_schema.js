@@ -58,6 +58,7 @@ async function prepararSchemaMesas() {
             // permanecer ativa por dado legado/manual.
             if (
                 conhecida.runtime_habilitado !== true
+                && conhecida.runtime_ativacao_explicita !== true
             ) {
                 await conexao.query(
                     `UPDATE mesas
@@ -89,6 +90,17 @@ async function prepararSchemaMesas() {
         ) {
             const erro = new Error(`MC22-B: identidade persistida inconsistente para ${mesa.codigo}`);
             erro.code = 'MESA_IDENTIDADE_INCONSISTENTE';
+            throw erro;
+        }
+
+        if (!Boolean(persistida.ativo)) {
+            const erro = new Error(
+                `MC22-Z-F: mesa persistida inativa: ${mesa.codigo}`
+            );
+
+            erro.code =
+                'MESA_PERSISTIDA_INATIVA';
+
             throw erro;
         }
 
