@@ -3077,14 +3077,24 @@ function nivelHistoricoResultado(galeAtual) {
 }
 
 async function registrarHistoricoResultadoEstrategia(est, tipoResultado, galeAtual, multiplicador, timestampColeta) {
+    const mesaRuntime = obterMesaRuntime();
     const timestampMs = Number(timestampColeta);
     const timestampSegundos = Number.isFinite(timestampMs) && timestampMs > 0
         ? timestampMs / 1000
         : Date.now() / 1000;
 
     await dbPool.query(
-        `INSERT INTO historico_resultados (estrategia_id, tipo_resultado, nivel, multiplicador, data_hora) VALUES (?, ?, ?, ?, FROM_UNIXTIME(?))`,
-        [est.id, tipoResultado, nivelHistoricoResultado(galeAtual), multiplicador || '', timestampSegundos]
+        `INSERT INTO historico_resultados
+            (mesa_id, estrategia_id, tipo_resultado, nivel, multiplicador, data_hora)
+         VALUES (?, ?, ?, ?, ?, FROM_UNIXTIME(?))`,
+        [
+            mesaRuntime.id,
+            est.id,
+            tipoResultado,
+            nivelHistoricoResultado(galeAtual),
+            multiplicador || '',
+            timestampSegundos
+        ]
     );
 }
 
@@ -4644,16 +4654,18 @@ function emitirAlertaWebRobo(tipo, est, estado, extras = {}) {
 async function registrarHistoricoRobosInscritos(est, estado, tipoResultado, galeAtual, multiplicador, timestampColeta) {
     if (!estado || !Array.isArray(estado.robosInscritos) || estado.robosInscritos.length === 0) return;
 
+    const mesaRuntime = obterMesaRuntime();
     const timestampMs = Number(timestampColeta);
     const timestampSegundos = Number.isFinite(timestampMs) && timestampMs > 0
         ? timestampMs / 1000
         : Date.now() / 1000;
 
-    const placeholders = estado.robosInscritos.map(() => '(?,?,?,?,?,?,FROM_UNIXTIME(?))').join(',');
+    const placeholders = estado.robosInscritos.map(() => '(?,?,?,?,?,?,?,FROM_UNIXTIME(?))').join(',');
     const params = [];
 
     for (const robo of estado.robosInscritos) {
         params.push(
+            mesaRuntime.id,
             robo.id,
             est.id,
             tipoResultado,
@@ -4666,7 +4678,7 @@ async function registrarHistoricoRobosInscritos(est, estado, tipoResultado, gale
 
     await dbPool.query(
         `INSERT INTO historico_disparos_robos
-            (robo_id, estrategia_id, tipo_resultado, nivel, multiplicador, estrategia_origem, data_hora)
+            (mesa_id, robo_id, estrategia_id, tipo_resultado, nivel, multiplicador, estrategia_origem, data_hora)
          VALUES ${placeholders}`,
         params
     );
@@ -5425,7 +5437,24 @@ app.post("/receber-sinal", async (req, res) => {
             const timestampGiroAnalitico = Number.isFinite(timestampColetaNumero) && timestampColetaNumero > 0
                 ? timestampColetaNumero
                 : Date.now();
-            const [resultadoInsertGiro] = await dbPool.query('INSERT INTO giros_recentes (resultado, p_d1, p_d2, b_d1, b_d2, numero_empate, multiplicador, id_sessao, data_hora) VALUES (?,?,?,?,?,?,?,?,FROM_UNIXTIME(?))', [vencedor, p1, p2, b1, b2, nEmp, mult, idSessaoContinua, timestampGiroAnalitico / 1000]);
+            const mesaRuntimeGiro = obterMesaRuntime();
+            const [resultadoInsertGiro] = await dbPool.query(
+                `INSERT INTO giros_recentes
+                    (mesa_id, resultado, p_d1, p_d2, b_d1, b_d2, numero_empate, multiplicador, id_sessao, data_hora)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, FROM_UNIXTIME(?))`,
+                [
+                    mesaRuntimeGiro.id,
+                    vencedor,
+                    p1,
+                    p2,
+                    b1,
+                    b2,
+                    nEmp,
+                    mult,
+                    idSessaoContinua,
+                    timestampGiroAnalitico / 1000
+                ]
+            );
             giroIdPersistidoParaIA = Number(resultadoInsertGiro.insertId) || 0;
             historicoGirosAnalitico.push({
                 id: giroIdPersistidoParaIA,
