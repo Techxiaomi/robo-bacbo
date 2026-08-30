@@ -174,7 +174,7 @@ async function prepararBancoDeDados() {
         await dbPool.query(`
             CREATE TABLE IF NOT EXISTS estrategias (
                 id VARCHAR(100) PRIMARY KEY,
-                mesa_id SMALLINT UNSIGNED NOT NULL DEFAULT ${mesaIdSchema},
+                mesa_id SMALLINT UNSIGNED NOT NULL,
                 nome VARCHAR(100),
                 origem VARCHAR(100),
                 padrao TEXT,
@@ -197,7 +197,7 @@ async function prepararBancoDeDados() {
         await dbPool.query(`
             CREATE TABLE IF NOT EXISTS historico_resultados (
                 id INT AUTO_INCREMENT PRIMARY KEY,
-                mesa_id SMALLINT UNSIGNED NOT NULL DEFAULT ${mesaIdSchema},
+                mesa_id SMALLINT UNSIGNED NOT NULL,
                 estrategia_id VARCHAR(100),
                 tipo_resultado VARCHAR(20),
                 nivel VARCHAR(20),
@@ -209,7 +209,7 @@ async function prepararBancoDeDados() {
         await dbPool.query(`
             CREATE TABLE IF NOT EXISTS historico_shadow_ia (
                 id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                mesa_id SMALLINT UNSIGNED NOT NULL DEFAULT ${mesaIdSchema},
+                mesa_id SMALLINT UNSIGNED NOT NULL,
                 estrategia_id VARCHAR(100) NOT NULL,
                 robo_id INT NOT NULL,
                 giro_resultado_id INT NOT NULL,
@@ -226,7 +226,7 @@ async function prepararBancoDeDados() {
         await dbPool.query(`
             CREATE TABLE IF NOT EXISTS giros_recentes (
                 id INT AUTO_INCREMENT PRIMARY KEY,
-                mesa_id SMALLINT UNSIGNED NOT NULL DEFAULT ${mesaIdSchema},
+                mesa_id SMALLINT UNSIGNED NOT NULL,
                 resultado VARCHAR(20),
                 p_d1 INT DEFAULT 0,
                 p_d2 INT DEFAULT 0,
@@ -242,7 +242,7 @@ async function prepararBancoDeDados() {
         await dbPool.query(`
             CREATE TABLE IF NOT EXISTS robos_canais (
                 id INT AUTO_INCREMENT PRIMARY KEY,
-                mesa_id SMALLINT UNSIGNED NOT NULL DEFAULT ${mesaIdSchema},
+                mesa_id SMALLINT UNSIGNED NOT NULL,
                 nome VARCHAR(100),
                 tag_visual VARCHAR(20),
                 cor_hex VARCHAR(10) DEFAULT '#007bff',
@@ -274,7 +274,7 @@ async function prepararBancoDeDados() {
         await dbPool.query(`
             CREATE TABLE IF NOT EXISTS historico_disparos_robos (
                 id INT AUTO_INCREMENT PRIMARY KEY,
-                mesa_id SMALLINT UNSIGNED NOT NULL DEFAULT ${mesaIdSchema},
+                mesa_id SMALLINT UNSIGNED NOT NULL,
                 robo_id INT,
                 estrategia_id VARCHAR(100),
                 tipo_resultado VARCHAR(20),
@@ -289,7 +289,7 @@ async function prepararBancoDeDados() {
         await dbPool.query(`
             CREATE TABLE IF NOT EXISTS auto_traders (
                 id INT AUTO_INCREMENT PRIMARY KEY,
-                mesa_id SMALLINT UNSIGNED NOT NULL DEFAULT ${mesaIdSchema},
+                mesa_id SMALLINT UNSIGNED NOT NULL,
                 nome VARCHAR(100),
                 ativo BOOLEAN DEFAULT false,
                 config_json TEXT,
@@ -313,7 +313,7 @@ async function prepararBancoDeDados() {
         await dbPool.query(`
             CREATE TABLE IF NOT EXISTS auditoria_ordens (
                 id INT AUTO_INCREMENT PRIMARY KEY,
-                mesa_id SMALLINT UNSIGNED NOT NULL DEFAULT ${mesaIdSchema},
+                mesa_id SMALLINT UNSIGNED NOT NULL,
                 trader_id INT,
                 estrategia_id VARCHAR(100) DEFAULT NULL,
                 estrategia_nome VARCHAR(100),

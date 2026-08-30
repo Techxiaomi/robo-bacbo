@@ -252,53 +252,177 @@ async function garantirUnicidadeShadowPorMesa(conexao) {
     };
 }
 
-async function garantirMesaIdTabela(conexao, tabela, mesaId, fase) {
+async function garantirMesaIdTabela(
+    conexao,
+    tabela,
+    mesaId,
+    fase
+) {
     if (!(await tabelaExiste(conexao, tabela))) {
-        // Em instalação totalmente nova, bot2_coletor ainda criará suas tabelas depois
-        // deste bootstrap. Não criamos cópias parciais delas aqui para evitar divergência
-        // de schema. A adaptação canônica das CREATE TABLE virá em checkpoint próprio.
-        console.warn(`⚠️ ${fase} | ${tabela}: tabela ainda ausente; vínculo mesa_id adiado.`);
-        return { tabela, migrada: false, motivo: 'TABELA_AUSENTE' };
+        // Em fresh install, bot2_coletor cria posteriormente
+        // o schema canonico ja neutro por mesa.
+        console.warn(
+            `?? ${fase} | ${tabela}: tabela ainda ausente; ` +
+            `vinculo mesa_id adiado.`
+        );
+
+        return {
+            tabela,
+            migrada: false,
+            motivo: 'TABELA_AUSENTE'
+        };
     }
 
-    const colunaAtual = await obterColunaMesa(conexao, tabela);
+    let colunaAtual =
+        await obterColunaMesa(conexao, tabela);
+
     if (!colunaAtual) {
+        // MC22-Z-B:
+        // Em tabela legada populada, a coluna nasce nullable
+        // apenas durante a janela controlada de backfill.
+        // Nenhum DEFAULT dependente da instancia e criado.
         await conexao.query(
             `ALTER TABLE \`${tabela}\`
-             ADD COLUMN mesa_id SMALLINT UNSIGNED NOT NULL DEFAULT ${mesaId}`
-        );
-    } else {
-        // Recuperação idempotente de eventual execução parcial: primeiro preenche somente
-        // linhas sem dono, nunca sobrescrevendo um mesa_id já existente.
-        await conexao.query(
-            `UPDATE \`${tabela}\` SET mesa_id=? WHERE mesa_id IS NULL`,
-            [mesaId]
+             ADD COLUMN mesa_id SMALLINT UNSIGNED NULL`
         );
 
-        const nullable = String(colunaAtual.IS_NULLABLE || '').toUpperCase() === 'YES';
-        const defaultAtual = Number(colunaAtual.COLUMN_DEFAULT);
-        const tipoAtual = String(colunaAtual.COLUMN_TYPE || '').toLowerCase();
-        const tipoOk = tipoAtual.includes('smallint') && tipoAtual.includes('unsigned');
-        if (nullable || defaultAtual !== mesaId || !tipoOk) {
-            await conexao.query(
-                `ALTER TABLE \`${tabela}\`
-                 MODIFY COLUMN mesa_id SMALLINT UNSIGNED NOT NULL DEFAULT ${mesaId}`
+        colunaAtual =
+            await obterColunaMesa(conexao, tabela);
+
+        if (!colunaAtual) {
+            const erro = new Error(
+                `${fase}: ${tabela} nao criou mesa_id`
             );
+            erro.code = 'MESA_COLUNA_NAO_CRIADA';
+            throw erro;
         }
     }
 
-    const [[validacao]] = await conexao.query(
-        `SELECT COUNT(*) AS sem_mesa
-         FROM \`${tabela}\`
-         WHERE mesa_id IS NULL`
-    );
-    if (Number(validacao?.sem_mesa || 0) !== 0) {
-        const erro = new Error(`${fase}: ${tabela} permaneceu com registros sem mesa_id`);
+    const [[pendentesAntes]] =
+        await conexao.query(
+            `SELECT COUNT(*) AS sem_mesa
+             FROM \`${tabela}\`
+             WHERE mesa_id IS NULL`
+        );
+
+    const totalSemMesaAntes =
+        Math.max(
+            0,
+            Number(pendentesAntes?.sem_mesa) || 0
+        );
+
+    if (totalSemMesaAntes > 0) {
+        // Backfill estritamente legado:
+        // apenas registros ainda sem dono recebem a mesa
+        // que esta executando a migracao.
+        await conexao.query(
+            `UPDATE \`${tabela}\`
+             SET mesa_id=?
+             WHERE mesa_id IS NULL`,
+            [mesaId]
+        );
+    }
+
+    const colunaNormalizacao =
+        await obterColunaMesa(conexao, tabela);
+
+    if (!colunaNormalizacao) {
+        const erro = new Error(
+            `${fase}: ${tabela} perdeu coluna mesa_id`
+        );
+        erro.code = 'MESA_COLUNA_AUSENTE';
+        throw erro;
+    }
+
+    const nullable =
+        String(
+            colunaNormalizacao.IS_NULLABLE || ''
+        ).toUpperCase() === 'YES';
+
+    const defaultPresente =
+        colunaNormalizacao.COLUMN_DEFAULT !== null
+        && colunaNormalizacao.COLUMN_DEFAULT !== undefined;
+
+    const tipoAtual =
+        String(
+            colunaNormalizacao.COLUMN_TYPE || ''
+        ).toLowerCase();
+
+    const tipoOk =
+        tipoAtual.includes('smallint')
+        && tipoAtual.includes('unsigned');
+
+    if (
+        nullable
+        || defaultPresente
+        || !tipoOk
+    ) {
+        // Estado canonico compartilhado:
+        // NOT NULL e SEM DEFAULT de mesa.
+        await conexao.query(
+            `ALTER TABLE \`${tabela}\`
+             MODIFY COLUMN mesa_id
+             SMALLINT UNSIGNED NOT NULL`
+        );
+    }
+
+    const colunaFinal =
+        await obterColunaMesa(conexao, tabela);
+
+    const finalNullable =
+        String(
+            colunaFinal?.IS_NULLABLE || ''
+        ).toUpperCase() === 'YES';
+
+    const finalDefaultPresente =
+        colunaFinal?.COLUMN_DEFAULT !== null
+        && colunaFinal?.COLUMN_DEFAULT !== undefined;
+
+    const finalTipo =
+        String(
+            colunaFinal?.COLUMN_TYPE || ''
+        ).toLowerCase();
+
+    const finalTipoOk =
+        finalTipo.includes('smallint')
+        && finalTipo.includes('unsigned');
+
+    if (
+        !colunaFinal
+        || finalNullable
+        || finalDefaultPresente
+        || !finalTipoOk
+    ) {
+        const erro = new Error(
+            `${fase}: ${tabela} permaneceu com ` +
+            `schema mesa_id nao neutro`
+        );
+        erro.code = 'MESA_SCHEMA_NAO_NEUTRO';
+        throw erro;
+    }
+
+    const [[validacao]] =
+        await conexao.query(
+            `SELECT COUNT(*) AS sem_mesa
+             FROM \`${tabela}\`
+             WHERE mesa_id IS NULL`
+        );
+
+    if (
+        Number(validacao?.sem_mesa || 0) !== 0
+    ) {
+        const erro = new Error(
+            `${fase}: ${tabela} permaneceu ` +
+            `com registros sem mesa_id`
+        );
         erro.code = 'MESA_BACKFILL_INCOMPLETO';
         throw erro;
     }
 
-    return { tabela, migrada: true };
+    return {
+        tabela,
+        migrada: true
+    };
 }
 
 async function prepararEscopoHistoricoMesaAtual(mesaPersistida) {
