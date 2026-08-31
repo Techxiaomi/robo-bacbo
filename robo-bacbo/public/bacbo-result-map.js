@@ -12,8 +12,8 @@
 
     // MC28: bead plate possui 6 linhas. Todo limite visual deve
     // representar colunas completas para evitar um buraco permanente
-    // na última coluna quando a janela visual é mantida fixa.
-    // A preferência legada 1000 migra para 1002 = 167 x 6.
+    // na ultima coluna quando a janela visual e mantida fixa.
+    // A preferencia legada 1000 migra para 1002 = 167 x 6.
     const limiteSalvo = Number(
         localStorage.getItem(STORAGE_LIMIT)
     );
@@ -250,14 +250,14 @@
         root.classList.add('bacbo-map-root');
         root.innerHTML = `
             <div class="bacbo-map-toolbar">
-                <div class="bacbo-map-title"><span>â–¦</span><span>Mapa Bac Bo</span><span class="bacbo-map-live-dot" title="AtualizaÃ§Ã£o live"></span></div>
+                <div class="bacbo-map-title"><span>▦</span><span>Mapa Bac Bo</span><span class="bacbo-map-live-dot" title="Atualização live"></span></div>
                 <div class="bacbo-map-controls">
                     <div class="bacbo-map-segment" role="group" aria-label="Modo do mapa">
                         <button type="button" class="bacbo-map-mode" data-mode="letters">P/B/T</button>
-                        <button type="button" class="bacbo-map-mode" data-mode="numbers">1â€“12</button>
+                        <button type="button" class="bacbo-map-mode" data-mode="numbers">1–12</button>
                     </div>
-                    <label class="bacbo-map-limit-label">Ãšltimos
-                        <select class="bacbo-map-limit" aria-label="Quantidade de resultados visÃ­veis">
+                    <label class="bacbo-map-limit-label">Últimos
+                        <select class="bacbo-map-limit" aria-label="Quantidade de resultados visíveis">
                             ${LIMITS.map(limite => `<option value="${limite}">${limite}</option>`).join('')}
                         </select>
                     </label>
@@ -374,7 +374,7 @@
         if (status === 'loss') cell.classList.add('map-loss');
 
         cell.textContent = state.mode === 'numbers'
-            ? (Number.isFinite(Number(item._sum)) ? String(Number(item._sum)) : 'â€”')
+            ? (Number.isFinite(Number(item._sum)) ? String(Number(item._sum)) : '—')
             : letraResultado(item.resultado);
 
         cell.addEventListener('mouseenter', event => showTooltip(event, item));
@@ -403,7 +403,7 @@
         grid.innerHTML = '';
 
         if (exibir.length === 0) {
-            grid.innerHTML = '<div class="bacbo-map-empty">Nenhum resultado disponÃ­vel.</div>';
+            grid.innerHTML = '<div class="bacbo-map-empty">Nenhum resultado disponível.</div>';
             return true;
         }
 

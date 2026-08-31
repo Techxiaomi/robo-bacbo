@@ -77,3 +77,37 @@ test('MC28: renderer continua vertical em seis linhas', () => {
         /grid-auto-columns:28px/
     );
 });
+
+test('MC28: preserva UTF-8 original da interface do mapa', () => {
+    const esperados = [
+        '\u25a6',
+        'Atualiza\u00e7\u00e3o live',
+        '1\u201312',
+        '\u00daltimos',
+        'resultados vis\u00edveis',
+        '\u2014',
+        'resultado dispon\u00edvel'
+    ];
+
+    for (const esperado of esperados) {
+        assert.ok(
+            source.includes(esperado),
+            `texto UTF-8 ausente: ${esperado}`
+        );
+    }
+
+    const corrompidos = [
+        'Atualiza\u00c3',
+        '1\u00e2',
+        '\u00c3\u0161ltimos',
+        'vis\u00c3'
+    ];
+
+    for (const corrompido of corrompidos) {
+        assert.equal(
+            source.includes(corrompido),
+            false,
+            `mojibake encontrado: ${corrompido}`
+        );
+    }
+});
