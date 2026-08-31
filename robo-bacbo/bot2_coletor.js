@@ -5221,7 +5221,7 @@ function montarMensagemTelegram(tipo, est, estado, robo, extras = {}) {
     // MC9: todo GREEN carrega somente a etapa em que foi concluído.
     // A semântica visual "Entrada: Principal/Gale N" pertence ao presenter.
     if (tipo === 'GREEN') {
-        linhas.push(`🏁 Resultado: ${rotuloNivelTelegram(estado.galeAtual)}`);
+        linhas.push(`🏁 Resultado: ${rotuloNivelTelegram(extras.nivel_resultado ?? estado.galeAtual)}`);
     }
 
     if (['ENTRADA', 'GREEN', 'RED'].includes(tipo)) {
@@ -6349,7 +6349,9 @@ app.post("/receber-sinal", async (req, res) => {
                         console.error(`Falha ao atualizar proteção dos robôs da estratégia ${est.id}:`, e.message);
                     }
 
+                    const nivelResultadoTelegram = st.galeAtual;
                     const extrasFinal = {
+                        nivel_resultado: nivelResultadoTelegram,
                         resultado: isTie ? 'TIE' : 'GREEN',
                         multiplicador: isTie ? mult : ''
                     };
