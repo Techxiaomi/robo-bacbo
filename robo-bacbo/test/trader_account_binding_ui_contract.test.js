@@ -27,6 +27,16 @@ test('formulario exige conta e injeta account_ids no config salvo', () => {
     assert.match(source, /payload\.accounts/);
 });
 
+test('seletor de contas permanece compacto e escalavel', () => {
+    const source = read('public/trader-account-binding-ui.js');
+    assert.match(source, /data-at-account-toggle/);
+    assert.match(source, /data-at-account-count/);
+    assert.match(source, /data-at-account-search/);
+    assert.match(source, /max-height:210px/);
+    assert.match(source, /overflow-y:auto/);
+    assert.match(source, /contas selecionadas/);
+});
+
 test('catalogo seguro concentra filtro de adapter e mesa no backend', () => {
     const source = read('trader_account_catalog.js');
     assert.match(source, /brasil-da-sorte/);
