@@ -62,8 +62,10 @@ def main():
     robo.URL_CASSINO = game_url
     robo.URL_HOME_CASSINO = home_url
 
+    print("DRY_RUN_BROWSER_MODE=HEADED")
+
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True, args=BROWSER_ARGS)
+        browser = playwright.chromium.launch(headless=False, args=BROWSER_ARGS)
         adapter = BrasilDaSorteAdapter(browser=browser, config=config)
 
         try:
