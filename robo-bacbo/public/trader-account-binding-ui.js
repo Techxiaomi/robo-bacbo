@@ -74,6 +74,17 @@
         return STATE.eligibleAccounts;
     }
 
+    async function loadTrader(id) {
+        const response = await STATE.originalFetch('/api/auto-traders', {
+            cache: 'no-store',
+            credentials: 'same-origin'
+        });
+        if (!response.ok) throw new Error(`TRADER_ACCOUNT_UI_TRADERS_HTTP_${response.status}`);
+        const traders = await response.json();
+        if (!Array.isArray(traders)) throw new Error('TRADER_ACCOUNT_UI_TRADERS_INVALID');
+        return traders.find(item => Number(item?.id) === Number(id)) || null;
+    }
+
     function ensureContainer() {
         let root = document.getElementById('at-account-bindings');
         if (root) return root;
@@ -143,11 +154,6 @@
         }
     }
 
-    function traderById(id) {
-        const items = Array.isArray(window.autoTradersGlobais) ? window.autoTradersGlobais : [];
-        return items.find(item => Number(item?.id) === Number(id)) || null;
-    }
-
     function installFetchInterceptor() {
         if (STATE.originalFetch) return;
         STATE.originalFetch = window.fetch.bind(window);
@@ -195,9 +201,14 @@
         if (typeof window.prepararEdicaoAutoTrader === 'function' && !STATE.originalEdit) {
             STATE.originalEdit = window.prepararEdicaoAutoTrader;
             window.prepararEdicaoAutoTrader = async function(id, ...args) {
-                const trader = traderById(id);
                 const result = await STATE.originalEdit.call(this, id, ...args);
-                await prepareAccounts(trader?.config?.account_ids || []);
+                try {
+                    const trader = await loadTrader(id);
+                    await prepareAccounts(trader?.config?.account_ids || []);
+                } catch (error) {
+                    console.error('Falha ao carregar vínculo do Auto-Trader em edição:', error);
+                    await prepareAccounts([]);
+                }
                 return result;
             };
         }
