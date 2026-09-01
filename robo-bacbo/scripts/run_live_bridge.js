@@ -17,6 +17,13 @@ const CONTROLLED_MAX_EXPOSURE_CAP = 5;
 let activePythonControl = null;
 let pendingExternalShutdownReason = null;
 
+function sendTelemetry(status, extra = {}) {
+    if (!process.connected || typeof process.send !== 'function') return;
+    try {
+        process.send({ type: 'telemetry', status, ...extra });
+    } catch (_) {}
+}
+
 function selectedTableKey() {
     const tableKey = String(process.argv[2] || DEFAULT_TABLE_KEY).trim();
     if (!SUPPORTED_TABLE_KEYS.has(tableKey)) {
@@ -114,6 +121,7 @@ function sanitizedPythonEnv() {
             env[name] = process.env[name];
         }
     }
+    env.PYTHONUNBUFFERED = '1';
     return env;
 }
 
@@ -208,27 +216,58 @@ function requestExternalShutdown(reason) {
     pendingExternalShutdownReason = normalizedReason;
 }
 
+function inspectPythonLine(line) {
+    const text = String(line || '').trim();
+    if (!text) return;
+    if (text === 'LIVE_BRIDGE_READY=true') {
+        sendTelemetry('READY');
+        return;
+    }
+    if (
+        text.startsWith('LIVE_BRIDGE_WORKER_ERROR=') ||
+        text.startsWith('LIVE_BRIDGE_SHUTDOWN_INCOMPLETE=true') ||
+        text.startsWith('LIVE_BRIDGE_BROWSER_CLOSE_FAILED:')
+    ) {
+        sendTelemetry('ERROR', { error: text.slice(0, 1000) });
+    }
+}
+
 function runPython({ pythonExecutable, pythonScript, config, cwd }) {
     return new Promise((resolve, reject) => {
         const child = spawn(pythonExecutable, [pythonScript], {
             cwd,
             env: sanitizedPythonEnv(),
-            stdio: ['pipe', 'inherit', 'inherit'],
+            stdio: ['pipe', 'pipe', 'inherit'],
             windowsHide: false
         });
 
         let settled = false;
         let shutdownRequested = false;
+        let stdoutBuffer = '';
+
+        const consumeStdout = chunk => {
+            process.stdout.write(chunk);
+            stdoutBuffer += chunk.toString('utf8');
+            let newlineIndex = stdoutBuffer.indexOf('\n');
+            while (newlineIndex >= 0) {
+                const line = stdoutBuffer.slice(0, newlineIndex).replace(/\r$/, '');
+                stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
+                inspectPythonLine(line);
+                newlineIndex = stdoutBuffer.indexOf('\n');
+            }
+        };
 
         const finish = callback => {
             if (settled) return;
             settled = true;
             activePythonControl = null;
+            if (stdoutBuffer.trim()) inspectPythonLine(stdoutBuffer);
             try { child.stdin.end(); } catch (_) {}
             callback();
         };
 
         const fail = error => {
+            sendTelemetry('ERROR', { error: String(error?.message || error).slice(0, 1000) });
             finish(() => reject(error));
         };
 
@@ -247,6 +286,8 @@ function runPython({ pythonExecutable, pythonScript, config, cwd }) {
 
         activePythonControl = Object.freeze({ requestShutdown });
 
+        child.stdout.on('data', consumeStdout);
+        child.stdout.once('error', fail);
         child.once('error', fail);
         child.once('exit', (code, signal) => {
             finish(() => {
@@ -332,6 +373,8 @@ process.on('message', message => {
 });
 
 main().catch(error => {
-    console.error('LIVE_BRIDGE_ORCHESTRATOR_FAILED:', error?.message || error);
+    const text = String(error?.message || error);
+    sendTelemetry('ERROR', { error: text.slice(0, 1000) });
+    console.error('LIVE_BRIDGE_ORCHESTRATOR_FAILED:', text);
     process.exitCode = 1;
 });
