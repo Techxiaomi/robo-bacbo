@@ -43,6 +43,26 @@ test("classes HTTP e resumo de latencia sao deterministas", () => {
     });
 });
 
+test("namespace de worker produz arquivo exclusivo sem depender do sufixo da mesa", () => {
+    const config = metrics.configMetricasOperacionais({
+        baseDir: "D:/Projetos/Bacbo",
+        env: {
+            BACBO_MESA_CODIGO: "BACBO_BR",
+            OPERATIONS_METRICS_DIR: "logs",
+            OPERATIONS_METRICS_NAMESPACE: "account-4-bacbo_br"
+        }
+    });
+
+    assert.equal(
+        path.basename(config.filePath),
+        "backend.operations.account-4-bacbo_br.json"
+    );
+    assert.equal(
+        metrics.normalizarNamespaceMetricas(" Account 4 / BACBO_BR "),
+        "account-4-bacbo_br"
+    );
+});
+
 test("registro HTTP agrega status e rota normalizada sem cardinalidade por ID", () => {
     metrics.resetMetricasOperacionaisParaTeste(Date.parse("2026-08-17T20:00:00.000Z"));
 
