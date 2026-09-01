@@ -7,7 +7,7 @@ const {
     normalizeSignal,
     buildTargetIndex,
     commandForTarget,
-    SignalDedup
+    RedisSignalDedup
 } = require('../scripts/signal_router');
 
 test('normaliza sync_balance global para uma mesa', () => {
@@ -93,9 +93,30 @@ test('gera comando individualizado por sessao', () => {
     });
 });
 
-test('dedup rejeita repeticao do mesmo signal_id dentro do TTL', () => {
-    const dedup = new SignalDedup(60000);
-    assert.equal(dedup.seen('sync-003'), false);
-    assert.equal(dedup.seen('sync-003'), true);
-    assert.equal(dedup.seen('sync-004'), false);
+test('dedup redis usa SET NX PX e rejeita signal_id ja reivindicado', async () => {
+    const calls = [];
+    let first = true;
+    const client = {
+        async set(key, value, options) {
+            calls.push({ key, value, options });
+            if (first) {
+                first = false;
+                return 'OK';
+            }
+            return null;
+        }
+    };
+
+    const dedup = new RedisSignalDedup({
+        client,
+        ttlMs: 60000,
+        prefix: 'signal_router:dedup:test'
+    });
+
+    assert.equal(await dedup.claim('sync-003'), true);
+    assert.equal(await dedup.claim('sync-003'), false);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].key, 'signal_router:dedup:test:sync-003');
+    assert.equal(calls[0].options.NX, true);
+    assert.equal(calls[0].options.PX, 60000);
 });
