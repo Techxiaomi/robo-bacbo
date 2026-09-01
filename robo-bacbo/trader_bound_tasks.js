@@ -73,12 +73,15 @@ async function discoverBoundTasks(dbPool, tableFilter = null) {
     const [traders] = await dbPool.query(
         `SELECT at.id AS trader_id,
                 at.config_json,
+                at.ativo,
+                at.status_operacao,
                 LOWER(m.codigo) AS table_key
          FROM auto_traders at
          INNER JOIN mesas m
             ON m.id = at.mesa_id
            AND m.ativo = true
          WHERE at.ativo = true
+            OR (at.ativo = false AND at.status_operacao = 'ATIVANDO')
          ORDER BY at.id`
     );
 
