@@ -57,8 +57,6 @@ def main():
     if table_key != "bacbo_br":
         raise RuntimeError("DRY_RUN_TABLE_UNSUPPORTED")
 
-    # Ajuste somente do contexto read-only deste processo. Nenhuma função
-    # financeira é importada nominalmente ou chamada pelo dry-run.
     robo.URL_CASSINO = game_url
     robo.URL_HOME_CASSINO = home_url
 
@@ -74,7 +72,7 @@ def main():
             page = adapter.get_game_page()
 
             url_ok = robo.pagina_na_rota_da_mesa(page)
-            evolution_found = robo.mesa_evolution_pronta(page)
+            evolution_found = robo.aguardar_mesa_evolution(page, 30000)
             operational_frame = robo.localizar_frame_mesa(page) is not None
 
             print(f"DRY_RUN_URL_OK={url_ok}")
