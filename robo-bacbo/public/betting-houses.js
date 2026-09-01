@@ -1,7 +1,12 @@
 (() => {
     'use strict';
 
-    const state = { houses: [], editingHouse: null, tableDrafts: [] };
+    const state = {
+        houses: [],
+        editingHouse: null,
+        tableDrafts: [],
+        mode: 'account'
+    };
     const $ = id => document.getElementById(id);
 
     function esc(value) {
@@ -36,10 +41,12 @@
             const payload = await api(`/api/betting-houses${includeDisabled}`);
             state.houses = Array.isArray(payload.houses) ? payload.houses : [];
             renderHouses();
-            setStatus($('status-global'), `${state.houses.length} casa(s) carregada(s).`, 'ok');
+            renderSourceOptions();
+            setStatus($('status-global'), `${state.houses.length} conta(s) carregada(s).`, 'ok');
         } catch (error) {
             state.houses = [];
             renderHouses();
+            renderSourceOptions();
             setStatus($('status-global'), `Falha ao carregar: ${error.message}`, 'erro');
         }
     }
@@ -47,7 +54,7 @@
     function renderHouses() {
         const root = $('lista-casas');
         if (state.houses.length === 0) {
-            root.innerHTML = '<div class="vazio">Nenhuma casa cadastrada para o filtro atual.</div>';
+            root.innerHTML = '<div class="vazio">Nenhuma conta cadastrada para o filtro atual.</div>';
             return;
         }
         root.innerHTML = state.houses.map(house => {
@@ -55,14 +62,61 @@
             const activeTables = tables.filter(table => table.enabled === true).length;
             return `<article class="card ${house.enabled ? '' : 'inativo'}">
                 <div class="card-topo">
-                    <div><h2>${esc(house.name)}</h2><div class="meta">Adapter: ${esc(house.adapter_key)}</div><div class="meta">${esc(house.home_url)}</div></div>
+                    <div><h2>${esc(house.name)}</h2><div class="meta">Conta #${Number(house.id)} · Adapter: ${esc(house.adapter_key)}</div></div>
                     <span class="badge ${house.enabled ? 'ativo' : 'inativo'}">${house.enabled ? '● Ativa' : '● Inativa'}</span>
                 </div>
                 <div class="meta" style="margin-top:8px;">Usuário: ${esc(house.username || 'não informado')} · Senha: ${house.has_password ? 'configurada' : 'não configurada'}</div>
-                <div class="mesas-resumo"><div class="meta" style="margin-bottom:5px;">Mesas: ${activeTables} ativa(s) / ${tables.length} cadastrada(s)</div>${tables.map(table => `<div class="mesa-linha"><div><strong>${esc(table.display_name)}</strong><div class="meta">${esc(table.table_key)}</div></div><span class="badge ${table.enabled ? 'ativo' : 'inativo'}">${table.enabled ? 'Ativa' : 'Inativa'}</span></div>`).join('') || '<div class="meta">Nenhuma mesa cadastrada.</div>'}</div>
+                <div class="mesas-resumo"><div class="meta" style="margin-bottom:5px;">Mesas herdadas/homologadas: ${activeTables} ativa(s) / ${tables.length} cadastrada(s)</div>${tables.map(table => `<div class="mesa-linha"><div><strong>${esc(table.display_name)}</strong><div class="meta">${esc(table.table_key)}</div></div><span class="badge ${table.enabled ? 'ativo' : 'inativo'}">${table.enabled ? 'Ativa' : 'Inativa'}</span></div>`).join('') || '<div class="meta">Nenhuma mesa cadastrada.</div>'}</div>
                 <div class="card-acoes"><button class="btn pequeno secundario" type="button" data-edit-house="${Number(house.id)}">Editar</button>${house.enabled ? `<button class="btn pequeno perigo" type="button" data-disable-house="${Number(house.id)}">Desativar</button>` : ''}</div>
             </article>`;
         }).join('');
+    }
+
+    function homologatedSources() {
+        const byAdapter = new Map();
+        for (const house of state.houses) {
+            if (house.enabled !== true) continue;
+            const adapterKey = String(house.adapter_key || '').trim();
+            if (!adapterKey) continue;
+            const current = byAdapter.get(adapterKey);
+            if (!current || Number(house.id) < Number(current.id)) {
+                byAdapter.set(adapterKey, house);
+            }
+        }
+        return Array.from(byAdapter.values()).sort((a, b) => String(a.name).localeCompare(String(b.name), 'pt-BR'));
+    }
+
+    function renderSourceOptions() {
+        const select = $('source-house-id');
+        if (!select) return;
+        const previous = String(select.value || '');
+        const sources = homologatedSources();
+        select.innerHTML = sources.length
+            ? sources.map(house => `<option value="${Number(house.id)}">${esc(house.name)} (${esc(house.adapter_key)})</option>`).join('')
+            : '<option value="">Nenhuma casa homologada disponível</option>';
+        if (previous && sources.some(house => String(house.id) === previous)) {
+            select.value = previous;
+        }
+        updateSourceSummary();
+    }
+
+    function selectedSource() {
+        const id = Number($('source-house-id').value || 0);
+        return homologatedSources().find(house => Number(house.id) === id) || null;
+    }
+
+    function updateSourceSummary() {
+        const source = selectedSource();
+        $('source-house-adapter-summary').textContent = source
+            ? `Adapter: ${source.adapter_key}`
+            : 'Selecione uma casa homologada.';
+        $('source-house-url-summary').textContent = source
+            ? `URL principal: ${source.home_url}`
+            : '';
+        const tables = source && Array.isArray(source.tables) ? source.tables : [];
+        $('source-house-tables-summary').textContent = source
+            ? `Mesas: ${tables.map(table => `${table.display_name} [${table.table_key}]`).join(' · ') || 'nenhuma'}`
+            : '';
     }
 
     function blankTable() {
@@ -103,11 +157,50 @@
         setStatus($('status-modal'), '');
     }
 
-    function openCreate() {
+    function configureMode(mode) {
+        state.mode = mode;
+        const accountMode = mode === 'account';
+        const technicalMode = mode === 'technical' || mode === 'edit';
+
+        $('source-house-group').classList.toggle('oculto', !accountMode);
+        $('source-house-summary').classList.toggle('oculto', !accountMode);
+        $('technical-house-fields').classList.toggle('oculto', !technicalMode);
+        $('tables-section').classList.toggle('oculto', !technicalMode);
+        $('house-adapter-key').required = technicalMode;
+        $('house-home-url').required = technicalMode;
+        $('house-username').required = accountMode;
+        $('house-password').required = accountMode;
+
+        $('house-name-label').textContent = accountMode ? 'Nome / apelido da conta' : 'Nome';
+        $('house-name').placeholder = accountMode ? 'Ex.: Brasil da Sorte - Conta 2' : 'Ex.: Brasil da Sorte';
+        renderSourceOptions();
+    }
+
+    function openCreateAccount() {
         resetForm();
-        $('titulo-modal-casa').textContent = 'Nova casa';
-        $('subtitulo-modal-casa').textContent = 'Cadastre a casa e suas mesas.';
-        $('senha-ajuda').textContent = 'Preencha para definir a senha.';
+        configureMode('account');
+        $('titulo-modal-casa').textContent = 'Nova conta';
+        $('subtitulo-modal-casa').textContent = 'Escolha a casa homologada. URLs, Adapter e mesas serão reaproveitados automaticamente.';
+        $('senha-ajuda').textContent = 'Informe a senha desta nova conta.';
+        const source = selectedSource();
+        if (source) {
+            $('house-name').value = `${source.name} - Conta nova`;
+            $('btn-salvar').disabled = false;
+        } else {
+            $('btn-salvar').disabled = true;
+            setStatus($('status-modal'), 'Nenhuma casa homologada disponível. Homologue uma casa primeiro.', 'erro');
+        }
+        $('modal-casa').classList.add('aberto');
+        $('house-name').focus();
+    }
+
+    function openCreateTechnical() {
+        resetForm();
+        configureMode('technical');
+        $('titulo-modal-casa').textContent = 'Homologar nova casa';
+        $('subtitulo-modal-casa').textContent = 'Configuração técnica feita uma única vez: Adapter, URL principal e mesas.';
+        $('senha-ajuda').textContent = 'Opcional nesta etapa técnica; uma conta pode ser cadastrada depois.';
+        $('btn-salvar').disabled = false;
         $('modal-casa').classList.add('aberto');
         $('house-name').focus();
     }
@@ -117,6 +210,8 @@
         try {
             const payload = await api(`/api/betting-houses/${id}`);
             const house = payload.house;
+            resetForm();
+            configureMode('edit');
             state.editingHouse = house;
             $('house-id').value = house.id;
             $('house-name').value = house.name || '';
@@ -125,9 +220,11 @@
             $('house-username').value = house.username || '';
             $('house-password').value = '';
             $('house-enabled').checked = house.enabled === true;
+            $('house-password').required = false;
+            $('house-username').required = false;
             state.tableDrafts = (Array.isArray(house.tables) ? house.tables : []).map(table => ({ ...table, isNew: false }));
             $('titulo-modal-casa').textContent = `Editar: ${house.name}`;
-            $('subtitulo-modal-casa').textContent = 'Altere os dados gerais e gerencie as mesas vinculadas.';
+            $('subtitulo-modal-casa').textContent = 'Credenciais e configuração técnica deste registro.';
             $('senha-ajuda').textContent = house.has_password ? 'Senha já configurada. Deixe vazio para manter a senha atual.' : 'Nenhuma senha configurada. Preencha para definir.';
             updateEnabledLabel();
             renderTableEditors();
@@ -164,19 +261,63 @@
         }
     }
 
+    async function createInheritedAccount() {
+        const sourceId = Number($('source-house-id').value || 0);
+        if (!sourceId) throw new Error('Selecione uma casa homologada.');
+
+        const sourcePayload = await api(`/api/betting-houses/${sourceId}`);
+        const source = sourcePayload.house;
+        const tables = Array.isArray(source.tables) ? source.tables : [];
+        if (tables.length === 0) {
+            throw new Error('A casa homologada não possui mesas para herdar.');
+        }
+
+        const payload = {
+            name: $('house-name').value.trim(),
+            adapter_key: source.adapter_key,
+            home_url: source.home_url,
+            username: $('house-username').value.trim(),
+            password: $('house-password').value,
+            enabled: $('house-enabled').checked,
+            tables: tables.map(table => ({
+                table_key: String(table.table_key || '').trim(),
+                display_name: String(table.display_name || '').trim(),
+                game_url: String(table.game_url || '').trim(),
+                enabled: table.enabled === true
+            }))
+        };
+        if (source.session_state_file) {
+            payload.session_state_file = source.session_state_file;
+        }
+
+        return (await api('/api/betting-houses', {
+            method: 'POST',
+            body: JSON.stringify(payload)
+        })).house;
+    }
+
     async function saveHouse(event) {
         event.preventDefault();
         setStatus($('status-modal'), 'Salvando...');
         $('btn-salvar').disabled = true;
         try {
-            validateDraftTables();
             const id = Number($('house-id').value || 0);
             let house;
-            if (!id) {
+
+            if (!id && state.mode === 'account') {
+                house = await createInheritedAccount();
+            } else if (!id) {
+                validateDraftTables();
                 const payload = housePayload();
-                payload.tables = state.tableDrafts.filter(t => t.enabled !== false).map(t => ({ table_key:t.table_key.trim(), display_name:t.display_name.trim(), game_url:t.game_url.trim(), enabled:t.enabled !== false }));
+                payload.tables = state.tableDrafts.filter(t => t.enabled !== false).map(t => ({
+                    table_key: t.table_key.trim(),
+                    display_name: t.display_name.trim(),
+                    game_url: t.game_url.trim(),
+                    enabled: t.enabled !== false
+                }));
                 house = (await api('/api/betting-houses', { method:'POST', body:JSON.stringify(payload) })).house;
             } else {
+                validateDraftTables();
                 house = (await api(`/api/betting-houses/${id}`, { method:'PUT', body:JSON.stringify(housePayload()) })).house;
                 for (const table of state.tableDrafts) {
                     if (table.id) {
@@ -186,6 +327,7 @@
                     }
                 }
             }
+
             setStatus($('status-modal'), `Cadastro ${house?.name || ''} salvo.`, 'ok');
             await loadHouses();
             closeModal();
@@ -198,7 +340,7 @@
 
     async function disableHouse(id) {
         const house = state.houses.find(item => Number(item.id) === Number(id));
-        if (!house || !confirm(`Desativar a casa "${house.name}"?`)) return;
+        if (!house || !confirm(`Desativar a conta "${house.name}"?`)) return;
         try {
             await api(`/api/betting-houses/${id}`, { method:'DELETE' });
             await loadHouses();
@@ -208,12 +350,14 @@
     }
 
     function bind() {
-        $('btn-nova-casa').addEventListener('click', openCreate);
+        $('btn-nova-conta').addEventListener('click', openCreateAccount);
+        $('btn-nova-casa').addEventListener('click', openCreateTechnical);
         $('btn-fechar-modal').addEventListener('click', closeModal);
         $('btn-cancelar').addEventListener('click', closeModal);
         $('form-casa').addEventListener('submit', saveHouse);
         $('mostrar-inativas').addEventListener('change', loadHouses);
         $('house-enabled').addEventListener('change', updateEnabledLabel);
+        $('source-house-id').addEventListener('change', updateSourceSummary);
         $('btn-adicionar-mesa').addEventListener('click', () => { state.tableDrafts.push(blankTable()); renderTableEditors(); });
         $('lista-casas').addEventListener('click', event => {
             const edit = event.target.closest('[data-edit-house]');
