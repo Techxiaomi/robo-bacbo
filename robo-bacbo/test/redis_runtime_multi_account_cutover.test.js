@@ -38,6 +38,13 @@ test('callbacks redis de resultado sao fail-safe e nao deixam rejection escapar'
     assert.match(source, /encaminharBetResult\(dados\)\.catch\(erro =>/);
 });
 
+test('resultado sintetico de homologacao nao e entregue ao executor-status', () => {
+    assert.match(source, /if \(dados\.simulation === true\)/);
+    assert.match(source, /MULTI-ACCOUNT SIMULATION/);
+    assert.match(source, /executor_status_delivery=skipped/);
+    assert.match(source, /return true;/);
+});
+
 test('rota legada permanece apenas como rollback quando cutover estiver desligado', () => {
     assert.match(source, /if \(multiAccountRouterEnabled\(\)\)/);
     assert.match(source, /publicarViaRouterMultiConta/);
