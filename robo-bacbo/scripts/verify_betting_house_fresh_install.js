@@ -18,10 +18,13 @@ function quoteIdentifier(value) {
 }
 
 function namesFor(prefix) {
+    const houses = `${prefix}_betting_houses`;
     return Object.freeze({
-        houses: `${prefix}_betting_houses`,
+        houses,
         tables: `${prefix}_betting_house_tables`,
-        foreignKey: `${prefix}_fk_house`
+        foreignKey: `${prefix}_fk_house`,
+        adapterIndex: `idx_${houses}_adapter_key`,
+        legacyUniqueIndex: `uq_${houses}_adapter_key`
     });
 }
 
@@ -115,12 +118,12 @@ async function requireAdapterIndexes(connection, schema, names) {
          FROM information_schema.statistics
          WHERE table_schema = ?
            AND table_name = ?
-           AND index_name IN ('idx_betting_houses_adapter_key', 'uq_betting_houses_adapter_key')`,
-        [schema, names.houses]
+           AND index_name IN (?, ?)`,
+        [schema, names.houses, names.adapterIndex, names.legacyUniqueIndex]
     );
 
-    const normal = rows.find(row => row.index_name === 'idx_betting_houses_adapter_key');
-    const legacyUnique = rows.find(row => row.index_name === 'uq_betting_houses_adapter_key');
+    const normal = rows.find(row => row.index_name === names.adapterIndex);
+    const legacyUnique = rows.find(row => row.index_name === names.legacyUniqueIndex);
 
     if (!normal || Number(normal.non_unique) !== 1) {
         throw new Error('VERIFY_ADAPTER_INDEX_MISSING_OR_UNIQUE');
