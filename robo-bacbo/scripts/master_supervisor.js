@@ -12,7 +12,8 @@ const DEFAULT_STAGGER_MS = 3000;
 const DEFAULT_BACKOFF_BASE_MS = 2000;
 const DEFAULT_BACKOFF_MAX_MS = 60000;
 const DEFAULT_STABLE_WINDOW_MS = 60000;
-const SHUTDOWN_GRACE_MS = 15000;
+const DEFAULT_RECONCILE_INTERVAL_MS = 15000;
+const CHILD_GRACEFUL_STOP_TIMEOUT_MS = 15000;
 
 function positiveIntEnv(name, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
     const raw = String(process.env[name] || '').trim();
@@ -28,8 +29,7 @@ function optionalTableFilter() {
     const raw = String(process.env.MASTER_SUPERVISOR_TABLE_KEYS || '').trim();
     if (!raw) return null;
     const values = raw.split(',').map(item => item.trim()).filter(Boolean);
-    if (values.length === 0) return null;
-    return new Set(values);
+    return values.length ? new Set(values) : null;
 }
 
 function createDbPool() {
@@ -103,17 +103,34 @@ class MasterSupervisor {
         if (this.entries.has(task.id)) {
             throw new Error(`MASTER_SUPERVISOR_DUPLICATE_TASK: ${task.id}`);
         }
-        this.entries.set(task.id, {
+        const entry = {
             task,
+            desired: true,
             child: null,
             restartCount: 0,
             startedAt: 0,
-            restartTimer: null
-        });
+            restartTimer: null,
+            forceStopTimer: null,
+            intentionalStopReason: null
+        };
+        this.entries.set(task.id, entry);
+        return entry;
+    }
+
+    cancelRestart(entry) {
+        if (!entry.restartTimer) return;
+        clearTimeout(entry.restartTimer);
+        entry.restartTimer = null;
+    }
+
+    cancelForceStop(entry) {
+        if (!entry.forceStopTimer) return;
+        clearTimeout(entry.forceStopTimer);
+        entry.forceStopTimer = null;
     }
 
     scheduleRestart(entry, code, signal) {
-        if (this.shuttingDown || entry.restartTimer) return;
+        if (this.shuttingDown || !entry.desired || entry.restartTimer || entry.intentionalStopReason) return;
 
         const runtimeMs = Math.max(0, Date.now() - entry.startedAt);
         if (runtimeMs >= this.stableWindowMs) {
@@ -139,13 +156,13 @@ class MasterSupervisor {
     }
 
     spawnTask(entry) {
-        if (this.shuttingDown || entry.child) return;
+        if (this.shuttingDown || !entry.desired || entry.child || entry.intentionalStopReason) return;
 
         const { task } = entry;
         const child = spawn(process.execPath, [this.runnerPath, task.tableKey, String(task.accountId)], {
             cwd: this.cwd,
             env: process.env,
-            stdio: 'inherit',
+            stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
             windowsHide: false
         });
 
@@ -162,7 +179,10 @@ class MasterSupervisor {
         });
 
         child.once('close', (code, signal) => {
+            const intentionalReason = entry.intentionalStopReason;
+            this.cancelForceStop(entry);
             entry.child = null;
+            entry.intentionalStopReason = null;
 
             if (this.shuttingDown) {
                 console.log(
@@ -171,19 +191,132 @@ class MasterSupervisor {
                 return;
             }
 
+            if (intentionalReason) {
+                console.log(
+                    `MASTER_SUPERVISOR_CHILD_STOPPED_INTENTIONAL=${task.id} reason=${intentionalReason} ` +
+                    `code=${code ?? 'null'} signal=${signal || 'none'}`
+                );
+                if (!entry.desired) {
+                    this.entries.delete(task.id);
+                    return;
+                }
+
+                entry.restartTimer = setTimeout(() => {
+                    entry.restartTimer = null;
+                    this.spawnTask(entry);
+                }, this.staggerMs);
+                return;
+            }
+
             this.scheduleRestart(entry, code, signal);
         });
     }
 
-    async startAll() {
-        const entries = Array.from(this.entries.values());
+    requestGracefulStop(entry, reason) {
+        if (!entry.child || entry.intentionalStopReason) return;
+
+        this.cancelRestart(entry);
+        entry.intentionalStopReason = reason;
+        const child = entry.child;
+
+        console.log(`MASTER_SUPERVISOR_CHILD_STOP_REQUESTED=${entry.task.id} reason=${reason}`);
+
+        const forceStop = () => {
+            if (entry.child !== child) return;
+            console.error(`MASTER_SUPERVISOR_CHILD_GRACE_TIMEOUT=${entry.task.id} reason=${reason}`);
+            try {
+                child.kill('SIGTERM');
+            } catch (error) {
+                console.error(
+                    `MASTER_SUPERVISOR_CHILD_FORCE_STOP_FAILED=${entry.task.id}: ${error?.message || error}`
+                );
+            }
+        };
+
+        entry.forceStopTimer = setTimeout(forceStop, CHILD_GRACEFUL_STOP_TIMEOUT_MS);
+
+        if (child.connected && typeof child.send === 'function') {
+            child.send(
+                { type: 'graceful_shutdown', reason, task_id: entry.task.id },
+                error => {
+                    if (!error) return;
+                    console.error(
+                        `MASTER_SUPERVISOR_CHILD_IPC_FAILED=${entry.task.id}: ${error?.message || error}`
+                    );
+                    forceStop();
+                }
+            );
+            return;
+        }
+
+        console.error(`MASTER_SUPERVISOR_CHILD_IPC_UNAVAILABLE=${entry.task.id}`);
+        forceStop();
+    }
+
+    async startEntries(entries) {
         for (let index = 0; index < entries.length; index += 1) {
             if (this.shuttingDown) break;
-            this.spawnTask(entries[index]);
+            const entry = entries[index];
+            if (entry.desired && !entry.child && !entry.restartTimer && !entry.intentionalStopReason) {
+                this.spawnTask(entry);
+            }
             if (index < entries.length - 1) {
                 await sleep(this.staggerMs);
             }
         }
+    }
+
+    async reconcile(tasks) {
+        if (this.shuttingDown) return;
+
+        const desiredById = new Map(tasks.map(task => [task.id, task]));
+        let keepCount = 0;
+        let stopCount = 0;
+        const startEntries = [];
+
+        for (const [id, entry] of this.entries) {
+            if (desiredById.has(id)) continue;
+            if (!entry.desired) continue;
+
+            entry.desired = false;
+            stopCount += 1;
+            this.cancelRestart(entry);
+            if (entry.child) {
+                this.requestGracefulStop(entry, 'DB_DISABLED');
+            } else {
+                this.entries.delete(id);
+            }
+        }
+
+        for (const task of tasks) {
+            const existing = this.entries.get(task.id);
+            if (!existing) {
+                const entry = this.register(task);
+                startEntries.push(entry);
+                continue;
+            }
+
+            existing.task = task;
+            const wasDesired = existing.desired;
+            existing.desired = true;
+
+            if (existing.child || existing.restartTimer || existing.intentionalStopReason) {
+                keepCount += 1;
+                if (!wasDesired) {
+                    console.log(`MASTER_SUPERVISOR_TASK_REENABLED=${task.id}`);
+                }
+                continue;
+            }
+
+            startEntries.push(existing);
+        }
+
+        console.log(
+            `MASTER_SUPERVISOR_RECONCILE desired=${tasks.length} ` +
+            `start=${startEntries.length} stop=${stopCount} keep=${keepCount}`
+        );
+
+        await this.startEntries(startEntries);
     }
 
     async shutdown() {
@@ -194,30 +327,14 @@ class MasterSupervisor {
             console.log('MASTER_SUPERVISOR_SHUTDOWN_REQUESTED=true');
 
             for (const entry of this.entries.values()) {
-                if (entry.restartTimer) {
-                    clearTimeout(entry.restartTimer);
-                    entry.restartTimer = null;
+                entry.desired = false;
+                this.cancelRestart(entry);
+                if (entry.child && !entry.intentionalStopReason) {
+                    this.requestGracefulStop(entry, 'SUPERVISOR_SHUTDOWN');
                 }
             }
 
-            // No Windows, Ctrl+C do console e propagado aos processos filhos.
-            // Evitamos child.kill('SIGINT') aqui para nao encerrar o Node filho
-            // antes do cleanup cooperativo Python/Playwright e reintroduzir EPIPE.
-            if (process.platform !== 'win32') {
-                for (const entry of this.entries.values()) {
-                    const child = entry.child;
-                    if (!child || child.exitCode != null || child.signalCode != null) continue;
-                    try {
-                        child.kill('SIGINT');
-                    } catch (error) {
-                        console.error(
-                            `MASTER_SUPERVISOR_CHILD_SIGNAL_FAILED=${entry.task.id}: ${error?.message || error}`
-                        );
-                    }
-                }
-            }
-
-            const deadline = Date.now() + SHUTDOWN_GRACE_MS;
+            const deadline = Date.now() + CHILD_GRACEFUL_STOP_TIMEOUT_MS + 3000;
             while (Date.now() < deadline) {
                 const pending = Array.from(this.entries.values()).some(entry => entry.child);
                 if (!pending) break;
@@ -225,6 +342,7 @@ class MasterSupervisor {
             }
 
             for (const entry of this.entries.values()) {
+                this.cancelForceStop(entry);
                 const child = entry.child;
                 if (!child) continue;
                 try {
@@ -246,8 +364,17 @@ async function main() {
     const backoffBaseMs = positiveIntEnv('MASTER_SUPERVISOR_BACKOFF_BASE_MS', DEFAULT_BACKOFF_BASE_MS, { min: 500, max: 60000 });
     const backoffMaxMs = positiveIntEnv('MASTER_SUPERVISOR_BACKOFF_MAX_MS', DEFAULT_BACKOFF_MAX_MS, { min: backoffBaseMs, max: 600000 });
     const stableWindowMs = positiveIntEnv('MASTER_SUPERVISOR_STABLE_WINDOW_MS', DEFAULT_STABLE_WINDOW_MS, { min: 5000, max: 3600000 });
+    const reconcileIntervalMs = positiveIntEnv(
+        'MASTER_SUPERVISOR_RECONCILE_INTERVAL_MS',
+        DEFAULT_RECONCILE_INTERVAL_MS,
+        { min: 5000, max: 300000 }
+    );
 
     const dbPool = createDbPool();
+    const service = createBettingHouseService({
+        dbPool,
+        encryptionKey: process.env.BETTING_HOUSE_CREDENTIALS_KEY
+    });
     const supervisor = new MasterSupervisor({
         runnerPath: path.join(__dirname, 'run_live_bridge.js'),
         cwd: path.resolve(__dirname, '..'),
@@ -265,43 +392,40 @@ async function main() {
     process.once('SIGTERM', requestShutdown);
 
     try {
-        const service = createBettingHouseService({
-            dbPool,
-            encryptionKey: process.env.BETTING_HOUSE_CREDENTIALS_KEY
-        });
-        const tasks = await discoverTasks(service, tableFilter);
-
         console.log('=== MASTER SUPERVISOR ===');
-        console.log(`MASTER_SUPERVISOR_TASK_COUNT=${tasks.length}`);
         console.log(`MASTER_SUPERVISOR_STAGGER_MS=${staggerMs}`);
         console.log(`MASTER_SUPERVISOR_BACKOFF_BASE_MS=${backoffBaseMs}`);
         console.log(`MASTER_SUPERVISOR_BACKOFF_MAX_MS=${backoffMaxMs}`);
+        console.log(`MASTER_SUPERVISOR_RECONCILE_INTERVAL_MS=${reconcileIntervalMs}`);
         console.log(
             `MASTER_SUPERVISOR_TABLE_FILTER=${tableFilter ? Array.from(tableFilter).join(',') : 'ALL_ENABLED'}`
         );
 
-        for (const task of tasks) {
+        const initialTasks = await discoverTasks(service, tableFilter);
+        console.log(`MASTER_SUPERVISOR_TASK_COUNT=${initialTasks.length}`);
+        for (const task of initialTasks) {
             console.log(
                 `MASTER_SUPERVISOR_DISCOVERED=${task.id} account=${task.accountName} table=${task.tableName}`
             );
-            supervisor.register(task);
         }
-
-        if (tasks.length === 0) {
+        if (initialTasks.length === 0) {
             throw new Error('MASTER_SUPERVISOR_NO_ACTIVE_TASKS');
         }
 
-        await supervisor.startAll();
+        await supervisor.reconcile(initialTasks);
         console.log('MASTER_SUPERVISOR_READY=true');
 
-        await new Promise(resolve => {
-            const poll = setInterval(() => {
-                if (supervisor.shuttingDown) {
-                    clearInterval(poll);
-                    resolve();
-                }
-            }, 500);
-        });
+        while (!supervisor.shuttingDown) {
+            await sleep(reconcileIntervalMs);
+            if (supervisor.shuttingDown) break;
+
+            try {
+                const tasks = await discoverTasks(service, tableFilter);
+                await supervisor.reconcile(tasks);
+            } catch (error) {
+                console.error(`MASTER_SUPERVISOR_RECONCILE_FAILED: ${error?.message || error}`);
+            }
+        }
 
         await supervisor.shutdown();
     } finally {
