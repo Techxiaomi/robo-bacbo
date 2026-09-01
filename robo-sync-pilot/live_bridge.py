@@ -16,6 +16,7 @@ MAX_CONTROL_LINE_BYTES = 4096
 SUPPORTED_TABLE_KEYS = {"bacbo_br", "bacbo_int"}
 CONTROLLED_MAX_EXPOSURE_CAP = 5.0
 KEEP_ALIVE_INTERVAL_SECONDS = 15.0
+WORKER_SHUTDOWN_TIMEOUT_SECONDS = 15.0
 SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 REDIS_CHANNEL_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,160}$")
 BROWSER_ARGS = [
@@ -292,11 +293,41 @@ def _worker(config, max_exposure, runtime_session, ready_event, worker_error):
                 _controlled_cycle(playwright, session, max_exposure)
             finally:
                 robo.navegador_aberto.clear()
-                adapter.cleanup()
+                cleanup_error = None
+
+                print("LIVE_BRIDGE_BROWSER_CLOSE_REQUESTED=true")
                 try:
                     browser.close()
+                except Exception as error:
+                    cleanup_error = RuntimeError(
+                        f"LIVE_BRIDGE_BROWSER_CLOSE_FAILED: {type(error).__name__}: {error}"
+                    )
+                    print(str(cleanup_error))
+
+                try:
+                    adapter.cleanup()
+                except Exception as error:
+                    if cleanup_error is None:
+                        cleanup_error = RuntimeError(
+                            f"LIVE_BRIDGE_ADAPTER_CLEANUP_FAILED: {type(error).__name__}: {error}"
+                        )
+                    print(
+                        "LIVE_BRIDGE_ADAPTER_CLEANUP_FAILED="
+                        f"{type(error).__name__}: {error}"
+                    )
+
+                try:
+                    browser_connected = browser.is_connected()
                 except Exception:
-                    pass
+                    browser_connected = False
+
+                if browser_connected and cleanup_error is None:
+                    cleanup_error = RuntimeError("LIVE_BRIDGE_BROWSER_STILL_CONNECTED")
+
+                if cleanup_error is not None:
+                    worker_error.append(cleanup_error)
+                else:
+                    print("LIVE_BRIDGE_BROWSER_CLOSED=true")
     except Exception as error:
         if robo.encerrar_executor.is_set():
             print("LIVE_BRIDGE_WORKER_STOPPED_DURING_SHUTDOWN=true")
@@ -393,7 +424,15 @@ def main():
                 pass
 
         redis_thread.join(timeout=3.0)
-        worker_thread.join(timeout=10.0)
+        worker_thread.join(timeout=WORKER_SHUTDOWN_TIMEOUT_SECONDS)
+
+        if worker_thread.is_alive():
+            print("LIVE_BRIDGE_SHUTDOWN_INCOMPLETE=true")
+            raise RuntimeError("LIVE_BRIDGE_WORKER_SHUTDOWN_TIMEOUT")
+        if worker_error:
+            print("LIVE_BRIDGE_SHUTDOWN_INCOMPLETE=true")
+            raise RuntimeError(f"LIVE_BRIDGE_WORKER_SHUTDOWN_FAILED: {worker_error[0]}")
+
         print("LIVE_BRIDGE_STOPPED=true")
 
 
