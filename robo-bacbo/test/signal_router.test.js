@@ -10,6 +10,7 @@ const {
     commandForTarget,
     calculateGlobalExposure,
     resolveOnlineTargets,
+    fanInTargets,
     RedisSignalDedup
 } = require('../scripts/signal_router');
 
@@ -86,6 +87,8 @@ test('indexa somente contas e mesas habilitadas', () => {
 
     assert.equal(index.get('bacbo_br').length, 2);
     assert.deepEqual(index.get('bacbo_br').map(item => item.account_id), [1, 4]);
+    assert.equal(index.get('bacbo_br')[0].response_channel, 'auto_trader_responses:1:bacbo_br');
+    assert.equal(index.get('bacbo_br')[1].response_channel, 'auto_trader_responses:4:bacbo_br');
     assert.equal(index.has('bacbo_int'), false);
 });
 
@@ -108,6 +111,37 @@ test('gera order_id financeiro deterministico por conta', () => {
     assert.equal(command.alvo, 'PlayerWon');
     assert.equal(command.valor, 5);
     assert.match(command.order_id, /^sr-[a-f0-9]{32}$/);
+});
+
+test('fanin associa order_id e response channel da mesma conta', () => {
+    const signal = normalizeSignal(JSON.stringify({
+        signal_id: 'bet-fanin-001',
+        action: 'place_bet',
+        table_key: 'bacbo_br',
+        alvo: 'PlayerWon',
+        valor_base: 5
+    }), { financialEnabled: true });
+    const targets = [
+        {
+            account_id: 1,
+            session_id: 'account-1:bacbo_br',
+            table_key: 'bacbo_br',
+            response_channel: 'auto_trader_responses:1:bacbo_br'
+        },
+        {
+            account_id: 4,
+            session_id: 'account-4:bacbo_br',
+            table_key: 'bacbo_br',
+            response_channel: 'auto_trader_responses:4:bacbo_br'
+        }
+    ];
+
+    const mapped = fanInTargets(signal, targets);
+    assert.equal(mapped.length, 2);
+    assert.equal(mapped[0].order_id, deterministicOrderId(signal, targets[0]));
+    assert.equal(mapped[0].response_channel, targets[0].response_channel);
+    assert.equal(mapped[1].order_id, deterministicOrderId(signal, targets[1]));
+    assert.equal(mapped[1].response_channel, targets[1].response_channel);
 });
 
 test('calcula exposicao global somente pelos alvos online', () => {
