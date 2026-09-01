@@ -18,6 +18,7 @@ const {
     confirmarContratoMesaTransporteRuntime
 } = require('./mesa_transport_context');
 const { instalarGuardaMesaBackend } = require('./mesa_backend_guard');
+const { instalarCatalogoContasAutoTrader } = require('./trader_account_catalog');
 
 async function iniciar() {
     const canonicalBridge = require('./bacbo_canonical_bridge');
@@ -86,6 +87,7 @@ async function iniciar() {
 
     confirmarContratoMesaTransporteRuntime();
     instalarGuardaMesaBackend();
+    instalarCatalogoContasAutoTrader();
 
     require('./auto_pilot_history_barrier')
         .instalarAutoPilotHistoryBarrier();
