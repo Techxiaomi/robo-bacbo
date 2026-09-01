@@ -7,13 +7,14 @@ const mysql = require('mysql2/promise');
 require('../env_loader').loadEnvFile(path.join(__dirname, '..', '..', '.env'));
 
 async function main() {
-    const sqlPath = path.join(
-        __dirname,
-        '..',
-        'migrations',
-        '20260901_create_betting_houses.sql'
-    );
-    const sql = fs.readFileSync(sqlPath, 'utf8');
+    const migrationsDir = path.join(__dirname, '..', 'migrations');
+    const migrationFiles = fs.readdirSync(migrationsDir)
+        .filter(name => /^\d+.*\.sql$/i.test(name))
+        .sort((a, b) => a.localeCompare(b));
+
+    if (migrationFiles.length === 0) {
+        throw new Error('BETTING_HOUSE_MIGRATION_NOT_FOUND');
+    }
 
     const connection = await mysql.createConnection({
         host: process.env.DB_HOST,
@@ -25,8 +26,13 @@ async function main() {
     });
 
     try {
-        await connection.query(sql);
-        console.log('BETTING_HOUSE_MIGRATION_SUCCESS');
+        for (const fileName of migrationFiles) {
+            const sqlPath = path.join(migrationsDir, fileName);
+            const sql = fs.readFileSync(sqlPath, 'utf8');
+            console.log(`BETTING_HOUSE_MIGRATION_APPLY=${fileName}`);
+            await connection.query(sql);
+        }
+        console.log(`BETTING_HOUSE_MIGRATION_SUCCESS=${migrationFiles.length}`);
     } finally {
         await connection.end();
     }
