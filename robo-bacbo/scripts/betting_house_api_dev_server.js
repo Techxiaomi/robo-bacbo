@@ -35,8 +35,14 @@ async function main() {
         encryptionKey: process.env.BETTING_HOUSE_CREDENTIALS_KEY
     });
 
+    app.use(express.static(path.join(__dirname, '..', 'public')));
+    app.get('/betting-houses', (req, res) => {
+        res.sendFile(path.join(__dirname, '..', 'public', 'betting-houses.html'));
+    });
+
     const server = app.listen(port, host, () => {
         console.log(`BETTING_HOUSE_API_DEV_READY http://${host}:${port}`);
+        console.log(`BETTING_HOUSE_UI_READY http://${host}:${port}/betting-houses`);
     });
 
     const shutdown = async () => {
