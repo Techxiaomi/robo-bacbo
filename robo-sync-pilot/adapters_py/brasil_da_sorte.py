@@ -44,6 +44,7 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
         r"^\s*(entrar|acessar|login|iniciar\s+sess[aã]o)\s*$",
         re.IGNORECASE,
     )
+    DIRECT_LOGIN_PATTERN = re.compile(r"Entrar", re.IGNORECASE)
     COOKIE_PATTERN = re.compile(r"Aceitar todos", re.IGNORECASE)
     AGE_CONFIRM_PATTERN = re.compile(r"^\s*Sim\s*$", re.IGNORECASE)
 
@@ -117,7 +118,8 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
 
         username, password, root, auth_page = self._find_login_fields(page)
         if username is None or password is None:
-            self._open_login_form(page)
+            triggered = self._open_login_form(page)
+            print(f"BRASIL_DA_SORTE_LOGIN_TRIGGER_RESULT={str(triggered).lower()}")
             username, password, root, auth_page = self._wait_for_login_fields(page)
 
         if username is None or password is None:
@@ -183,7 +185,6 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
         interval_ms = 250
 
         while elapsed < LOGIN_FORM_WAIT_MS:
-            self._dismiss_prelaunch_overlays(primary_page)
             username, password, root, auth_page = self._find_login_fields(primary_page)
             if username is not None and password is not None:
                 return username, password, root, auth_page
@@ -195,17 +196,38 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
     def _open_login_form(self, primary_page: Page) -> bool:
         self._dismiss_prelaunch_overlays(primary_page)
 
+        # Caminho principal: reproduz exatamente o fluxo homologado no executor.
+        direct = primary_page.locator("button", has_text=self.DIRECT_LOGIN_PATTERN)
+        for index in range(min(direct.count(), 8)):
+            candidate = direct.nth(index)
+            try:
+                if not candidate.is_visible():
+                    continue
+                candidate.click(force=True, timeout=3000)
+                primary_page.wait_for_timeout(2500)
+                print("BRASIL_DA_SORTE_LOGIN_TRIGGERED=true")
+                return True
+            except Exception as error:
+                print(
+                    "BRASIL_DA_SORTE_LOGIN_TRIGGER_ERROR="
+                    f"{self._sanitize_diagnostic(type(error).__name__ + ': ' + str(error))}"
+                )
+
+        # Fallback seguro para variantes semanticas/popup/iframe.
         for candidate_page in self._candidate_pages(primary_page):
             for root in self._roots(candidate_page):
                 button = self._first_visible_role_button(root, self.LOGIN_BUTTON_PATTERN)
                 if button is not None:
                     try:
                         button.click(force=True, timeout=3000)
-                        candidate_page.wait_for_timeout(500)
+                        candidate_page.wait_for_timeout(2500)
                         print("BRASIL_DA_SORTE_LOGIN_TRIGGERED=true")
                         return True
-                    except Exception:
-                        continue
+                    except Exception as error:
+                        print(
+                            "BRASIL_DA_SORTE_LOGIN_TRIGGER_ERROR="
+                            f"{self._sanitize_diagnostic(type(error).__name__ + ': ' + str(error))}"
+                        )
 
         for candidate_page in self._candidate_pages(primary_page):
             for root in self._roots(candidate_page):
@@ -218,11 +240,14 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
                     if candidate is not None:
                         try:
                             candidate.click(force=True, timeout=3000)
-                            candidate_page.wait_for_timeout(500)
+                            candidate_page.wait_for_timeout(2500)
                             print("BRASIL_DA_SORTE_LOGIN_TRIGGERED=true")
                             return True
-                        except Exception:
-                            continue
+                        except Exception as error:
+                            print(
+                                "BRASIL_DA_SORTE_LOGIN_TRIGGER_ERROR="
+                                f"{self._sanitize_diagnostic(type(error).__name__ + ': ' + str(error))}"
+                            )
 
         return False
 
@@ -363,7 +388,7 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
     @staticmethod
     def _sanitize_diagnostic(value):
         normalized = re.sub(r"[\r\n\t]+", " ", str(value or "")).strip()
-        return normalized[:120]
+        return normalized[:160]
 
     @staticmethod
     def _looks_like_active_session(page: Page) -> bool:
