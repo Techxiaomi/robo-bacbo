@@ -24,10 +24,25 @@ function liveBridgeAdapterSupported(value) {
     return SUPPORTED_LIVE_BRIDGE_ADAPTERS.has(String(value || '').trim().toLowerCase());
 }
 
+function configWithAccountIds(configJson, accountIds) {
+    let config = {};
+    if (configJson && typeof configJson === 'object' && !Array.isArray(configJson)) {
+        config = { ...configJson };
+    } else if (typeof configJson === 'string' && configJson.trim()) {
+        try {
+            const parsed = JSON.parse(configJson);
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) config = { ...parsed };
+        } catch (_) {}
+    }
+    config.account_ids = normalizeAccountIds(accountIds);
+    return config;
+}
+
 async function traderDescriptor(dbPool, traderId) {
     const id = positiveId(traderId, 'TRADER_ID');
     const [rows] = await dbPool.query(
-        `SELECT at.id, at.nome, at.ativo, at.mesa_id, m.codigo AS mesa_codigo, m.nome AS mesa_nome
+        `SELECT at.id, at.nome, at.ativo, at.mesa_id, at.config_json,
+                m.codigo AS mesa_codigo, m.nome AS mesa_nome
          FROM auto_traders at
          INNER JOIN mesas m ON m.id = at.mesa_id
          WHERE at.id = ?
@@ -94,6 +109,11 @@ async function setTraderAccounts(dbPool, traderId, accountIds) {
                 [Number(trader.id), accountId]
             );
         }
+        const config = configWithAccountIds(trader.config_json, normalized);
+        await connection.query(
+            'UPDATE auto_traders SET config_json=? WHERE id=?',
+            [JSON.stringify(config), Number(trader.id)]
+        );
         await connection.commit();
     } catch (error) {
         try { await connection.rollback(); } catch (_) {}
@@ -123,14 +143,29 @@ async function setTraderAccounts(dbPool, traderId, accountIds) {
 
 async function clearTraderAccounts(dbPool, traderId) {
     const trader = await traderDescriptor(dbPool, traderId);
-    const [result] = await dbPool.query(
-        'DELETE FROM auto_trader_account_bindings WHERE auto_trader_id=?',
-        [Number(trader.id)]
-    );
-    return {
-        trader_id: Number(trader.id),
-        removed: Number(result?.affectedRows || 0)
-    };
+    const connection = await dbPool.getConnection();
+    try {
+        await connection.beginTransaction();
+        const [result] = await connection.query(
+            'DELETE FROM auto_trader_account_bindings WHERE auto_trader_id=?',
+            [Number(trader.id)]
+        );
+        const config = configWithAccountIds(trader.config_json, []);
+        await connection.query(
+            'UPDATE auto_traders SET config_json=? WHERE id=?',
+            [JSON.stringify(config), Number(trader.id)]
+        );
+        await connection.commit();
+        return {
+            trader_id: Number(trader.id),
+            removed: Number(result?.affectedRows || 0)
+        };
+    } catch (error) {
+        try { await connection.rollback(); } catch (_) {}
+        throw error;
+    } finally {
+        connection.release();
+    }
 }
 
 async function listTraderAccountBindings(dbPool) {
@@ -187,6 +222,7 @@ module.exports = {
     positiveId,
     normalizeAccountIds,
     liveBridgeAdapterSupported,
+    configWithAccountIds,
     traderDescriptor,
     validateAccountsForTrader,
     setTraderAccounts,
