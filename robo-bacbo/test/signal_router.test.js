@@ -11,6 +11,7 @@ const {
     calculateGlobalExposure,
     resolveOnlineTargets,
     fanInTargets,
+    registerFanInExpectation,
     RedisSignalDedup
 } = require('../scripts/signal_router');
 
@@ -142,6 +143,42 @@ test('fanin associa order_id e response channel da mesma conta', () => {
     assert.equal(mapped[0].response_channel, targets[0].response_channel);
     assert.equal(mapped[1].order_id, deterministicOrderId(signal, targets[1]));
     assert.equal(mapped[1].response_channel, targets[1].response_channel);
+});
+
+test('registro de fanin usa exatamente os alvos calculados sem dispatch', () => {
+    const signal = normalizeSignal(JSON.stringify({
+        signal_id: 'bet-fanin-sim-001',
+        action: 'place_bet',
+        table_key: 'bacbo_br',
+        alvo: 'PlayerWon',
+        valor_base: 5
+    }), { financialEnabled: true });
+    const targets = [
+        {
+            account_id: 1,
+            session_id: 'account-1:bacbo_br',
+            table_key: 'bacbo_br',
+            response_channel: 'auto_trader_responses:1:bacbo_br'
+        },
+        {
+            account_id: 4,
+            session_id: 'account-4:bacbo_br',
+            table_key: 'bacbo_br',
+            response_channel: 'auto_trader_responses:4:bacbo_br'
+        }
+    ];
+    let registered = null;
+    const fanin = {
+        register(value) { registered = value; }
+    };
+
+    const expected = registerFanInExpectation(fanin, signal, targets, 210000);
+    assert.equal(expected.length, 2);
+    assert.equal(registered.signalId, signal.signal_id);
+    assert.equal(registered.tableKey, 'bacbo_br');
+    assert.deepEqual(registered.targets, expected);
+    assert.equal(expected[0].order_id, deterministicOrderId(signal, targets[0]));
+    assert.equal(expected[1].order_id, deterministicOrderId(signal, targets[1]));
 });
 
 test('calcula exposicao global somente pelos alvos online', () => {
