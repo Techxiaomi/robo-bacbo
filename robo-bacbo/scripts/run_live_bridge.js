@@ -203,19 +203,41 @@ function runPython({ pythonExecutable, pythonScript, config, cwd }) {
         });
 
         let settled = false;
-        const fail = error => {
+        let shutdownRequested = false;
+
+        const removeSignalHandlers = () => {
+            process.removeListener('SIGINT', handleSigint);
+        };
+
+        const finish = callback => {
             if (settled) return;
             settled = true;
-            reject(error);
+            removeSignalHandlers();
+            callback();
         };
+
+        const fail = error => {
+            finish(() => reject(error));
+        };
+
+        const handleSigint = () => {
+            if (shutdownRequested) return;
+            shutdownRequested = true;
+            console.log('LIVE_BRIDGE_ORCHESTRATOR_SHUTDOWN_REQUESTED=true');
+            // O console também entrega Ctrl+C ao Python filho no Windows.
+            // Manter o Node pai vivo evita fechar os pipes enquanto o Python
+            // conclui BrowserContext/browser/sync_playwright de forma cooperativa.
+        };
+
+        process.on('SIGINT', handleSigint);
 
         child.once('error', fail);
         child.once('exit', (code, signal) => {
-            if (settled) return;
-            settled = true;
-            if (signal) return reject(new Error(`LIVE_BRIDGE_PYTHON_SIGNAL: ${signal}`));
-            if (code !== 0) return reject(new Error(`LIVE_BRIDGE_PYTHON_EXIT_CODE: ${code}`));
-            resolve();
+            finish(() => {
+                if (signal) return reject(new Error(`LIVE_BRIDGE_PYTHON_SIGNAL: ${signal}`));
+                if (code !== 0) return reject(new Error(`LIVE_BRIDGE_PYTHON_EXIT_CODE: ${code}`));
+                resolve();
+            });
         });
         child.stdin.once('error', fail);
         child.stdin.end(JSON.stringify(config));
