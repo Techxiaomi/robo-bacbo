@@ -112,6 +112,32 @@ class MasterSupervisor {
         });
     }
 
+    scheduleRestart(entry, code, signal) {
+        if (this.shuttingDown || entry.restartTimer) return;
+
+        const runtimeMs = Math.max(0, Date.now() - entry.startedAt);
+        if (runtimeMs >= this.stableWindowMs) {
+            entry.restartCount = 0;
+        } else {
+            entry.restartCount += 1;
+        }
+
+        const delay = Math.min(
+            this.backoffBaseMs * (2 ** Math.max(0, entry.restartCount - 1)),
+            this.backoffMaxMs
+        );
+
+        console.error(
+            `MASTER_SUPERVISOR_CHILD_EXIT=${entry.task.id} code=${code ?? 'null'} signal=${signal || 'none'} ` +
+            `runtime_ms=${runtimeMs} restart_in_ms=${delay} attempt=${entry.restartCount}`
+        );
+
+        entry.restartTimer = setTimeout(() => {
+            entry.restartTimer = null;
+            this.spawnTask(entry);
+        }, delay);
+    }
+
     spawnTask(entry) {
         if (this.shuttingDown || entry.child) return;
 
@@ -135,8 +161,7 @@ class MasterSupervisor {
             console.error(`MASTER_SUPERVISOR_CHILD_ERROR=${task.id}: ${error?.message || error}`);
         });
 
-        child.once('exit', (code, signal) => {
-            const runtimeMs = Math.max(0, Date.now() - entry.startedAt);
+        child.once('close', (code, signal) => {
             entry.child = null;
 
             if (this.shuttingDown) {
@@ -146,27 +171,7 @@ class MasterSupervisor {
                 return;
             }
 
-            if (runtimeMs >= this.stableWindowMs) {
-                entry.restartCount = 0;
-            } else {
-                entry.restartCount += 1;
-            }
-
-            const delay = Math.min(
-                this.backoffBaseMs * (2 ** Math.max(0, entry.restartCount - 1)),
-                this.backoffMaxMs
-            );
-
-            console.error(
-                `MASTER_SUPERVISOR_CHILD_EXIT=${task.id} code=${code ?? 'null'} signal=${signal || 'none'} ` +
-                `runtime_ms=${runtimeMs} restart_in_ms=${delay} attempt=${entry.restartCount}`
-            );
-
-            entry.restartTimer = setTimeout(() => {
-                entry.restartTimer = null;
-                this.spawnTask(entry);
-            }, delay);
-            entry.restartTimer.unref?.();
+            this.scheduleRestart(entry, code, signal);
         });
     }
 
@@ -195,15 +200,20 @@ class MasterSupervisor {
                 }
             }
 
-            const liveChildren = Array.from(this.entries.values())
-                .map(entry => entry.child)
-                .filter(child => child && child.exitCode == null && child.signalCode == null);
-
-            for (const child of liveChildren) {
-                try {
-                    child.kill('SIGINT');
-                } catch (error) {
-                    console.error(`MASTER_SUPERVISOR_CHILD_SIGNAL_FAILED=${child.pid || 'unknown'}: ${error?.message || error}`);
+            // No Windows, Ctrl+C do console e propagado aos processos filhos.
+            // Evitamos child.kill('SIGINT') aqui para nao encerrar o Node filho
+            // antes do cleanup cooperativo Python/Playwright e reintroduzir EPIPE.
+            if (process.platform !== 'win32') {
+                for (const entry of this.entries.values()) {
+                    const child = entry.child;
+                    if (!child || child.exitCode != null || child.signalCode != null) continue;
+                    try {
+                        child.kill('SIGINT');
+                    } catch (error) {
+                        console.error(
+                            `MASTER_SUPERVISOR_CHILD_SIGNAL_FAILED=${entry.task.id}: ${error?.message || error}`
+                        );
+                    }
                 }
             }
 
@@ -248,11 +258,7 @@ async function main() {
     });
 
     const requestShutdown = () => {
-        void supervisor.shutdown().finally(() => {
-            void dbPool.end().finally(() => {
-                process.exitCode = 0;
-            });
-        });
+        void supervisor.shutdown();
     };
 
     process.once('SIGINT', requestShutdown);
@@ -295,7 +301,6 @@ async function main() {
                     resolve();
                 }
             }, 500);
-            poll.unref?.();
         });
 
         await supervisor.shutdown();
