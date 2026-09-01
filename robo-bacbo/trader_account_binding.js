@@ -20,6 +20,17 @@ function normalizeAccountIds(values) {
     return Array.from(unique).sort((a, b) => a - b);
 }
 
+function accountIdsFromConfig(configJson) {
+    let config = configJson;
+    if (typeof configJson === 'string') {
+        try { config = JSON.parse(configJson); }
+        catch (_) { return []; }
+    }
+    if (!config || typeof config !== 'object' || Array.isArray(config)) return [];
+    try { return normalizeAccountIds(Array.isArray(config.account_ids) ? config.account_ids : []); }
+    catch (_) { return []; }
+}
+
 function liveBridgeAdapterSupported(value) {
     return SUPPORTED_LIVE_BRIDGE_ADAPTERS.has(String(value || '').trim().toLowerCase());
 }
@@ -169,58 +180,86 @@ async function clearTraderAccounts(dbPool, traderId) {
 }
 
 async function listTraderAccountBindings(dbPool) {
-    const [rows] = await dbPool.query(
+    const [traderRows] = await dbPool.query(
         `SELECT at.id AS trader_id,
                 at.nome AS trader_name,
                 at.ativo AS trader_active,
-                m.codigo AS table_code,
-                b.betting_house_id AS account_id,
-                h.name AS account_name,
-                h.adapter_key AS adapter_key,
-                h.enabled AS account_enabled,
-                ht.enabled AS table_enabled
+                at.config_json,
+                m.codigo AS table_code
          FROM auto_traders at
          INNER JOIN mesas m ON m.id = at.mesa_id
-         LEFT JOIN auto_trader_account_bindings b ON b.auto_trader_id = at.id
-         LEFT JOIN betting_houses h ON h.id = b.betting_house_id
-         LEFT JOIN betting_house_tables ht
-           ON ht.betting_house_id = h.id
-          AND LOWER(ht.table_key) = LOWER(m.codigo)
-         ORDER BY at.id, b.betting_house_id`
+         ORDER BY at.id`
+    );
+    const [bindingRows] = await dbPool.query(
+        `SELECT auto_trader_id AS trader_id,
+                betting_house_id AS account_id
+         FROM auto_trader_account_bindings
+         ORDER BY auto_trader_id, betting_house_id`
+    );
+    const [accountRows] = await dbPool.query(
+        `SELECT h.id AS account_id,
+                h.name AS account_name,
+                h.adapter_key,
+                h.enabled AS account_enabled,
+                LOWER(ht.table_key) AS table_code,
+                ht.enabled AS table_enabled
+         FROM betting_houses h
+         LEFT JOIN betting_house_tables ht ON ht.betting_house_id = h.id
+         ORDER BY h.id, ht.table_key`
     );
 
-    const traders = new Map();
-    for (const row of rows || []) {
-        const id = Number(row.trader_id);
-        let item = traders.get(id);
-        if (!item) {
-            item = {
-                trader_id: id,
-                trader_name: String(row.trader_name || ''),
-                trader_active: Boolean(row.trader_active),
-                table_code: String(row.table_code || ''),
-                accounts: []
-            };
-            traders.set(id, item);
-        }
-        if (row.account_id != null) {
-            item.accounts.push({
-                account_id: Number(row.account_id),
-                account_name: String(row.account_name || ''),
-                adapter_key: String(row.adapter_key || ''),
-                adapter_supported: liveBridgeAdapterSupported(row.adapter_key),
-                account_enabled: Boolean(row.account_enabled),
-                table_enabled: Boolean(row.table_enabled)
-            });
-        }
+    const legacyByTrader = new Map();
+    for (const row of bindingRows || []) {
+        const traderId = Number(row.trader_id);
+        const accountId = Number(row.account_id);
+        if (!Number.isSafeInteger(traderId) || traderId <= 0) continue;
+        if (!Number.isSafeInteger(accountId) || accountId <= 0) continue;
+        if (!legacyByTrader.has(traderId)) legacyByTrader.set(traderId, []);
+        legacyByTrader.get(traderId).push(accountId);
     }
-    return Array.from(traders.values());
+
+    const accountIndex = new Map();
+    for (const row of accountRows || []) {
+        const accountId = Number(row.account_id);
+        const tableCode = String(row.table_code || '').trim().toLowerCase();
+        if (!Number.isSafeInteger(accountId) || accountId <= 0 || !tableCode) continue;
+        accountIndex.set(`${accountId}:${tableCode}`, row);
+    }
+
+    return (traderRows || []).map(row => {
+        const traderId = Number(row.trader_id);
+        const tableCode = String(row.table_code || '').trim();
+        const configIds = accountIdsFromConfig(row.config_json);
+        const accountIds = configIds.length > 0
+            ? configIds
+            : normalizeAccountIds(legacyByTrader.get(traderId) || []);
+        const accounts = accountIds.map(accountId => {
+            const account = accountIndex.get(`${accountId}:${tableCode.toLowerCase()}`);
+            return {
+                account_id: accountId,
+                account_name: String(account?.account_name || `Conta ${accountId}`),
+                adapter_key: String(account?.adapter_key || ''),
+                adapter_supported: liveBridgeAdapterSupported(account?.adapter_key),
+                account_enabled: Boolean(account?.account_enabled),
+                table_enabled: Boolean(account?.table_enabled)
+            };
+        });
+        return {
+            trader_id: traderId,
+            trader_name: String(row.trader_name || ''),
+            trader_active: Boolean(row.trader_active),
+            table_code: tableCode,
+            binding_source: configIds.length > 0 ? 'config' : 'legacy_table',
+            accounts
+        };
+    });
 }
 
 module.exports = {
     SUPPORTED_LIVE_BRIDGE_ADAPTERS,
     positiveId,
     normalizeAccountIds,
+    accountIdsFromConfig,
     liveBridgeAdapterSupported,
     configWithAccountIds,
     traderDescriptor,
