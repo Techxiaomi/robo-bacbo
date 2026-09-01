@@ -12,6 +12,7 @@ const {
     resolveOnlineTargets,
     fanInTargets,
     registerFanInExpectation,
+    buildDryRunConsolidated,
     RedisSignalDedup
 } = require('../scripts/signal_router');
 
@@ -179,6 +180,45 @@ test('registro de fanin usa exatamente os alvos calculados sem dispatch', () => 
     assert.deepEqual(registered.targets, expected);
     assert.equal(expected[0].order_id, deterministicOrderId(signal, targets[0]));
     assert.equal(expected[1].order_id, deterministicOrderId(signal, targets[1]));
+});
+
+test('dry run real fecha plumbing como nao executado e sem confirmacao financeira', () => {
+    const signal = normalizeSignal(JSON.stringify({
+        signal_id: '550e8400-e29b-41d4-a716-446655440000',
+        action: 'place_bet',
+        table_key: 'bacbo_br',
+        alvo: 'PlayerWon',
+        valor_base: 5
+    }), { financialEnabled: true });
+    const targets = [
+        {
+            account_id: 1,
+            session_id: 'account-1:bacbo_br',
+            table_key: 'bacbo_br',
+            response_channel: 'auto_trader_responses:1:bacbo_br'
+        },
+        {
+            account_id: 4,
+            session_id: 'account-4:bacbo_br',
+            table_key: 'bacbo_br',
+            response_channel: 'auto_trader_responses:4:bacbo_br'
+        }
+    ];
+
+    const result = buildDryRunConsolidated(signal, targets, 123456789);
+    assert.equal(result.action, 'multi_account_bet_result');
+    assert.equal(result.order_id, signal.signal_id);
+    assert.equal(result.table_key, 'bacbo_br');
+    assert.equal(result.status, 'FAILED');
+    assert.equal(result.executor_status, 'FALHOU');
+    assert.equal(result.dry_run, true);
+    assert.equal(result.expected_accounts, 2);
+    assert.equal(result.success_accounts, 0);
+    assert.equal(result.failed_accounts, 2);
+    assert.equal(result.confirmacao, null);
+    assert.equal(result.completed_at, 123456789);
+    assert.ok(result.accounts.every(item => item.status === 'FALHOU'));
+    assert.ok(result.accounts.every(item => item.motivo === 'SIGNAL_ROUTER_FINANCIAL_DRY_RUN_NO_DISPATCH'));
 });
 
 test('calcula exposicao global somente pelos alvos online', () => {
