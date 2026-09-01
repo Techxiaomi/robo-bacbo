@@ -1,12 +1,13 @@
 import json
 import queue
+import re
 import sys
 import threading
 import time
 
 from playwright.sync_api import sync_playwright
 
-from adapters_py.brasil_da_sorte import BrasilDaSorteAdapter
+from adapters_py.registry import create_adapter, registered_adapter_keys
 import robo
 
 
@@ -14,6 +15,8 @@ MAX_CONFIG_BYTES = 64 * 1024
 SUPPORTED_TABLE_KEYS = {"bacbo_br", "bacbo_int"}
 CONTROLLED_MAX_EXPOSURE_CAP = 5.0
 KEEP_ALIVE_INTERVAL_SECONDS = 15.0
+SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+REDIS_CHANNEL_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,160}$")
 BROWSER_ARGS = [
     "--disable-blink-features=AutomationControlled",
     "--disable-infobars",
@@ -51,14 +54,50 @@ def _required_nested(config, section, key):
     return value
 
 
+def _validated_session(config):
+    session = config.get("session")
+    if not isinstance(session, dict):
+        raise RuntimeError("LIVE_BRIDGE_SESSION_CONFIG_REQUIRED")
+
+    try:
+        account_id = int(session.get("account_id"))
+        house_id = int(config.get("house", {}).get("id"))
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("LIVE_BRIDGE_ACCOUNT_ID_INVALID") from error
+
+    if account_id <= 0 or house_id <= 0 or account_id != house_id:
+        raise RuntimeError("LIVE_BRIDGE_ACCOUNT_ID_MISMATCH")
+
+    session_id = _required_nested(config, "session", "session_id")
+    command_channel = _required_nested(config, "session", "redis_command_channel")
+    response_channel = _required_nested(config, "session", "redis_response_channel")
+
+    if not SESSION_ID_PATTERN.fullmatch(session_id):
+        raise RuntimeError("LIVE_BRIDGE_SESSION_ID_INVALID")
+    if not REDIS_CHANNEL_PATTERN.fullmatch(command_channel):
+        raise RuntimeError("LIVE_BRIDGE_REDIS_COMMAND_CHANNEL_INVALID")
+    if not REDIS_CHANNEL_PATTERN.fullmatch(response_channel):
+        raise RuntimeError("LIVE_BRIDGE_REDIS_RESPONSE_CHANNEL_INVALID")
+    if command_channel == response_channel:
+        raise RuntimeError("LIVE_BRIDGE_REDIS_CHANNEL_COLLISION")
+
+    return {
+        "account_id": account_id,
+        "session_id": session_id,
+        "redis_command_channel": command_channel,
+        "redis_response_channel": response_channel,
+    }
+
+
 def _validate_config(config):
     adapter_key = _required_nested(config, "house", "adapter_key")
     table_key = _required_nested(config, "table", "table_key")
     game_url = _required_nested(config, "table", "game_url")
     home_url = _required_nested(config, "house", "home_url")
+    session = _validated_session(config)
 
-    if adapter_key != "brasil-da-sorte":
-        raise RuntimeError("LIVE_BRIDGE_ADAPTER_UNSUPPORTED")
+    if adapter_key not in registered_adapter_keys():
+        raise RuntimeError(f"LIVE_BRIDGE_ADAPTER_UNSUPPORTED: {adapter_key}")
     if table_key not in SUPPORTED_TABLE_KEYS:
         raise RuntimeError("LIVE_BRIDGE_TABLE_UNSUPPORTED")
 
@@ -83,7 +122,9 @@ def _validate_config(config):
 
     robo.URL_CASSINO = game_url
     robo.URL_HOME_CASSINO = home_url
-    return table_key, max_exposure
+    robo.REDIS_COMMAND_CHANNEL = session["redis_command_channel"]
+    robo.REDIS_RESPONSE_CHANNEL = session["redis_response_channel"]
+    return table_key, max_exposure, session
 
 
 def _adapter_session_healthy(page):
@@ -177,7 +218,7 @@ def _controlled_cycle(playwright, session, max_exposure):
         robo.registrar_atividade_node()
 
 
-def _worker(config, max_exposure, ready_event, worker_error):
+def _worker(config, max_exposure, runtime_session, ready_event, worker_error):
     session = {
         "browser": None,
         "context": None,
@@ -188,7 +229,7 @@ def _worker(config, max_exposure, ready_event, worker_error):
     try:
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=False, args=BROWSER_ARGS)
-            adapter = BrasilDaSorteAdapter(browser=browser, config=config)
+            adapter = create_adapter(browser=browser, config=config)
             session["browser"] = browser
 
             try:
@@ -197,6 +238,8 @@ def _worker(config, max_exposure, ready_event, worker_error):
                 context = adapter.context
                 if context is None:
                     raise RuntimeError("LIVE_BRIDGE_ADAPTER_CONTEXT_NOT_READY")
+                if page.context is not context:
+                    raise RuntimeError("LIVE_BRIDGE_ADAPTER_CONTEXT_OWNERSHIP_MISMATCH")
 
                 session.update({
                     "context": context,
@@ -205,6 +248,10 @@ def _worker(config, max_exposure, ready_event, worker_error):
                 })
                 robo.navegador_aberto.set()
                 _require_adapter_session_healthy(page)
+                print(
+                    "LIVE_BRIDGE_CONTEXT_ISOLATED="
+                    f"{runtime_session['session_id']}"
+                )
                 print("LIVE_BRIDGE_ADAPTER_PAGE_READY=true")
                 ready_event.set()
 
@@ -228,17 +275,19 @@ def _worker(config, max_exposure, ready_event, worker_error):
 
 def main():
     config = _read_config_from_stdin()
-    table_key, max_exposure = _validate_config(config)
+    table_key, max_exposure, runtime_session = _validate_config(config)
 
-    # Live Bridge nunca usa o login legado do executor universal. A sessão é
-    # propriedade do Adapter; perda de sessão encerra o bridge fail-closed.
     robo.renovar_sessao_automaticamente = _disable_legacy_login
     robo.encerrar_executor.clear()
 
     print("=== LIVE BRIDGE CONTROLLED ===")
+    print(f"LIVE_BRIDGE_ACCOUNT_ID={runtime_session['account_id']}")
+    print(f"LIVE_BRIDGE_SESSION_ID={runtime_session['session_id']}")
     print(f"LIVE_BRIDGE_TABLE={table_key}")
     print("LIVE_BRIDGE_MODE=controlled")
     print(f"LIVE_BRIDGE_MAX_EXPOSURE={max_exposure:.2f}")
+    print(f"LIVE_BRIDGE_REDIS_COMMAND_CHANNEL={robo.REDIS_COMMAND_CHANNEL}")
+    print(f"LIVE_BRIDGE_REDIS_RESPONSE_CHANNEL={robo.REDIS_RESPONSE_CHANNEL}")
     print("LIVE_BRIDGE_FINANCIAL_ENGINE=robo.executar_place_bet")
     print("LIVE_BRIDGE_LEGACY_LOGIN_ENABLED=false")
 
@@ -247,13 +296,13 @@ def main():
 
     worker_thread = threading.Thread(
         target=_worker,
-        args=(config, max_exposure, ready_event, worker_error),
-        name="bacbo-live-adapter-worker",
+        args=(config, max_exposure, runtime_session, ready_event, worker_error),
+        name=f"bacbo-live-adapter-worker-{runtime_session['session_id']}",
         daemon=True,
     )
     redis_thread = threading.Thread(
         target=robo.ouvir_comandos_redis,
-        name="bacbo-live-redis-listener",
+        name=f"bacbo-live-redis-listener-{runtime_session['session_id']}",
         daemon=True,
     )
 
