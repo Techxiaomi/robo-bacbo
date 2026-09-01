@@ -379,13 +379,14 @@ function installActivationBootstrap() {
                     }
                     if (res.headersSent) return undefined;
                     const statusCode = Number(error?.statusCode) || 409;
+                    res.status(statusCode);
                     return originalJson({
                         sucesso: false,
                         erro: 'saldo_contas_vinculadas_indisponivel',
                         mensagem: 'Não foi possível confirmar o saldo real de todas as contas vinculadas. O Auto-Trader permaneceu desligado.',
                         detalhe: String(error?.message || error),
                         primed
-                    }) && res.status(statusCode);
+                    });
                 } finally {
                     res.json = originalJson;
                 }
