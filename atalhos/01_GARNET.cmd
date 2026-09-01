@@ -1,24 +1,20 @@
 @echo off
 setlocal EnableExtensions
-set "ROOT=D:\Projetos\Bacbo"
 title GARNET - Redis
+set "ROOT=D:\Projetos\Bacbo"
+set "LAUNCHER=%~dp0Garnet-Launcher.ps1"
 
-if defined GARNET_EXE if exist "%GARNET_EXE%" goto :run
-
-set "GARNET_EXE="
-if exist "%ROOT%\garnet" (
-  for /r "%ROOT%\garnet" %%F in (GarnetServer.exe) do (
-    if not defined GARNET_EXE set "GARNET_EXE=%%~fF"
-  )
-)
-
-if not defined GARNET_EXE (
-  echo [ERRO] GarnetServer.exe nao encontrado em "%ROOT%\garnet".
-  echo Defina GARNET_EXE com o caminho completo se o executavel estiver em outro local.
+if not exist "%LAUNCHER%" (
+  echo [ERRO] Launcher Garnet nao encontrado: %LAUNCHER%
   pause
   exit /b 1
 )
 
-:run
-echo [GARNET] %GARNET_EXE%
-"%GARNET_EXE%"
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%LAUNCHER%" -Root "%ROOT%"
+set "RC=%ERRORLEVEL%"
+if not "%RC%"=="0" (
+  echo.
+  echo [ERRO] Garnet encerrou com codigo %RC%.
+  pause
+  exit /b %RC%
+)
