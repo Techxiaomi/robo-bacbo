@@ -10,6 +10,7 @@
     <script src="/realtime-ui-scheduler.js"></script>
     <script src="/dashboard-ui.js"></script>
     <script src="/mesa-switcher.js"></script>
+    <script src="/trader-account-binding-ui.js"></script>
     <script src="/dom-ui2-transform.js"></script>
     <script src="/bacbo-result-map.js"></script>
     <script src="/bacbo-result-sum-integrity.js"></script>
@@ -50,6 +51,9 @@
                 }
                 if (window.__mesaSwitcherReady !== true || typeof window.__mesaSwitcher?.mount !== 'function') {
                     throw new Error('Switcher de mesa MC25 não carregado');
+                }
+                if (typeof window.__traderAccountBindingUi?.install !== 'function') {
+                    throw new Error('UI de vínculo Trader -> Conta(s) não carregada');
                 }
                 if (window.__domUi2Ready !== true || typeof window.otimizarScriptPrincipalUI2 !== 'function') {
                     throw new Error('Transformador DOM UI-2 não carregado');
@@ -108,6 +112,9 @@
 
                 if (!window.__mesaSwitcher.mount()) {
                     throw new Error('Switcher de mesa MC25 não encontrou o cabeçalho do painel');
+                }
+                if (!window.__traderAccountBindingUi.install()) {
+                    throw new Error('UI de vínculo Trader -> Conta(s) não foi instalada');
                 }
 
                 const finalizarInicializacao = () => {
