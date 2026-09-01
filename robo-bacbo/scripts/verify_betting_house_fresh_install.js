@@ -6,8 +6,8 @@ const mysql = require('mysql2/promise');
 
 require('../env_loader').loadEnvFile(path.join(__dirname, '..', '..', '.env'));
 
-const FRESH_DB = 'bacbo_migration_fresh_test';
-const GUARD_DB = 'bacbo_migration_guard_test';
+const FRESH_PREFIX = '__migration_verify_fresh';
+const GUARD_PREFIX = '__migration_verify_guard';
 
 function quoteIdentifier(value) {
     const text = String(value || '');
@@ -15,6 +15,14 @@ function quoteIdentifier(value) {
         throw new Error(`VERIFY_INVALID_IDENTIFIER: ${text}`);
     }
     return `\`${text}\``;
+}
+
+function namesFor(prefix) {
+    return Object.freeze({
+        houses: `${prefix}_betting_houses`,
+        tables: `${prefix}_betting_house_tables`,
+        foreignKey: `${prefix}_fk_house`
+    });
 }
 
 function migrationFiles() {
@@ -39,24 +47,39 @@ function migrationFiles() {
     return { dir, files };
 }
 
-function connectionConfig(database) {
-    const config = {
+function connectionConfig() {
+    const database = String(process.env.DB_NAME || '').trim();
+    if (!database) throw new Error('VERIFY_DB_NAME_REQUIRED');
+
+    return {
         host: process.env.DB_HOST,
         port: Number(process.env.DB_PORT || 3306),
         user: process.env.DB_USER,
         password: process.env.DB_PASSWORD,
+        database,
         multipleStatements: true
     };
-    if (database) config.database = database;
-    return config;
 }
 
-async function applyMigrations(connection, dir, files) {
+function transformMigrationSql(sql, names) {
+    return String(sql)
+        .replaceAll('fk_betting_house_tables_house', names.foreignKey)
+        .replaceAll('betting_house_tables', names.tables)
+        .replaceAll('betting_houses', names.houses);
+}
+
+async function applyMigrations(connection, dir, files, names) {
     for (const fileName of files) {
-        const sql = fs.readFileSync(path.join(dir, fileName), 'utf8');
+        const originalSql = fs.readFileSync(path.join(dir, fileName), 'utf8');
+        const sql = transformMigrationSql(originalSql, names);
         console.log(`VERIFY_MIGRATION_APPLY=${fileName}`);
         await connection.query(sql);
     }
+}
+
+async function cleanupTables(connection, names) {
+    await connection.query(`DROP TABLE IF EXISTS ${quoteIdentifier(names.tables)}`);
+    await connection.query(`DROP TABLE IF EXISTS ${quoteIdentifier(names.houses)}`);
 }
 
 async function requireTable(connection, schema, table) {
@@ -71,29 +94,29 @@ async function requireTable(connection, schema, table) {
     }
 }
 
-async function requireForeignKey(connection, schema) {
+async function requireForeignKey(connection, schema, names) {
     const [rows] = await connection.execute(
         `SELECT referenced_table_name, delete_rule
          FROM information_schema.referential_constraints
          WHERE constraint_schema = ?
-           AND table_name = 'betting_house_tables'
-           AND constraint_name = 'fk_betting_house_tables_house'`,
-        [schema]
+           AND table_name = ?
+           AND constraint_name = ?`,
+        [schema, names.tables, names.foreignKey]
     );
     const row = rows[0];
-    if (!row || row.referenced_table_name !== 'betting_houses' || row.delete_rule !== 'CASCADE') {
+    if (!row || row.referenced_table_name !== names.houses || row.delete_rule !== 'CASCADE') {
         throw new Error('VERIFY_FOREIGN_KEY_INVALID');
     }
 }
 
-async function requireAdapterIndexes(connection, schema) {
+async function requireAdapterIndexes(connection, schema, names) {
     const [rows] = await connection.execute(
         `SELECT index_name, non_unique
          FROM information_schema.statistics
          WHERE table_schema = ?
-           AND table_name = 'betting_houses'
+           AND table_name = ?
            AND index_name IN ('idx_betting_houses_adapter_key', 'uq_betting_houses_adapter_key')`,
-        [schema]
+        [schema, names.houses]
     );
 
     const normal = rows.find(row => row.index_name === 'idx_betting_houses_adapter_key');
@@ -107,74 +130,65 @@ async function requireAdapterIndexes(connection, schema) {
     }
 }
 
-async function requireGuardSchemaEmpty(connection, schema) {
+async function requirePrefixedTablesAbsent(connection, schema, names) {
     const [rows] = await connection.execute(
         `SELECT COUNT(*) AS total
          FROM information_schema.tables
-         WHERE table_schema = ?`,
-        [schema]
+         WHERE table_schema = ?
+           AND table_name IN (?, ?)`,
+        [schema, names.houses, names.tables]
     );
     if (Number(rows[0]?.total || 0) !== 0) {
-        throw new Error('VERIFY_GUARD_SCHEMA_NOT_EMPTY');
+        throw new Error('VERIFY_GUARD_CREATED_TABLES_UNEXPECTEDLY');
     }
 }
 
 async function main() {
-    const configuredDb = String(process.env.DB_NAME || '').trim();
-    if (!configuredDb) throw new Error('VERIFY_DB_NAME_REQUIRED');
-    if (configuredDb === FRESH_DB || configuredDb === GUARD_DB) {
-        throw new Error('VERIFY_TEST_DATABASE_COLLIDES_WITH_CONFIGURED_DATABASE');
-    }
+    const schema = String(process.env.DB_NAME || '').trim();
+    if (!schema) throw new Error('VERIFY_DB_NAME_REQUIRED');
 
+    const freshNames = namesFor(FRESH_PREFIX);
+    const guardNames = namesFor(GUARD_PREFIX);
     const { dir, files } = migrationFiles();
-    const admin = await mysql.createConnection(connectionConfig());
-    let fresh = null;
-    let guard = null;
+    const connection = await mysql.createConnection(connectionConfig());
 
     try {
-        await admin.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(FRESH_DB)}`);
-        await admin.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(GUARD_DB)}`);
-        await admin.query(
-            `CREATE DATABASE ${quoteIdentifier(FRESH_DB)} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`
-        );
-        await admin.query(
-            `CREATE DATABASE ${quoteIdentifier(GUARD_DB)} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`
-        );
+        console.log('VERIFY_MODE=ISOLATED_PREFIXED_TABLES');
+        console.log(`VERIFY_SCHEMA=${schema}`);
 
-        fresh = await mysql.createConnection(connectionConfig(FRESH_DB));
-        guard = await mysql.createConnection(connectionConfig(GUARD_DB));
+        await cleanupTables(connection, guardNames);
+        await cleanupTables(connection, freshNames);
 
         console.log('VERIFY_PHASE=FRESH_INSTALL_FIRST_PASS');
-        await applyMigrations(fresh, dir, files);
-        await requireTable(fresh, FRESH_DB, 'betting_houses');
-        await requireTable(fresh, FRESH_DB, 'betting_house_tables');
-        await requireForeignKey(fresh, FRESH_DB);
-        await requireAdapterIndexes(fresh, FRESH_DB);
+        await applyMigrations(connection, dir, files, freshNames);
+        await requireTable(connection, schema, freshNames.houses);
+        await requireTable(connection, schema, freshNames.tables);
+        await requireForeignKey(connection, schema, freshNames);
+        await requireAdapterIndexes(connection, schema, freshNames);
 
         console.log('VERIFY_PHASE=FRESH_INSTALL_SECOND_PASS');
-        await applyMigrations(fresh, dir, files);
-        await requireTable(fresh, FRESH_DB, 'betting_houses');
-        await requireTable(fresh, FRESH_DB, 'betting_house_tables');
-        await requireForeignKey(fresh, FRESH_DB);
-        await requireAdapterIndexes(fresh, FRESH_DB);
+        await applyMigrations(connection, dir, files, freshNames);
+        await requireTable(connection, schema, freshNames.houses);
+        await requireTable(connection, schema, freshNames.tables);
+        await requireForeignKey(connection, schema, freshNames);
+        await requireAdapterIndexes(connection, schema, freshNames);
 
         console.log('VERIFY_PHASE=INCREMENTAL_GUARD_ISOLATED');
-        const guardSql = fs.readFileSync(
+        const guardSqlOriginal = fs.readFileSync(
             path.join(dir, '20260901_02_allow_multi_account_adapter_key.sql'),
             'utf8'
         );
-        await guard.query(guardSql);
-        await requireGuardSchemaEmpty(guard, GUARD_DB);
+        const guardSql = transformMigrationSql(guardSqlOriginal, guardNames);
+        await connection.query(guardSql);
+        await requirePrefixedTablesAbsent(connection, schema, guardNames);
 
         console.log('VERIFY_FRESH_INSTALL_SUCCESS=true');
         console.log('VERIFY_IDEMPOTENCY_SUCCESS=true');
         console.log('VERIFY_GUARD_SUCCESS=true');
     } finally {
-        if (fresh) await fresh.end().catch(() => {});
-        if (guard) await guard.end().catch(() => {});
-        await admin.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(FRESH_DB)}`).catch(() => {});
-        await admin.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(GUARD_DB)}`).catch(() => {});
-        await admin.end().catch(() => {});
+        await cleanupTables(connection, guardNames).catch(() => {});
+        await cleanupTables(connection, freshNames).catch(() => {});
+        await connection.end().catch(() => {});
     }
 }
 
