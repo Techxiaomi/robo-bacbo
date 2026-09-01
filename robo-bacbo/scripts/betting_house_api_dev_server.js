@@ -7,6 +7,7 @@ const mysql = require('mysql2/promise');
 require('../env_loader').loadEnvFile(path.join(__dirname, '..', '..', '.env'));
 
 const { installBettingHouseApi } = require('../betting_house_api');
+const { readSupervisorSnapshot } = require('../supervisor_telemetry_store');
 
 async function main() {
     const host = '127.0.0.1';
@@ -35,14 +36,31 @@ async function main() {
         encryptionKey: process.env.BETTING_HOUSE_CREDENTIALS_KEY
     });
 
+    app.get('/api/supervisor/status', (req, res) => {
+        const snapshot = readSupervisorSnapshot();
+        res.set('Cache-Control', 'no-store');
+        res.json({
+            ...snapshot,
+            healthy: Boolean(
+                snapshot.available &&
+                !snapshot.stale &&
+                snapshot.supervisor?.running === true
+            )
+        });
+    });
+
     app.use(express.static(path.join(__dirname, '..', 'public')));
     app.get('/betting-houses', (req, res) => {
         res.sendFile(path.join(__dirname, '..', 'public', 'betting-houses.html'));
+    });
+    app.get('/supervisor', (req, res) => {
+        res.sendFile(path.join(__dirname, '..', 'public', 'supervisor-status.html'));
     });
 
     const server = app.listen(port, host, () => {
         console.log(`BETTING_HOUSE_API_DEV_READY http://${host}:${port}`);
         console.log(`BETTING_HOUSE_UI_READY http://${host}:${port}/betting-houses`);
+        console.log(`SUPERVISOR_UI_READY http://${host}:${port}/supervisor`);
     });
 
     const shutdown = async () => {
