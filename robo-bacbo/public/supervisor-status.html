@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Supervisor | Painel Bac Bo</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { margin:0; padding:20px 0 40px; background:#121212; color:#fff; font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif; }
+        .container { max-width:1280px; margin:0 auto; padding:0 20px; }
+        .topo { display:flex; justify-content:space-between; align-items:center; gap:15px; flex-wrap:wrap; border-bottom:1px solid #333; padding-bottom:15px; margin-bottom:20px; }
+        h1 { margin:0; font-size:22px; }
+        .subtitulo { color:#888; font-size:12px; margin-top:4px; }
+        .acoes { display:flex; gap:8px; flex-wrap:wrap; }
+        .btn { display:inline-flex; align-items:center; min-height:36px; padding:8px 14px; border-radius:6px; background:#333; color:#ddd; text-decoration:none; font-size:12px; font-weight:700; }
+        .resumo { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin-bottom:18px; }
+        .resumo-card { background:#1a1a1a; border:1px solid #333; border-radius:8px; padding:14px; }
+        .resumo-label { color:#888; font-size:10px; text-transform:uppercase; letter-spacing:.5px; }
+        .resumo-valor { font-size:22px; font-weight:700; margin-top:5px; }
+        .barra { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; background:#1a1a1a; border:1px solid #333; border-radius:8px; padding:11px 14px; margin-bottom:14px; }
+        .health { display:flex; align-items:center; gap:8px; font-size:12px; color:#aaa; }
+        .dot { width:9px; height:9px; border-radius:50%; background:#777; }
+        .dot.ok { background:#54c96b; }
+        .dot.erro { background:#e05a67; }
+        .tabela-wrap { overflow:auto; background:#1a1a1a; border:1px solid #333; border-radius:8px; }
+        table { width:100%; border-collapse:collapse; min-width:980px; }
+        th,td { text-align:left; padding:11px 12px; border-bottom:1px solid #2a2a2a; font-size:12px; vertical-align:middle; }
+        th { position:sticky; top:0; background:#202020; color:#aaa; font-size:10px; text-transform:uppercase; letter-spacing:.5px; }
+        tr:last-child td { border-bottom:0; }
+        .session { font-family:Consolas,monospace; color:#c7d7ef; }
+        .muted { color:#888; }
+        .erro-texto { color:#ff8c95; max-width:340px; overflow-wrap:anywhere; }
+        .badge { display:inline-flex; min-width:78px; justify-content:center; padding:4px 8px; border-radius:12px; border:1px solid #444; font-size:10px; font-weight:800; letter-spacing:.3px; }
+        .STARTING { color:#8fc7ff; background:#142235; border-color:#315d85; }
+        .READY { color:#8be79f; background:#102016; border-color:#285b36; }
+        .BACKOFF { color:#ffcc7a; background:#2a2112; border-color:#705521; }
+        .STOPPING { color:#d6b4ff; background:#21162d; border-color:#5c3b78; }
+        .STOPPED { color:#aaa; background:#222; border-color:#444; }
+        .ERROR { color:#ff969e; background:#291417; border-color:#76313a; }
+        .vazio { padding:34px; text-align:center; color:#777; }
+        @media (max-width:800px) { .resumo { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+    </style>
+</head>
+<body>
+<div class="container">
+    <header class="topo">
+        <div>
+            <h1>🧭 Master Supervisor</h1>
+            <div class="subtitulo">Telemetria em tempo real das sessões orquestradas.</div>
+        </div>
+        <div class="acoes">
+            <a class="btn" href="/betting-houses">Contas de Aposta</a>
+            <a class="btn" href="/">Painel</a>
+        </div>
+    </header>
+
+    <section class="resumo">
+        <div class="resumo-card"><div class="resumo-label">Workers</div><div class="resumo-valor" id="total-workers">0</div></div>
+        <div class="resumo-card"><div class="resumo-label">Ready</div><div class="resumo-valor" id="total-ready">0</div></div>
+        <div class="resumo-card"><div class="resumo-label">Backoff / Error</div><div class="resumo-valor" id="total-problemas">0</div></div>
+        <div class="resumo-card"><div class="resumo-label">Supervisor PID</div><div class="resumo-valor" id="supervisor-pid">—</div></div>
+    </section>
+
+    <section class="barra">
+        <div class="health"><span class="dot" id="health-dot"></span><span id="health-text">Carregando telemetria...</span></div>
+        <div class="muted" id="updated-at">—</div>
+    </section>
+
+    <div class="tabela-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Sessão</th>
+                    <th>Conta</th>
+                    <th>Mesa</th>
+                    <th>PID</th>
+                    <th>Status</th>
+                    <th>Uptime</th>
+                    <th>Restarts</th>
+                    <th>Desejado</th>
+                    <th>Último erro</th>
+                </tr>
+            </thead>
+            <tbody id="workers-body"></tbody>
+        </table>
+        <div id="empty-state" class="vazio" hidden>Nenhum worker registrado.</div>
+    </div>
+</div>
+<script src="/supervisor-status.js"></script>
+</body>
+</html>
