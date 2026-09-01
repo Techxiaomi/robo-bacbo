@@ -22,8 +22,18 @@ test('formulario exige conta e injeta account_ids no config salvo', () => {
     assert.match(source, /Conta\(s\) de Operação \*/);
     assert.match(source, /Selecione ao menos uma Conta de Operação/);
     assert.match(source, /body\.config\.account_ids = selectedAccountIds\(\)/);
-    assert.match(source, /\/api\/betting-houses/);
-    assert.match(source, /adapter_key === 'brasil-da-sorte'/);
+    assert.match(source, /\/api\/trader-account-catalog/);
+    assert.match(source, /payload\.table_code/);
+    assert.match(source, /payload\.accounts/);
+});
+
+test('catalogo seguro concentra filtro de adapter e mesa no backend', () => {
+    const source = read('trader_account_catalog.js');
+    assert.match(source, /brasil-da-sorte/);
+    assert.match(source, /betting_house_tables/);
+    assert.match(source, /LOWER\(ht\.table_key\) = LOWER\(\?\)/);
+    assert.doesNotMatch(source, /password/i);
+    assert.doesNotMatch(source, /username/i);
 });
 
 test('edicao relê trader pela API para restaurar account_ids', () => {
