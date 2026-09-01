@@ -22,7 +22,9 @@ function namesFor(prefix) {
     return Object.freeze({
         houses,
         tables: `${prefix}_betting_house_tables`,
+        bindings: `${prefix}_auto_trader_account_bindings`,
         foreignKey: `${prefix}_fk_house`,
+        bindingForeignKey: `${prefix}_fk_atab_house`,
         adapterIndex: `idx_${houses}_adapter_key`,
         legacyUniqueIndex: `uq_${houses}_adapter_key`
     });
@@ -36,7 +38,8 @@ function migrationFiles() {
 
     const expected = [
         '20260901_01_create_betting_houses.sql',
-        '20260901_02_allow_multi_account_adapter_key.sql'
+        '20260901_02_allow_multi_account_adapter_key.sql',
+        '20260901_03_auto_trader_account_bindings.sql'
     ];
 
     for (let index = 0; index < expected.length; index += 1) {
@@ -66,6 +69,8 @@ function connectionConfig() {
 
 function transformMigrationSql(sql, names) {
     return String(sql)
+        .replaceAll('fk_atab_betting_house', names.bindingForeignKey)
+        .replaceAll('auto_trader_account_bindings', names.bindings)
         .replaceAll('fk_betting_house_tables_house', names.foreignKey)
         .replaceAll('betting_house_tables', names.tables)
         .replaceAll('betting_houses', names.houses);
@@ -81,6 +86,7 @@ async function applyMigrations(connection, dir, files, names) {
 }
 
 async function cleanupTables(connection, names) {
+    await connection.query(`DROP TABLE IF EXISTS ${quoteIdentifier(names.bindings)}`);
     await connection.query(`DROP TABLE IF EXISTS ${quoteIdentifier(names.tables)}`);
     await connection.query(`DROP TABLE IF EXISTS ${quoteIdentifier(names.houses)}`);
 }
@@ -97,18 +103,18 @@ async function requireTable(connection, schema, table) {
     }
 }
 
-async function requireForeignKey(connection, schema, names) {
+async function requireForeignKey(connection, schema, table, constraint, referencedTable) {
     const [rows] = await connection.execute(
         `SELECT referenced_table_name, delete_rule
          FROM information_schema.referential_constraints
          WHERE constraint_schema = ?
            AND table_name = ?
            AND constraint_name = ?`,
-        [schema, names.tables, names.foreignKey]
+        [schema, table, constraint]
     );
     const row = rows[0];
-    if (!row || row.referenced_table_name !== names.houses || row.delete_rule !== 'CASCADE') {
-        throw new Error('VERIFY_FOREIGN_KEY_INVALID');
+    if (!row || row.referenced_table_name !== referencedTable || row.delete_rule !== 'CASCADE') {
+        throw new Error(`VERIFY_FOREIGN_KEY_INVALID: ${table}.${constraint}`);
     }
 }
 
@@ -138,12 +144,21 @@ async function requirePrefixedTablesAbsent(connection, schema, names) {
         `SELECT COUNT(*) AS total
          FROM information_schema.tables
          WHERE table_schema = ?
-           AND table_name IN (?, ?)`,
-        [schema, names.houses, names.tables]
+           AND table_name IN (?, ?, ?)`,
+        [schema, names.houses, names.tables, names.bindings]
     );
     if (Number(rows[0]?.total || 0) !== 0) {
         throw new Error('VERIFY_GUARD_CREATED_TABLES_UNEXPECTEDLY');
     }
+}
+
+async function verifyFreshState(connection, schema, names) {
+    await requireTable(connection, schema, names.houses);
+    await requireTable(connection, schema, names.tables);
+    await requireTable(connection, schema, names.bindings);
+    await requireForeignKey(connection, schema, names.tables, names.foreignKey, names.houses);
+    await requireForeignKey(connection, schema, names.bindings, names.bindingForeignKey, names.houses);
+    await requireAdapterIndexes(connection, schema, names);
 }
 
 async function main() {
@@ -164,17 +179,11 @@ async function main() {
 
         console.log('VERIFY_PHASE=FRESH_INSTALL_FIRST_PASS');
         await applyMigrations(connection, dir, files, freshNames);
-        await requireTable(connection, schema, freshNames.houses);
-        await requireTable(connection, schema, freshNames.tables);
-        await requireForeignKey(connection, schema, freshNames);
-        await requireAdapterIndexes(connection, schema, freshNames);
+        await verifyFreshState(connection, schema, freshNames);
 
         console.log('VERIFY_PHASE=FRESH_INSTALL_SECOND_PASS');
         await applyMigrations(connection, dir, files, freshNames);
-        await requireTable(connection, schema, freshNames.houses);
-        await requireTable(connection, schema, freshNames.tables);
-        await requireForeignKey(connection, schema, freshNames);
-        await requireAdapterIndexes(connection, schema, freshNames);
+        await verifyFreshState(connection, schema, freshNames);
 
         console.log('VERIFY_PHASE=INCREMENTAL_GUARD_ISOLATED');
         const guardSqlOriginal = fs.readFileSync(
