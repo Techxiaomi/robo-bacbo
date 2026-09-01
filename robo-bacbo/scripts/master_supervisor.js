@@ -7,6 +7,7 @@ const mysql = require('mysql2/promise');
 require('../env_loader').loadEnvFile(path.join(__dirname, '..', '..', '.env'));
 
 const { createBettingHouseService } = require('../betting_house_service');
+const { writeSupervisorSnapshot } = require('../supervisor_telemetry_store');
 
 const DEFAULT_STAGGER_MS = 3000;
 const DEFAULT_BACKOFF_BASE_MS = 2000;
@@ -14,6 +15,7 @@ const DEFAULT_BACKOFF_MAX_MS = 60000;
 const DEFAULT_STABLE_WINDOW_MS = 60000;
 const DEFAULT_RECONCILE_INTERVAL_MS = 15000;
 const CHILD_GRACEFUL_STOP_TIMEOUT_MS = 15000;
+const WORKER_STATUSES = new Set(['STARTING', 'READY', 'BACKOFF', 'STOPPING', 'STOPPED', 'ERROR']);
 
 function positiveIntEnv(name, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
     const raw = String(process.env[name] || '').trim();
@@ -87,16 +89,87 @@ async function discoverTasks(service, tableFilter) {
 }
 
 class MasterSupervisor {
-    constructor({ runnerPath, cwd, staggerMs, backoffBaseMs, backoffMaxMs, stableWindowMs }) {
+    constructor({ runnerPath, cwd, staggerMs, backoffBaseMs, backoffMaxMs, stableWindowMs, reconcileIntervalMs }) {
         this.runnerPath = runnerPath;
         this.cwd = cwd;
         this.staggerMs = staggerMs;
         this.backoffBaseMs = backoffBaseMs;
         this.backoffMaxMs = backoffMaxMs;
         this.stableWindowMs = stableWindowMs;
+        this.reconcileIntervalMs = reconcileIntervalMs;
         this.entries = new Map();
+        this.telemetry = new Map();
         this.shuttingDown = false;
         this.shutdownPromise = null;
+    }
+
+    telemetryFor(task) {
+        let item = this.telemetry.get(task.id);
+        if (!item) {
+            item = {
+                session_id: task.id,
+                account_id: task.accountId,
+                account_name: task.accountName,
+                table_key: task.tableKey,
+                table_name: task.tableName,
+                pid: null,
+                status: 'STOPPED',
+                restart_attempts: 0,
+                last_error: null,
+                desired: false,
+                started_at: null,
+                updated_at: new Date().toISOString()
+            };
+            this.telemetry.set(task.id, item);
+        }
+        item.account_name = task.accountName;
+        item.table_name = task.tableName;
+        return item;
+    }
+
+    setTelemetry(entry, status, patch = {}) {
+        if (!WORKER_STATUSES.has(status)) {
+            throw new Error(`MASTER_SUPERVISOR_TELEMETRY_STATUS_INVALID: ${status}`);
+        }
+        const item = this.telemetryFor(entry.task);
+        Object.assign(item, patch, {
+            status,
+            desired: Boolean(entry.desired),
+            restart_attempts: entry.restartCount,
+            updated_at: new Date().toISOString()
+        });
+        this.publishSnapshot();
+    }
+
+    publishSnapshot({ running = !this.shuttingDown } = {}) {
+        const now = Date.now();
+        const workers = Array.from(this.telemetry.values())
+            .map(item => ({
+                ...item,
+                uptime_ms: item.pid && item.started_at
+                    ? Math.max(0, now - Date.parse(item.started_at))
+                    : 0
+            }))
+            .sort((a, b) => {
+                if (a.account_id !== b.account_id) return a.account_id - b.account_id;
+                return a.table_key.localeCompare(b.table_key, 'en');
+            });
+
+        try {
+            writeSupervisorSnapshot({
+                version: 1,
+                generated_at: new Date(now).toISOString(),
+                supervisor: {
+                    running,
+                    pid: running ? process.pid : null,
+                    reconcile_interval_ms: this.reconcileIntervalMs,
+                    table_filter: String(process.env.MASTER_SUPERVISOR_TABLE_KEYS || '').trim() || null
+                },
+                workers
+            });
+        } catch (error) {
+            console.error(`MASTER_SUPERVISOR_TELEMETRY_WRITE_FAILED: ${error?.message || error}`);
+        }
     }
 
     register(task) {
@@ -114,6 +187,9 @@ class MasterSupervisor {
             intentionalStopReason: null
         };
         this.entries.set(task.id, entry);
+        const telemetry = this.telemetryFor(task);
+        telemetry.desired = true;
+        telemetry.updated_at = new Date().toISOString();
         return entry;
     }
 
@@ -143,16 +219,37 @@ class MasterSupervisor {
             this.backoffBaseMs * (2 ** Math.max(0, entry.restartCount - 1)),
             this.backoffMaxMs
         );
+        const lastError = `process_exit code=${code ?? 'null'} signal=${signal || 'none'}`;
 
         console.error(
             `MASTER_SUPERVISOR_CHILD_EXIT=${entry.task.id} code=${code ?? 'null'} signal=${signal || 'none'} ` +
             `runtime_ms=${runtimeMs} restart_in_ms=${delay} attempt=${entry.restartCount}`
         );
+        this.setTelemetry(entry, 'BACKOFF', {
+            pid: null,
+            last_error: lastError
+        });
 
         entry.restartTimer = setTimeout(() => {
             entry.restartTimer = null;
             this.spawnTask(entry);
         }, delay);
+    }
+
+    handleChildTelemetry(entry, message) {
+        if (!message || message.type !== 'telemetry') return;
+        const status = String(message.status || '').trim().toUpperCase();
+        if (!WORKER_STATUSES.has(status)) return;
+
+        if (status === 'READY') {
+            this.setTelemetry(entry, 'READY', { last_error: null });
+            return;
+        }
+        if (status === 'ERROR') {
+            this.setTelemetry(entry, 'ERROR', {
+                last_error: String(message.error || 'LIVE_BRIDGE_ERROR').slice(0, 1000)
+            });
+        }
     }
 
     spawnTask(entry) {
@@ -168,14 +265,22 @@ class MasterSupervisor {
 
         entry.child = child;
         entry.startedAt = Date.now();
+        this.setTelemetry(entry, 'STARTING', {
+            pid: child.pid || null,
+            started_at: new Date(entry.startedAt).toISOString(),
+            last_error: null
+        });
 
         console.log(
             `MASTER_SUPERVISOR_CHILD_STARTED=${task.id} pid=${child.pid || 'unknown'} ` +
             `account=${task.accountName} table=${task.tableName}`
         );
 
+        child.on('message', message => this.handleChildTelemetry(entry, message));
         child.once('error', error => {
-            console.error(`MASTER_SUPERVISOR_CHILD_ERROR=${task.id}: ${error?.message || error}`);
+            const text = String(error?.message || error);
+            console.error(`MASTER_SUPERVISOR_CHILD_ERROR=${task.id}: ${text}`);
+            this.setTelemetry(entry, 'ERROR', { last_error: text });
         });
 
         child.once('close', (code, signal) => {
@@ -185,6 +290,7 @@ class MasterSupervisor {
             entry.intentionalStopReason = null;
 
             if (this.shuttingDown) {
+                this.setTelemetry(entry, 'STOPPED', { pid: null });
                 console.log(
                     `MASTER_SUPERVISOR_CHILD_STOPPED=${task.id} code=${code ?? 'null'} signal=${signal || 'none'}`
                 );
@@ -192,6 +298,7 @@ class MasterSupervisor {
             }
 
             if (intentionalReason) {
+                this.setTelemetry(entry, 'STOPPED', { pid: null });
                 console.log(
                     `MASTER_SUPERVISOR_CHILD_STOPPED_INTENTIONAL=${task.id} reason=${intentionalReason} ` +
                     `code=${code ?? 'null'} signal=${signal || 'none'}`
@@ -218,17 +325,20 @@ class MasterSupervisor {
         this.cancelRestart(entry);
         entry.intentionalStopReason = reason;
         const child = entry.child;
+        this.setTelemetry(entry, 'STOPPING');
 
         console.log(`MASTER_SUPERVISOR_CHILD_STOP_REQUESTED=${entry.task.id} reason=${reason}`);
 
         const forceStop = () => {
             if (entry.child !== child) return;
+            const error = `graceful_shutdown_timeout reason=${reason}`;
             console.error(`MASTER_SUPERVISOR_CHILD_GRACE_TIMEOUT=${entry.task.id} reason=${reason}`);
+            this.setTelemetry(entry, 'ERROR', { last_error: error });
             try {
                 child.kill('SIGTERM');
-            } catch (error) {
+            } catch (killError) {
                 console.error(
-                    `MASTER_SUPERVISOR_CHILD_FORCE_STOP_FAILED=${entry.task.id}: ${error?.message || error}`
+                    `MASTER_SUPERVISOR_CHILD_FORCE_STOP_FAILED=${entry.task.id}: ${killError?.message || killError}`
                 );
             }
         };
@@ -284,6 +394,7 @@ class MasterSupervisor {
             if (entry.child) {
                 this.requestGracefulStop(entry, 'DB_DISABLED');
             } else {
+                this.setTelemetry(entry, 'STOPPED', { pid: null });
                 this.entries.delete(id);
             }
         }
@@ -299,6 +410,7 @@ class MasterSupervisor {
             existing.task = task;
             const wasDesired = existing.desired;
             existing.desired = true;
+            this.telemetryFor(task).desired = true;
 
             if (existing.child || existing.restartTimer || existing.intentionalStopReason) {
                 keepCount += 1;
@@ -317,6 +429,7 @@ class MasterSupervisor {
         );
 
         await this.startEntries(startEntries);
+        this.publishSnapshot();
     }
 
     async shutdown() {
@@ -331,6 +444,8 @@ class MasterSupervisor {
                 this.cancelRestart(entry);
                 if (entry.child && !entry.intentionalStopReason) {
                     this.requestGracefulStop(entry, 'SUPERVISOR_SHUTDOWN');
+                } else if (!entry.child) {
+                    this.setTelemetry(entry, 'STOPPED', { pid: null });
                 }
             }
 
@@ -351,6 +466,7 @@ class MasterSupervisor {
                 } catch (_) {}
             }
 
+            this.publishSnapshot({ running: false });
             console.log('MASTER_SUPERVISOR_STOPPED=true');
         })();
 
@@ -381,7 +497,8 @@ async function main() {
         staggerMs,
         backoffBaseMs,
         backoffMaxMs,
-        stableWindowMs
+        stableWindowMs,
+        reconcileIntervalMs
     });
 
     const requestShutdown = () => {
@@ -401,6 +518,7 @@ async function main() {
             `MASTER_SUPERVISOR_TABLE_FILTER=${tableFilter ? Array.from(tableFilter).join(',') : 'ALL_ENABLED'}`
         );
 
+        supervisor.publishSnapshot();
         const initialTasks = await discoverTasks(service, tableFilter);
         console.log(`MASTER_SUPERVISOR_TASK_COUNT=${initialTasks.length}`);
         for (const task of initialTasks) {
@@ -424,6 +542,7 @@ async function main() {
                 await supervisor.reconcile(tasks);
             } catch (error) {
                 console.error(`MASTER_SUPERVISOR_RECONCILE_FAILED: ${error?.message || error}`);
+                supervisor.publishSnapshot();
             }
         }
 
@@ -435,5 +554,14 @@ async function main() {
 
 main().catch(error => {
     console.error('MASTER_SUPERVISOR_FAILED:', error?.message || error);
+    try {
+        writeSupervisorSnapshot({
+            version: 1,
+            generated_at: new Date().toISOString(),
+            supervisor: { running: false, pid: null },
+            workers: [],
+            error: String(error?.message || error)
+        });
+    } catch (_) {}
     process.exitCode = 1;
 });
