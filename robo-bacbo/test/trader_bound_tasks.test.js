@@ -4,10 +4,19 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
+    normalizeAccountIds,
+    accountIdsFromConfig,
     tasksFromRows,
     metricsNamespaceForTask,
     envForTask
 } = require('../trader_bound_tasks');
+
+test('normaliza account_ids do config do trader de forma deterministica', () => {
+    assert.deepEqual(normalizeAccountIds([4, '1', 4, 0, 'x']), [1, 4]);
+    assert.deepEqual(accountIdsFromConfig('{"account_ids":[4,1,4]}'), [1, 4]);
+    assert.deepEqual(accountIdsFromConfig({ account_ids: [7, 2] }), [2, 7]);
+    assert.deepEqual(accountIdsFromConfig('{json-invalido'), []);
+});
 
 test('deduplica dois traders na mesma conta e mesa em um unico worker', () => {
     const tasks = tasksFromRows([
