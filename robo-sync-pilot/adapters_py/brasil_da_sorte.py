@@ -8,7 +8,7 @@ from adapters_py.base_adapter import BettingHouseAdapter
 
 
 DEFAULT_NAVIGATION_TIMEOUT_MS = 60000
-LOGIN_FORM_WAIT_MS = 5000
+LOGIN_FORM_WAIT_MS = 10000
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -109,10 +109,10 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
     def _perform_login(self, page: Page) -> None:
         page.wait_for_timeout(1000)
 
-        username, password, root = self._find_login_fields(page)
+        username, password, root, auth_page = self._find_login_fields(page)
         if username is None or password is None:
             self._open_login_form(page)
-            username, password, root = self._wait_for_login_fields(page)
+            username, password, root, auth_page = self._wait_for_login_fields(page)
 
         if username is None or password is None:
             self._log_login_dom_diagnostic(page)
@@ -127,100 +127,135 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
         else:
             password.press("Enter")
 
-        page.wait_for_timeout(3000)
+        auth_page.wait_for_timeout(3000)
 
         if self._session_state_file:
             self._context.storage_state(path=self._session_state_file)
 
-    def _find_login_fields(self, page: Page):
-        for root in self._roots(page):
-            username = self._first_visible(root, self.USERNAME_SELECTORS)
-            password = self._first_visible(root, self.PASSWORD_SELECTORS)
+    def _find_login_fields(self, primary_page: Page):
+        for candidate_page in self._candidate_pages(primary_page):
+            for root in self._roots(candidate_page):
+                username = self._first_visible(root, self.USERNAME_SELECTORS)
+                password = self._first_visible(root, self.PASSWORD_SELECTORS)
 
-            if username is None and password is not None:
-                username = self._first_visible_text_input(root)
+                if username is None and password is not None:
+                    username = self._first_visible_text_input(root)
 
-            if username is not None and password is not None:
-                return username, password, root
+                if username is not None and password is not None:
+                    return username, password, root, candidate_page
 
-        return None, None, None
+        return None, None, None, primary_page
 
-    def _wait_for_login_fields(self, page: Page):
+    def _wait_for_login_fields(self, primary_page: Page):
         elapsed = 0
         interval_ms = 250
 
         while elapsed < LOGIN_FORM_WAIT_MS:
-            username, password, root = self._find_login_fields(page)
+            username, password, root, auth_page = self._find_login_fields(primary_page)
             if username is not None and password is not None:
-                return username, password, root
-            page.wait_for_timeout(interval_ms)
+                return username, password, root, auth_page
+            primary_page.wait_for_timeout(interval_ms)
             elapsed += interval_ms
 
-        return None, None, None
+        return None, None, None, primary_page
 
-    def _open_login_form(self, page: Page) -> bool:
-        for root in self._roots(page):
-            button = self._first_visible_role_button(root, self.LOGIN_BUTTON_PATTERN)
-            if button is not None:
-                button.click()
-                return True
-
-        for root in self._roots(page):
-            for selector in (
-                "a[href*='login' i]",
-                "button[data-testid*='login' i]",
-                "[role='button'][data-testid*='login' i]",
-            ):
-                candidate = self._first_visible(root, (selector,))
-                if candidate is not None:
-                    candidate.click()
+    def _open_login_form(self, primary_page: Page) -> bool:
+        for candidate_page in self._candidate_pages(primary_page):
+            for root in self._roots(candidate_page):
+                button = self._first_visible_role_button(root, self.LOGIN_BUTTON_PATTERN)
+                if button is not None:
+                    button.click()
                     return True
+
+        for candidate_page in self._candidate_pages(primary_page):
+            for root in self._roots(candidate_page):
+                for selector in (
+                    "a[href*='login' i]",
+                    "button[data-testid*='login' i]",
+                    "[role='button'][data-testid*='login' i]",
+                ):
+                    candidate = self._first_visible(root, (selector,))
+                    if candidate is not None:
+                        candidate.click()
+                        return True
 
         return False
 
-    def _log_login_dom_diagnostic(self, page: Page) -> None:
-        print(f"BRASIL_DA_SORTE_LOGIN_DIAG_URL={page.url}")
+    def _log_login_dom_diagnostic(self, primary_page: Page) -> None:
+        pages = self._candidate_pages(primary_page)
+        page_urls = [self._sanitize_diagnostic(item.url) for item in pages]
+        print(f"BRASIL_DA_SORTE_LOGIN_DIAG_PAGES={page_urls[:8]}")
 
         descriptors = []
         buttons = []
+        frame_urls = []
 
-        for root in self._roots(page):
-            inputs = root.locator("input")
-            for index in range(min(inputs.count(), 20)):
-                candidate = inputs.nth(index)
+        for candidate_page in pages:
+            for root in self._roots(candidate_page):
                 try:
-                    if not candidate.is_visible():
-                        continue
-                    descriptor = {
-                        "type": candidate.get_attribute("type") or "",
-                        "name": candidate.get_attribute("name") or "",
-                        "id": candidate.get_attribute("id") or "",
-                        "placeholder": candidate.get_attribute("placeholder") or "",
-                        "autocomplete": candidate.get_attribute("autocomplete") or "",
-                    }
-                    encoded = ",".join(
-                        f"{key}={self._sanitize_diagnostic(value)}"
-                        for key, value in descriptor.items()
-                    )
-                    if encoded not in descriptors:
-                        descriptors.append(encoded)
+                    root_url = getattr(root, "url", "")
+                    clean_url = self._sanitize_diagnostic(root_url)
+                    if clean_url and clean_url not in frame_urls:
+                        frame_urls.append(clean_url)
                 except Exception:
-                    continue
+                    pass
 
-            role_buttons = root.get_by_role("button")
-            for index in range(min(role_buttons.count(), 20)):
-                candidate = role_buttons.nth(index)
-                try:
-                    if not candidate.is_visible():
+                inputs = root.locator("input")
+                for index in range(min(inputs.count(), 20)):
+                    candidate = inputs.nth(index)
+                    try:
+                        if not candidate.is_visible():
+                            continue
+                        descriptor = {
+                            "type": candidate.get_attribute("type") or "",
+                            "name": candidate.get_attribute("name") or "",
+                            "id": candidate.get_attribute("id") or "",
+                            "placeholder": candidate.get_attribute("placeholder") or "",
+                            "autocomplete": candidate.get_attribute("autocomplete") or "",
+                        }
+                        encoded = ",".join(
+                            f"{key}={self._sanitize_diagnostic(value)}"
+                            for key, value in descriptor.items()
+                        )
+                        if encoded not in descriptors:
+                            descriptors.append(encoded)
+                    except Exception:
                         continue
-                    text = self._sanitize_diagnostic(candidate.inner_text())
-                    if text and text not in buttons:
-                        buttons.append(text)
-                except Exception:
-                    continue
 
+                role_buttons = root.get_by_role("button")
+                for index in range(min(role_buttons.count(), 20)):
+                    candidate = role_buttons.nth(index)
+                    try:
+                        if not candidate.is_visible():
+                            continue
+                        text = self._sanitize_diagnostic(candidate.inner_text())
+                        if text and text not in buttons:
+                            buttons.append(text)
+                    except Exception:
+                        continue
+
+        print(f"BRASIL_DA_SORTE_LOGIN_DIAG_FRAMES={frame_urls[:12]}")
         print(f"BRASIL_DA_SORTE_LOGIN_DIAG_INPUTS={descriptors[:12]}")
         print(f"BRASIL_DA_SORTE_LOGIN_DIAG_BUTTONS={buttons[:12]}")
+
+    def _candidate_pages(self, primary_page: Page):
+        pages = []
+        seen = set()
+
+        for candidate in [primary_page, *list(self._context.pages)]:
+            try:
+                if candidate is None or candidate.is_closed():
+                    continue
+            except Exception:
+                continue
+
+            identity = id(candidate)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            pages.append(candidate)
+
+        return pages
 
     def _navigate(self, page: Page, url: str) -> None:
         page.goto(
