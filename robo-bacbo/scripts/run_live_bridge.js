@@ -14,6 +14,9 @@ const DEFAULT_TABLE_KEY = 'bacbo_br';
 const SUPPORTED_TABLE_KEYS = new Set(['bacbo_br', 'bacbo_int']);
 const CONTROLLED_MAX_EXPOSURE_CAP = 5;
 
+let activePythonControl = null;
+let pendingExternalShutdownReason = null;
+
 function selectedTableKey() {
     const tableKey = String(process.argv[2] || DEFAULT_TABLE_KEY).trim();
     if (!SUPPORTED_TABLE_KEYS.has(tableKey)) {
@@ -189,8 +192,20 @@ async function findRuntimeConfig(service, tableKey, requestedAccountId, safety) 
             enabled: table.enabled
         },
         session: sessionConfig(accountId, tableKey),
+        control: {
+            stdin_keepalive: true
+        },
         safety
     };
+}
+
+function requestExternalShutdown(reason) {
+    const normalizedReason = String(reason || 'EXTERNAL').trim().toUpperCase() || 'EXTERNAL';
+    if (activePythonControl) {
+        activePythonControl.requestShutdown(normalizedReason);
+        return;
+    }
+    pendingExternalShutdownReason = normalizedReason;
 }
 
 function runPython({ pythonExecutable, pythonScript, config, cwd }) {
@@ -205,14 +220,11 @@ function runPython({ pythonExecutable, pythonScript, config, cwd }) {
         let settled = false;
         let shutdownRequested = false;
 
-        const removeSignalHandlers = () => {
-            process.removeListener('SIGINT', handleSigint);
-        };
-
         const finish = callback => {
             if (settled) return;
             settled = true;
-            removeSignalHandlers();
+            activePythonControl = null;
+            try { child.stdin.end(); } catch (_) {}
             callback();
         };
 
@@ -220,16 +232,20 @@ function runPython({ pythonExecutable, pythonScript, config, cwd }) {
             finish(() => reject(error));
         };
 
-        const handleSigint = () => {
+        const requestShutdown = reason => {
             if (shutdownRequested) return;
             shutdownRequested = true;
-            console.log('LIVE_BRIDGE_ORCHESTRATOR_SHUTDOWN_REQUESTED=true');
-            // O console também entrega Ctrl+C ao Python filho no Windows.
-            // Manter o Node pai vivo evita fechar os pipes enquanto o Python
-            // conclui BrowserContext/browser/sync_playwright de forma cooperativa.
+            console.log(`LIVE_BRIDGE_ORCHESTRATOR_SHUTDOWN_REQUESTED=true reason=${reason}`);
+            if (!child.stdin.destroyed && child.stdin.writable) {
+                child.stdin.write('SHUTDOWN\n', error => {
+                    if (error && error.code !== 'EPIPE') {
+                        console.error(`LIVE_BRIDGE_CONTROL_WRITE_FAILED: ${error.message}`);
+                    }
+                });
+            }
         };
 
-        process.on('SIGINT', handleSigint);
+        activePythonControl = Object.freeze({ requestShutdown });
 
         child.once('error', fail);
         child.once('exit', (code, signal) => {
@@ -239,8 +255,22 @@ function runPython({ pythonExecutable, pythonScript, config, cwd }) {
                 resolve();
             });
         });
-        child.stdin.once('error', fail);
-        child.stdin.end(JSON.stringify(config));
+        child.stdin.on('error', error => {
+            if (shutdownRequested && error?.code === 'EPIPE') return;
+            fail(error);
+        });
+
+        child.stdin.write(`${JSON.stringify(config)}\n`, error => {
+            if (error) {
+                fail(error);
+                return;
+            }
+            if (pendingExternalShutdownReason) {
+                const reason = pendingExternalShutdownReason;
+                pendingExternalShutdownReason = null;
+                requestShutdown(reason);
+            }
+        });
     });
 }
 
@@ -273,7 +303,7 @@ async function main() {
         console.log(`TABLE=${config.table.table_key}`);
         console.log(`REDIS_COMMAND_CHANNEL=${config.session.redis_command_channel}`);
         console.log(`REDIS_RESPONSE_CHANNEL=${config.session.redis_response_channel}`);
-        console.log('CONFIG_TRANSPORT=STDIN_JSON');
+        console.log('CONFIG_TRANSPORT=STDIN_JSONL_CONTROL');
         console.log('SECRETS_LOGGED=false');
         console.log('LIVE_BRIDGE_MODE=controlled');
         console.log(`LIVE_BRIDGE_MAX_EXPOSURE=${safety.max_exposure.toFixed(2)}`);
@@ -288,8 +318,18 @@ async function main() {
         console.log('LIVE_BRIDGE_ORCHESTRATOR_STOPPED');
     } finally {
         await dbPool.end();
+        if (process.connected) {
+            try { process.disconnect(); } catch (_) {}
+        }
     }
 }
+
+process.on('SIGINT', () => requestExternalShutdown('SIGINT'));
+process.on('SIGTERM', () => requestExternalShutdown('SIGTERM'));
+process.on('message', message => {
+    if (!message || message.type !== 'graceful_shutdown') return;
+    requestExternalShutdown(message.reason || 'SUPERVISOR');
+});
 
 main().catch(error => {
     console.error('LIVE_BRIDGE_ORCHESTRATOR_FAILED:', error?.message || error);
