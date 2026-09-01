@@ -6,7 +6,10 @@ const assert = require('node:assert/strict');
 const {
     normalizeSignal,
     buildTargetIndex,
+    deterministicOrderId,
     commandForTarget,
+    calculateGlobalExposure,
+    resolveOnlineTargets,
     RedisSignalDedup
 } = require('../scripts/signal_router');
 
@@ -24,15 +27,32 @@ test('normaliza sync_balance global para uma mesa', () => {
     });
 });
 
-test('bloqueia fan-out financeiro nesta etapa', () => {
+test('place_bet permanece bloqueado sem chave financeira', () => {
     assert.throws(
         () => normalizeSignal(JSON.stringify({
             signal_id: 'bet-001',
             action: 'place_bet',
-            table_key: 'bacbo_br'
+            table_key: 'bacbo_br',
+            alvo: 'PlayerWon',
+            valor_base: 5
         })),
         /SIGNAL_ROUTER_FINANCIAL_ACTION_BLOCKED/
     );
+});
+
+test('normaliza place_bet somente quando chave financeira esta habilitada', () => {
+    const signal = normalizeSignal(JSON.stringify({
+        signal_id: 'bet-002',
+        action: 'place_bet',
+        table_key: 'bacbo_br',
+        alvo: 'PlayerWon',
+        valor_base: 5
+    }), { financialEnabled: true });
+
+    assert.equal(signal.action, 'place_bet');
+    assert.equal(signal.alvo, 'PlayerWon');
+    assert.equal(signal.valor, 5);
+    assert.equal(signal.exposure_cents, 500);
 });
 
 test('indexa somente contas e mesas habilitadas', () => {
@@ -65,32 +85,67 @@ test('indexa somente contas e mesas habilitadas', () => {
     ]);
 
     assert.equal(index.get('bacbo_br').length, 2);
-    assert.deepEqual(
-        index.get('bacbo_br').map(item => item.account_id),
-        [1, 4]
-    );
+    assert.deepEqual(index.get('bacbo_br').map(item => item.account_id), [1, 4]);
     assert.equal(index.has('bacbo_int'), false);
 });
 
-test('gera comando individualizado por sessao', () => {
-    const signal = Object.freeze({
-        signal_id: 'sync-002',
-        action: 'sync_balance',
-        table_key: 'bacbo_br'
-    });
-    const target = {
-        account_id: 4,
-        session_id: 'account-4:bacbo_br',
-        table_key: 'bacbo_br'
-    };
+test('gera order_id financeiro deterministico por conta', () => {
+    const signal = normalizeSignal(JSON.stringify({
+        signal_id: 'bet-003',
+        action: 'place_bet',
+        table_key: 'bacbo_br',
+        alvo: 'PlayerWon',
+        valor_base: 5
+    }), { financialEnabled: true });
+    const target1 = { account_id: 1, session_id: 'account-1:bacbo_br', table_key: 'bacbo_br' };
+    const target4 = { account_id: 4, session_id: 'account-4:bacbo_br', table_key: 'bacbo_br' };
 
-    assert.deepEqual(commandForTarget(signal, target), {
-        action: 'sync_balance',
-        router_signal_id: 'sync-002',
-        routed_account_id: 4,
-        routed_session_id: 'account-4:bacbo_br',
-        routed_table_key: 'bacbo_br'
-    });
+    assert.equal(deterministicOrderId(signal, target1), deterministicOrderId(signal, target1));
+    assert.notEqual(deterministicOrderId(signal, target1), deterministicOrderId(signal, target4));
+
+    const command = commandForTarget(signal, target4);
+    assert.equal(command.action, 'place_bet');
+    assert.equal(command.alvo, 'PlayerWon');
+    assert.equal(command.valor, 5);
+    assert.match(command.order_id, /^sr-[a-f0-9]{32}$/);
+});
+
+test('calcula exposicao global somente pelos alvos online', () => {
+    const signal = normalizeSignal(JSON.stringify({
+        signal_id: 'bet-004',
+        action: 'place_bet',
+        table_key: 'bacbo_br',
+        alvo: 'BankerWon',
+        valor_base: 5
+    }), { financialEnabled: true });
+
+    assert.equal(calculateGlobalExposure(signal, 2), 10);
+    assert.equal(calculateGlobalExposure(signal, 1), 5);
+    assert.equal(calculateGlobalExposure(signal, 0), 0);
+});
+
+test('resolve alvos online via PUBSUB NUMSUB', async () => {
+    const client = {
+        async sendCommand(command) {
+            assert.deepEqual(command, [
+                'PUBSUB', 'NUMSUB',
+                'auto_trader_commands:1:bacbo_br',
+                'auto_trader_commands:4:bacbo_br'
+            ]);
+            return [
+                'auto_trader_commands:1:bacbo_br', 1,
+                'auto_trader_commands:4:bacbo_br', 0
+            ];
+        }
+    };
+    const targets = [
+        { account_id: 1, command_channel: 'auto_trader_commands:1:bacbo_br' },
+        { account_id: 4, command_channel: 'auto_trader_commands:4:bacbo_br' }
+    ];
+
+    const result = await resolveOnlineTargets(client, targets);
+    assert.equal(result[0].subscribers, 1);
+    assert.equal(result[1].subscribers, 0);
 });
 
 test('dedup redis usa SET NX PX e rejeita signal_id ja reivindicado', async () => {
