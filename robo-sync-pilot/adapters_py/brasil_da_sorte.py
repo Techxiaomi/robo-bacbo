@@ -49,7 +49,7 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
     )
     DIRECT_LOGIN_PATTERN = re.compile(r"Entrar", re.IGNORECASE)
     PLAY_BUTTON_PATTERN = re.compile(r"^\s*(jogue|jogar)\s*$", re.IGNORECASE)
-    GAME_TITLE_PATTERN = re.compile(r"^\s*Bac\s+Bo\s*$", re.IGNORECASE)
+    GAME_TITLE_PATTERN = re.compile(r"^\s*Bac\s+Bo(?:\s+Ao\s+Vivo)?\s*$", re.IGNORECASE)
     COOKIE_PATTERN = re.compile(r"Aceitar todos", re.IGNORECASE)
     AGE_CONFIRM_PATTERN = re.compile(r"^\s*Sim\s*$", re.IGNORECASE)
 
@@ -211,7 +211,7 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
 
     def _find_scoped_play_control(self, primary_page: Page):
         # Nunca aceita um "Jogue" global. O controle precisa estar em um
-        # ancestral do titulo exato "Bac Bo", evitando cards de jogos relacionados.
+        # ancestral do titulo Bac Bo/Bac Bo Ao Vivo, evitando cards relacionados.
         for candidate_page in self._candidate_pages(primary_page):
             for root in self._roots(candidate_page):
                 titles = root.get_by_text(self.GAME_TITLE_PATTERN, exact=True)
@@ -223,7 +223,7 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
                     except Exception:
                         continue
 
-                    for depth in range(1, 7):
+                    for depth in range(1, 9):
                         try:
                             scope = title.locator(f"xpath=ancestor::*[{depth}]")
                             if scope.count() <= 0:
