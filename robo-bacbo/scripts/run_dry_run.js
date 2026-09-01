@@ -10,7 +10,19 @@ require('../env_loader').loadEnvFile(path.join(__dirname, '..', '..', '.env'));
 const { createBettingHouseService } = require('../betting_house_service');
 
 const HOUSE_ADAPTER_KEY = 'brasil-da-sorte';
-const TABLE_KEY = 'bacbo_br';
+const DEFAULT_TABLE_KEY = 'bacbo_br';
+const TABLE_KEY_PATTERN = /^[a-z0-9_-]+$/;
+
+function resolveTableKey(argv = process.argv) {
+    const requested = String(argv[2] || '').trim().toLowerCase();
+    const tableKey = requested || DEFAULT_TABLE_KEY;
+
+    if (!TABLE_KEY_PATTERN.test(tableKey)) {
+        throw new Error(`DRY_RUN_TABLE_KEY_INVALID: ${tableKey}`);
+    }
+
+    return tableKey;
+}
 
 function createDbPool() {
     return mysql.createPool({
@@ -70,14 +82,16 @@ function sanitizedPythonEnv() {
     return env;
 }
 
-async function findRuntimeConfig(service) {
+async function findRuntimeConfig(service, tableKey) {
     const houses = await service.listHouses({ includeDisabled: false });
     const house = houses.find(item => item.adapter_key === HOUSE_ADAPTER_KEY);
     if (!house) throw new Error(`DRY_RUN_HOUSE_NOT_FOUND: ${HOUSE_ADAPTER_KEY}`);
 
     const runtime = await service.getRuntimeConfig(house.id);
-    const table = runtime.tables.find(item => item.table_key === TABLE_KEY && item.enabled === true);
-    if (!table) throw new Error(`DRY_RUN_TABLE_NOT_FOUND: ${TABLE_KEY}`);
+    const table = runtime.tables.find(
+        item => item.table_key === tableKey && item.enabled === true
+    );
+    if (!table) throw new Error(`DRY_RUN_TABLE_NOT_FOUND: ${tableKey}`);
 
     return {
         house: {
@@ -129,6 +143,7 @@ function runPython({ pythonExecutable, pythonScript, config, cwd }) {
 }
 
 async function main() {
+    const tableKey = resolveTableKey();
     const projectRoot = path.resolve(__dirname, '..', '..');
     const pythonRoot = path.join(projectRoot, 'robo-sync-pilot');
     const pythonScript = path.join(pythonRoot, 'dry_run_discovery.py');
@@ -139,7 +154,7 @@ async function main() {
             dbPool,
             encryptionKey: process.env.BETTING_HOUSE_CREDENTIALS_KEY
         });
-        const config = await findRuntimeConfig(service);
+        const config = await findRuntimeConfig(service, tableKey);
 
         console.log('=== DRY RUN ORCHESTRATOR ===');
         console.log(`HOUSE=${config.house.name}`);
