@@ -480,6 +480,14 @@ async function encaminharResultadoMultiConta(dados) {
         + `executor=${status} | success=${dados.success_accounts}/${dados.expected_accounts}`
     );
 
+    if (dados.simulation === true) {
+        console.log(
+            `🧪 MULTI-ACCOUNT SIMULATION | signal=${orderId} | aggregate=${dados.status} | `
+            + 'executor_status_delivery=skipped'
+        );
+        return true;
+    }
+
     return postNode('/executor-status', {
         order_id: orderId,
         status,
