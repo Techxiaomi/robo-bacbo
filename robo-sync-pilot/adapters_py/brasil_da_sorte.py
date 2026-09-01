@@ -251,8 +251,13 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
                 if self._has_visible_text(root, self.GAME_START_PATTERN, exact=False):
                     prompt_found = True
 
-                locator = root.locator(self.PLAY_SPAN_SELECTOR)
-                for index in range(min(locator.count(), 20)):
+                try:
+                    locator = root.locator(self.PLAY_SPAN_SELECTOR)
+                    quantity = self._safe_locator_count(locator, 20)
+                except Exception:
+                    continue
+
+                for index in range(quantity):
                     candidate = locator.nth(index)
                     try:
                         if not candidate.is_visible():
@@ -277,10 +282,15 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
             "control": controls[0] if len(controls) == 1 else None,
         }
 
-    @staticmethod
-    def _has_visible_text(root, pattern, exact) -> bool:
-        locator = root.get_by_text(pattern, exact=exact)
-        for index in range(min(locator.count(), 20)):
+    @classmethod
+    def _has_visible_text(cls, root, pattern, exact) -> bool:
+        try:
+            locator = root.get_by_text(pattern, exact=exact)
+            quantity = cls._safe_locator_count(locator, 20)
+        except Exception:
+            return False
+
+        for index in range(quantity):
             try:
                 if locator.nth(index).is_visible():
                     return True
@@ -317,8 +327,13 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
             closed = False
             for candidate_page in self._candidate_pages(primary_page):
                 for root in self._roots(candidate_page):
-                    locator = root.locator("button", has_text=pattern)
-                    for index in range(min(locator.count(), 8)):
+                    try:
+                        locator = root.locator("button", has_text=pattern)
+                        quantity = self._safe_locator_count(locator, 8)
+                    except Exception:
+                        continue
+
+                    for index in range(quantity):
                         candidate = locator.nth(index)
                         try:
                             if not candidate.is_visible():
@@ -544,10 +559,22 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
             for frame in page.frames:
                 if frame is page.main_frame:
                     continue
+                try:
+                    if frame.is_detached():
+                        continue
+                except Exception:
+                    continue
                 roots.append(frame)
         except Exception:
             pass
         return roots
+
+    @staticmethod
+    def _safe_locator_count(locator, limit):
+        try:
+            return min(max(0, int(locator.count())), max(1, int(limit)))
+        except Exception:
+            return 0
 
     @staticmethod
     def _first_visible(root, selectors):
