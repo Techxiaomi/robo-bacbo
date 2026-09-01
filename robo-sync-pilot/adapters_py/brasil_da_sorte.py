@@ -1,5 +1,4 @@
 import os
-import re
 
 from adapters_py.base_adapter import BettingHouseAdapter
 
@@ -23,6 +22,9 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
         session_state_file="",
         username="",
         password="",
+        username_selector="",
+        password_selector="",
+        submit_selector="",
         navigation_timeout_ms=DEFAULT_NAVIGATION_TIMEOUT_MS,
     ):
         super().__init__(browser)
@@ -32,10 +34,15 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
         self._session_state_file = str(session_state_file or "").strip()
         self._username = str(username or "").strip()
         self._password = str(password or "")
+        self._username_selector = str(username_selector or "").strip()
+        self._password_selector = str(password_selector or "").strip()
+        self._submit_selector = str(submit_selector or "").strip()
         self._navigation_timeout_ms = int(navigation_timeout_ms)
 
         if self._navigation_timeout_ms <= 0:
             raise ValueError("BRASIL_DA_SORTE_INVALID_TIMEOUT")
+
+        self._validate_login_configuration()
 
     def prepare_session(self):
         if self._context is not None or self._page is not None:
@@ -53,14 +60,6 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
         self._page = self._context.new_page()
         self._page.set_default_navigation_timeout(self._navigation_timeout_ms)
         self._apply_stealth(self._page)
-
-        if self._home_url:
-            self._page.goto(
-                self._home_url,
-                wait_until="domcontentloaded",
-                timeout=self._navigation_timeout_ms,
-            )
-
         return self._page
 
     def launch_bacbo(self):
@@ -72,8 +71,11 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
             timeout=self._navigation_timeout_ms,
         )
 
-        if not self._looks_like_active_session(page) and self._home_url:
-            self._perform_login_if_available(page)
+        if self._looks_like_active_session(page):
+            return page
+
+        if self._login_configured() and self._home_url:
+            self._perform_login(page)
             page.goto(
                 self._game_url,
                 wait_until="domcontentloaded",
@@ -85,47 +87,47 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
     def get_game_page(self):
         return self._require_prepared_page()
 
-    def _perform_login_if_available(self, page):
-        if not self._username or not self._password:
-            return False
-
+    def _perform_login(self, page):
         page.goto(
             self._home_url,
             wait_until="domcontentloaded",
             timeout=self._navigation_timeout_ms,
         )
 
-        entrar = page.locator("button", has_text=re.compile(r"Entrar", re.IGNORECASE))
-        for index in range(min(entrar.count(), 8)):
-            candidate = entrar.nth(index)
-            if candidate.is_visible():
-                candidate.click(force=True)
-                page.wait_for_timeout(1500)
-                break
-
-        email = page.locator("input[name='email']")
-        password = page.locator("input[name='password']")
-
-        if email.count() <= 0 or password.count() <= 0:
-            return False
-
-        email.first.fill(self._username)
-        password.first.fill(self._password)
-
-        submit = page.locator("button#legitimuz-action-send-analisys")
-        if submit.count() > 0 and submit.first.is_visible():
-            submit.first.click(force=True)
-        else:
-            password.first.press("Enter")
-
-        page.wait_for_timeout(5000)
+        page.locator(self._username_selector).fill(self._username)
+        page.locator(self._password_selector).fill(self._password)
+        page.locator(self._submit_selector).click()
+        page.wait_for_timeout(3000)
 
         if self._session_state_file:
             self._context.storage_state(path=self._session_state_file)
 
-        return True
+    def _validate_login_configuration(self):
+        values = (
+            self._username,
+            self._password,
+            self._username_selector,
+            self._password_selector,
+            self._submit_selector,
+        )
+        configured = [bool(value) for value in values]
 
-    def _looks_like_active_session(self, page):
+        if any(configured) and not all(configured):
+            raise ValueError("BRASIL_DA_SORTE_LOGIN_CONFIG_INCOMPLETE")
+
+    def _login_configured(self):
+        return all(
+            (
+                self._username,
+                self._password,
+                self._username_selector,
+                self._password_selector,
+                self._submit_selector,
+            )
+        )
+
+    @staticmethod
+    def _looks_like_active_session(page):
         try:
             return len(page.frames) > 1
         except Exception:

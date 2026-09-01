@@ -4,7 +4,7 @@ from playwright.sync_api import sync_playwright
 
 from adapters_py.brasil_da_sorte import BrasilDaSorteAdapter
 from env_loader import load_env_file
-from robo import localizar_frame_mesa, mesa_evolution_pronta, pagina_na_rota_da_mesa
+import robo
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -29,6 +29,10 @@ def _env_required(name):
     return value
 
 
+def _env_optional(name):
+    return str(os.getenv(name, "") or "").strip()
+
+
 def _count_read_only(frame, selector):
     if frame is None:
         return 0
@@ -39,14 +43,23 @@ def _count_read_only(frame, selector):
 
 
 def main():
-    game_url = _env_required("CASINO_GAME_URL")
-    home_url = str(os.getenv("CASINO_HOME_URL", "") or "").strip()
-    username = str(os.getenv("CASINO_USER", "") or "").strip()
-    password = str(os.getenv("CASINO_PASSWORD", "") or "")
-    session_state_file = str(os.getenv("SESSION_STATE_FILE", "") or "").strip()
+    game_url = _env_required("BRASIL_DA_SORTE_GAME_URL")
+    home_url = _env_optional("BRASIL_DA_SORTE_HOME_URL")
+    username = _env_optional("BRASIL_DA_SORTE_USER")
+    password = _env_optional("BRASIL_DA_SORTE_PASSWORD")
+    session_state_file = _env_optional("BRASIL_DA_SORTE_SESSION_STATE_FILE")
+    username_selector = _env_optional("BRASIL_DA_SORTE_LOGIN_USERNAME_SELECTOR")
+    password_selector = _env_optional("BRASIL_DA_SORTE_LOGIN_PASSWORD_SELECTOR")
+    submit_selector = _env_optional("BRASIL_DA_SORTE_LOGIN_SUBMIT_SELECTOR")
+
+    # Somente neste processo de diagnostico: as funcoes read-only do motor
+    # devem comparar contra a rota da casa que esta sendo inspecionada.
+    robo.URL_CASSINO = game_url
+    robo.URL_HOME_CASSINO = home_url
 
     print("=== DRY RUN DISCOVERY | BRASIL DA SORTE ===")
     print("MODO=READ_ONLY | APOSTAS=DESABILITADAS_POR_DESIGN")
+    print("CONFIG_SOURCE=BRASIL_DA_SORTE_*")
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True, args=BROWSER_ARGS)
@@ -57,6 +70,9 @@ def main():
             session_state_file=session_state_file,
             username=username,
             password=password,
+            username_selector=username_selector,
+            password_selector=password_selector,
+            submit_selector=submit_selector,
         )
 
         try:
@@ -64,9 +80,9 @@ def main():
             adapter.launch_bacbo()
             page = adapter.get_game_page()
 
-            url_ok = pagina_na_rota_da_mesa(page)
-            evolution_ok = mesa_evolution_pronta(page)
-            frame = localizar_frame_mesa(page)
+            url_ok = robo.pagina_na_rota_da_mesa(page)
+            evolution_ok = robo.mesa_evolution_pronta(page)
+            frame = robo.localizar_frame_mesa(page)
             frame_ok = frame is not None
 
             chip_count = _count_read_only(frame, "[data-role='chip'][data-value]")
