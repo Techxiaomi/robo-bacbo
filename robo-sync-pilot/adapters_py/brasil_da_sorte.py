@@ -49,6 +49,7 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
     )
     DIRECT_LOGIN_PATTERN = re.compile(r"Entrar", re.IGNORECASE)
     PLAY_BUTTON_PATTERN = re.compile(r"^\s*(jogue|jogar)\s*$", re.IGNORECASE)
+    GAME_TITLE_PATTERN = re.compile(r"^\s*Bac\s+Bo\s*$", re.IGNORECASE)
     COOKIE_PATTERN = re.compile(r"Aceitar todos", re.IGNORECASE)
     AGE_CONFIRM_PATTERN = re.compile(r"^\s*Sim\s*$", re.IGNORECASE)
 
@@ -98,8 +99,6 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
     def pre_launch(self) -> Page:
         page = self._require_prepared_page()
 
-        # Ordem obrigatoria da Brasil da Sorte:
-        # HOME -> overlays -> login -> sessao confirmada -> GAME URL -> Jogue.
         print("BRASIL_DA_SORTE_STAGE=HOME")
         self._navigate(page, self._home_url)
         self._dismiss_prelaunch_overlays(page)
@@ -171,13 +170,32 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
 
         while elapsed < PLAY_BUTTON_WAIT_MS:
             self._dismiss_prelaunch_overlays(primary_page)
-            candidate = self._find_play_control(primary_page)
+
+            if not self._is_expected_game_route(primary_page.url):
+                print(
+                    "BRASIL_DA_SORTE_GAME_ROUTE_MISMATCH="
+                    f"{self._sanitize_diagnostic(primary_page.url)}"
+                )
+                raise RuntimeError("BRASIL_DA_SORTE_UNEXPECTED_GAME_ROUTE")
+
+            candidate = self._find_scoped_play_control(primary_page)
             if candidate is not None:
                 try:
+                    print("BRASIL_DA_SORTE_PLAY_SCOPE=BAC_BO")
                     candidate.click(force=True, timeout=3000)
                     primary_page.wait_for_timeout(GAME_LAUNCH_SETTLE_MS)
+
+                    if self._is_other_game_route(primary_page.url):
+                        print(
+                            "BRASIL_DA_SORTE_UNEXPECTED_GAME_REDIRECT="
+                            f"{self._sanitize_diagnostic(primary_page.url)}"
+                        )
+                        raise RuntimeError("BRASIL_DA_SORTE_UNEXPECTED_GAME_REDIRECT")
+
                     print("BRASIL_DA_SORTE_PLAY_TRIGGERED=true")
                     return
+                except RuntimeError:
+                    raise
                 except Exception as error:
                     print(
                         "BRASIL_DA_SORTE_PLAY_TRIGGER_ERROR="
@@ -189,35 +207,77 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
 
         self._log_game_dom_diagnostic(primary_page)
         print("BRASIL_DA_SORTE_PLAY_TRIGGERED=false")
-        raise RuntimeError("BRASIL_DA_SORTE_PLAY_BUTTON_NOT_FOUND")
+        raise RuntimeError("BRASIL_DA_SORTE_SCOPED_PLAY_BUTTON_NOT_FOUND")
 
-    def _find_play_control(self, primary_page: Page):
+    def _find_scoped_play_control(self, primary_page: Page):
+        # Nunca aceita um "Jogue" global. O controle precisa estar em um
+        # ancestral do titulo exato "Bac Bo", evitando cards de jogos relacionados.
         for candidate_page in self._candidate_pages(primary_page):
             for root in self._roots(candidate_page):
-                role_button = self._first_visible_role_button(root, self.PLAY_BUTTON_PATTERN)
-                if role_button is not None:
-                    return role_button
-
-                for selector in ("button", "[role='button']", "a"):
-                    locator = root.locator(selector, has_text=self.PLAY_BUTTON_PATTERN)
-                    for index in range(min(locator.count(), 12)):
-                        candidate = locator.nth(index)
-                        try:
-                            if candidate.is_visible():
-                                return candidate
-                        except Exception:
-                            continue
-
-                text_locator = root.get_by_text(self.PLAY_BUTTON_PATTERN, exact=True)
-                for index in range(min(text_locator.count(), 12)):
-                    candidate = text_locator.nth(index)
+                titles = root.get_by_text(self.GAME_TITLE_PATTERN, exact=True)
+                for title_index in range(min(titles.count(), 8)):
+                    title = titles.nth(title_index)
                     try:
-                        if candidate.is_visible():
-                            return candidate
+                        if not title.is_visible():
+                            continue
                     except Exception:
                         continue
 
+                    for depth in range(1, 7):
+                        try:
+                            scope = title.locator(f"xpath=ancestor::*[{depth}]")
+                            if scope.count() <= 0:
+                                continue
+                            play = self._play_control_inside(scope.first)
+                            if play is not None:
+                                return play
+                        except Exception:
+                            continue
+
         return None
+
+    def _play_control_inside(self, scope):
+        candidates = []
+
+        role_button = scope.get_by_role("button", name=self.PLAY_BUTTON_PATTERN)
+        for index in range(min(role_button.count(), 8)):
+            candidate = role_button.nth(index)
+            try:
+                if candidate.is_visible():
+                    candidates.append(candidate)
+            except Exception:
+                continue
+
+        for selector in ("button", "[role='button']", "a"):
+            locator = scope.locator(selector, has_text=self.PLAY_BUTTON_PATTERN)
+            for index in range(min(locator.count(), 8)):
+                candidate = locator.nth(index)
+                try:
+                    if candidate.is_visible() and all(candidate != item for item in candidates):
+                        candidates.append(candidate)
+                except Exception:
+                    continue
+
+        if len(candidates) == 1:
+            return candidates[0]
+        return None
+
+    def _is_expected_game_route(self, url: str) -> bool:
+        return self._normalized_route(url) == self._normalized_route(self._game_url)
+
+    def _is_other_game_route(self, url: str) -> bool:
+        current = self._normalized_route(url)
+        expected = self._normalized_route(self._game_url)
+        return current[0:2] == expected[0:2] and current[2].startswith("/play/") and current != expected
+
+    @staticmethod
+    def _normalized_route(url: str):
+        parsed = urlparse(str(url or ""))
+        return (
+            (parsed.scheme or "").lower(),
+            (parsed.netloc or "").lower(),
+            (parsed.path or "/").rstrip("/") or "/",
+        )
 
     def _dismiss_prelaunch_overlays(self, primary_page: Page) -> None:
         for label, pattern in (
@@ -379,6 +439,7 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
         page_urls = [self._sanitize_diagnostic(item.url) for item in pages]
         frame_urls = []
         texts = []
+        titles = []
 
         for candidate_page in pages:
             for root in self._roots(candidate_page):
@@ -388,6 +449,19 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
                         frame_urls.append(clean_url)
                 except Exception:
                     pass
+
+                for selector in ("h1", "h2", "h3", "h4", "[role='heading']"):
+                    locator = root.locator(selector)
+                    for index in range(min(locator.count(), 20)):
+                        candidate = locator.nth(index)
+                        try:
+                            if not candidate.is_visible():
+                                continue
+                            text = self._sanitize_diagnostic(candidate.inner_text())
+                            if text and text not in titles:
+                                titles.append(text)
+                        except Exception:
+                            continue
 
                 for selector in ("button", "[role='button']", "a"):
                     locator = root.locator(selector)
@@ -404,6 +478,7 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
 
         print(f"BRASIL_DA_SORTE_GAME_DIAG_PAGES={page_urls[:8]}")
         print(f"BRASIL_DA_SORTE_GAME_DIAG_FRAMES={frame_urls[:12]}")
+        print(f"BRASIL_DA_SORTE_GAME_DIAG_TITLES={titles[:20]}")
         print(f"BRASIL_DA_SORTE_GAME_DIAG_CONTROLS={texts[:20]}")
 
     def _candidate_pages(self, primary_page: Page):
