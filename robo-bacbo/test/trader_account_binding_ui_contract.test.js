@@ -31,7 +31,8 @@ test('catalogo seguro concentra filtro de adapter e mesa no backend', () => {
     const source = read('trader_account_catalog.js');
     assert.match(source, /brasil-da-sorte/);
     assert.match(source, /betting_house_tables/);
-    assert.match(source, /LOWER\(ht\.table_key\) = LOWER\(\?\)/);
+    assert.match(source, /LOWER\([a-z][a-z0-9_]*\.table_key\)\s*=\s*LOWER\(\?\)/i);
+    assert.match(source, /enabled\s*=\s*true/i);
     assert.doesNotMatch(source, /password/i);
     assert.doesNotMatch(source, /username/i);
 });
