@@ -8,14 +8,19 @@ const { createClient } = require('redis');
 require('../env_loader').loadEnvFile(path.join(__dirname, '..', '..', '.env'));
 
 const { createBettingHouseService } = require('../betting_house_service');
+const { ResultFanIn } = require('../signal_result_fanin');
 
 const DEFAULT_GLOBAL_CHANNEL = 'global_signals';
+const DEFAULT_RESULT_CHANNEL = 'global_signal_results';
+const DEFAULT_RESPONSE_PATTERN = 'auto_trader_responses:*:*';
 const DEFAULT_TARGET_CACHE_TTL_MS = 5000;
 const DEFAULT_DEDUP_TTL_MS = 60000;
 const DEFAULT_DEDUP_PREFIX = 'signal_router:dedup';
+const DEFAULT_RESULT_TIMEOUT_MS = 210000;
 const MAX_SIGNAL_BYTES = 32 * 1024;
 const KEY_PATTERN = /^[a-z0-9][a-z0-9_-]{0,79}$/;
 const SIGNAL_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+const CHANNEL_PATTERN = /^[A-Za-z0-9._:*-]{1,160}$/;
 const SAFE_ACTIONS = new Set(['sync_balance']);
 const FINANCIAL_ACTIONS = new Set(['place_bet']);
 const BET_TARGETS = new Set(['PlayerWon', 'BankerWon', 'Tie']);
@@ -51,6 +56,14 @@ function positiveMoneyEnv(name, { required = false, max = 1000000 } = {}) {
     return Math.round(value * 100) / 100;
 }
 
+function validatedChannel(value, errorCode, { allowWildcard = false } = {}) {
+    const channel = String(value || '').trim();
+    if (!CHANNEL_PATTERN.test(channel) || (!allowWildcard && channel.includes('*'))) {
+        throw new Error(errorCode);
+    }
+    return channel;
+}
+
 function financialFanoutEnabled() {
     return envBoolean('SIGNAL_ROUTER_FINANCIAL_FANOUT_ENABLED', false);
 }
@@ -60,11 +73,25 @@ function financialDryRun() {
 }
 
 function globalChannel() {
-    const channel = String(process.env.SIGNAL_ROUTER_GLOBAL_CHANNEL || DEFAULT_GLOBAL_CHANNEL).trim();
-    if (!/^[A-Za-z0-9._:-]{1,160}$/.test(channel)) {
-        throw new Error('SIGNAL_ROUTER_GLOBAL_CHANNEL_INVALID');
-    }
-    return channel;
+    return validatedChannel(
+        process.env.SIGNAL_ROUTER_GLOBAL_CHANNEL || DEFAULT_GLOBAL_CHANNEL,
+        'SIGNAL_ROUTER_GLOBAL_CHANNEL_INVALID'
+    );
+}
+
+function resultChannel() {
+    return validatedChannel(
+        process.env.SIGNAL_ROUTER_RESULT_CHANNEL || DEFAULT_RESULT_CHANNEL,
+        'SIGNAL_ROUTER_RESULT_CHANNEL_INVALID'
+    );
+}
+
+function responsePattern() {
+    return validatedChannel(
+        process.env.SIGNAL_ROUTER_RESPONSE_PATTERN || DEFAULT_RESPONSE_PATTERN,
+        'SIGNAL_ROUTER_RESPONSE_PATTERN_INVALID',
+        { allowWildcard: true }
+    );
 }
 
 function dedupPrefix() {
@@ -154,11 +181,8 @@ function normalizeSignal(raw, options = {}) {
     }
 
     let parsed;
-    try {
-        parsed = JSON.parse(source);
-    } catch (_) {
-        throw new Error('SIGNAL_ROUTER_INVALID_JSON');
-    }
+    try { parsed = JSON.parse(source); }
+    catch (_) { throw new Error('SIGNAL_ROUTER_INVALID_JSON'); }
 
     const input = plainObject(parsed);
     if (!input) throw new Error('SIGNAL_ROUTER_INVALID_PAYLOAD');
@@ -178,11 +202,7 @@ function normalizeSignal(raw, options = {}) {
     if (!signalId) signalId = String(nextGeneratedId()).trim();
     if (!SIGNAL_ID_PATTERN.test(signalId)) throw new Error('SIGNAL_ROUTER_SIGNAL_ID_INVALID');
 
-    const base = {
-        signal_id: signalId,
-        action,
-        table_key: tableKey
-    };
+    const base = { signal_id: signalId, action, table_key: tableKey };
     if (action !== 'place_bet') return Object.freeze(base);
 
     const plan = normalizeBetPlan(input);
@@ -214,7 +234,8 @@ function buildTargetIndex(houses) {
                 table_key: tableKey,
                 table_name: String(table.display_name || tableKey),
                 session_id: `account-${accountId}:${tableKey}`,
-                command_channel: `auto_trader_commands:${accountId}:${tableKey}`
+                command_channel: `auto_trader_commands:${accountId}:${tableKey}`,
+                response_channel: `auto_trader_responses:${accountId}:${tableKey}`
             }));
         }
     }
@@ -324,10 +345,22 @@ class RedisSignalDedup {
     }
 }
 
+function fanInTargets(signal, targets) {
+    return targets.map(target => ({
+        account_id: target.account_id,
+        session_id: target.session_id,
+        order_id: deterministicOrderId(signal, target),
+        response_channel: target.response_channel
+    }));
+}
+
 async function main() {
     const channel = globalChannel();
+    const consolidatedChannel = resultChannel();
+    const responsesPattern = responsePattern();
     const cacheTtlMs = positiveIntEnv('SIGNAL_ROUTER_TARGET_CACHE_TTL_MS', DEFAULT_TARGET_CACHE_TTL_MS, { min: 1000, max: 300000 });
     const dedupTtlMs = positiveIntEnv('SIGNAL_ROUTER_DEDUP_TTL_MS', DEFAULT_DEDUP_TTL_MS, { min: 1000, max: 3600000 });
+    const resultTimeoutMs = positiveIntEnv('SIGNAL_ROUTER_RESULT_TIMEOUT_MS', DEFAULT_RESULT_TIMEOUT_MS, { min: 5000, max: 600000 });
     const dedupKeyPrefix = dedupPrefix();
     const financialEnabled = financialFanoutEnabled();
     const dryRun = financialDryRun();
@@ -338,18 +371,33 @@ async function main() {
     const cache = new TargetCache({ service, ttlMs: cacheTtlMs });
     const publisher = createClient({ url: redisUrl() });
     const subscriber = publisher.duplicate();
+    const responseSubscriber = publisher.duplicate();
     const dedup = new RedisSignalDedup({ client: publisher, ttlMs: dedupTtlMs, prefix: dedupKeyPrefix });
+    const fanin = new ResultFanIn({
+        timeoutMs: resultTimeoutMs,
+        publish: async consolidated => {
+            const subscribers = await publisher.publish(consolidatedChannel, JSON.stringify(consolidated));
+            console.log(
+                `SIGNAL_FANIN_COMPLETE signal=${consolidated.signal_id} status=${consolidated.status} ` +
+                `success=${consolidated.success_accounts}/${consolidated.expected_accounts} ` +
+                `executor_status=${consolidated.executor_status} subscribers=${subscribers}`
+            );
+        }
+    });
     let shuttingDown = false;
 
     publisher.on('error', error => console.error(`SIGNAL_ROUTER_REDIS_PUBLISHER_ERROR: ${error?.message || error}`));
     subscriber.on('error', error => console.error(`SIGNAL_ROUTER_REDIS_SUBSCRIBER_ERROR: ${error?.message || error}`));
+    responseSubscriber.on('error', error => console.error(`SIGNAL_ROUTER_REDIS_RESPONSE_ERROR: ${error?.message || error}`));
 
     const shutdown = async reason => {
         if (shuttingDown) return;
         shuttingDown = true;
         console.log(`SIGNAL_ROUTER_SHUTDOWN_REQUESTED reason=${reason}`);
+        fanin.close();
         await Promise.allSettled([
             subscriber.isOpen ? subscriber.quit() : Promise.resolve(),
+            responseSubscriber.isOpen ? responseSubscriber.quit() : Promise.resolve(),
             publisher.isOpen ? publisher.quit() : Promise.resolve()
         ]);
         await dbPool.end();
@@ -360,11 +408,23 @@ async function main() {
     process.once('SIGTERM', () => void shutdown('SIGTERM'));
 
     try {
-        await Promise.all([publisher.connect(), subscriber.connect()]);
+        await Promise.all([publisher.connect(), subscriber.connect(), responseSubscriber.connect()]);
         await cache.refresh();
+
+        await responseSubscriber.pSubscribe(responsesPattern, (message, responseChannelName) => {
+            let payload;
+            try { payload = JSON.parse(String(message || '')); }
+            catch (_) { return; }
+            void fanin.accept(responseChannelName, payload).catch(error => {
+                console.error(`SIGNAL_FANIN_RESPONSE_FAILED channel=${responseChannelName}: ${error?.message || error}`);
+            });
+        });
 
         console.log('=== SIGNAL ROUTER ===');
         console.log(`SIGNAL_ROUTER_GLOBAL_CHANNEL=${channel}`);
+        console.log(`SIGNAL_ROUTER_RESULT_CHANNEL=${consolidatedChannel}`);
+        console.log(`SIGNAL_ROUTER_RESPONSE_PATTERN=${responsesPattern}`);
+        console.log(`SIGNAL_ROUTER_RESULT_TIMEOUT_MS=${resultTimeoutMs}`);
         console.log(`SIGNAL_ROUTER_TARGET_CACHE_TTL_MS=${cacheTtlMs}`);
         console.log(`SIGNAL_ROUTER_DEDUP_TTL_MS=${dedupTtlMs}`);
         console.log(`SIGNAL_ROUTER_DEDUP_BACKEND=redis prefix=${dedupKeyPrefix}`);
@@ -445,16 +505,36 @@ async function main() {
                     );
                     return;
                 }
+
+                fanin.register({
+                    signalId: signal.signal_id,
+                    tableKey: signal.table_key,
+                    targets: fanInTargets(signal, dispatchTargets)
+                });
+                console.log(
+                    `SIGNAL_FANIN_EXPECTING signal=${signal.signal_id} accounts=${dispatchTargets.length} ` +
+                    `timeout_ms=${resultTimeoutMs}`
+                );
             }
 
             const results = await Promise.allSettled(dispatchTargets.map(async target => {
                 const command = commandForTarget(signal, target);
-                const subscribers = await publisher.publish(target.command_channel, JSON.stringify(command));
-                console.log(
-                    `SIGNAL_ROUTER_DISPATCH signal=${signal.signal_id} account=${target.account_id} ` +
-                    `session=${target.session_id} channel=${target.command_channel} subscribers=${subscribers}`
-                );
-                return { target, subscribers };
+                try {
+                    const subscribers = await publisher.publish(target.command_channel, JSON.stringify(command));
+                    console.log(
+                        `SIGNAL_ROUTER_DISPATCH signal=${signal.signal_id} account=${target.account_id} ` +
+                        `session=${target.session_id} channel=${target.command_channel} subscribers=${subscribers}`
+                    );
+                    if (signal.action === 'place_bet' && Number(subscribers) < 1) {
+                        await fanin.markDispatchFailure(command.order_id, 'SIGNAL_ROUTER_DISPATCH_NO_SUBSCRIBER');
+                    }
+                    return { target, subscribers };
+                } catch (error) {
+                    if (signal.action === 'place_bet') {
+                        await fanin.markDispatchFailure(command.order_id, `SIGNAL_ROUTER_DISPATCH_FAILED: ${error?.message || error}`);
+                    }
+                    throw error;
+                }
             }));
 
             let published = 0;
@@ -498,6 +578,7 @@ module.exports = {
     commandForTarget,
     calculateGlobalExposure,
     resolveOnlineTargets,
+    fanInTargets,
     TargetCache,
     RedisSignalDedup
 };
