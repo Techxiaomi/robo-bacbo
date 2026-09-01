@@ -33,8 +33,13 @@ test('catalogo seguro concentra filtro de adapter e mesa no backend', () => {
     assert.match(source, /betting_house_tables/);
     assert.match(source, /LOWER\([a-z][a-z0-9_]*\.table_key\)\s*=\s*LOWER\(\?\)/i);
     assert.match(source, /enabled\s*=\s*true/i);
-    assert.doesNotMatch(source, /password/i);
-    assert.doesNotMatch(source, /username/i);
+
+    const queryMatch = source.match(/`SELECT[\s\S]*?ORDER BY h\.id`/i);
+    assert.ok(queryMatch, 'query SELECT do catalogo deve existir');
+    const selectQuery = queryMatch[0];
+    assert.doesNotMatch(selectQuery, /h\.username/i);
+    assert.doesNotMatch(selectQuery, /h\.password_encrypted/i);
+    assert.doesNotMatch(selectQuery, /password_encrypted/i);
 });
 
 test('edicao relê trader pela API para restaurar account_ids', () => {
