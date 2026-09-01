@@ -1,5 +1,6 @@
 import json
 import sys
+import time
 
 from playwright.sync_api import sync_playwright
 
@@ -8,6 +9,8 @@ import robo
 
 
 MAX_CONFIG_BYTES = 64 * 1024
+OPERATIONAL_FRAME_WAIT_MS = 30000
+SUPPORTED_TABLE_KEYS = {"bacbo_br", "bacbo_int"}
 BROWSER_ARGS = [
     "--disable-blink-features=AutomationControlled",
     "--disable-infobars",
@@ -45,6 +48,30 @@ def _required_nested(config, section, key):
     return value
 
 
+def _wait_for_operational_frame(page, timeout_ms=OPERATIONAL_FRAME_WAIT_MS):
+    deadline = time.monotonic() + max(1.0, float(timeout_ms) / 1000.0)
+
+    while time.monotonic() < deadline:
+        frame = robo.localizar_frame_mesa(page)
+        if frame is not None:
+            return frame
+        page.wait_for_timeout(250)
+
+    return robo.localizar_frame_mesa(page)
+
+
+def _log_frame_diagnostic(page):
+    frame_urls = []
+    try:
+        for frame in list(page.frames):
+            url = str(frame.url or "").strip()
+            if url and url not in frame_urls:
+                frame_urls.append(url[:200])
+    except Exception:
+        pass
+    print(f"DRY_RUN_FRAME_URLS={frame_urls[:12]}")
+
+
 def main():
     config = _read_config_from_stdin()
     adapter_key = _required_nested(config, "house", "adapter_key")
@@ -54,7 +81,7 @@ def main():
 
     if adapter_key != "brasil-da-sorte":
         raise RuntimeError("DRY_RUN_ADAPTER_UNSUPPORTED")
-    if table_key != "bacbo_br":
+    if table_key not in SUPPORTED_TABLE_KEYS:
         raise RuntimeError("DRY_RUN_TABLE_UNSUPPORTED")
 
     robo.URL_CASSINO = game_url
@@ -73,13 +100,21 @@ def main():
 
             url_ok = robo.pagina_na_rota_da_mesa(page)
             evolution_found = robo.aguardar_mesa_evolution(page, 30000)
-            operational_frame = robo.localizar_frame_mesa(page) is not None
+            operational_frame = None
+            if evolution_found:
+                print("DRY_RUN_OPERATIONAL_FRAME_WAIT=true")
+                operational_frame = _wait_for_operational_frame(page)
+
+            operational_frame_ok = operational_frame is not None
 
             print(f"DRY_RUN_URL_OK={url_ok}")
             print(f"DRY_RUN_EVOLUTION_FOUND={evolution_found}")
-            print(f"DRY_RUN_OPERATIONAL_FRAME={operational_frame}")
+            print(f"DRY_RUN_OPERATIONAL_FRAME={operational_frame_ok}")
 
-            if not (url_ok and evolution_found and operational_frame):
+            if not operational_frame_ok:
+                _log_frame_diagnostic(page)
+
+            if not (url_ok and evolution_found and operational_frame_ok):
                 raise RuntimeError("DRY_RUN_DISCOVERY_FAILED")
         finally:
             adapter.cleanup()
