@@ -46,29 +46,30 @@
         const tableKey = currentTableKey();
         if (!tableKey) throw new Error('TRADER_ACCOUNT_UI_TABLE_UNRESOLVED');
 
-        const response = await STATE.originalFetch('/api/betting-houses', {
+        const response = await STATE.originalFetch('/api/trader-account-catalog', {
             cache: 'no-store',
             credentials: 'same-origin'
         });
-        if (!response.ok) {
-            throw new Error(`TRADER_ACCOUNT_UI_HOUSES_HTTP_${response.status}`);
+        let payload = null;
+        try { payload = await response.json(); } catch (_) {}
+        if (!response.ok || payload?.success !== true) {
+            const detail = String(payload?.error || `HTTP_${response.status}`);
+            throw new Error(`TRADER_ACCOUNT_UI_CATALOG_${detail}`);
         }
-        const payload = await response.json();
-        const houses = Array.isArray(payload?.houses) ? payload.houses : [];
 
-        STATE.eligibleAccounts = houses
-            .filter(house => house?.enabled === true && house?.adapter_key === 'brasil-da-sorte')
-            .map(house => {
-                const table = (Array.isArray(house.tables) ? house.tables : [])
-                    .find(item => item?.enabled === true && String(item.table_key || '').trim().toLowerCase() === tableKey);
-                if (!table) return null;
-                return Object.freeze({
-                    id: Number(house.id),
-                    name: String(house.name || `Conta ${house.id}`),
-                    tableName: String(table.display_name || table.table_key || tableKey)
-                });
-            })
-            .filter(item => item && Number.isSafeInteger(item.id) && item.id > 0)
+        const responseTable = String(payload.table_code || '').trim().toLowerCase();
+        if (responseTable !== tableKey) {
+            throw new Error(`TRADER_ACCOUNT_UI_CATALOG_TABLE_MISMATCH:${responseTable || '<empty>'}`);
+        }
+
+        const accounts = Array.isArray(payload.accounts) ? payload.accounts : [];
+        STATE.eligibleAccounts = accounts
+            .map(account => Object.freeze({
+                id: Number(account.account_id),
+                name: String(account.account_name || `Conta ${account.account_id}`),
+                tableName: String(account.table_name || account.table_key || tableKey)
+            }))
+            .filter(item => Number.isSafeInteger(item.id) && item.id > 0)
             .sort((a, b) => a.id - b.id);
 
         return STATE.eligibleAccounts;
@@ -149,7 +150,7 @@
             const root = ensureContainer();
             const list = root?.querySelector('[data-at-account-list]');
             if (list) {
-                list.innerHTML = '<div style="color:#dc3545; font-size:12px;">Falha ao carregar contas disponíveis. Não salve o Trader até corrigir.</div>';
+                list.innerHTML = `<div style="color:#dc3545; font-size:12px;">Falha ao carregar contas disponíveis (${String(error?.message || 'erro desconhecido')}). Não salve o Trader até corrigir.</div>`;
             }
         }
     }
