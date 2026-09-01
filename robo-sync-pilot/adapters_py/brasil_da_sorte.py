@@ -55,9 +55,10 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
         re.IGNORECASE,
     )
     GAME_START_PATTERN = re.compile(
-        r"^\s*Clique\s+em\s+Jogar\s+para\s+iniciar\s*$",
+        r"Clique\s+em\s+Jogar\s+para\s+iniciar",
         re.IGNORECASE,
     )
+    PLAY_SPAN_SELECTOR = "span.inline-flex.items-center.gap-2"
     COOKIE_PATTERN = re.compile(r"Aceitar todos", re.IGNORECASE)
     AGE_CONFIRM_PATTERN = re.compile(r"^\s*Sim\s*$", re.IGNORECASE)
 
@@ -191,28 +192,41 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
 
             evidence = self._game_launch_evidence(primary_page)
             if evidence["ready"]:
-                candidate = evidence["button"]
+                candidate = evidence["control"]
+                print("BRASIL_DA_SORTE_PLAY_EVIDENCE=ROUTE_TITLE_PROMPT_UNIQUE_SPAN")
+                print("BRASIL_DA_SORTE_PLAY_SELECTOR=SPAN_INLINE_FLEX")
                 try:
-                    print("BRASIL_DA_SORTE_PLAY_EVIDENCE=ROUTE_TITLE_PROMPT_UNIQUE_BUTTON")
+                    candidate.scroll_into_view_if_needed(timeout=3000)
                     candidate.click(force=True, timeout=3000)
-                    primary_page.wait_for_timeout(GAME_LAUNCH_SETTLE_MS)
-
-                    if self._is_other_game_route(primary_page.url):
-                        print(
-                            "BRASIL_DA_SORTE_UNEXPECTED_GAME_REDIRECT="
-                            f"{self._sanitize_diagnostic(primary_page.url)}"
-                        )
-                        raise RuntimeError("BRASIL_DA_SORTE_UNEXPECTED_GAME_REDIRECT")
-
-                    print("BRASIL_DA_SORTE_PLAY_TRIGGERED=true")
-                    return
-                except RuntimeError:
-                    raise
+                    print("BRASIL_DA_SORTE_PLAY_CLICK_METHOD=PLAYWRIGHT_SPAN")
                 except Exception as error:
                     print(
-                        "BRASIL_DA_SORTE_PLAY_TRIGGER_ERROR="
+                        "BRASIL_DA_SORTE_PLAY_PRIMARY_CLICK_ERROR="
                         f"{self._sanitize_diagnostic(type(error).__name__ + ': ' + str(error))}"
                     )
+                    try:
+                        candidate.evaluate("element => element.click()")
+                        print("BRASIL_DA_SORTE_PLAY_CLICK_METHOD=DOM_SPAN")
+                    except Exception as dom_error:
+                        print(
+                            "BRASIL_DA_SORTE_PLAY_TRIGGER_ERROR="
+                            f"{self._sanitize_diagnostic(type(dom_error).__name__ + ': ' + str(dom_error))}"
+                        )
+                        primary_page.wait_for_timeout(interval_ms)
+                        elapsed += interval_ms
+                        continue
+
+                primary_page.wait_for_timeout(GAME_LAUNCH_SETTLE_MS)
+
+                if self._is_other_game_route(primary_page.url):
+                    print(
+                        "BRASIL_DA_SORTE_UNEXPECTED_GAME_REDIRECT="
+                        f"{self._sanitize_diagnostic(primary_page.url)}"
+                    )
+                    raise RuntimeError("BRASIL_DA_SORTE_UNEXPECTED_GAME_REDIRECT")
+
+                print("BRASIL_DA_SORTE_PLAY_TRIGGERED=true")
+                return
 
             primary_page.wait_for_timeout(interval_ms)
             elapsed += interval_ms
@@ -220,29 +234,32 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
         evidence = self._game_launch_evidence(primary_page)
         print(f"BRASIL_DA_SORTE_PLAY_EVIDENCE_TITLE={str(evidence['title']).lower()}")
         print(f"BRASIL_DA_SORTE_PLAY_EVIDENCE_PROMPT={str(evidence['prompt']).lower()}")
-        print(f"BRASIL_DA_SORTE_PLAY_EVIDENCE_BUTTON_COUNT={evidence['button_count']}")
+        print(f"BRASIL_DA_SORTE_PLAY_EVIDENCE_SPAN_COUNT={evidence['control_count']}")
         self._log_game_dom_diagnostic(primary_page)
         print("BRASIL_DA_SORTE_PLAY_TRIGGERED=false")
-        raise RuntimeError("BRASIL_DA_SORTE_PLAY_BUTTON_NOT_PROVEN")
+        raise RuntimeError("BRASIL_DA_SORTE_PLAY_SPAN_NOT_PROVEN")
 
     def _game_launch_evidence(self, primary_page: Page):
         title_found = False
         prompt_found = False
-        buttons = []
+        controls = []
 
         for candidate_page in self._candidate_pages(primary_page):
             for root in self._roots(candidate_page):
-                if self._has_visible_exact_text(root, self.GAME_TITLE_PATTERN):
+                if self._has_visible_text(root, self.GAME_TITLE_PATTERN, exact=True):
                     title_found = True
-                if self._has_visible_exact_text(root, self.GAME_START_PATTERN):
+                if self._has_visible_text(root, self.GAME_START_PATTERN, exact=False):
                     prompt_found = True
 
-                locator = root.get_by_role("button", name=self.PLAY_BUTTON_PATTERN)
-                for index in range(min(locator.count(), 12)):
+                locator = root.locator(self.PLAY_SPAN_SELECTOR)
+                for index in range(min(locator.count(), 20)):
                     candidate = locator.nth(index)
                     try:
-                        if candidate.is_visible():
-                            buttons.append(candidate)
+                        if not candidate.is_visible():
+                            continue
+                        text = str(candidate.inner_text() or "").strip()
+                        if self.PLAY_BUTTON_PATTERN.fullmatch(text):
+                            controls.append(candidate)
                     except Exception:
                         continue
 
@@ -250,20 +267,20 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
             self._is_expected_game_route(primary_page.url)
             and title_found
             and prompt_found
-            and len(buttons) == 1
+            and len(controls) == 1
         )
         return {
             "ready": ready,
             "title": title_found,
             "prompt": prompt_found,
-            "button_count": len(buttons),
-            "button": buttons[0] if len(buttons) == 1 else None,
+            "control_count": len(controls),
+            "control": controls[0] if len(controls) == 1 else None,
         }
 
     @staticmethod
-    def _has_visible_exact_text(root, pattern) -> bool:
-        locator = root.get_by_text(pattern, exact=True)
-        for index in range(min(locator.count(), 12)):
+    def _has_visible_text(root, pattern, exact) -> bool:
+        locator = root.get_by_text(pattern, exact=exact)
+        for index in range(min(locator.count(), 20)):
             try:
                 if locator.nth(index).is_visible():
                     return True
@@ -476,7 +493,7 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
                         except Exception:
                             continue
 
-                for selector in ("button", "[role='button']", "a"):
+                for selector in ("button", "[role='button']", "a", self.PLAY_SPAN_SELECTOR):
                     locator = root.locator(selector)
                     for index in range(min(locator.count(), 30)):
                         candidate = locator.nth(index)
