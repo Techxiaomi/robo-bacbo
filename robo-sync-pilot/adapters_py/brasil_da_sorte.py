@@ -9,7 +9,8 @@ from adapters_py.base_adapter import BettingHouseAdapter
 
 DEFAULT_NAVIGATION_TIMEOUT_MS = 60000
 LOGIN_FORM_WAIT_MS = 10000
-POST_LOGIN_SETTLE_MS = 6000
+POST_LOGIN_CONFIRM_TIMEOUT_MS = 15000
+PLAY_BUTTON_WAIT_MS = 20000
 GAME_LAUNCH_SETTLE_MS = 2500
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -96,21 +97,27 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
 
     def pre_launch(self) -> Page:
         page = self._require_prepared_page()
-        self._navigate(page, self._game_url)
+
+        # Ordem obrigatoria da Brasil da Sorte:
+        # HOME -> overlays -> login -> sessao confirmada -> GAME URL -> Jogue.
+        print("BRASIL_DA_SORTE_STAGE=HOME")
+        self._navigate(page, self._home_url)
         self._dismiss_prelaunch_overlays(page)
 
-        if not self._looks_like_authenticated_game(page):
+        if self._login_button_visible(page):
             if not self._username or not self._password:
                 raise RuntimeError("BRASIL_DA_SORTE_LOGIN_CREDENTIALS_REQUIRED")
-
-            self._navigate(page, self._home_url)
-            self._dismiss_prelaunch_overlays(page)
             self._perform_login(page)
-            self._navigate(page, self._game_url)
-            self._dismiss_prelaunch_overlays(page)
+            self._wait_for_authenticated_home(page)
+        else:
+            print("BRASIL_DA_SORTE_SESSION_REUSED=true")
 
+        print("BRASIL_DA_SORTE_STAGE=GAME_URL")
+        self._navigate(page, self._game_url)
+        self._dismiss_prelaunch_overlays(page)
         print(f"BRASIL_DA_SORTE_GAME_NAVIGATED_URL={page.url}")
-        self._launch_game(page)
+
+        self._wait_and_launch_game(page)
         return page
 
     def get_game_page(self) -> Page:
@@ -139,35 +146,36 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
         else:
             password.press("Enter")
 
-        auth_page.wait_for_timeout(POST_LOGIN_SETTLE_MS)
-        print("BRASIL_DA_SORTE_LOGIN_SETTLED=true")
+        auth_page.wait_for_timeout(1000)
+        print("BRASIL_DA_SORTE_LOGIN_SUBMITTED=true")
 
-        if self._session_state_file:
-            self._context.storage_state(path=self._session_state_file)
+    def _wait_for_authenticated_home(self, page: Page) -> None:
+        elapsed = 0
+        interval_ms = 250
 
-    def _launch_game(self, primary_page: Page) -> None:
-        self._dismiss_prelaunch_overlays(primary_page)
+        while elapsed < POST_LOGIN_CONFIRM_TIMEOUT_MS:
+            self._dismiss_prelaunch_overlays(page)
+            if not self._login_button_visible(page):
+                print("BRASIL_DA_SORTE_LOGIN_CONFIRMED=true")
+                if self._session_state_file:
+                    self._context.storage_state(path=self._session_state_file)
+                return
+            page.wait_for_timeout(interval_ms)
+            elapsed += interval_ms
 
-        for candidate_page in self._candidate_pages(primary_page):
-            for root in self._roots(candidate_page):
-                button = self._first_visible_role_button(root, self.PLAY_BUTTON_PATTERN)
-                if button is None:
-                    locator = root.locator("button", has_text=self.PLAY_BUTTON_PATTERN)
-                    for index in range(min(locator.count(), 8)):
-                        candidate = locator.nth(index)
-                        try:
-                            if candidate.is_visible():
-                                button = candidate
-                                break
-                        except Exception:
-                            continue
+        raise RuntimeError("BRASIL_DA_SORTE_LOGIN_NOT_CONFIRMED")
 
-                if button is None:
-                    continue
+    def _wait_and_launch_game(self, primary_page: Page) -> None:
+        elapsed = 0
+        interval_ms = 250
 
+        while elapsed < PLAY_BUTTON_WAIT_MS:
+            self._dismiss_prelaunch_overlays(primary_page)
+            candidate = self._find_play_control(primary_page)
+            if candidate is not None:
                 try:
-                    button.click(force=True, timeout=3000)
-                    candidate_page.wait_for_timeout(GAME_LAUNCH_SETTLE_MS)
+                    candidate.click(force=True, timeout=3000)
+                    primary_page.wait_for_timeout(GAME_LAUNCH_SETTLE_MS)
                     print("BRASIL_DA_SORTE_PLAY_TRIGGERED=true")
                     return
                 except Exception as error:
@@ -176,8 +184,40 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
                         f"{self._sanitize_diagnostic(type(error).__name__ + ': ' + str(error))}"
                     )
 
+            primary_page.wait_for_timeout(interval_ms)
+            elapsed += interval_ms
+
+        self._log_game_dom_diagnostic(primary_page)
         print("BRASIL_DA_SORTE_PLAY_TRIGGERED=false")
         raise RuntimeError("BRASIL_DA_SORTE_PLAY_BUTTON_NOT_FOUND")
+
+    def _find_play_control(self, primary_page: Page):
+        for candidate_page in self._candidate_pages(primary_page):
+            for root in self._roots(candidate_page):
+                role_button = self._first_visible_role_button(root, self.PLAY_BUTTON_PATTERN)
+                if role_button is not None:
+                    return role_button
+
+                for selector in ("button", "[role='button']", "a"):
+                    locator = root.locator(selector, has_text=self.PLAY_BUTTON_PATTERN)
+                    for index in range(min(locator.count(), 12)):
+                        candidate = locator.nth(index)
+                        try:
+                            if candidate.is_visible():
+                                return candidate
+                        except Exception:
+                            continue
+
+                text_locator = root.get_by_text(self.PLAY_BUTTON_PATTERN, exact=True)
+                for index in range(min(text_locator.count(), 12)):
+                    candidate = text_locator.nth(index)
+                    try:
+                        if candidate.is_visible():
+                            return candidate
+                    except Exception:
+                        continue
+
+        return None
 
     def _dismiss_prelaunch_overlays(self, primary_page: Page) -> None:
         for label, pattern in (
@@ -266,26 +306,16 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
                             f"{self._sanitize_diagnostic(type(error).__name__ + ': ' + str(error))}"
                         )
 
-        for candidate_page in self._candidate_pages(primary_page):
-            for root in self._roots(candidate_page):
-                for selector in (
-                    "a[href*='login' i]",
-                    "button[data-testid*='login' i]",
-                    "[role='button'][data-testid*='login' i]",
-                ):
-                    candidate = self._first_visible(root, (selector,))
-                    if candidate is not None:
-                        try:
-                            candidate.click(force=True, timeout=3000)
-                            candidate_page.wait_for_timeout(2500)
-                            print("BRASIL_DA_SORTE_LOGIN_TRIGGERED=true")
-                            return True
-                        except Exception as error:
-                            print(
-                                "BRASIL_DA_SORTE_LOGIN_TRIGGER_ERROR="
-                                f"{self._sanitize_diagnostic(type(error).__name__ + ': ' + str(error))}"
-                            )
+        return False
 
+    def _login_button_visible(self, page: Page) -> bool:
+        locator = page.locator("button", has_text=self.DIRECT_LOGIN_PATTERN)
+        for index in range(min(locator.count(), 8)):
+            try:
+                if locator.nth(index).is_visible():
+                    return True
+            except Exception:
+                continue
         return False
 
     def _log_login_dom_diagnostic(self, primary_page: Page) -> None:
@@ -300,8 +330,7 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
         for candidate_page in pages:
             for root in self._roots(candidate_page):
                 try:
-                    root_url = getattr(root, "url", "")
-                    clean_url = self._sanitize_diagnostic(root_url)
+                    clean_url = self._sanitize_diagnostic(getattr(root, "url", ""))
                     if clean_url and clean_url not in frame_urls:
                         frame_urls.append(clean_url)
                 except Exception:
@@ -344,6 +373,38 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
         print(f"BRASIL_DA_SORTE_LOGIN_DIAG_FRAMES={frame_urls[:12]}")
         print(f"BRASIL_DA_SORTE_LOGIN_DIAG_INPUTS={descriptors[:12]}")
         print(f"BRASIL_DA_SORTE_LOGIN_DIAG_BUTTONS={buttons[:12]}")
+
+    def _log_game_dom_diagnostic(self, primary_page: Page) -> None:
+        pages = self._candidate_pages(primary_page)
+        page_urls = [self._sanitize_diagnostic(item.url) for item in pages]
+        frame_urls = []
+        texts = []
+
+        for candidate_page in pages:
+            for root in self._roots(candidate_page):
+                try:
+                    clean_url = self._sanitize_diagnostic(getattr(root, "url", ""))
+                    if clean_url and clean_url not in frame_urls:
+                        frame_urls.append(clean_url)
+                except Exception:
+                    pass
+
+                for selector in ("button", "[role='button']", "a"):
+                    locator = root.locator(selector)
+                    for index in range(min(locator.count(), 30)):
+                        candidate = locator.nth(index)
+                        try:
+                            if not candidate.is_visible():
+                                continue
+                            text = self._sanitize_diagnostic(candidate.inner_text())
+                            if text and text not in texts:
+                                texts.append(text)
+                        except Exception:
+                            continue
+
+        print(f"BRASIL_DA_SORTE_GAME_DIAG_PAGES={page_urls[:8]}")
+        print(f"BRASIL_DA_SORTE_GAME_DIAG_FRAMES={frame_urls[:12]}")
+        print(f"BRASIL_DA_SORTE_GAME_DIAG_CONTROLS={texts[:20]}")
 
     def _candidate_pages(self, primary_page: Page):
         pages = []
@@ -426,18 +487,6 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
     def _sanitize_diagnostic(value):
         normalized = re.sub(r"[\r\n\t]+", " ", str(value or "")).strip()
         return normalized[:160]
-
-    def _looks_like_authenticated_game(self, page: Page) -> bool:
-        try:
-            if self._find_login_fields(page)[0] is not None:
-                return False
-            login_buttons = page.locator("button", has_text=self.DIRECT_LOGIN_PATTERN)
-            for index in range(min(login_buttons.count(), 8)):
-                if login_buttons.nth(index).is_visible():
-                    return False
-            return urlparse(str(page.url or "")).path.rstrip("/") == urlparse(self._game_url).path.rstrip("/")
-        except Exception:
-            return False
 
     @staticmethod
     def _apply_stealth(page: Page) -> None:
