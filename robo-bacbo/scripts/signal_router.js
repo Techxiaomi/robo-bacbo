@@ -404,11 +404,15 @@ async function main() {
     const fanin = new ResultFanIn({
         timeoutMs: resultTimeoutMs,
         publish: async consolidated => {
-            const subscribers = await publisher.publish(consolidatedChannel, JSON.stringify(consolidated));
+            const output = faninSimulation
+                ? { ...consolidated, simulation: true }
+                : consolidated;
+            const subscribers = await publisher.publish(consolidatedChannel, JSON.stringify(output));
             console.log(
-                `SIGNAL_FANIN_COMPLETE signal=${consolidated.signal_id} status=${consolidated.status} ` +
-                `success=${consolidated.success_accounts}/${consolidated.expected_accounts} ` +
-                `executor_status=${consolidated.executor_status} subscribers=${subscribers}`
+                `SIGNAL_FANIN_COMPLETE signal=${output.signal_id} status=${output.status} ` +
+                `success=${output.success_accounts}/${output.expected_accounts} ` +
+                `executor_status=${output.executor_status} simulation=${output.simulation === true} ` +
+                `subscribers=${subscribers}`
             );
         }
     });
@@ -443,7 +447,14 @@ async function main() {
             let payload;
             try { payload = JSON.parse(String(message || '')); }
             catch (_) { return; }
-            void fanin.accept(responseChannelName, payload).catch(error => {
+            void (async () => {
+                const accepted = await fanin.accept(responseChannelName, payload);
+                if (!accepted) return;
+                console.log(
+                    `SIGNAL_FANIN_RESPONSE_ACCEPTED order_id=${String(payload.order_id || '').trim()} ` +
+                    `status=${String(payload.status || '').trim().toUpperCase()} channel=${responseChannelName}`
+                );
+            })().catch(error => {
                 console.error(`SIGNAL_FANIN_RESPONSE_FAILED channel=${responseChannelName}: ${error?.message || error}`);
             });
         });
