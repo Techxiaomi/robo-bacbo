@@ -194,7 +194,9 @@ def _worker(config, max_exposure, ready_event, worker_error):
             try:
                 page = adapter.prepare_session()
                 adapter.pre_launch()
-                context = adapter._context
+                context = adapter.context
+                if context is None:
+                    raise RuntimeError("LIVE_BRIDGE_ADAPTER_CONTEXT_NOT_READY")
 
                 session.update({
                     "context": context,
