@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS betting_houses (
     enabled BOOLEAN NOT NULL DEFAULT true,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    UNIQUE KEY uq_betting_houses_adapter_key (adapter_key),
+    INDEX idx_betting_houses_adapter_key (adapter_key),
     INDEX idx_betting_houses_enabled (enabled)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
