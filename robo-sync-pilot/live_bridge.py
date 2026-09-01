@@ -218,6 +218,10 @@ def _worker(config, max_exposure, ready_event, worker_error):
                     pass
     except Exception as error:
         worker_error.append(error)
+        print(
+            "LIVE_BRIDGE_WORKER_ERROR="
+            f"{type(error).__name__}: {error}"
+        )
         ready_event.set()
         robo.solicitar_encerramento_executor()
 
@@ -264,11 +268,22 @@ def main():
     print("LIVE_BRIDGE_READY=true")
 
     try:
-        while not robo.encerrar_executor.wait(0.5):
+        while True:
+            if worker_error:
+                raise RuntimeError(
+                    f"LIVE_BRIDGE_WORKER_FAILED: {worker_error[0]}"
+                )
             if not worker_thread.is_alive():
                 raise RuntimeError("LIVE_BRIDGE_WORKER_STOPPED")
             if not redis_thread.is_alive():
                 raise RuntimeError("LIVE_BRIDGE_REDIS_LISTENER_STOPPED")
+
+            if robo.encerrar_executor.wait(0.5):
+                if worker_error:
+                    raise RuntimeError(
+                        f"LIVE_BRIDGE_WORKER_FAILED: {worker_error[0]}"
+                    )
+                break
     except KeyboardInterrupt:
         print("\nLIVE_BRIDGE_SHUTDOWN_REQUESTED=true")
     finally:
