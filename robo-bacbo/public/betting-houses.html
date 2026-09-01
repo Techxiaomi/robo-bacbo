@@ -12,7 +12,7 @@
         .topo h1 { margin:0; font-size:22px; }
         .subtitulo { color:#888; font-size:12px; margin-top:4px; }
         .acoes { display:flex; gap:8px; flex-wrap:wrap; }
-        .btn { min-height:36px; padding:8px 16px; border:0; border-radius:6px; background:#007bff; color:#fff; font-weight:700; cursor:pointer; }
+        .btn { min-height:36px; padding:8px 16px; border:0; border-radius:6px; background:#007bff; color:#fff; font-weight:700; cursor:pointer; text-decoration:none; display:inline-flex; align-items:center; }
         .btn:hover { filter:brightness(1.1); }
         .btn:disabled { opacity:.55; cursor:not-allowed; }
         .btn.secundario { background:#333; color:#ddd; }
@@ -74,6 +74,7 @@
             <div class="subtitulo">Gerencie contas usando configurações de casas já homologadas.</div>
         </div>
         <div class="acoes">
+            <a class="btn secundario" href="/supervisor">🧭 Supervisor</a>
             <a class="btn secundario" href="/">← Painel</a>
             <button class="btn secundario" id="btn-nova-casa" type="button">⚙ Homologar nova casa</button>
             <button class="btn" id="btn-nova-conta" type="button">＋ Nova conta</button>
