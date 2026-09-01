@@ -2,6 +2,7 @@
 setlocal EnableExtensions
 title BACBO - Inicializador Financeiro
 set "BASE=%~dp0"
+set "WINDOW=BACBO-OPERACIONAL"
 
 where wt.exe >nul 2>&1
 if errorlevel 1 goto :sem_terminal
@@ -13,10 +14,10 @@ for %%F in (
   if not exist "%BASE%%%~F" goto :arquivo_ausente
 )
 
-echo [BACBO] Abrindo janela FINANCEIRO / TRADER...
-wt.exe -w new ^
-  new-tab --title "Master Supervisor" cmd.exe /k ""%BASE%06_MASTER_SUPERVISOR.cmd"" ^; ^
-  new-tab --title "Signal Router - DRY RUN" cmd.exe /k ""%BASE%07_SIGNAL_ROUTER.cmd""
+echo [BACBO] Adicionando abas FINANCEIRO / TRADER na janela principal...
+wt.exe -w "%WINDOW%" ^
+  new-tab --title "Master Supervisor" --suppressApplicationTitle cmd.exe /k ""%BASE%06_MASTER_SUPERVISOR.cmd"" ^; ^
+  new-tab --title "Signal Router - DRY RUN" --suppressApplicationTitle cmd.exe /k ""%BASE%07_SIGNAL_ROUTER.cmd""
 
 if errorlevel 1 goto :falha_wt
 exit /b 0
@@ -37,7 +38,7 @@ exit /b 1
 :falha_wt
 set "RC=%ERRORLEVEL%"
 echo.
-echo [ERRO] Windows Terminal recusou a abertura da janela FINANCEIRO / TRADER.
+echo [ERRO] Windows Terminal recusou a inclusao das abas FINANCEIRO / TRADER.
 echo Codigo de saida: %RC%
 pause
 exit /b %RC%
