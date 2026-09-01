@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const path = require('path');
 const mysql = require('mysql2/promise');
 const { createClient } = require('redis');
@@ -16,6 +17,16 @@ const MAX_SIGNAL_BYTES = 32 * 1024;
 const KEY_PATTERN = /^[a-z0-9][a-z0-9_-]{0,79}$/;
 const SIGNAL_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 const SAFE_ACTIONS = new Set(['sync_balance']);
+const FINANCIAL_ACTIONS = new Set(['place_bet']);
+const BET_TARGETS = new Set(['PlayerWon', 'BankerWon', 'Tie']);
+
+function envBoolean(name, fallback = false) {
+    const raw = String(process.env[name] ?? '').trim().toLowerCase();
+    if (!raw) return fallback;
+    if (['1', 'true', 'yes', 'on'].includes(raw)) return true;
+    if (['0', 'false', 'no', 'off'].includes(raw)) return false;
+    throw new Error(`SIGNAL_ROUTER_INVALID_${name}: ${raw}`);
+}
 
 function positiveIntEnv(name, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
     const raw = String(process.env[name] || '').trim();
@@ -25,6 +36,27 @@ function positiveIntEnv(name, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER
         throw new Error(`SIGNAL_ROUTER_INVALID_${name}: ${raw}`);
     }
     return value;
+}
+
+function positiveMoneyEnv(name, { required = false, max = 1000000 } = {}) {
+    const raw = String(process.env[name] || '').trim();
+    if (!raw) {
+        if (required) throw new Error(`SIGNAL_ROUTER_${name}_REQUIRED`);
+        return null;
+    }
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value <= 0 || value > max) {
+        throw new Error(`SIGNAL_ROUTER_INVALID_${name}: ${raw}`);
+    }
+    return Math.round(value * 100) / 100;
+}
+
+function financialFanoutEnabled() {
+    return envBoolean('SIGNAL_ROUTER_FINANCIAL_FANOUT_ENABLED', false);
+}
+
+function financialDryRun() {
+    return envBoolean('SIGNAL_ROUTER_FINANCIAL_DRY_RUN', true);
 }
 
 function globalChannel() {
@@ -65,7 +97,57 @@ function plainObject(value) {
     return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
 }
 
-function normalizeSignal(raw, nextGeneratedId = () => `router-${process.pid}-${Date.now()}`) {
+function normalizeMoney(value, field) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number <= 0 || number > 1000000) {
+        throw new Error(`SIGNAL_ROUTER_${field.toUpperCase()}_INVALID`);
+    }
+    const cents = Math.round(number * 100);
+    if (cents <= 0) throw new Error(`SIGNAL_ROUTER_${field.toUpperCase()}_INVALID`);
+    return cents / 100;
+}
+
+function normalizeTarget(value) {
+    const target = String(value || '').trim();
+    if (!BET_TARGETS.has(target)) throw new Error('SIGNAL_ROUTER_BET_TARGET_INVALID');
+    return target;
+}
+
+function normalizeBetPlan(input) {
+    if (Array.isArray(input.apostas) && input.apostas.length > 0) {
+        if (input.apostas.length > 4) throw new Error('SIGNAL_ROUTER_BET_PLAN_TOO_LARGE');
+        const apostas = input.apostas.map(leg => {
+            const item = plainObject(leg);
+            if (!item) throw new Error('SIGNAL_ROUTER_BET_PLAN_INVALID');
+            return Object.freeze({
+                alvo: normalizeTarget(item.alvo),
+                valor: normalizeMoney(item.valor, 'bet_value')
+            });
+        });
+        const exposureCents = apostas.reduce((sum, leg) => sum + Math.round(leg.valor * 100), 0);
+        return Object.freeze({
+            alvo: apostas[0].alvo,
+            valor: exposureCents / 100,
+            apostas: Object.freeze(apostas),
+            exposure_cents: exposureCents
+        });
+    }
+
+    const alvo = normalizeTarget(input.alvo);
+    const valor = normalizeMoney(input.valor_base ?? input.valor, 'bet_value');
+    return Object.freeze({
+        alvo,
+        valor,
+        apostas: null,
+        exposure_cents: Math.round(valor * 100)
+    });
+}
+
+function normalizeSignal(raw, options = {}) {
+    const nextGeneratedId = typeof options.nextGeneratedId === 'function'
+        ? options.nextGeneratedId
+        : () => `router-${process.pid}-${Date.now()}`;
+    const allowFinancial = options.financialEnabled === true;
     const source = typeof raw === 'string' ? raw : String(raw ?? '');
     if (!source || Buffer.byteLength(source, 'utf8') > MAX_SIGNAL_BYTES) {
         throw new Error('SIGNAL_ROUTER_SIGNAL_SIZE_INVALID');
@@ -82,26 +164,34 @@ function normalizeSignal(raw, nextGeneratedId = () => `router-${process.pid}-${D
     if (!input) throw new Error('SIGNAL_ROUTER_INVALID_PAYLOAD');
 
     const action = String(input.action || '').trim().toLowerCase();
-    if (!SAFE_ACTIONS.has(action)) {
-        if (action === 'place_bet') throw new Error('SIGNAL_ROUTER_FINANCIAL_ACTION_BLOCKED');
+    if (!SAFE_ACTIONS.has(action) && !FINANCIAL_ACTIONS.has(action)) {
         throw new Error(`SIGNAL_ROUTER_ACTION_UNSUPPORTED: ${action || '<empty>'}`);
+    }
+    if (FINANCIAL_ACTIONS.has(action) && !allowFinancial) {
+        throw new Error('SIGNAL_ROUTER_FINANCIAL_ACTION_BLOCKED');
     }
 
     const tableKey = String(input.table_key || input.table || '').trim().toLowerCase();
-    if (!KEY_PATTERN.test(tableKey)) {
-        throw new Error('SIGNAL_ROUTER_TABLE_KEY_INVALID');
-    }
+    if (!KEY_PATTERN.test(tableKey)) throw new Error('SIGNAL_ROUTER_TABLE_KEY_INVALID');
 
     let signalId = String(input.signal_id || '').trim();
     if (!signalId) signalId = String(nextGeneratedId()).trim();
-    if (!SIGNAL_ID_PATTERN.test(signalId)) {
-        throw new Error('SIGNAL_ROUTER_SIGNAL_ID_INVALID');
-    }
+    if (!SIGNAL_ID_PATTERN.test(signalId)) throw new Error('SIGNAL_ROUTER_SIGNAL_ID_INVALID');
 
-    return Object.freeze({
+    const base = {
         signal_id: signalId,
         action,
         table_key: tableKey
+    };
+    if (action !== 'place_bet') return Object.freeze(base);
+
+    const plan = normalizeBetPlan(input);
+    return Object.freeze({
+        ...base,
+        alvo: plan.alvo,
+        valor: plan.valor,
+        apostas: plan.apostas,
+        exposure_cents: plan.exposure_cents
     });
 }
 
@@ -129,20 +219,60 @@ function buildTargetIndex(houses) {
         }
     }
 
-    for (const targets of index.values()) {
-        targets.sort((a, b) => a.account_id - b.account_id);
-    }
+    for (const targets of index.values()) targets.sort((a, b) => a.account_id - b.account_id);
     return index;
 }
 
+function deterministicOrderId(signal, target) {
+    const digest = crypto.createHash('sha256')
+        .update(`signal-router-v1|${signal.signal_id}|${target.account_id}|${target.table_key}`)
+        .digest('hex')
+        .slice(0, 32);
+    return `sr-${digest}`;
+}
+
 function commandForTarget(signal, target) {
-    return Object.freeze({
+    const base = {
         action: signal.action,
         router_signal_id: signal.signal_id,
         routed_account_id: target.account_id,
         routed_session_id: target.session_id,
         routed_table_key: target.table_key
+    };
+    if (signal.action !== 'place_bet') return Object.freeze(base);
+
+    return Object.freeze({
+        ...base,
+        order_id: deterministicOrderId(signal, target),
+        alvo: signal.alvo,
+        valor: signal.valor,
+        ...(Array.isArray(signal.apostas) ? { apostas: signal.apostas } : {})
     });
+}
+
+function calculateGlobalExposure(signal, onlineTargetCount) {
+    if (signal.action !== 'place_bet') return 0;
+    const count = Number(onlineTargetCount);
+    if (!Number.isSafeInteger(count) || count < 0) throw new Error('SIGNAL_ROUTER_ONLINE_TARGET_COUNT_INVALID');
+    return (signal.exposure_cents * count) / 100;
+}
+
+async function resolveOnlineTargets(client, targets) {
+    const items = Array.isArray(targets) ? targets : [];
+    if (items.length === 0) return [];
+    if (!client || typeof client.sendCommand !== 'function') {
+        throw new TypeError('SIGNAL_ROUTER_PUBSUB_CLIENT_INVALID');
+    }
+    const channels = items.map(item => item.command_channel);
+    const raw = await client.sendCommand(['PUBSUB', 'NUMSUB', ...channels]);
+    const counts = new Map();
+    for (let index = 0; Array.isArray(raw) && index + 1 < raw.length; index += 2) {
+        counts.set(String(raw[index]), Number(raw[index + 1]) || 0);
+    }
+    return items.map(target => Object.freeze({
+        target,
+        subscribers: counts.get(target.command_channel) || 0
+    }));
 }
 
 class TargetCache {
@@ -162,9 +292,7 @@ class TargetCache {
             this.expiresAt = Date.now() + this.ttlMs;
             const total = Array.from(this.index.values()).reduce((sum, items) => sum + items.length, 0);
             console.log(`SIGNAL_ROUTER_TARGET_CACHE_REFRESH tables=${this.index.size} targets=${total} ttl_ms=${this.ttlMs}`);
-        })().finally(() => {
-            this.refreshPromise = null;
-        });
+        })().finally(() => { this.refreshPromise = null; });
         return this.refreshPromise;
     }
 
@@ -184,9 +312,7 @@ class RedisSignalDedup {
         this.prefix = prefix;
     }
 
-    key(signalId) {
-        return `${this.prefix}:${signalId}`;
-    }
+    key(signalId) { return `${this.prefix}:${signalId}`; }
 
     async claim(signalId) {
         const result = await this.client.set(
@@ -200,37 +326,23 @@ class RedisSignalDedup {
 
 async function main() {
     const channel = globalChannel();
-    const cacheTtlMs = positiveIntEnv('SIGNAL_ROUTER_TARGET_CACHE_TTL_MS', DEFAULT_TARGET_CACHE_TTL_MS, {
-        min: 1000,
-        max: 300000
-    });
-    const dedupTtlMs = positiveIntEnv('SIGNAL_ROUTER_DEDUP_TTL_MS', DEFAULT_DEDUP_TTL_MS, {
-        min: 1000,
-        max: 3600000
-    });
+    const cacheTtlMs = positiveIntEnv('SIGNAL_ROUTER_TARGET_CACHE_TTL_MS', DEFAULT_TARGET_CACHE_TTL_MS, { min: 1000, max: 300000 });
+    const dedupTtlMs = positiveIntEnv('SIGNAL_ROUTER_DEDUP_TTL_MS', DEFAULT_DEDUP_TTL_MS, { min: 1000, max: 3600000 });
     const dedupKeyPrefix = dedupPrefix();
+    const financialEnabled = financialFanoutEnabled();
+    const dryRun = financialDryRun();
+    const globalMaxExposure = positiveMoneyEnv('SIGNAL_ROUTER_GLOBAL_MAX_EXPOSURE', { required: financialEnabled });
 
     const dbPool = createDbPool();
-    const service = createBettingHouseService({
-        dbPool,
-        encryptionKey: process.env.BETTING_HOUSE_CREDENTIALS_KEY
-    });
+    const service = createBettingHouseService({ dbPool, encryptionKey: process.env.BETTING_HOUSE_CREDENTIALS_KEY });
     const cache = new TargetCache({ service, ttlMs: cacheTtlMs });
     const publisher = createClient({ url: redisUrl() });
     const subscriber = publisher.duplicate();
-    const dedup = new RedisSignalDedup({
-        client: publisher,
-        ttlMs: dedupTtlMs,
-        prefix: dedupKeyPrefix
-    });
+    const dedup = new RedisSignalDedup({ client: publisher, ttlMs: dedupTtlMs, prefix: dedupKeyPrefix });
     let shuttingDown = false;
 
-    publisher.on('error', error => {
-        console.error(`SIGNAL_ROUTER_REDIS_PUBLISHER_ERROR: ${error?.message || error}`);
-    });
-    subscriber.on('error', error => {
-        console.error(`SIGNAL_ROUTER_REDIS_SUBSCRIBER_ERROR: ${error?.message || error}`);
-    });
+    publisher.on('error', error => console.error(`SIGNAL_ROUTER_REDIS_PUBLISHER_ERROR: ${error?.message || error}`));
+    subscriber.on('error', error => console.error(`SIGNAL_ROUTER_REDIS_SUBSCRIBER_ERROR: ${error?.message || error}`));
 
     const shutdown = async reason => {
         if (shuttingDown) return;
@@ -257,55 +369,85 @@ async function main() {
         console.log(`SIGNAL_ROUTER_DEDUP_TTL_MS=${dedupTtlMs}`);
         console.log(`SIGNAL_ROUTER_DEDUP_BACKEND=redis prefix=${dedupKeyPrefix}`);
         console.log('SIGNAL_ROUTER_SAFE_ACTIONS=sync_balance');
-        console.log('SIGNAL_ROUTER_FINANCIAL_FANOUT_ENABLED=false');
+        console.log(`SIGNAL_ROUTER_FINANCIAL_FANOUT_ENABLED=${financialEnabled}`);
+        console.log(`SIGNAL_ROUTER_FINANCIAL_DRY_RUN=${dryRun}`);
+        console.log(`SIGNAL_ROUTER_GLOBAL_MAX_EXPOSURE=${globalMaxExposure == null ? 'disabled' : globalMaxExposure.toFixed(2)}`);
 
         let generatedSequence = 0;
         await subscriber.subscribe(channel, async message => {
             if (shuttingDown) return;
             let signal;
             try {
-                signal = normalizeSignal(message, () => `router-${process.pid}-${Date.now()}-${++generatedSequence}`);
+                signal = normalizeSignal(message, {
+                    financialEnabled,
+                    nextGeneratedId: () => `router-${process.pid}-${Date.now()}-${++generatedSequence}`
+                });
             } catch (error) {
                 console.error(`SIGNAL_ROUTER_REJECTED reason=${error?.message || error}`);
                 return;
             }
 
             let claimed;
-            try {
-                claimed = await dedup.claim(signal.signal_id);
-            } catch (error) {
-                console.error(
-                    `SIGNAL_ROUTER_DEDUP_FAILED signal=${signal.signal_id}: ${error?.message || error}`
-                );
+            try { claimed = await dedup.claim(signal.signal_id); }
+            catch (error) {
+                console.error(`SIGNAL_ROUTER_DEDUP_FAILED signal=${signal.signal_id}: ${error?.message || error}`);
                 return;
             }
-
             if (!claimed) {
                 console.warn(`SIGNAL_ROUTER_DUPLICATE signal=${signal.signal_id}`);
                 return;
             }
 
-            console.log(
-                `SIGNAL_ROUTER_RECEIVED signal=${signal.signal_id} action=${signal.action} table=${signal.table_key}`
-            );
+            console.log(`SIGNAL_ROUTER_RECEIVED signal=${signal.signal_id} action=${signal.action} table=${signal.table_key}`);
 
             let targets;
-            try {
-                targets = await cache.targets(signal.table_key);
-            } catch (error) {
-                console.error(
-                    `SIGNAL_ROUTER_TARGET_DISCOVERY_FAILED signal=${signal.signal_id}: ${error?.message || error}`
-                );
+            try { targets = await cache.targets(signal.table_key); }
+            catch (error) {
+                console.error(`SIGNAL_ROUTER_TARGET_DISCOVERY_FAILED signal=${signal.signal_id}: ${error?.message || error}`);
                 return;
             }
-
             console.log(`SIGNAL_ROUTER_TARGETS signal=${signal.signal_id} count=${targets.length}`);
             if (targets.length === 0) {
                 console.warn(`SIGNAL_ROUTER_NO_TARGETS signal=${signal.signal_id} table=${signal.table_key}`);
                 return;
             }
 
-            const results = await Promise.allSettled(targets.map(async target => {
+            let dispatchTargets = targets;
+            if (signal.action === 'place_bet') {
+                let availability;
+                try { availability = await resolveOnlineTargets(publisher, targets); }
+                catch (error) {
+                    console.error(`SIGNAL_ROUTER_ONLINE_DISCOVERY_FAILED signal=${signal.signal_id}: ${error?.message || error}`);
+                    return;
+                }
+                dispatchTargets = availability.filter(item => item.subscribers > 0).map(item => item.target);
+                const online = dispatchTargets.length;
+                const globalExposure = calculateGlobalExposure(signal, online);
+                console.log(
+                    `SIGNAL_ROUTER_FINANCIAL_PRECHECK signal=${signal.signal_id} per_account=${(signal.exposure_cents / 100).toFixed(2)} ` +
+                    `online=${online} global=${globalExposure.toFixed(2)} limit=${globalMaxExposure.toFixed(2)}`
+                );
+                if (globalExposure > globalMaxExposure + 1e-9) {
+                    console.error(
+                        `GLOBAL_EXPOSURE_LIMIT_EXCEEDED signal=${signal.signal_id} ` +
+                        `global=${globalExposure.toFixed(2)} limit=${globalMaxExposure.toFixed(2)} online=${online}`
+                    );
+                    return;
+                }
+                if (online === 0) {
+                    console.warn(`SIGNAL_ROUTER_NO_ONLINE_TARGETS signal=${signal.signal_id}`);
+                    return;
+                }
+                if (dryRun) {
+                    console.log(
+                        `SIGNAL_ROUTER_FINANCIAL_DRY_RUN_PASS signal=${signal.signal_id} ` +
+                        `online=${online} global=${globalExposure.toFixed(2)} dispatch=0`
+                    );
+                    return;
+                }
+            }
+
+            const results = await Promise.allSettled(dispatchTargets.map(async target => {
                 const command = commandForTarget(signal, target);
                 const subscribers = await publisher.publish(target.command_channel, JSON.stringify(command));
                 console.log(
@@ -321,19 +463,15 @@ async function main() {
             for (const result of results) {
                 if (result.status === 'rejected') {
                     failed += 1;
-                    console.error(
-                        `SIGNAL_ROUTER_DISPATCH_FAILED signal=${signal.signal_id}: ` +
-                        `${result.reason?.message || result.reason}`
-                    );
+                    console.error(`SIGNAL_ROUTER_DISPATCH_FAILED signal=${signal.signal_id}: ${result.reason?.message || result.reason}`);
                     continue;
                 }
                 published += 1;
                 if (Number(result.value.subscribers) === 0) offline += 1;
             }
-
             console.log(
                 `SIGNAL_ROUTER_DISPATCH_COMPLETE signal=${signal.signal_id} ` +
-                `targets=${targets.length} published=${published} offline=${offline} failed=${failed}`
+                `targets=${dispatchTargets.length} published=${published} offline=${offline} failed=${failed}`
             );
         });
 
@@ -353,9 +491,13 @@ if (require.main === module) {
 
 module.exports = {
     SAFE_ACTIONS,
+    FINANCIAL_ACTIONS,
     normalizeSignal,
     buildTargetIndex,
+    deterministicOrderId,
     commandForTarget,
+    calculateGlobalExposure,
+    resolveOnlineTargets,
     TargetCache,
     RedisSignalDedup
 };
