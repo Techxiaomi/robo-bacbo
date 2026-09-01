@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Casas de Aposta | Painel Bac Bo</title>
+    <title>Contas de Aposta | Painel Bac Bo</title>
     <style>
         * { box-sizing: border-box; }
         body { margin: 0; padding: 20px 0 40px; background:#121212; color:#fff; font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif; }
@@ -14,6 +14,7 @@
         .acoes { display:flex; gap:8px; flex-wrap:wrap; }
         .btn { min-height:36px; padding:8px 16px; border:0; border-radius:6px; background:#007bff; color:#fff; font-weight:700; cursor:pointer; }
         .btn:hover { filter:brightness(1.1); }
+        .btn:disabled { opacity:.55; cursor:not-allowed; }
         .btn.secundario { background:#333; color:#ddd; }
         .btn.perigo { background:#8d2530; }
         .btn.sucesso { background:#24843d; }
@@ -46,8 +47,8 @@
         .form-group { display:flex; flex-direction:column; gap:5px; }
         .form-group.full { grid-column:1/-1; }
         label { font-size:10px; color:#aaa; text-transform:uppercase; font-weight:700; letter-spacing:.5px; }
-        input[type="text"],input[type="url"],input[type="password"] { width:100%; padding:9px 10px; border-radius:6px; border:1px solid #444; background:#222; color:#fff; font:inherit; font-size:13px; outline:none; }
-        input:focus { border-color:#007bff; background:#1a1a1a; }
+        input[type="text"],input[type="url"],input[type="password"],select { width:100%; padding:9px 10px; border-radius:6px; border:1px solid #444; background:#222; color:#fff; font:inherit; font-size:13px; outline:none; }
+        input:focus,select:focus { border-color:#007bff; background:#1a1a1a; }
         .senha-ajuda { color:#888; font-size:11px; margin-top:2px; }
         .linha-switch { display:flex; align-items:center; gap:8px; min-height:36px; }
         .secao { margin-top:22px; padding-top:18px; border-top:1px solid #333; }
@@ -58,24 +59,29 @@
         .mesa-editor .url { grid-column:1/-1; }
         .mesa-editor-acoes { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-top:10px; }
         .modal-acoes { display:flex; justify-content:flex-end; gap:8px; margin-top:20px; padding-top:15px; border-top:1px solid #333; }
-        @media (max-width:800px) { #lista-casas,.grid-form,.mesa-editor-grid { grid-template-columns:1fr; } .mesa-editor .url,.form-group.full { grid-column:auto; } }
+        .heranca { grid-column:1/-1; padding:12px; border:1px solid #314661; border-radius:8px; background:#142131; }
+        .heranca strong { display:block; margin-bottom:5px; font-size:12px; }
+        .heranca .meta + .meta { margin-top:3px; }
+        .oculto { display:none !important; }
+        @media (max-width:800px) { #lista-casas,.grid-form,.mesa-editor-grid { grid-template-columns:1fr; } .mesa-editor .url,.form-group.full,.heranca { grid-column:auto; } }
     </style>
 </head>
 <body>
 <div class="container">
     <header class="topo">
         <div>
-            <h1>🏦 Casas de Aposta</h1>
-            <div class="subtitulo">Cadastro administrativo de casas, credenciais e mesas disponíveis.</div>
+            <h1>🏦 Contas de Aposta</h1>
+            <div class="subtitulo">Gerencie contas usando configurações de casas já homologadas.</div>
         </div>
         <div class="acoes">
             <a class="btn secundario" href="/">← Painel</a>
-            <button class="btn" id="btn-nova-casa" type="button">＋ Nova casa</button>
+            <button class="btn secundario" id="btn-nova-casa" type="button">⚙ Homologar nova casa</button>
+            <button class="btn" id="btn-nova-conta" type="button">＋ Nova conta</button>
         </div>
     </header>
 
     <section class="toolbar">
-        <label><input type="checkbox" id="mostrar-inativas"> Mostrar casas inativas</label>
+        <label><input type="checkbox" id="mostrar-inativas"> Mostrar contas inativas</label>
         <div id="status-global" class="status-msg">Carregando...</div>
     </section>
 
@@ -86,24 +92,41 @@
     <form class="modal-content" id="form-casa">
         <div class="modal-cabecalho">
             <div>
-                <h2 id="titulo-modal-casa">Nova casa</h2>
-                <div class="subtitulo" id="subtitulo-modal-casa">Cadastre a casa e suas mesas.</div>
+                <h2 id="titulo-modal-casa">Nova conta</h2>
+                <div class="subtitulo" id="subtitulo-modal-casa">Selecione uma casa homologada e informe apenas os dados da conta.</div>
             </div>
             <button class="btn secundario pequeno" type="button" id="btn-fechar-modal">Fechar</button>
         </div>
 
         <input type="hidden" id="house-id">
         <div class="grid-form">
-            <div class="form-group"><label for="house-name">Nome</label><input id="house-name" type="text" maxlength="120" required></div>
-            <div class="form-group"><label for="house-adapter-key">Adapter key</label><input id="house-adapter-key" type="text" maxlength="80" required placeholder="brasil-da-sorte"></div>
-            <div class="form-group full"><label for="house-home-url">URL principal</label><input id="house-home-url" type="url" maxlength="2048" required></div>
+            <div class="form-group full" id="source-house-group">
+                <label for="source-house-id">Casa homologada</label>
+                <select id="source-house-id"></select>
+            </div>
+
+            <div class="heranca" id="source-house-summary">
+                <strong>Configuração herdada automaticamente</strong>
+                <div class="meta" id="source-house-adapter-summary"></div>
+                <div class="meta" id="source-house-url-summary"></div>
+                <div class="meta" id="source-house-tables-summary"></div>
+            </div>
+
+            <div class="form-group"><label for="house-name" id="house-name-label">Nome / apelido da conta</label><input id="house-name" type="text" maxlength="120" required placeholder="Ex.: Brasil da Sorte - Conta 2"></div>
+            <div class="form-group"><label>Status</label><div class="linha-switch"><input id="house-enabled" type="checkbox" checked><span id="house-enabled-label">Ativa</span></div></div>
             <div class="form-group"><label for="house-username">Usuário</label><input id="house-username" type="text" maxlength="190" autocomplete="username"></div>
-            <div class="form-group"><label for="house-password">Senha</label><input id="house-password" type="password" autocomplete="new-password"><div class="senha-ajuda" id="senha-ajuda">Preencha para definir a senha.</div></div>
-            <div class="form-group full"><label>Status</label><div class="linha-switch"><input id="house-enabled" type="checkbox" checked><span id="house-enabled-label">Ativa</span></div></div>
+            <div class="form-group"><label for="house-password">Senha</label><input id="house-password" type="password" autocomplete="new-password"><div class="senha-ajuda" id="senha-ajuda">Preencha a senha desta conta.</div></div>
+
+            <div id="technical-house-fields" class="form-group full">
+                <div class="grid-form">
+                    <div class="form-group"><label for="house-adapter-key">Adapter key</label><input id="house-adapter-key" type="text" maxlength="80" placeholder="brasil-da-sorte"></div>
+                    <div class="form-group full"><label for="house-home-url">URL principal</label><input id="house-home-url" type="url" maxlength="2048"></div>
+                </div>
+            </div>
         </div>
 
-        <section class="secao">
-            <div class="secao-topo"><div><h3>Mesas vinculadas</h3><div class="subtitulo">Cada mesa possui identificador estável e URL própria.</div></div><button class="btn pequeno" type="button" id="btn-adicionar-mesa">＋ Adicionar mesa</button></div>
+        <section class="secao" id="tables-section">
+            <div class="secao-topo"><div><h3>Mesas homologadas</h3><div class="subtitulo">Configuração técnica reutilizada pelas contas desta casa.</div></div><button class="btn pequeno" type="button" id="btn-adicionar-mesa">＋ Adicionar mesa</button></div>
             <div id="mesas-editor"></div>
         </section>
 
