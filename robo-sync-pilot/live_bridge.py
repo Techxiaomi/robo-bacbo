@@ -264,6 +264,11 @@ def _worker(config, max_exposure, runtime_session, ready_event, worker_error):
                 except Exception:
                     pass
     except Exception as error:
+        if robo.encerrar_executor.is_set():
+            print("LIVE_BRIDGE_WORKER_STOPPED_DURING_SHUTDOWN=true")
+            ready_event.set()
+            return
+
         worker_error.append(error)
         print(
             "LIVE_BRIDGE_WORKER_ERROR="
