@@ -17,7 +17,7 @@ DEFAULT_USER_AGENT = (
 
 
 class BrasilDaSorteAdapter(BettingHouseAdapter):
-    """Navegação/autenticação da Brasil da Sorte sem qualquer clique financeiro."""
+    """Navegacao/autenticacao da Brasil da Sorte sem qualquer clique financeiro."""
 
     USERNAME_SELECTORS = (
         "input[name='email']",
@@ -44,6 +44,8 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
         r"^\s*(entrar|acessar|login|iniciar\s+sess[aã]o)\s*$",
         re.IGNORECASE,
     )
+    COOKIE_PATTERN = re.compile(r"Aceitar todos", re.IGNORECASE)
+    AGE_CONFIRM_PATTERN = re.compile(r"^\s*Sim\s*$", re.IGNORECASE)
 
     def __init__(self, browser, config, navigation_timeout_ms=DEFAULT_NAVIGATION_TIMEOUT_MS):
         super().__init__(browser)
@@ -91,6 +93,7 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
     def pre_launch(self) -> Page:
         page = self._require_prepared_page()
         self._navigate(page, self._game_url)
+        self._dismiss_prelaunch_overlays(page)
 
         if self._looks_like_active_session(page):
             return page
@@ -99,8 +102,10 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
             raise RuntimeError("BRASIL_DA_SORTE_LOGIN_CREDENTIALS_REQUIRED")
 
         self._navigate(page, self._home_url)
+        self._dismiss_prelaunch_overlays(page)
         self._perform_login(page)
         self._navigate(page, self._game_url)
+        self._dismiss_prelaunch_overlays(page)
         return page
 
     def get_game_page(self) -> Page:
@@ -108,6 +113,7 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
 
     def _perform_login(self, page: Page) -> None:
         page.wait_for_timeout(1000)
+        self._dismiss_prelaunch_overlays(page)
 
         username, password, root, auth_page = self._find_login_fields(page)
         if username is None or password is None:
@@ -123,7 +129,7 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
 
         submit = self._first_visible_role_button(root, self.LOGIN_BUTTON_PATTERN)
         if submit is not None:
-            submit.click()
+            submit.click(force=True, timeout=3000)
         else:
             password.press("Enter")
 
@@ -131,6 +137,32 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
 
         if self._session_state_file:
             self._context.storage_state(path=self._session_state_file)
+
+    def _dismiss_prelaunch_overlays(self, primary_page: Page) -> None:
+        for label, pattern in (
+            ("COOKIE", self.COOKIE_PATTERN),
+            ("AGE_CONFIRMATION", self.AGE_CONFIRM_PATTERN),
+        ):
+            closed = False
+            for candidate_page in self._candidate_pages(primary_page):
+                for root in self._roots(candidate_page):
+                    locator = root.locator("button", has_text=pattern)
+                    for index in range(min(locator.count(), 8)):
+                        candidate = locator.nth(index)
+                        try:
+                            if not candidate.is_visible():
+                                continue
+                            candidate.click(force=True, timeout=3000)
+                            candidate_page.wait_for_timeout(500)
+                            print(f"BRASIL_DA_SORTE_POPUP_CLOSED={label}")
+                            closed = True
+                            break
+                        except Exception:
+                            continue
+                    if closed:
+                        break
+                if closed:
+                    break
 
     def _find_login_fields(self, primary_page: Page):
         for candidate_page in self._candidate_pages(primary_page):
@@ -151,6 +183,7 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
         interval_ms = 250
 
         while elapsed < LOGIN_FORM_WAIT_MS:
+            self._dismiss_prelaunch_overlays(primary_page)
             username, password, root, auth_page = self._find_login_fields(primary_page)
             if username is not None and password is not None:
                 return username, password, root, auth_page
@@ -160,12 +193,19 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
         return None, None, None, primary_page
 
     def _open_login_form(self, primary_page: Page) -> bool:
+        self._dismiss_prelaunch_overlays(primary_page)
+
         for candidate_page in self._candidate_pages(primary_page):
             for root in self._roots(candidate_page):
                 button = self._first_visible_role_button(root, self.LOGIN_BUTTON_PATTERN)
                 if button is not None:
-                    button.click()
-                    return True
+                    try:
+                        button.click(force=True, timeout=3000)
+                        candidate_page.wait_for_timeout(500)
+                        print("BRASIL_DA_SORTE_LOGIN_TRIGGERED=true")
+                        return True
+                    except Exception:
+                        continue
 
         for candidate_page in self._candidate_pages(primary_page):
             for root in self._roots(candidate_page):
@@ -176,8 +216,13 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
                 ):
                     candidate = self._first_visible(root, (selector,))
                     if candidate is not None:
-                        candidate.click()
-                        return True
+                        try:
+                            candidate.click(force=True, timeout=3000)
+                            candidate_page.wait_for_timeout(500)
+                            print("BRASIL_DA_SORTE_LOGIN_TRIGGERED=true")
+                            return True
+                        except Exception:
+                            continue
 
         return False
 
