@@ -6,8 +6,8 @@ const mysql = require('mysql2/promise');
 
 require('../env_loader').loadEnvFile(path.join(__dirname, '..', '..', '.env'));
 
-const { createBettingHouseService } = require('../betting_house_service');
 const { writeSupervisorSnapshot } = require('../supervisor_telemetry_store');
+const { discoverBoundTasks, envForTask } = require('../trader_bound_tasks');
 
 const DEFAULT_STAGGER_MS = 3000;
 const DEFAULT_BACKOFF_BASE_MS = 2000;
@@ -30,7 +30,7 @@ function positiveIntEnv(name, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER
 function optionalTableFilter() {
     const raw = String(process.env.MASTER_SUPERVISOR_TABLE_KEYS || '').trim();
     if (!raw) return null;
-    const values = raw.split(',').map(item => item.trim()).filter(Boolean);
+    const values = raw.split(',').map(item => item.trim().toLowerCase()).filter(Boolean);
     return values.length ? new Set(values) : null;
 }
 
@@ -49,43 +49,6 @@ function createDbPool() {
 
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function taskId(accountId, tableKey) {
-    return `account-${accountId}:${tableKey}`;
-}
-
-async function discoverTasks(service, tableFilter) {
-    const accounts = await service.listHouses({ includeDisabled: false });
-    const tasks = [];
-
-    for (const account of accounts) {
-        if (account.enabled !== true) continue;
-        const accountId = Number(account.id);
-        if (!Number.isSafeInteger(accountId) || accountId <= 0) continue;
-
-        const tables = Array.isArray(account.tables) ? account.tables : [];
-        for (const table of tables) {
-            if (table.enabled !== true) continue;
-            const tableKey = String(table.table_key || '').trim();
-            if (!tableKey) continue;
-            if (tableFilter && !tableFilter.has(tableKey)) continue;
-
-            tasks.push(Object.freeze({
-                id: taskId(accountId, tableKey),
-                accountId,
-                accountName: String(account.name || `Conta ${accountId}`),
-                tableKey,
-                tableName: String(table.display_name || tableKey)
-            }));
-        }
-    }
-
-    tasks.sort((a, b) => {
-        if (a.accountId !== b.accountId) return a.accountId - b.accountId;
-        return a.tableKey.localeCompare(b.tableKey, 'en');
-    });
-    return tasks;
 }
 
 class MasterSupervisor {
@@ -112,6 +75,7 @@ class MasterSupervisor {
                 account_name: task.accountName,
                 table_key: task.tableKey,
                 table_name: task.tableName,
+                trader_ids: Array.from(task.traderIds || []),
                 pid: null,
                 status: 'STOPPED',
                 restart_attempts: 0,
@@ -124,6 +88,7 @@ class MasterSupervisor {
         }
         item.account_name = task.accountName;
         item.table_name = task.tableName;
+        item.trader_ids = Array.from(task.traderIds || []);
         return item;
     }
 
@@ -157,12 +122,13 @@ class MasterSupervisor {
 
         try {
             writeSupervisorSnapshot({
-                version: 1,
+                version: 2,
                 generated_at: new Date(now).toISOString(),
                 supervisor: {
                     running,
                     pid: running ? process.pid : null,
                     reconcile_interval_ms: this.reconcileIntervalMs,
+                    discovery_mode: 'ACTIVE_TRADER_BINDINGS',
                     table_filter: String(process.env.MASTER_SUPERVISOR_TABLE_KEYS || '').trim() || null
                 },
                 workers
@@ -256,9 +222,10 @@ class MasterSupervisor {
         if (this.shuttingDown || !entry.desired || entry.child || entry.intentionalStopReason) return;
 
         const { task } = entry;
+        const childEnv = envForTask(process.env, task);
         const child = spawn(process.execPath, [this.runnerPath, task.tableKey, String(task.accountId)], {
             cwd: this.cwd,
-            env: process.env,
+            env: childEnv,
             stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
             windowsHide: false
         });
@@ -273,7 +240,8 @@ class MasterSupervisor {
 
         console.log(
             `MASTER_SUPERVISOR_CHILD_STARTED=${task.id} pid=${child.pid || 'unknown'} ` +
-            `account=${task.accountName} table=${task.tableName}`
+            `account=${task.accountName} table=${task.tableName} traders=${task.traderIds.join(',')} ` +
+            `metrics_namespace=${childEnv.OPERATIONS_METRICS_NAMESPACE}`
         );
 
         child.on('message', message => this.handleChildTelemetry(entry, message));
@@ -392,7 +360,7 @@ class MasterSupervisor {
             stopCount += 1;
             this.cancelRestart(entry);
             if (entry.child) {
-                this.requestGracefulStop(entry, 'DB_DISABLED');
+                this.requestGracefulStop(entry, 'TRADER_BINDING_INACTIVE');
             } else {
                 this.setTelemetry(entry, 'STOPPED', { pid: null });
                 this.entries.delete(id);
@@ -487,10 +455,6 @@ async function main() {
     );
 
     const dbPool = createDbPool();
-    const service = createBettingHouseService({
-        dbPool,
-        encryptionKey: process.env.BETTING_HOUSE_CREDENTIALS_KEY
-    });
     const supervisor = new MasterSupervisor({
         runnerPath: path.join(__dirname, 'run_live_bridge.js'),
         cwd: path.resolve(__dirname, '..'),
@@ -510,24 +474,23 @@ async function main() {
 
     try {
         console.log('=== MASTER SUPERVISOR ===');
+        console.log('MASTER_SUPERVISOR_DISCOVERY_MODE=ACTIVE_TRADER_BINDINGS');
         console.log(`MASTER_SUPERVISOR_STAGGER_MS=${staggerMs}`);
         console.log(`MASTER_SUPERVISOR_BACKOFF_BASE_MS=${backoffBaseMs}`);
         console.log(`MASTER_SUPERVISOR_BACKOFF_MAX_MS=${backoffMaxMs}`);
         console.log(`MASTER_SUPERVISOR_RECONCILE_INTERVAL_MS=${reconcileIntervalMs}`);
         console.log(
-            `MASTER_SUPERVISOR_TABLE_FILTER=${tableFilter ? Array.from(tableFilter).join(',') : 'ALL_ENABLED'}`
+            `MASTER_SUPERVISOR_TABLE_FILTER=${tableFilter ? Array.from(tableFilter).join(',') : 'ALL_BOUND'}`
         );
 
         supervisor.publishSnapshot();
-        const initialTasks = await discoverTasks(service, tableFilter);
+        const initialTasks = await discoverBoundTasks(dbPool, tableFilter);
         console.log(`MASTER_SUPERVISOR_TASK_COUNT=${initialTasks.length}`);
         for (const task of initialTasks) {
             console.log(
-                `MASTER_SUPERVISOR_DISCOVERED=${task.id} account=${task.accountName} table=${task.tableName}`
+                `MASTER_SUPERVISOR_DISCOVERED=${task.id} account=${task.accountName} ` +
+                `table=${task.tableName} traders=${task.traderIds.join(',')}`
             );
-        }
-        if (initialTasks.length === 0) {
-            throw new Error('MASTER_SUPERVISOR_NO_ACTIVE_TASKS');
         }
 
         await supervisor.reconcile(initialTasks);
@@ -538,7 +501,7 @@ async function main() {
             if (supervisor.shuttingDown) break;
 
             try {
-                const tasks = await discoverTasks(service, tableFilter);
+                const tasks = await discoverBoundTasks(dbPool, tableFilter);
                 await supervisor.reconcile(tasks);
             } catch (error) {
                 console.error(`MASTER_SUPERVISOR_RECONCILE_FAILED: ${error?.message || error}`);
@@ -552,16 +515,26 @@ async function main() {
     }
 }
 
-main().catch(error => {
-    console.error('MASTER_SUPERVISOR_FAILED:', error?.message || error);
-    try {
-        writeSupervisorSnapshot({
-            version: 1,
-            generated_at: new Date().toISOString(),
-            supervisor: { running: false, pid: null },
-            workers: [],
-            error: String(error?.message || error)
-        });
-    } catch (_) {}
-    process.exitCode = 1;
-});
+if (require.main === module) {
+    main().catch(error => {
+        console.error('MASTER_SUPERVISOR_FAILED:', error?.message || error);
+        try {
+            writeSupervisorSnapshot({
+                version: 2,
+                generated_at: new Date().toISOString(),
+                supervisor: { running: false, pid: null, discovery_mode: 'ACTIVE_TRADER_BINDINGS' },
+                workers: [],
+                error: String(error?.message || error)
+            });
+        } catch (_) {}
+        process.exitCode = 1;
+    });
+}
+
+module.exports = {
+    MasterSupervisor,
+    positiveIntEnv,
+    optionalTableFilter,
+    createDbPool,
+    main
+};
