@@ -397,6 +397,13 @@ def main():
 
     try:
         while True:
+            if robo.encerrar_executor.wait(0.5):
+                if worker_error:
+                    raise RuntimeError(
+                        f"LIVE_BRIDGE_WORKER_FAILED: {worker_error[0]}"
+                    )
+                break
+
             if worker_error:
                 raise RuntimeError(
                     f"LIVE_BRIDGE_WORKER_FAILED: {worker_error[0]}"
@@ -405,13 +412,6 @@ def main():
                 raise RuntimeError("LIVE_BRIDGE_WORKER_STOPPED")
             if not redis_thread.is_alive():
                 raise RuntimeError("LIVE_BRIDGE_REDIS_LISTENER_STOPPED")
-
-            if robo.encerrar_executor.wait(0.5):
-                if worker_error:
-                    raise RuntimeError(
-                        f"LIVE_BRIDGE_WORKER_FAILED: {worker_error[0]}"
-                    )
-                break
     except KeyboardInterrupt:
         print("\nLIVE_BRIDGE_SHUTDOWN_REQUESTED=true")
     finally:
