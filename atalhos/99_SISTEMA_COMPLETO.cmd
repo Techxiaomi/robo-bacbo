@@ -17,12 +17,14 @@ if errorlevel 1 goto :falha_operacional
 
 timeout /t 2 /nobreak >nul
 
-echo [2/2] Abrindo stack FINANCEIRO / TRADER...
+echo [2/2] Adicionando Supervisor e Router na MESMA janela...
 call "%BASE%91_FINANCEIRO_ABAS.cmd"
 if errorlevel 1 goto :falha_financeiro
 
 echo.
-echo [OK] Solicitacao de inicializacao completa concluida.
+echo [OK] Sistema organizado em uma unica janela com 7 abas:
+echo      Garnet ^| Node INT ^| Node BR ^| Coletor INT ^| Coletor BR ^| Master Supervisor ^| Signal Router
+echo.
 echo      Acessos web NAO sao abertos automaticamente.
 echo      Use 08_ABRIR_SUPERVISOR.cmd ou 09_ABRIR_CASAS_CONTAS.cmd quando quiser.
 echo.
@@ -38,14 +40,14 @@ exit /b 1
 
 :falha_operacional
 echo.
-echo [ERRO] A janela OPERACIONAL nao foi iniciada completamente.
+echo [ERRO] A stack OPERACIONAL nao foi iniciada completamente.
 echo Corrija o erro exibido acima antes de prosseguir.
 pause
 exit /b 1
 
 :falha_financeiro
 echo.
-echo [ERRO] A janela FINANCEIRO / TRADER nao foi iniciada.
-echo A janela OPERACIONAL pode ter sido aberta normalmente.
+echo [ERRO] Supervisor/Router nao foram adicionados a janela principal.
+echo A stack operacional pode ter sido aberta normalmente.
 pause
 exit /b 1
