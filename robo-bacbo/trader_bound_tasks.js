@@ -1,5 +1,7 @@
 'use strict';
 
+const SUPPORTED_LIVE_BRIDGE_ADAPTER_KEY = 'brasil-da-sorte';
+
 function taskId(accountId, tableKey) {
     return `account-${accountId}:${tableKey}`;
 }
@@ -66,11 +68,13 @@ async function discoverBoundTasks(dbPool, tableFilter = null) {
          INNER JOIN betting_houses h
             ON h.id = binding.betting_house_id
            AND h.enabled = true
+           AND h.adapter_key = ?
          INNER JOIN betting_house_tables ht
             ON ht.betting_house_id = h.id
            AND ht.enabled = true
            AND LOWER(ht.table_key) = LOWER(m.codigo)
-         ORDER BY h.id, ht.table_key, at.id`
+         ORDER BY h.id, ht.table_key, at.id`,
+        [SUPPORTED_LIVE_BRIDGE_ADAPTER_KEY]
     );
     return tasksFromRows(rows, tableFilter);
 }
@@ -95,6 +99,7 @@ function envForTask(baseEnv, task) {
 }
 
 module.exports = {
+    SUPPORTED_LIVE_BRIDGE_ADAPTER_KEY,
     taskId,
     normalizeTableFilter,
     tasksFromRows,
