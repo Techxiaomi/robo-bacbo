@@ -9,6 +9,8 @@ from adapters_py.base_adapter import BettingHouseAdapter
 
 DEFAULT_NAVIGATION_TIMEOUT_MS = 60000
 LOGIN_FORM_WAIT_MS = 10000
+POST_LOGIN_SETTLE_MS = 6000
+GAME_LAUNCH_SETTLE_MS = 2500
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -45,6 +47,7 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
         re.IGNORECASE,
     )
     DIRECT_LOGIN_PATTERN = re.compile(r"Entrar", re.IGNORECASE)
+    PLAY_BUTTON_PATTERN = re.compile(r"^\s*(jogue|jogar)\s*$", re.IGNORECASE)
     COOKIE_PATTERN = re.compile(r"Aceitar todos", re.IGNORECASE)
     AGE_CONFIRM_PATTERN = re.compile(r"^\s*Sim\s*$", re.IGNORECASE)
 
@@ -96,17 +99,18 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
         self._navigate(page, self._game_url)
         self._dismiss_prelaunch_overlays(page)
 
-        if self._looks_like_active_session(page):
-            return page
+        if not self._looks_like_authenticated_game(page):
+            if not self._username or not self._password:
+                raise RuntimeError("BRASIL_DA_SORTE_LOGIN_CREDENTIALS_REQUIRED")
 
-        if not self._username or not self._password:
-            raise RuntimeError("BRASIL_DA_SORTE_LOGIN_CREDENTIALS_REQUIRED")
+            self._navigate(page, self._home_url)
+            self._dismiss_prelaunch_overlays(page)
+            self._perform_login(page)
+            self._navigate(page, self._game_url)
+            self._dismiss_prelaunch_overlays(page)
 
-        self._navigate(page, self._home_url)
-        self._dismiss_prelaunch_overlays(page)
-        self._perform_login(page)
-        self._navigate(page, self._game_url)
-        self._dismiss_prelaunch_overlays(page)
+        print(f"BRASIL_DA_SORTE_GAME_NAVIGATED_URL={page.url}")
+        self._launch_game(page)
         return page
 
     def get_game_page(self) -> Page:
@@ -135,10 +139,45 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
         else:
             password.press("Enter")
 
-        auth_page.wait_for_timeout(3000)
+        auth_page.wait_for_timeout(POST_LOGIN_SETTLE_MS)
+        print("BRASIL_DA_SORTE_LOGIN_SETTLED=true")
 
         if self._session_state_file:
             self._context.storage_state(path=self._session_state_file)
+
+    def _launch_game(self, primary_page: Page) -> None:
+        self._dismiss_prelaunch_overlays(primary_page)
+
+        for candidate_page in self._candidate_pages(primary_page):
+            for root in self._roots(candidate_page):
+                button = self._first_visible_role_button(root, self.PLAY_BUTTON_PATTERN)
+                if button is None:
+                    locator = root.locator("button", has_text=self.PLAY_BUTTON_PATTERN)
+                    for index in range(min(locator.count(), 8)):
+                        candidate = locator.nth(index)
+                        try:
+                            if candidate.is_visible():
+                                button = candidate
+                                break
+                        except Exception:
+                            continue
+
+                if button is None:
+                    continue
+
+                try:
+                    button.click(force=True, timeout=3000)
+                    candidate_page.wait_for_timeout(GAME_LAUNCH_SETTLE_MS)
+                    print("BRASIL_DA_SORTE_PLAY_TRIGGERED=true")
+                    return
+                except Exception as error:
+                    print(
+                        "BRASIL_DA_SORTE_PLAY_TRIGGER_ERROR="
+                        f"{self._sanitize_diagnostic(type(error).__name__ + ': ' + str(error))}"
+                    )
+
+        print("BRASIL_DA_SORTE_PLAY_TRIGGERED=false")
+        raise RuntimeError("BRASIL_DA_SORTE_PLAY_BUTTON_NOT_FOUND")
 
     def _dismiss_prelaunch_overlays(self, primary_page: Page) -> None:
         for label, pattern in (
@@ -196,7 +235,6 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
     def _open_login_form(self, primary_page: Page) -> bool:
         self._dismiss_prelaunch_overlays(primary_page)
 
-        # Caminho principal: reproduz exatamente o fluxo homologado no executor.
         direct = primary_page.locator("button", has_text=self.DIRECT_LOGIN_PATTERN)
         for index in range(min(direct.count(), 8)):
             candidate = direct.nth(index)
@@ -213,7 +251,6 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
                     f"{self._sanitize_diagnostic(type(error).__name__ + ': ' + str(error))}"
                 )
 
-        # Fallback seguro para variantes semanticas/popup/iframe.
         for candidate_page in self._candidate_pages(primary_page):
             for root in self._roots(candidate_page):
                 button = self._first_visible_role_button(root, self.LOGIN_BUTTON_PATTERN)
@@ -390,10 +427,15 @@ class BrasilDaSorteAdapter(BettingHouseAdapter):
         normalized = re.sub(r"[\r\n\t]+", " ", str(value or "")).strip()
         return normalized[:160]
 
-    @staticmethod
-    def _looks_like_active_session(page: Page) -> bool:
+    def _looks_like_authenticated_game(self, page: Page) -> bool:
         try:
-            return len(page.frames) > 1
+            if self._find_login_fields(page)[0] is not None:
+                return False
+            login_buttons = page.locator("button", has_text=self.DIRECT_LOGIN_PATTERN)
+            for index in range(min(login_buttons.count(), 8)):
+                if login_buttons.nth(index).is_visible():
+                    return False
+            return urlparse(str(page.url or "")).path.rstrip("/") == urlparse(self._game_url).path.rstrip("/")
         except Exception:
             return False
 
