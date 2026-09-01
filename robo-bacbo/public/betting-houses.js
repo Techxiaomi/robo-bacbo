@@ -157,6 +157,16 @@
         setStatus($('status-modal'), '');
     }
 
+    function setTechnicalControlsDisabled(disabled) {
+        for (const rootId of ['technical-house-fields', 'tables-section']) {
+            const root = $(rootId);
+            if (!root) continue;
+            root.querySelectorAll('input, select, textarea, button').forEach(control => {
+                control.disabled = disabled;
+            });
+        }
+    }
+
     function configureMode(mode) {
         state.mode = mode;
         const accountMode = mode === 'account';
@@ -166,6 +176,7 @@
         $('source-house-summary').classList.toggle('oculto', !accountMode);
         $('technical-house-fields').classList.toggle('oculto', !technicalMode);
         $('tables-section').classList.toggle('oculto', !technicalMode);
+        setTechnicalControlsDisabled(!technicalMode);
         $('house-adapter-key').required = technicalMode;
         $('house-home-url').required = technicalMode;
         $('house-username').required = accountMode;
