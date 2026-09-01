@@ -378,6 +378,33 @@ function registerFanInExpectation(fanin, signal, targets, resultTimeoutMs) {
     return expectedTargets;
 }
 
+function buildDryRunConsolidated(signal, targets, now = Date.now()) {
+    const expectedTargets = fanInTargets(signal, targets);
+    const accounts = expectedTargets.map(item => ({
+        account_id: item.account_id,
+        session_id: item.session_id,
+        order_id: item.order_id,
+        status: 'FALHOU',
+        motivo: 'SIGNAL_ROUTER_FINANCIAL_DRY_RUN_NO_DISPATCH',
+        confirmacao: null
+    }));
+    return Object.freeze({
+        action: 'multi_account_bet_result',
+        signal_id: signal.signal_id,
+        order_id: signal.signal_id,
+        table_key: signal.table_key,
+        status: 'FAILED',
+        executor_status: 'FALHOU',
+        expected_accounts: accounts.length,
+        success_accounts: 0,
+        failed_accounts: accounts.length,
+        accounts,
+        confirmacao: null,
+        dry_run: true,
+        completed_at: now
+    });
+}
+
 async function main() {
     const channel = globalChannel();
     const consolidatedChannel = resultChannel();
@@ -539,17 +566,21 @@ async function main() {
                     return;
                 }
                 if (dryRun) {
-                    if (!faninSimulation) {
+                    if (faninSimulation) {
+                        registerFanInExpectation(fanin, signal, dispatchTargets, resultTimeoutMs);
                         console.log(
-                            `SIGNAL_ROUTER_FINANCIAL_DRY_RUN_PASS signal=${signal.signal_id} ` +
+                            `SIGNAL_ROUTER_FINANCIAL_DRY_RUN_FANIN_SIMULATION signal=${signal.signal_id} ` +
                             `online=${online} global=${globalExposure.toFixed(2)} dispatch=0`
                         );
                         return;
                     }
-                    registerFanInExpectation(fanin, signal, dispatchTargets, resultTimeoutMs);
+
+                    const dryRunResult = buildDryRunConsolidated(signal, dispatchTargets);
+                    const subscribers = await publisher.publish(consolidatedChannel, JSON.stringify(dryRunResult));
                     console.log(
-                        `SIGNAL_ROUTER_FINANCIAL_DRY_RUN_FANIN_SIMULATION signal=${signal.signal_id} ` +
-                        `online=${online} global=${globalExposure.toFixed(2)} dispatch=0`
+                        `SIGNAL_ROUTER_FINANCIAL_DRY_RUN_COMPLETE signal=${signal.signal_id} ` +
+                        `online=${online} global=${globalExposure.toFixed(2)} dispatch=0 ` +
+                        `executor_status=${dryRunResult.executor_status} result_subscribers=${subscribers}`
                     );
                     return;
                 }
@@ -620,6 +651,7 @@ module.exports = {
     resolveOnlineTargets,
     fanInTargets,
     registerFanInExpectation,
+    buildDryRunConsolidated,
     TargetCache,
     RedisSignalDedup
 };
