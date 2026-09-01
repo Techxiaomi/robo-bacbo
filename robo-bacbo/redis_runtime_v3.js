@@ -81,8 +81,8 @@ function multiAccountRouterEnabled() {
 
 function tableKeyRuntime() {
     const codigo = String(ESCOPO_REDIS_MESA.codigo || '').trim().toUpperCase();
-    if (codigo === 'BR') return 'bacbo_br';
-    if (codigo === 'INT') return 'bacbo_int';
+    if (codigo === 'BR' || codigo === 'BACBO_BR') return 'bacbo_br';
+    if (codigo === 'INT' || codigo === 'BACBO_INT') return 'bacbo_int';
     throw new Error(`MULTI_ACCOUNT_TABLE_KEY_UNSUPPORTED: ${codigo || '<empty>'}`);
 }
 
@@ -465,7 +465,7 @@ async function encaminharBetResult(dados) {
 
 async function encaminharResultadoMultiConta(dados) {
     if (!dados || dados.action !== 'multi_account_bet_result') return false;
-    if (String(dados.table_key || '').trim() !== tableKeyRuntime()) return false;
+    if (String(dados.table_key || '').trim().toLowerCase() !== tableKeyRuntime()) return false;
 
     const orderId = String(dados.order_id || dados.signal_id || '').trim().toLowerCase();
     const status = String(dados.executor_status || '').trim().toUpperCase();
@@ -509,14 +509,18 @@ async function garantirRedis() {
                 await responseSubscriber.subscribe(GLOBAL_SIGNAL_RESULT_CHANNEL, mensagem => {
                     const dados = parseMensagem(mensagem);
                     if (!dados || dados.action !== 'multi_account_bet_result') return;
-                    void encaminharResultadoMultiConta(dados);
+                    void encaminharResultadoMultiConta(dados).catch(erro => {
+                        console.error(`⚠️ Multi-account fan-in ignorado por erro controlado: ${erro?.message || erro}`);
+                    });
                 });
                 console.log(`🎧 Multi-account fan-in ativo em ${GLOBAL_SIGNAL_RESULT_CHANNEL}.`);
             } else {
                 await responseSubscriber.subscribe(REDIS_RESPONSE_CHANNEL, mensagem => {
                     const dados = parseMensagem(mensagem);
                     if (!dados || dados.action !== 'bet_result') return;
-                    void encaminharBetResult(dados);
+                    void encaminharBetResult(dados).catch(erro => {
+                        console.error(`⚠️ bet_result Redis ignorado por erro controlado: ${erro?.message || erro}`);
+                    });
                 });
             }
             responseSubscriber.__subscribed = true;
@@ -652,7 +656,7 @@ function instalarRedisRuntimeV3() {
         console.error('⚠️ Schema bacbo_rounds não inicializou no bootstrap:', erro.message);
     });
     void garantirRedis().catch(erro => {
-        console.error('⚠️ Redis runtime V3 não conectou no bootstrap:', erro.message);
+        console.error('⚠️ Redis Runtime V3 não conectou no bootstrap:', erro.message);
         agendarReconexao();
     });
 
