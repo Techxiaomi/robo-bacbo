@@ -28,8 +28,6 @@ let timerReconexao = null;
 let filaBacbo = Promise.resolve();
 let sequenciaLocal = 0;
 
-const REDIS_COMMAND_CHANNEL = 'auto_trader_commands';
-const REDIS_RESPONSE_CHANNEL = 'auto_trader_responses';
 const GLOBAL_SIGNAL_CHANNEL = String(process.env.SIGNAL_ROUTER_GLOBAL_CHANNEL || 'global_signals').trim();
 const GLOBAL_SIGNAL_RESULT_CHANNEL = String(process.env.SIGNAL_ROUTER_RESULT_CHANNEL || 'global_signal_results').trim();
 
@@ -77,6 +75,13 @@ function envBoolean(nome, padrao = false) {
 
 function multiAccountRouterEnabled() {
     return envBoolean('AUTO_TRADER_MULTI_ACCOUNT_ROUTER_ENABLED', false);
+}
+
+function afirmarCutoverMultiContaAtivo() {
+    if (!multiAccountRouterEnabled()) {
+        throw new Error('MULTI_ACCOUNT_ROUTER_REQUIRED');
+    }
+    return true;
 }
 
 function tableKeyRuntime() {
@@ -451,18 +456,6 @@ function criarClientes() {
     }
 }
 
-async function encaminharBetResult(dados) {
-    const orderId = String(dados?.order_id || '').trim().toLowerCase();
-    const status = String(dados?.status || '').trim().toUpperCase();
-    if (!orderId || !STATUS_VALIDOS.has(status)) return false;
-    return postNode('/executor-status', {
-        order_id: orderId,
-        status,
-        motivo: String(dados?.motivo || '').slice(0, 300),
-        confirmacao: dados?.confirmacao || null
-    }, `bet_result ${orderId}`, 3);
-}
-
 async function encaminharResultadoMultiConta(dados) {
     if (!dados || dados.action !== 'multi_account_bet_result') return false;
     if (String(dados.table_key || '').trim().toLowerCase() !== tableKeyRuntime()) return false;
@@ -471,9 +464,11 @@ async function encaminharResultadoMultiConta(dados) {
     const status = String(dados.executor_status || '').trim().toUpperCase();
     if (!orderId || !STATUS_VALIDOS.has(status)) return false;
 
-    const motivo = status === 'EXECUTADA'
-        ? `MULTI_ACCOUNT_${dados.status}: ${Number(dados.success_accounts) || 0}/${Number(dados.expected_accounts) || 0}`
-        : `MULTI_ACCOUNT_${dados.status || 'FAILED'}: ${Number(dados.success_accounts) || 0}/${Number(dados.expected_accounts) || 0}`;
+    const motivo = dados.dry_run === true
+        ? `MULTI_ACCOUNT_DRY_RUN_NO_DISPATCH: 0/${Number(dados.expected_accounts) || 0}`
+        : status === 'EXECUTADA'
+            ? `MULTI_ACCOUNT_${dados.status}: ${Number(dados.success_accounts) || 0}/${Number(dados.expected_accounts) || 0}`
+            : `MULTI_ACCOUNT_${dados.status || 'FAILED'}: ${Number(dados.success_accounts) || 0}/${Number(dados.expected_accounts) || 0}`;
 
     console.log(
         `🔀 MULTI-ACCOUNT RESULT | signal=${orderId} | aggregate=${dados.status} | `
@@ -488,6 +483,13 @@ async function encaminharResultadoMultiConta(dados) {
         return true;
     }
 
+    if (dados.dry_run === true) {
+        console.log(
+            `🛡️ MULTI-ACCOUNT DRY RUN | signal=${orderId} | dispatch=0 | `
+            + 'executor_status_delivery=enabled'
+        );
+    }
+
     return postNode('/executor-status', {
         order_id: orderId,
         status,
@@ -497,6 +499,7 @@ async function encaminharResultadoMultiConta(dados) {
 }
 
 async function garantirRedis() {
+    afirmarCutoverMultiContaAtivo();
     if (
         clientePronto(publisher)
         && clientePronto(responseSubscriber)
@@ -513,25 +516,15 @@ async function garantirRedis() {
         await conectar(bacboSubscriber);
 
         if (!responseSubscriber.__subscribed) {
-            if (multiAccountRouterEnabled()) {
-                await responseSubscriber.subscribe(GLOBAL_SIGNAL_RESULT_CHANNEL, mensagem => {
-                    const dados = parseMensagem(mensagem);
-                    if (!dados || dados.action !== 'multi_account_bet_result') return;
-                    void encaminharResultadoMultiConta(dados).catch(erro => {
-                        console.error(`⚠️ Multi-account fan-in ignorado por erro controlado: ${erro?.message || erro}`);
-                    });
+            await responseSubscriber.subscribe(GLOBAL_SIGNAL_RESULT_CHANNEL, mensagem => {
+                const dados = parseMensagem(mensagem);
+                if (!dados || dados.action !== 'multi_account_bet_result') return;
+                void encaminharResultadoMultiConta(dados).catch(erro => {
+                    console.error(`⚠️ Multi-account fan-in ignorado por erro controlado: ${erro?.message || erro}`);
                 });
-                console.log(`🎧 Multi-account fan-in ativo em ${GLOBAL_SIGNAL_RESULT_CHANNEL}.`);
-            } else {
-                await responseSubscriber.subscribe(REDIS_RESPONSE_CHANNEL, mensagem => {
-                    const dados = parseMensagem(mensagem);
-                    if (!dados || dados.action !== 'bet_result') return;
-                    void encaminharBetResult(dados).catch(erro => {
-                        console.error(`⚠️ bet_result Redis ignorado por erro controlado: ${erro?.message || erro}`);
-                    });
-                });
-            }
+            });
             responseSubscriber.__subscribed = true;
+            console.log(`🎧 Multi-account fan-in ativo em ${GLOBAL_SIGNAL_RESULT_CHANNEL}.`);
         }
 
         if (!bacboSubscriber.__subscribed) {
@@ -603,25 +596,6 @@ async function publicarViaRouterMultiConta(dados, orderId) {
     });
 }
 
-async function publicarViaExecutorLegado(dados, orderId) {
-    const comando = {
-        action: 'place_bet',
-        order_id: orderId,
-        alvo: dados.alvo,
-        valor: dados.valor
-    };
-    if (Array.isArray(dados.apostas) && dados.apostas.length > 0) comando.apostas = dados.apostas;
-    const receptores = await publisher.publish(REDIS_COMMAND_CHANNEL, JSON.stringify(comando));
-    if (!Number.isFinite(Number(receptores)) || Number(receptores) < 1) {
-        return respostaJson(503, { erro: 'executor Redis sem assinante ativo', aceita: false });
-    }
-    return respostaJson(200, {
-        status: 'Ordem Redis aceita pelo transporte local',
-        duplicada: false,
-        dados: { order_id: orderId, alvo: dados.alvo, valor: dados.valor }
-    });
-}
-
 async function fetchComExecutorRedis(input, init = {}) {
     const alvo = typeof input === 'string' || input instanceof URL
         ? String(input)
@@ -638,20 +612,19 @@ async function fetchComExecutorRedis(input, init = {}) {
     }
 
     try {
+        afirmarCutoverMultiContaAtivo();
         await garantirRedis();
-        if (multiAccountRouterEnabled()) {
-            return await publicarViaRouterMultiConta(dados, orderId);
-        }
-        return await publicarViaExecutorLegado(dados, orderId);
+        return await publicarViaRouterMultiConta(dados, orderId);
     } catch (erro) {
-        console.error(`⚠️ Redis executor V3: falha ao publicar place_bet ${orderId}:`, erro.message);
-        return respostaJson(503, { erro: 'transporte Redis do executor indisponível', aceita: false });
+        console.error(`⚠️ Redis executor V3: falha no cutover global ${orderId}:`, erro.message);
+        return respostaJson(503, { erro: 'Signal Router multi-conta obrigatorio e indisponivel', aceita: false });
     }
 }
 
 function instalarRedisRuntimeV3() {
     if (instalado) return;
     configurarTimeoutMinimoSaldo();
+    afirmarCutoverMultiContaAtivo();
     if (typeof globalThis.fetch !== 'function' || typeof globalThis.Response !== 'function') {
         throw new Error('Runtime Node sem fetch/Response nativos');
     }
@@ -668,14 +641,10 @@ function instalarRedisRuntimeV3() {
         agendarReconexao();
     });
 
-    if (multiAccountRouterEnabled()) {
-        console.log(
-            `🔀 Redis Runtime V3 MULTI-ACCOUNT: ${BACBO_EVENTS_CHANNEL} -> Node; `
-            + `${GLOBAL_SIGNAL_CHANNEL} -> Router; ${GLOBAL_SIGNAL_RESULT_CHANNEL} -> fan-in.`
-        );
-    } else {
-        console.log(`🔌 Redis Runtime V3: ${BACBO_EVENTS_CHANNEL} -> schema novo -> Node; ${REDIS_COMMAND_CHANNEL} -> executor.`);
-    }
+    console.log(
+        `🔀 Redis Runtime V3 REAL CUTOVER: ${BACBO_EVENTS_CHANNEL} -> Node; `
+        + `${GLOBAL_SIGNAL_CHANNEL} -> Router; ${GLOBAL_SIGNAL_RESULT_CHANNEL} -> /executor-status.`
+    );
 }
 
 module.exports = {
@@ -683,5 +652,6 @@ module.exports = {
     processarBacbo,
     payloadNode,
     multiAccountRouterEnabled,
+    afirmarCutoverMultiContaAtivo,
     tableKeyRuntime
 };
