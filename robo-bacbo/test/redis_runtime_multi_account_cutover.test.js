@@ -24,12 +24,18 @@ test('cutover escuta somente resultado consolidado do router', () => {
     assert.match(source, /postNode\('\/executor-status'/);
 });
 
-test('runtime filtra resultado consolidado pela mesa local', () => {
-    assert.match(source, /String\(dados\.table_key \|\| ''\)\.trim\(\) !== tableKeyRuntime\(\)/);
-    assert.match(source, /codigo === 'BR'/);
+test('runtime normaliza identidade canonica BACBO_BR e BACBO_INT para table_key do router', () => {
+    assert.match(source, /codigo === 'BR' \|\| codigo === 'BACBO_BR'/);
     assert.match(source, /return 'bacbo_br'/);
-    assert.match(source, /codigo === 'INT'/);
+    assert.match(source, /codigo === 'INT' \|\| codigo === 'BACBO_INT'/);
     assert.match(source, /return 'bacbo_int'/);
+    assert.match(source, /String\(dados\.table_key \|\| ''\)\.trim\(\)\.toLowerCase\(\) !== tableKeyRuntime\(\)/);
+});
+
+test('callbacks redis de resultado sao fail-safe e nao deixam rejection escapar', () => {
+    assert.match(source, /encaminharResultadoMultiConta\(dados\)\.catch\(erro =>/);
+    assert.match(source, /Multi-account fan-in ignorado por erro controlado/);
+    assert.match(source, /encaminharBetResult\(dados\)\.catch\(erro =>/);
 });
 
 test('rota legada permanece apenas como rollback quando cutover estiver desligado', () => {
