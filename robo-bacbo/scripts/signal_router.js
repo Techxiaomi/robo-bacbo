@@ -11,6 +11,7 @@ const { createBettingHouseService } = require('../betting_house_service');
 const DEFAULT_GLOBAL_CHANNEL = 'global_signals';
 const DEFAULT_TARGET_CACHE_TTL_MS = 5000;
 const DEFAULT_DEDUP_TTL_MS = 60000;
+const DEFAULT_DEDUP_PREFIX = 'signal_router:dedup';
 const MAX_SIGNAL_BYTES = 32 * 1024;
 const KEY_PATTERN = /^[a-z0-9][a-z0-9_-]{0,79}$/;
 const SIGNAL_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -32,6 +33,14 @@ function globalChannel() {
         throw new Error('SIGNAL_ROUTER_GLOBAL_CHANNEL_INVALID');
     }
     return channel;
+}
+
+function dedupPrefix() {
+    const prefix = String(process.env.SIGNAL_ROUTER_DEDUP_PREFIX || DEFAULT_DEDUP_PREFIX).trim();
+    if (!/^[A-Za-z0-9._:-]{1,120}$/.test(prefix)) {
+        throw new Error('SIGNAL_ROUTER_DEDUP_PREFIX_INVALID');
+    }
+    return prefix;
 }
 
 function createDbPool() {
@@ -165,20 +174,27 @@ class TargetCache {
     }
 }
 
-class SignalDedup {
-    constructor(ttlMs) {
+class RedisSignalDedup {
+    constructor({ client, ttlMs, prefix = DEFAULT_DEDUP_PREFIX }) {
+        if (!client || typeof client.set !== 'function') {
+            throw new TypeError('SIGNAL_ROUTER_DEDUP_INVALID_REDIS_CLIENT');
+        }
+        this.client = client;
         this.ttlMs = ttlMs;
-        this.items = new Map();
+        this.prefix = prefix;
     }
 
-    seen(signalId) {
-        const now = Date.now();
-        for (const [key, expiresAt] of this.items) {
-            if (expiresAt <= now) this.items.delete(key);
-        }
-        if (this.items.has(signalId)) return true;
-        this.items.set(signalId, now + this.ttlMs);
-        return false;
+    key(signalId) {
+        return `${this.prefix}:${signalId}`;
+    }
+
+    async claim(signalId) {
+        const result = await this.client.set(
+            this.key(signalId),
+            String(Date.now()),
+            { NX: true, PX: this.ttlMs }
+        );
+        return result === 'OK';
     }
 }
 
@@ -192,6 +208,7 @@ async function main() {
         min: 1000,
         max: 3600000
     });
+    const dedupKeyPrefix = dedupPrefix();
 
     const dbPool = createDbPool();
     const service = createBettingHouseService({
@@ -199,9 +216,13 @@ async function main() {
         encryptionKey: process.env.BETTING_HOUSE_CREDENTIALS_KEY
     });
     const cache = new TargetCache({ service, ttlMs: cacheTtlMs });
-    const dedup = new SignalDedup(dedupTtlMs);
     const publisher = createClient({ url: redisUrl() });
     const subscriber = publisher.duplicate();
+    const dedup = new RedisSignalDedup({
+        client: publisher,
+        ttlMs: dedupTtlMs,
+        prefix: dedupKeyPrefix
+    });
     let shuttingDown = false;
 
     publisher.on('error', error => {
@@ -234,6 +255,7 @@ async function main() {
         console.log(`SIGNAL_ROUTER_GLOBAL_CHANNEL=${channel}`);
         console.log(`SIGNAL_ROUTER_TARGET_CACHE_TTL_MS=${cacheTtlMs}`);
         console.log(`SIGNAL_ROUTER_DEDUP_TTL_MS=${dedupTtlMs}`);
+        console.log(`SIGNAL_ROUTER_DEDUP_BACKEND=redis prefix=${dedupKeyPrefix}`);
         console.log('SIGNAL_ROUTER_SAFE_ACTIONS=sync_balance');
         console.log('SIGNAL_ROUTER_FINANCIAL_FANOUT_ENABLED=false');
 
@@ -248,7 +270,17 @@ async function main() {
                 return;
             }
 
-            if (dedup.seen(signal.signal_id)) {
+            let claimed;
+            try {
+                claimed = await dedup.claim(signal.signal_id);
+            } catch (error) {
+                console.error(
+                    `SIGNAL_ROUTER_DEDUP_FAILED signal=${signal.signal_id}: ${error?.message || error}`
+                );
+                return;
+            }
+
+            if (!claimed) {
                 console.warn(`SIGNAL_ROUTER_DUPLICATE signal=${signal.signal_id}`);
                 return;
             }
@@ -325,5 +357,5 @@ module.exports = {
     buildTargetIndex,
     commandForTarget,
     TargetCache,
-    SignalDedup
+    RedisSignalDedup
 };
