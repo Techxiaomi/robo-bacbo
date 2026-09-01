@@ -72,6 +72,10 @@ function financialDryRun() {
     return envBoolean('SIGNAL_ROUTER_FINANCIAL_DRY_RUN', true);
 }
 
+function financialFaninSimulationEnabled() {
+    return envBoolean('SIGNAL_ROUTER_FINANCIAL_FANIN_SIMULATION', false);
+}
+
 function globalChannel() {
     return validatedChannel(
         process.env.SIGNAL_ROUTER_GLOBAL_CHANNEL || DEFAULT_GLOBAL_CHANNEL,
@@ -354,6 +358,26 @@ function fanInTargets(signal, targets) {
     }));
 }
 
+function registerFanInExpectation(fanin, signal, targets, resultTimeoutMs) {
+    const expectedTargets = fanInTargets(signal, targets);
+    fanin.register({
+        signalId: signal.signal_id,
+        tableKey: signal.table_key,
+        targets: expectedTargets
+    });
+    console.log(
+        `SIGNAL_FANIN_EXPECTING signal=${signal.signal_id} accounts=${targets.length} ` +
+        `timeout_ms=${resultTimeoutMs}`
+    );
+    for (const item of expectedTargets) {
+        console.log(
+            `SIGNAL_FANIN_EXPECTED_TARGET signal=${signal.signal_id} account=${item.account_id} ` +
+            `order_id=${item.order_id} channel=${item.response_channel}`
+        );
+    }
+    return expectedTargets;
+}
+
 async function main() {
     const channel = globalChannel();
     const consolidatedChannel = resultChannel();
@@ -364,6 +388,10 @@ async function main() {
     const dedupKeyPrefix = dedupPrefix();
     const financialEnabled = financialFanoutEnabled();
     const dryRun = financialDryRun();
+    const faninSimulation = financialFaninSimulationEnabled();
+    if (faninSimulation && !dryRun) {
+        throw new Error('SIGNAL_ROUTER_FANIN_SIMULATION_REQUIRES_DRY_RUN');
+    }
     const globalMaxExposure = positiveMoneyEnv('SIGNAL_ROUTER_GLOBAL_MAX_EXPOSURE', { required: financialEnabled });
 
     const dbPool = createDbPool();
@@ -431,6 +459,7 @@ async function main() {
         console.log('SIGNAL_ROUTER_SAFE_ACTIONS=sync_balance');
         console.log(`SIGNAL_ROUTER_FINANCIAL_FANOUT_ENABLED=${financialEnabled}`);
         console.log(`SIGNAL_ROUTER_FINANCIAL_DRY_RUN=${dryRun}`);
+        console.log(`SIGNAL_ROUTER_FINANCIAL_FANIN_SIMULATION=${faninSimulation}`);
         console.log(`SIGNAL_ROUTER_GLOBAL_MAX_EXPOSURE=${globalMaxExposure == null ? 'disabled' : globalMaxExposure.toFixed(2)}`);
 
         let generatedSequence = 0;
@@ -499,22 +528,22 @@ async function main() {
                     return;
                 }
                 if (dryRun) {
+                    if (!faninSimulation) {
+                        console.log(
+                            `SIGNAL_ROUTER_FINANCIAL_DRY_RUN_PASS signal=${signal.signal_id} ` +
+                            `online=${online} global=${globalExposure.toFixed(2)} dispatch=0`
+                        );
+                        return;
+                    }
+                    registerFanInExpectation(fanin, signal, dispatchTargets, resultTimeoutMs);
                     console.log(
-                        `SIGNAL_ROUTER_FINANCIAL_DRY_RUN_PASS signal=${signal.signal_id} ` +
+                        `SIGNAL_ROUTER_FINANCIAL_DRY_RUN_FANIN_SIMULATION signal=${signal.signal_id} ` +
                         `online=${online} global=${globalExposure.toFixed(2)} dispatch=0`
                     );
                     return;
                 }
 
-                fanin.register({
-                    signalId: signal.signal_id,
-                    tableKey: signal.table_key,
-                    targets: fanInTargets(signal, dispatchTargets)
-                });
-                console.log(
-                    `SIGNAL_FANIN_EXPECTING signal=${signal.signal_id} accounts=${dispatchTargets.length} ` +
-                    `timeout_ms=${resultTimeoutMs}`
-                );
+                registerFanInExpectation(fanin, signal, dispatchTargets, resultTimeoutMs);
             }
 
             const results = await Promise.allSettled(dispatchTargets.map(async target => {
@@ -579,6 +608,7 @@ module.exports = {
     calculateGlobalExposure,
     resolveOnlineTargets,
     fanInTargets,
+    registerFanInExpectation,
     TargetCache,
     RedisSignalDedup
 };
