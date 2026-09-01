@@ -1,47 +1,50 @@
 from abc import ABC, abstractmethod
 
+from playwright.sync_api import Browser, BrowserContext, Page
+
 
 class BettingHouseAdapter(ABC):
-    """Contrato da casca: sessao e pre-launch, nunca logica financeira."""
+    """Contrato de navegação da casa; nunca contém lógica financeira."""
 
-    def __init__(self, browser):
+    def __init__(self, browser: Browser):
         if browser is None or not hasattr(browser, "new_context"):
             raise TypeError("ADAPTER_INVALID_BROWSER: esperado Playwright Browser sync.")
 
         self._browser = browser
-        self._context = None
-        self._page = None
+        self._context: BrowserContext | None = None
+        self._page: Page | None = None
 
     @property
-    def context(self):
+    def context(self) -> BrowserContext | None:
         return self._context
 
     @property
-    def page(self):
+    def page(self) -> Page | None:
         return self._page
 
     @abstractmethod
-    def prepare_session(self):
+    def prepare_session(self) -> Page:
+        """Cria o BrowserContext isolado e devolve a Page pertencente ao adapter."""
         raise NotImplementedError
 
     @abstractmethod
-    def launch_bacbo(self):
+    def pre_launch(self) -> Page:
+        """Executa autenticação/navegação da casa até a mesa configurada."""
         raise NotImplementedError
 
     @abstractmethod
-    def get_game_page(self):
+    def get_game_page(self) -> Page:
+        """Devolve exclusivamente a Page pronta para handoff ao motor universal."""
         raise NotImplementedError
 
-    def cleanup(self):
-        """Fecha apenas o BrowserContext pertencente a esta conta."""
+    def cleanup(self) -> None:
         context = self._context
         self._page = None
         self._context = None
-
         if context is not None:
             context.close()
 
-    def _require_prepared_page(self):
+    def _require_prepared_page(self) -> Page:
         page = self._page
         if page is None or page.is_closed():
             raise RuntimeError(
@@ -49,7 +52,6 @@ class BettingHouseAdapter(ABC):
             )
         return page
 
-    # Barreiras arquiteturais explicitas: cliques financeiros nao pertencem ao adapter.
     def place_bet(self, *args, **kwargs):
         raise RuntimeError("ADAPTER_FINANCIAL_ACCESS_FORBIDDEN: place_bet pertence ao motor.")
 
