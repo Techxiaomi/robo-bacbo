@@ -12,6 +12,7 @@ import robo
 
 
 MAX_CONFIG_BYTES = 64 * 1024
+MAX_CONTROL_LINE_BYTES = 4096
 SUPPORTED_TABLE_KEYS = {"bacbo_br", "bacbo_int"}
 CONTROLLED_MAX_EXPOSURE_CAP = 5.0
 KEEP_ALIVE_INTERVAL_SECONDS = 15.0
@@ -28,7 +29,7 @@ BROWSER_ARGS = [
 
 
 def _read_config_from_stdin():
-    raw = sys.stdin.buffer.read(MAX_CONFIG_BYTES + 1)
+    raw = sys.stdin.buffer.readline(MAX_CONFIG_BYTES + 1)
     if len(raw) > MAX_CONFIG_BYTES:
         raise RuntimeError("LIVE_BRIDGE_CONFIG_TOO_LARGE")
     if not raw.strip():
@@ -42,6 +43,39 @@ def _read_config_from_stdin():
     if not isinstance(config, dict):
         raise RuntimeError("LIVE_BRIDGE_CONFIG_INVALID")
     return config
+
+
+def _stdin_control_enabled(config):
+    control = config.get("control")
+    return isinstance(control, dict) and control.get("stdin_keepalive") is True
+
+
+def _stdin_control_loop():
+    while not robo.encerrar_executor.is_set():
+        raw = sys.stdin.buffer.readline(MAX_CONTROL_LINE_BYTES + 1)
+        if raw == b"":
+            if not robo.encerrar_executor.is_set():
+                print("LIVE_BRIDGE_PARENT_CHANNEL_CLOSED=true")
+                robo.solicitar_encerramento_executor()
+            return
+        if len(raw) > MAX_CONTROL_LINE_BYTES:
+            print("LIVE_BRIDGE_CONTROL_REJECTED=LINE_TOO_LARGE")
+            continue
+
+        try:
+            command = raw.decode("utf-8").strip().upper()
+        except UnicodeDecodeError:
+            print("LIVE_BRIDGE_CONTROL_REJECTED=INVALID_ENCODING")
+            continue
+
+        if not command:
+            continue
+        if command == "SHUTDOWN":
+            print("LIVE_BRIDGE_CONTROL_SHUTDOWN_REQUESTED=true")
+            robo.solicitar_encerramento_executor()
+            return
+
+        print(f"LIVE_BRIDGE_CONTROL_REJECTED={command[:80]}")
 
 
 def _required_nested(config, section, key):
@@ -298,6 +332,15 @@ def main():
 
     ready_event = threading.Event()
     worker_error = []
+
+    if _stdin_control_enabled(config):
+        control_thread = threading.Thread(
+            target=_stdin_control_loop,
+            name=f"bacbo-live-control-{runtime_session['session_id']}",
+            daemon=True,
+        )
+        control_thread.start()
+        print("LIVE_BRIDGE_CONTROL_CHANNEL=STDIN")
 
     worker_thread = threading.Thread(
         target=_worker,
