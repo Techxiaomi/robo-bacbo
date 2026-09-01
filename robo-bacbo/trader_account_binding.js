@@ -1,5 +1,7 @@
 'use strict';
 
+const SUPPORTED_LIVE_BRIDGE_ADAPTERS = new Set(['brasil-da-sorte']);
+
 function positiveId(value, fieldName) {
     const number = Number(value);
     if (!Number.isSafeInteger(number) || number <= 0) {
@@ -16,6 +18,10 @@ function normalizeAccountIds(values) {
         unique.add(positiveId(value, 'ACCOUNT_ID'));
     }
     return Array.from(unique).sort((a, b) => a - b);
+}
+
+function liveBridgeAdapterSupported(value) {
+    return SUPPORTED_LIVE_BRIDGE_ADAPTERS.has(String(value || '').trim().toLowerCase());
 }
 
 async function traderDescriptor(dbPool, traderId) {
@@ -38,7 +44,8 @@ async function validateAccountsForTrader(dbPool, trader, accountIds) {
     if (accountIds.length === 0) return [];
     const placeholders = accountIds.map(() => '?').join(',');
     const [rows] = await dbPool.query(
-        `SELECT h.id, h.name, h.enabled, t.table_key, t.display_name, t.enabled AS table_enabled
+        `SELECT h.id, h.name, h.adapter_key, h.enabled,
+                t.table_key, t.display_name, t.enabled AS table_enabled
          FROM betting_houses h
          LEFT JOIN betting_house_tables t
            ON t.betting_house_id = h.id
@@ -53,6 +60,11 @@ async function validateAccountsForTrader(dbPool, trader, accountIds) {
         const row = byId.get(accountId);
         if (!row) {
             throw new Error(`TRADER_ACCOUNT_BINDING_ACCOUNT_NOT_FOUND: ${accountId}`);
+        }
+        if (!liveBridgeAdapterSupported(row.adapter_key)) {
+            throw new Error(
+                `TRADER_ACCOUNT_BINDING_ADAPTER_UNSUPPORTED: account=${accountId} adapter=${row.adapter_key || '<empty>'}`
+            );
         }
         if (!row.table_key) {
             throw new Error(
@@ -101,6 +113,7 @@ async function setTraderAccounts(dbPool, traderId, accountIds) {
         accounts: accounts.map(row => ({
             id: Number(row.id),
             name: String(row.name || ''),
+            adapter_key: String(row.adapter_key || ''),
             enabled: Boolean(row.enabled),
             table_key: String(row.table_key || ''),
             table_enabled: Boolean(row.table_enabled)
@@ -128,6 +141,7 @@ async function listTraderAccountBindings(dbPool) {
                 m.codigo AS table_code,
                 b.betting_house_id AS account_id,
                 h.name AS account_name,
+                h.adapter_key AS adapter_key,
                 h.enabled AS account_enabled,
                 ht.enabled AS table_enabled
          FROM auto_traders at
@@ -158,6 +172,8 @@ async function listTraderAccountBindings(dbPool) {
             item.accounts.push({
                 account_id: Number(row.account_id),
                 account_name: String(row.account_name || ''),
+                adapter_key: String(row.adapter_key || ''),
+                adapter_supported: liveBridgeAdapterSupported(row.adapter_key),
                 account_enabled: Boolean(row.account_enabled),
                 table_enabled: Boolean(row.table_enabled)
             });
@@ -167,7 +183,10 @@ async function listTraderAccountBindings(dbPool) {
 }
 
 module.exports = {
+    SUPPORTED_LIVE_BRIDGE_ADAPTERS,
+    positiveId,
     normalizeAccountIds,
+    liveBridgeAdapterSupported,
     traderDescriptor,
     validateAccountsForTrader,
     setTraderAccounts,
