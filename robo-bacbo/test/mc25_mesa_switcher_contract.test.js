@@ -34,28 +34,30 @@ test('MC25: alternancia preserva runtimes separados e usa a mesma aba', () => {
     assert.doesNotMatch(switcher, /fetch\([^\n]*place_bet/);
 });
 
-test('MC25: identidade visual diferencia INT e BR de forma permanente', () => {
+test('MC25: identidade visual diferencia INT e BR e mostra financeiro ativo', () => {
     assert.match(switcher, /document\.title = `\[\$\{mesa\.sigla\}\] Inteligência Bac Bo`/);
     assert.match(switcher, /id = 'mesa-runtime-switcher'/);
     assert.match(switcher, /Mesa operacional/);
     assert.match(switcher, /Internacional · BACBO_INT/);
     assert.match(switcher, /Brasil · BACBO_BR/);
+    assert.match(switcher, /BACBO_BR:[\s\S]*?financeiro: true/);
     assert.match(switcher, /Execução financeira disponível nesta mesa/);
-    assert.match(switcher, /Execução financeira bloqueada nesta mesa/);
+    assert.doesNotMatch(switcher, /Execução financeira bloqueada nesta mesa/);
 });
 
-test('MC25: BR bloqueia Trader na UI sem substituir o gate do backend', () => {
-    assert.match(switcher, /mesa\?\.codigo === 'BACBO_BR'/);
-    assert.match(switcher, /botao\.disabled = true/);
-    assert.match(switcher, /botao\.removeAttribute\('onclick'\)/);
-    assert.match(switcher, /botao\.textContent = '🔒 Trader'/);
-    assert.match(switcher, /Execução financeira não autorizada para BACBO_BR/);
+test('MC25: Trader permanece acessivel em INT e BR', () => {
+    assert.match(switcher, /function habilitarAutoTraderPorMesa\(mesa\)/);
+    assert.match(switcher, /botao\.disabled = false/);
+    assert.match(switcher, /botao\.textContent = '💸 Trader'/);
+    assert.match(switcher, /Abrir módulo Trader da mesa \$\{mesa\.nome\}/);
+    assert.doesNotMatch(switcher, /botao\.disabled = true/);
+    assert.doesNotMatch(switcher, /botao\.removeAttribute\('onclick'\)/);
 });
 
-test('MC25: sair da INT avisa quando existe Auto-Trader ativo', () => {
+test('MC25: troca de mesa avisa quando existe Auto-Trader ativo em qualquer runtime', () => {
     assert.match(switcher, /fetch\('\/api\/auto-traders'/);
     assert.match(switcher, /trader\.ativo === true \|\| trader\.ativo === 1/);
-    assert.match(switcher, /atual\?\.codigo === 'BACBO_INT' && destino\.codigo === 'BACBO_BR'/);
+    assert.match(switcher, /const traderAtivo = await existeAutoTraderAtivo\(\)/);
     assert.match(switcher, /window\.confirm\(/);
-    assert.match(switcher, /Trocar a visualização para a mesa BRASIL não interrompe o runtime INT/);
+    assert.match(switcher, /não interrompe o runtime atual/);
 });
