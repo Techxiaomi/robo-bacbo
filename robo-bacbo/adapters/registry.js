@@ -1,6 +1,7 @@
 'use strict';
 
 const { validateAdapterClass } = require('./contract/betting-house-adapter');
+const BrasilDaSorteAdapter = require('./houses/brasil-da-sorte');
 
 const HOUSE_ID_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
 
@@ -71,7 +72,14 @@ class BettingHouseAdapterRegistry {
   }
 }
 
+function createApprovedRegistry() {
+  return new BettingHouseAdapterRegistry()
+    .register('brasil-da-sorte', BrasilDaSorteAdapter)
+    .seal();
+}
+
 module.exports = {
   BettingHouseAdapterRegistry,
+  createApprovedRegistry,
   normalizeHouseId,
 };
