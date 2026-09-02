@@ -20,13 +20,13 @@ function Get-ProcessSnapshot {
     Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, Name, CommandLine
 }
 
-function Stop-ProcessTree([int]$Pid, [string]$Label) {
-    if ($Pid -le 0 -or $Pid -eq $PID) { return $false }
-    $proc = Get-Process -Id $Pid -ErrorAction SilentlyContinue
+function Stop-ProcessTree([int]$ProcessId, [string]$Label) {
+    if ($ProcessId -le 0 -or $ProcessId -eq $PID) { return $false }
+    $proc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
     if (-not $proc) { return $false }
 
-    Write-Host "[STOP] $Label | PID=$Pid" -ForegroundColor Yellow
-    & taskkill.exe /PID $Pid /T /F *> $null
+    Write-Host "[STOP] $Label | PID=$ProcessId" -ForegroundColor Yellow
+    & taskkill.exe /PID $ProcessId /T /F *> $null
     return $true
 }
 
@@ -61,7 +61,7 @@ foreach ($shortcut in $shortcutNames) {
     foreach ($item in $matches) {
         $pidValue = [int]$item.ProcessId
         if ($stopped.Add($pidValue)) {
-            [void](Stop-ProcessTree -Pid $pidValue -Label $shortcut)
+            [void](Stop-ProcessTree -ProcessId $pidValue -Label $shortcut)
         }
     }
 }
@@ -96,7 +96,7 @@ foreach ($item in $snapshot) {
 
     $pidValue = [int]$item.ProcessId
     if ($stopped.Add($pidValue)) {
-        [void](Stop-ProcessTree -Pid $pidValue -Label $item.Name)
+        [void](Stop-ProcessTree -ProcessId $pidValue -Label $item.Name)
     }
 }
 
@@ -104,7 +104,7 @@ foreach ($item in $snapshot) {
 foreach ($port in @(3000, 3001, 6379)) {
     $ownerPid = Get-ListeningPid -Port $port
     if ($ownerPid -gt 0 -and $stopped.Add($ownerPid)) {
-        [void](Stop-ProcessTree -Pid $ownerPid -Label "porta $port")
+        [void](Stop-ProcessTree -ProcessId $ownerPid -Label "porta $port")
     }
 }
 
@@ -112,7 +112,7 @@ foreach ($port in @(3000, 3001, 6379)) {
 Get-Process -Name 'GarnetServer' -ErrorAction SilentlyContinue | ForEach-Object {
     $pidValue = [int]$_.Id
     if ($stopped.Add($pidValue)) {
-        [void](Stop-ProcessTree -Pid $pidValue -Label 'GarnetServer')
+        [void](Stop-ProcessTree -ProcessId $pidValue -Label 'GarnetServer')
     }
 }
 
