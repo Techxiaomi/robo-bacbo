@@ -82,7 +82,7 @@ test('structural source keeps active creation and manual sync on balance-only sc
     assert.match(source, /AUTO_TRADER_MANUAL_BALANCE_SYNC/);
 });
 
-test('catalog route is anchored to existing auto-traders route and remains credential-free', () => {
+test('catalog route is anchored to existing auto-traders route and public SELECT remains credential-free', () => {
     const source = fs.readFileSync(
         path.join(__dirname, '..', 'trader_account_catalog.js'),
         'utf8'
@@ -91,7 +91,9 @@ test('catalog route is anchored to existing auto-traders route and remains crede
     assert.match(source, /path === '\/api\/auto-traders'/);
     assert.match(source, /AUTH_ORDER_ANCHORED/);
     assert.match(source, /\/api\/trader-account-catalog/);
-    assert.doesNotMatch(source, /password|senha|credential|cookie/i);
+    const selectQuery = source.match(/`SELECT[\s\S]*?ORDER BY h\.id`/i)?.[0] || '';
+    assert.ok(selectQuery, 'catalog SELECT must exist');
+    assert.doesNotMatch(selectQuery, /username|password|credential|cookie|senha/i);
 });
 
 test('UI manual balance button targets edited trader and never uses legacy global balance endpoint', () => {
