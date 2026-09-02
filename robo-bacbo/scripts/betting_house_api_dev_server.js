@@ -49,16 +49,23 @@ async function main() {
         });
     });
 
-    app.use(express.static(path.join(__dirname, '..', 'public')));
+    const publicDir = path.join(__dirname, '..', 'public');
+    app.use(express.static(publicDir));
+
+    app.get('/', (req, res) => res.redirect('/accesses'));
+    app.get('/accesses', (req, res) => {
+        res.sendFile(path.join(publicDir, 'accesses.html'));
+    });
     app.get('/betting-houses', (req, res) => {
-        res.sendFile(path.join(__dirname, '..', 'public', 'betting-houses.html'));
+        res.sendFile(path.join(publicDir, 'betting-houses.html'));
     });
     app.get('/supervisor', (req, res) => {
-        res.sendFile(path.join(__dirname, '..', 'public', 'supervisor-status.html'));
+        res.sendFile(path.join(publicDir, 'supervisor-status.html'));
     });
 
     const server = app.listen(port, host, () => {
         console.log(`BETTING_HOUSE_API_DEV_READY http://${host}:${port}`);
+        console.log(`ACCESSES_UI_READY http://${host}:${port}/accesses`);
         console.log(`BETTING_HOUSE_UI_READY http://${host}:${port}/betting-houses`);
         console.log(`SUPERVISOR_UI_READY http://${host}:${port}/supervisor`);
     });
