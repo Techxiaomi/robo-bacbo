@@ -82,8 +82,8 @@ $projectPatterns = @(
 )
 
 foreach ($item in $snapshot) {
-    $commandLine = String($item.CommandLine)
-    if (-not $commandLine) { continue }
+    $commandLine = [string]$item.CommandLine
+    if ([string]::IsNullOrWhiteSpace($commandLine)) { continue }
 
     $matched = $false
     foreach ($pattern in $projectPatterns) {
@@ -96,7 +96,7 @@ foreach ($item in $snapshot) {
 
     $pidValue = [int]$item.ProcessId
     if ($stopped.Add($pidValue)) {
-        [void](Stop-ProcessTree -ProcessId $pidValue -Label $item.Name)
+        [void](Stop-ProcessTree -ProcessId $pidValue -Label ([string]$item.Name))
     }
 }
 
