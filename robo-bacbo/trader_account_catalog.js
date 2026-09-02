@@ -3,6 +3,7 @@
 const express = require('express');
 const mysql = require('mysql2/promise');
 const { obterMesaRuntime } = require('./mesa_runtime_context');
+const { publicTableFinancialRules } = require('./table_financial_rules');
 
 const SUPPORTED_ADAPTER_KEY = 'brasil-da-sorte';
 let installed = false;
@@ -60,6 +61,7 @@ async function handler(req, res) {
         return res.json({
             success: true,
             table_code: mesa.codigo,
+            financial_rules: publicTableFinancialRules(mesa.codigo),
             accounts
         });
     } catch (error) {
