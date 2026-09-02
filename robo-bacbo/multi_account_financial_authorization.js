@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const { createClient } = require('redis');
 const { obterMesaRuntime } = require('./mesa_runtime_context');
 const { criarControleDiarioAutoTrader } = require('./bug051b_daily_counter');
@@ -8,6 +9,8 @@ const { validarConfiguracaoAutoTrader } = require('./bug051d_config_validation')
 const { parseScopedBalance, aggregateTraderBalance, maxAgeMs } = require('./continuous_trader_balance');
 
 const INSTALL_MARK = Symbol.for('robo-bacbo.multi-account-financial-authorization');
+const DEFAULT_REFRESH_TIMEOUT_MS = 12000;
+const DEFAULT_REFRESH_POLL_MS = 100;
 
 function multiAccountEnabled() {
     return String(process.env.AUTO_TRADER_MULTI_ACCOUNT_ROUTER_ENABLED || '').trim().toLowerCase() === 'true';
@@ -16,6 +19,17 @@ function multiAccountEnabled() {
 function redisUrl() {
     return String(process.env.REDIS_URL || 'redis://127.0.0.1:6379').trim()
         || 'redis://127.0.0.1:6379';
+}
+
+function positiveIntEnv(name, fallback, min = 1, max = 120000) {
+    const raw = Number(process.env[name]);
+    if (!Number.isFinite(raw)) return fallback;
+    const value = Math.trunc(raw);
+    return value >= min && value <= max ? value : fallback;
+}
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function avaliarTrailingStopTrader(trader, variacao) {
@@ -104,7 +118,11 @@ class ScopedTraderBalanceAuthorization {
         this.log = log;
         this.snapshots = new Map();
         this.subscriber = null;
+        this.publisher = null;
         this.startPromise = null;
+        this.refreshFlights = new Map();
+        this.refreshTimeoutMs = positiveIntEnv('MULTI_ACCOUNT_BALANCE_REFRESH_TIMEOUT_MS', DEFAULT_REFRESH_TIMEOUT_MS, 1000, 60000);
+        this.refreshPollMs = positiveIntEnv('MULTI_ACCOUNT_BALANCE_REFRESH_POLL_MS', DEFAULT_REFRESH_POLL_MS, 25, 1000);
         this.daily = criarControleDiarioAutoTrader({
             dbPool,
             timezone: process.env.AUTO_TRADER_TIMEZONE || process.env.TZ || 'America/Sao_Paulo'
@@ -143,19 +161,24 @@ class ScopedTraderBalanceAuthorization {
     }
 
     async start() {
-        if (this.subscriber?.isReady) return true;
+        if (this.subscriber?.isReady && this.publisher?.isReady) return true;
         if (this.startPromise) return this.startPromise;
         this.startPromise = (async () => {
-            const client = createClient({ url: redisUrl() });
-            client.on('error', error => {
+            const subscriber = createClient({ url: redisUrl() });
+            const publisher = createClient({ url: redisUrl() });
+            subscriber.on('error', error => {
                 this.log.error(`MULTI_ACCOUNT_AUTH_REDIS_ERROR: ${error?.message || error}`);
             });
-            await client.connect();
+            publisher.on('error', error => {
+                this.log.error(`MULTI_ACCOUNT_AUTH_REDIS_PUBLISH_ERROR: ${error?.message || error}`);
+            });
+            await Promise.all([subscriber.connect(), publisher.connect()]);
             const pattern = `auto_trader_responses:*:${this.tableKey}`;
-            await client.pSubscribe(pattern, (message, channel) => {
+            await subscriber.pSubscribe(pattern, (message, channel) => {
                 this.record(channel, message);
             });
-            this.subscriber = client;
+            this.subscriber = subscriber;
+            this.publisher = publisher;
             this.log.log(`MULTI_ACCOUNT_AUTH_BALANCE_READY=true table=${this.tableKey} pattern=${pattern}`);
             return true;
         })();
@@ -163,6 +186,61 @@ class ScopedTraderBalanceAuthorization {
             return await this.startPromise;
         } finally {
             this.startPromise = null;
+        }
+    }
+
+    async refreshTraderBalance(trader) {
+        const traderId = Number(trader?.id);
+        const initial = this.snapshotForTrader(trader);
+        if (initial.fresco) return initial;
+        if (!['MISSING_ACCOUNT_BALANCE', 'STALE_ACCOUNT_BALANCE'].includes(initial.motivo)) return initial;
+
+        const accountIds = [...(initial.account_ids || [])];
+        if (!Number.isSafeInteger(traderId) || traderId <= 0 || accountIds.length === 0) return initial;
+
+        const flightKey = `${this.tableKey}:${traderId}`;
+        const existing = this.refreshFlights.get(flightKey);
+        if (existing) return existing;
+
+        const flight = (async () => {
+            await this.start();
+            const requestId = crypto.randomUUID();
+            this.log.log(
+                `MULTI_ACCOUNT_AUTH_BALANCE_REFRESH_REQUESTED trader=${traderId} table=${this.tableKey} ` +
+                `accounts=${accountIds.join(',')} reason=${initial.motivo}`
+            );
+
+            await Promise.all(accountIds.map(accountId => this.publisher.publish(
+                `auto_trader_commands:${accountId}:${this.tableKey}`,
+                JSON.stringify({ action: 'sync_balance', request_id: requestId })
+            )));
+
+            const deadline = Date.now() + this.refreshTimeoutMs;
+            while (Date.now() <= deadline) {
+                const refreshed = this.snapshotForTrader(trader);
+                if (refreshed.fresco) {
+                    this.log.log(
+                        `MULTI_ACCOUNT_AUTH_BALANCE_REFRESHED trader=${traderId} table=${this.tableKey} ` +
+                        `accounts=${refreshed.account_ids.join(',')} balance=${refreshed.saldo_atual.toFixed(2)}`
+                    );
+                    return refreshed;
+                }
+                await sleep(this.refreshPollMs);
+            }
+
+            const finalSnapshot = this.snapshotForTrader(trader);
+            this.log.warn(
+                `MULTI_ACCOUNT_AUTH_BALANCE_REFRESH_FAILED trader=${traderId} table=${this.tableKey} ` +
+                `accounts=${accountIds.join(',')} reason=${finalSnapshot.motivo || 'TIMEOUT'}`
+            );
+            return finalSnapshot;
+        })();
+
+        this.refreshFlights.set(flightKey, flight);
+        try {
+            return await flight;
+        } finally {
+            if (this.refreshFlights.get(flightKey) === flight) this.refreshFlights.delete(flightKey);
         }
     }
 
@@ -200,7 +278,18 @@ class ScopedTraderBalanceAuthorization {
             return false;
         }
 
-        const snapshot = this.snapshotForTrader(trader);
+        let snapshot = this.snapshotForTrader(trader);
+        if (!snapshot.fresco && ['MISSING_ACCOUNT_BALANCE', 'STALE_ACCOUNT_BALANCE'].includes(snapshot.motivo)) {
+            try {
+                snapshot = await this.refreshTraderBalance(trader);
+            } catch (error) {
+                this.log.error(
+                    `MULTI_ACCOUNT_AUTH_BALANCE_REFRESH_ERROR trader=${trader?.id || 'n/a'} ` +
+                    `reason=${error?.message || error}`
+                );
+                return false;
+            }
+        }
         if (!snapshot.fresco) {
             this.log.warn(
                 `MULTI_ACCOUNT_AUTH_REJECTED trader=${trader?.id || 'n/a'} reason=${snapshot.motivo || 'BALANCE_UNAVAILABLE'} ` +
