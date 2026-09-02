@@ -11,6 +11,9 @@ const repoRoot = path.join(root, '..');
 const server = fs.readFileSync(path.join(root, 'scripts', 'betting_house_api_dev_server.js'), 'utf8');
 const riskObservability = fs.readFileSync(path.join(root, 'risk_policy_observability.js'), 'utf8');
 const riskCaps = fs.readFileSync(path.join(root, 'technical_risk_caps.js'), 'utf8');
+const configService = fs.readFileSync(path.join(root, 'system_config_service.js'), 'utf8');
+const configRunner = fs.readFileSync(path.join(root, 'scripts', 'run_with_system_config.js'), 'utf8');
+const riskAdmin = fs.readFileSync(path.join(root, 'public', 'risk-policy-admin.js'), 'utf8');
 const traderScope = fs.readFileSync(path.join(root, 'signal_router_trader_scope.js'), 'utf8');
 const accessLink = fs.readFileSync(path.join(root, 'public', 'universal-access-link.js'), 'utf8');
 const accessPage = fs.readFileSync(path.join(root, 'public', 'accesses.html'), 'utf8');
@@ -86,6 +89,7 @@ test('Acessos expoe somente status e desarme financeiro fail-closed', () => {
 test('status financeiro aceita session.json PowerShell com BOM e usa rotulos claros', () => {
     assert.match(server, /function stripUtf8Bom\(text\)/);
     assert.match(server, /replace\(\/\^\\uFEFF\//);
+    assert.match(server, /const rawSession = fs\.readFileSync\(sessionFile, 'utf8'\)/);
     assert.match(server, /JSON\.parse\(stripUtf8Bom\(rawSession\)\)/);
 
     assert.match(accessPage, /Execução atual/);
@@ -96,16 +100,18 @@ test('status financeiro aceita session.json PowerShell com BOM e usa rotulos cla
     assert.match(accessPage, /SESSÃO ILEGÍVEL — FAIL-CLOSED/);
 });
 
-test('Acessos expoe hierarquia SSOT de risco com origens explicitas', () => {
+test('Acessos expoe hierarquia SSOT de risco com origens explicitas no banco', () => {
     assert.match(server, /readRiskPolicyObservability/);
     assert.match(server, /app\.get\('\/api\/financial-safety\/risk-policy'/);
-    assert.match(riskObservability, /getTechnicalRiskCaps/);
+    assert.match(server, /app\.put\('\/api\/financial-safety\/system-config'/);
+    assert.match(riskObservability, /readSystemConfig/);
     assert.match(riskObservability, /resolveRiskPolicy/);
     assert.match(riskObservability, /auto_traders\.config_json/);
-    assert.match(riskObservability, /robo-bacbo\/technical_risk_caps\.js/);
-    assert.match(riskObservability, /07_SIGNAL_ROUTER\.cmd/);
-    assert.match(riskCaps, /global_router_cap:\s*20\.00/);
-    assert.match(riskCaps, /per_bridge_cap:\s*5\.00/);
+    assert.match(riskObservability, /system_configs/);
+    assert.match(configService, /global_router_cap/);
+    assert.match(configService, /per_bridge_cap/);
+    assert.match(configService, /financial_dry_run/);
+    assert.match(riskCaps, /SAFE_TECHNICAL_RISK_CAPS/);
 
     assert.match(accessPage, /Política de Risco \/ Hierarquia SSOT/);
     assert.match(accessPage, /Cap por Live Bridge/);
@@ -115,15 +121,18 @@ test('Acessos expoe hierarquia SSOT de risco com origens explicitas', () => {
     assert.match(accessPage, /DRY RUN ATIVO/);
     assert.match(accessPage, /\/api\/financial-safety\/risk-policy/);
     assert.match(accessPage, /escapeHtml/);
+    assert.match(riskAdmin, /SALVAR CAPS/);
+    assert.match(riskAdmin, /\/api\/financial-safety\/system-config/);
 });
 
-test('observabilidade permanece fail-closed se DRY RUN nao puder ser confirmado', () => {
-    assert.match(riskObservability, /DRY_RUN_SETTING_NOT_FOUND/);
-    assert.match(riskObservability, /DRY_RUN_LAUNCHER_UNREADABLE/);
-    assert.match(riskObservability, /real_dispatch_blocked:\s*dryRunLocked/);
-    assert.match(riskObservability, /fail_closed:\s*!dryRunLocked \|\| invalidTraderPolicy/);
-    assert.match(signalRouterLauncher, /SIGNAL_ROUTER_FINANCIAL_DRY_RUN=true/);
-    assert.doesNotMatch(signalRouterLauncher, /SIGNAL_ROUTER_FINANCIAL_DRY_RUN=false/);
+test('DRY RUN permanece inviolavel fora do launcher e fail-closed no DB runner', () => {
+    assert.doesNotMatch(signalRouterLauncher, /SIGNAL_ROUTER_FINANCIAL_DRY_RUN=/);
+    assert.match(signalRouterLauncher, /run_with_system_config\.js scripts\\signal_router\.js/);
+    assert.match(configRunner, /SIGNAL_ROUTER_FINANCIAL_DRY_RUN:\s*'true'/);
+    assert.match(configService, /financial_dry_run:\s*true/);
+    assert.match(configService, /FINANCIAL_DRY_RUN_FORCED_TRUE/);
+    assert.match(server, /FINANCIAL_DRY_RUN_DISABLE_FORBIDDEN/);
+    assert.doesNotMatch(server, /financial-safety\/dry-run\/disable/);
 });
 
 test('Router mantém log explicito RISK_POLICY_HIERARCHY', () => {
@@ -132,6 +141,7 @@ test('Router mantém log explicito RISK_POLICY_HIERARCHY', () => {
     assert.match(traderScope, /trader_stop_win=/);
     assert.match(traderScope, /technical_global_cap=/);
     assert.match(traderScope, /technical_bridge_cap=/);
+    assert.match(traderScope, /config_source=/);
     assert.match(traderScope, /per_account_exposure=/);
     assert.match(traderScope, /aggregate_exposure=/);
 });
