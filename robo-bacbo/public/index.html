@@ -10,6 +10,7 @@
     <script src="/realtime-ui-scheduler.js"></script>
     <script src="/dashboard-ui.js"></script>
     <script src="/mesa-switcher.js"></script>
+    <script src="/universal-access-link.js"></script>
     <script src="/trader-account-binding-ui.js"></script>
     <script src="/trader-financial-rules-ui.js"></script>
     <script src="/trader-balance-sync-guard-ui.js"></script>
@@ -53,6 +54,9 @@
                 }
                 if (window.__mesaSwitcherReady !== true || typeof window.__mesaSwitcher?.mount !== 'function') {
                     throw new Error('Switcher de mesa MC25 não carregado');
+                }
+                if (typeof window.__universalAccessLink?.install !== 'function') {
+                    throw new Error('Link universal de Acessos não carregado');
                 }
                 if (typeof window.__traderAccountBindingUi?.install !== 'function') {
                     throw new Error('UI de vínculo Trader -> Conta(s) não carregada');
@@ -120,6 +124,9 @@
 
                 if (!window.__mesaSwitcher.mount()) {
                     throw new Error('Switcher de mesa MC25 não encontrou o cabeçalho do painel');
+                }
+                if (!window.__universalAccessLink.install()) {
+                    throw new Error('Link universal de Acessos não encontrou o cabeçalho do painel');
                 }
                 if (!window.__traderAccountBindingUi.install()) {
                     throw new Error('UI de vínculo Trader -> Conta(s) não foi instalada');
