@@ -19,6 +19,7 @@ const {
 } = require('./mesa_transport_context');
 const { instalarGuardaMesaBackend } = require('./mesa_backend_guard');
 const { instalarCatalogoContasAutoTrader } = require('./trader_account_catalog');
+const { installTableFinancialRulesGuard } = require('./table_financial_rules');
 const { installActivationBootstrap } = require('./auto_trader_activation_bootstrap');
 const { installContinuousTraderBalance } = require('./continuous_trader_balance');
 const { installAutoTraderStructuralIntegrity } = require('./auto_trader_structural_integrity');
@@ -94,6 +95,7 @@ async function iniciar() {
     confirmarContratoMesaTransporteRuntime();
     instalarGuardaMesaBackend();
     instalarCatalogoContasAutoTrader();
+    installTableFinancialRulesGuard();
     installActivationBootstrap();
     await installContinuousTraderBalance();
     installAutoTraderStructuralIntegrity();
