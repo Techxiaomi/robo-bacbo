@@ -3,47 +3,59 @@
 (() => {
     const ACCESS_URL = 'http://127.0.0.1:3010/accesses';
 
+    function normalizeHeaderTooltips(title) {
+        const speaker = title.querySelector('#btn-som');
+        if (speaker) {
+            speaker.title = 'Áudio';
+            speaker.setAttribute('aria-label', 'Áudio');
+        }
+
+        const gear = title.querySelector('.gear-icon.spin');
+        if (gear) {
+            gear.title = 'Configurações';
+            gear.setAttribute('aria-label', 'Configurações');
+        }
+
+        return { speaker, gear };
+    }
+
     function install() {
         const header = document.querySelector('.topo-header');
         const title = header?.querySelector('h1');
         if (!title) return false;
-        if (document.getElementById('universal-access-link')) return true;
 
-        const link = document.createElement('a');
-        link.id = 'universal-access-link';
-        link.href = ACCESS_URL;
-        link.target = '_blank';
-        link.rel = 'noopener';
-        link.textContent = '🔐 Acessos';
-        link.title = 'Abrir Casas, Contas e Processos de Traders em nova aba';
-        link.setAttribute('aria-label', 'Abrir Acessos universais em nova aba');
-        link.style.cssText = [
-            'display:inline-flex',
-            'align-items:center',
-            'height:26px',
-            'padding:0 7px',
-            'margin-left:4px',
-            'border:1px solid #3f3f3f',
-            'border-radius:999px',
-            'background:#181818',
-            'color:#aaa',
-            'font-size:10px',
-            'font-weight:800',
-            'text-decoration:none',
-            'white-space:nowrap',
-            'vertical-align:middle'
-        ].join(';');
+        const { gear } = normalizeHeaderTooltips(title);
 
-        const gear = title.querySelector('.gear-icon');
-        const speaker = title.querySelector('.speaker-icon, .sound-icon, [title*="som" i], [aria-label*="som" i]');
-        const anchor = gear || speaker;
-        if (anchor?.nextSibling) {
-            title.insertBefore(link, anchor.nextSibling);
-        } else if (anchor) {
+        let link = document.getElementById('universal-access-link');
+        if (!link) {
+            link = document.createElement('a');
+            link.id = 'universal-access-link';
+            link.href = ACCESS_URL;
+            link.target = '_blank';
+            link.rel = 'noopener';
+            link.className = 'gear-icon universal-access-icon';
+            link.textContent = '🔒';
+            link.title = 'Acessos';
+            link.setAttribute('aria-label', 'Acessos');
+            link.style.cssText = [
+                'margin-left:12px',
+                'color:#aaa',
+                'text-decoration:none',
+                'font-size:20px',
+                'line-height:1',
+                'cursor:pointer'
+            ].join(';');
+        }
+
+        // Ordem visual obrigatória: alto-falante -> engrenagem -> cadeado.
+        if (gear?.nextSibling) {
+            title.insertBefore(link, gear.nextSibling);
+        } else if (gear) {
             title.appendChild(link);
         } else {
             title.appendChild(link);
         }
+
         return true;
     }
 
