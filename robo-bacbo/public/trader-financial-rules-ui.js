@@ -16,16 +16,23 @@
 
     function validStep(value, min, step) {
         const amount = Number(value);
-        if (!Number.isFinite(amount) || amount < Number(min)) return false;
-        const units = amount / Number(step);
+        const minValue = Number(min);
+        const stepValue = Number(step);
+        if (!Number.isFinite(amount) || !Number.isFinite(minValue) || !Number.isFinite(stepValue)) return false;
+        if (amount < minValue || stepValue <= 0) return false;
+        const units = (amount - minValue) / stepValue;
         return Math.abs(units - Math.round(units)) < 1e-9;
     }
 
     function quantize(value, min, step) {
         const amount = Number(value);
+        const minValue = Number(min);
+        const stepValue = Number(step);
         if (!Number.isFinite(amount) || amount <= 0) return 0;
-        const rounded = Math.round(amount / Number(step)) * Number(step);
-        return Math.max(Number(min), Math.round(rounded * 100) / 100);
+        if (!Number.isFinite(minValue) || !Number.isFinite(stepValue) || stepValue <= 0) return 0;
+        if (amount <= minValue) return minValue;
+        const units = Math.round((amount - minValue) / stepValue);
+        return Math.round((minValue + units * stepValue) * 100) / 100;
     }
 
     async function loadRules() {
