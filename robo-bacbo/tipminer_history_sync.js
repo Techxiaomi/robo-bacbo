@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const { withMysqlDeadlockRetry } = require('./mysql_deadlock_retry');
 
 const {
     obterEscopoRedisMesa
@@ -213,8 +214,20 @@ async function notificarConsumidores(meta) {
         throw new Error('nenhum consumidor crítico registrado para a barreira histórica');
     }
 
+    let indice = 0;
     for (const listener of [...listenersAplicacao]) {
-        const resultado = await listener(meta);
+        indice++;
+        const resultado = await withMysqlDeadlockRetry(
+            () => listener(meta),
+            {
+                onRetry: ({ nextAttempt, delayMs }) => {
+                    console.warn(
+                        `HISTORY_CONSUMER_DEADLOCK_RETRY version=${Math.max(0, Number(meta?.versao) || 0)} ` +
+                        `listener=${indice} attempt=${nextAttempt}/3 delay_ms=${delayMs}`
+                    );
+                }
+            }
+        );
         if (resultado === false || resultado?.ok === false || resultado?.adiado === true) {
             throw new Error('consumidor crítico não confirmou a consolidação histórica');
         }
