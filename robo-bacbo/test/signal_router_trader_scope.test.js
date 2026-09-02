@@ -32,6 +32,19 @@ function operatingTrader(config = { account_ids: [4, 1, 4] }) {
     };
 }
 
+function systemConfigResult(sql) {
+    if (/CREATE TABLE IF NOT EXISTS system_configs/.test(sql)) return [{ affectedRows: 0 }];
+    if (/INSERT IGNORE INTO system_configs/.test(sql)) return [{ affectedRows: 0 }];
+    if (/SELECT config_key, config_value/.test(sql)) {
+        return [[
+            { config_key: 'global_router_cap', config_value: '20.00' },
+            { config_key: 'per_bridge_cap', config_value: '5.00' },
+            { config_key: 'financial_dry_run', config_value: 'true' }
+        ]];
+    }
+    return null;
+}
+
 test('resolve trader scope from authoritative audit order and logs full risk hierarchy', async () => {
     const calls = [];
     const logs = [];
@@ -40,6 +53,8 @@ test('resolve trader scope from authoritative audit order and logs full risk hie
             calls.push({ sql, params });
             if (/auditoria_ordens/.test(sql)) return [[operatingTrader()]];
             if (/betting_house_tables/.test(sql)) return [[{ account_id: 1 }, { account_id: 4 }]];
+            const systemResult = systemConfigResult(sql);
+            if (systemResult) return systemResult;
             throw new Error('unexpected query');
         }
     };
@@ -64,36 +79,42 @@ test('resolve trader scope from authoritative audit order and logs full risk hie
     assert.match(logs[0], /trader_stop_loss=250\.00/);
     assert.match(logs[0], /technical_global_cap=20\.00/);
     assert.match(logs[0], /technical_bridge_cap=5\.00/);
+    assert.match(logs[0], /config_source=system_configs/);
     assert.match(logs[0], /per_account_exposure=5\.00/);
-    assert.equal(calls.length, 2);
-    assert.match(calls[0].sql, /auditoria_ordens/);
-    assert.match(calls[0].sql, /executor_order_id/);
-    assert.deepEqual(calls[0].params, [
+
+    const auditCalls = calls.filter(item => /auditoria_ordens/.test(item.sql));
+    const eligibilityCalls = calls.filter(item => /betting_house_tables/.test(item.sql));
+    const configReads = calls.filter(item => /SELECT config_key, config_value/.test(item.sql));
+    assert.equal(auditCalls.length, 1);
+    assert.equal(eligibilityCalls.length, 1);
+    assert.equal(configReads.length, 1);
+    assert.deepEqual(auditCalls[0].params, [
         '550e8400-e29b-41d4-a716-446655440000',
         'bacbo_int'
     ]);
 });
 
 test('resolver uses legacy junction only when config has no account_ids', async () => {
-    let call = 0;
+    let bindingReads = 0;
     const dbPool = {
         async query(sql, params) {
-            call += 1;
-            if (call === 1) return [[operatingTrader({})]];
-            if (call === 2) {
-                assert.match(sql, /auto_trader_account_bindings/);
+            if (/auditoria_ordens/.test(sql)) return [[operatingTrader({})]];
+            if (/auto_trader_account_bindings/.test(sql)) {
+                bindingReads += 1;
                 assert.deepEqual(params, [9]);
                 return [[{ account_id: 4 }, { account_id: 1 }]];
             }
-            assert.match(sql, /betting_house_tables/);
-            return [[{ account_id: 1 }, { account_id: 4 }]];
+            if (/betting_house_tables/.test(sql)) return [[{ account_id: 1 }, { account_id: 4 }]];
+            const systemResult = systemConfigResult(sql);
+            if (systemResult) return systemResult;
+            throw new Error('unexpected query');
         }
     };
 
     const resolver = new FinancialTraderScopeResolver({ dbPool, log: { log() {} } });
     const scope = await resolver.resolve(financialSignal());
     assert.deepEqual(scope.account_ids, [1, 4]);
-    assert.equal(call, 3);
+    assert.equal(bindingReads, 1);
 });
 
 test('financial scope fails closed when trader is not operating', async () => {
@@ -121,6 +142,8 @@ test('financial scope rejects missing stop_loss as INVALID_RISK_POLICY', async (
                 return [[operatingTrader({ stop_loss: undefined, account_ids: [1] })]];
             }
             if (/betting_house_tables/.test(sql)) return [[{ account_id: 1 }]];
+            const systemResult = systemConfigResult(sql);
+            if (systemResult) return systemResult;
             throw new Error('unexpected query');
         }
     };
@@ -144,13 +167,17 @@ test('fanout filter ignores every online target outside trader binding', () => {
     assert.equal(filtered.some(item => item.account_id === 7), false);
 });
 
-test('router source applies trader scope before online discovery and launcher keeps dry run locked', () => {
+test('router source applies trader scope before online discovery and launcher delegates safe config to DB runner', () => {
     const routerSource = fs.readFileSync(
         path.join(__dirname, '..', 'scripts', 'signal_router.js'),
         'utf8'
     );
     const launcherSource = fs.readFileSync(
         path.join(__dirname, '..', '..', 'atalhos', '07_SIGNAL_ROUTER.cmd'),
+        'utf8'
+    );
+    const runnerSource = fs.readFileSync(
+        path.join(__dirname, '..', 'scripts', 'run_with_system_config.js'),
         'utf8'
     );
 
@@ -163,6 +190,7 @@ test('router source applies trader scope before online discovery and launcher ke
     assert.ok(onlineIndex > filterIndex, 'online discovery must inspect only already-bound targets');
     assert.match(routerSource, /SIGNAL_ROUTER_TRADER_SCOPE_REJECTED/);
     assert.match(routerSource, /ignored_unbound=/);
-    assert.match(launcherSource, /SIGNAL_ROUTER_FINANCIAL_DRY_RUN=true/);
-    assert.doesNotMatch(launcherSource, /SIGNAL_ROUTER_FINANCIAL_DRY_RUN=false/);
+    assert.doesNotMatch(launcherSource, /SIGNAL_ROUTER_FINANCIAL_DRY_RUN=/);
+    assert.match(launcherSource, /run_with_system_config\.js scripts\\signal_router\.js/);
+    assert.match(runnerSource, /SIGNAL_ROUTER_FINANCIAL_DRY_RUN:\s*'true'/);
 });
