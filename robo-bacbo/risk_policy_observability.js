@@ -1,45 +1,11 @@
 'use strict';
 
-const fs = require('fs');
-const path = require('path');
-const { getTechnicalRiskCaps } = require('./technical_risk_caps');
 const { resolveRiskPolicy } = require('./risk_policy');
+const { readSystemConfig } = require('./system_config_service');
 
-function readDryRunLauncherState(projectRoot) {
-    const relativeSource = path.join('atalhos', '07_SIGNAL_ROUTER.cmd');
-    const launcherPath = path.join(projectRoot, relativeSource);
-
-    try {
-        const source = fs.readFileSync(launcherPath, 'utf8');
-        const match = source.match(/set\s+"SIGNAL_ROUTER_FINANCIAL_DRY_RUN=(true|false)"/i);
-        if (!match) {
-            return Object.freeze({
-                configured: false,
-                dry_run: null,
-                source: relativeSource,
-                reason: 'DRY_RUN_SETTING_NOT_FOUND'
-            });
-        }
-        return Object.freeze({
-            configured: true,
-            dry_run: String(match[1]).toLowerCase() === 'true',
-            source: relativeSource,
-            reason: null
-        });
-    } catch (error) {
-        return Object.freeze({
-            configured: false,
-            dry_run: null,
-            source: relativeSource,
-            reason: `DRY_RUN_LAUNCHER_UNREADABLE:${error?.code || 'ERROR'}`
-        });
-    }
-}
-
-function mapTraderRiskPolicy(row) {
+function mapTraderRiskPolicy(row, technicalCaps) {
     const traderId = Number(row?.id);
-    const policy = resolveRiskPolicy({ configJson: row?.config_json });
-
+    const policy = resolveRiskPolicy({ configJson: row?.config_json, technicalCaps });
     if (!policy.valid) {
         return Object.freeze({
             trader_id: Number.isSafeInteger(traderId) ? traderId : null,
@@ -53,7 +19,6 @@ function mapTraderRiskPolicy(row) {
             source: 'auto_traders.config_json'
         });
     }
-
     return Object.freeze({
         trader_id: traderId,
         trader_name: String(row?.nome || '').trim() || `Trader ${traderId}`,
@@ -67,47 +32,38 @@ function mapTraderRiskPolicy(row) {
     });
 }
 
-async function readRiskPolicyObservability({ dbPool, projectRoot }) {
-    if (!dbPool || typeof dbPool.query !== 'function') {
-        throw new TypeError('RISK_POLICY_OBSERVABILITY_DB_INVALID');
-    }
-
-    const caps = getTechnicalRiskCaps();
-    const dryRun = readDryRunLauncherState(projectRoot);
+async function readRiskPolicyObservability({ dbPool }) {
+    if (!dbPool || typeof dbPool.query !== 'function') throw new TypeError('RISK_POLICY_OBSERVABILITY_DB_INVALID');
+    const systemConfig = await readSystemConfig({ dbPool });
+    const technicalCaps = {
+        global_router_cap: systemConfig.global_router_cap,
+        per_bridge_cap: systemConfig.per_bridge_cap
+    };
     const [rows] = await dbPool.query(
         `SELECT id, nome, config_json, status_operacao
-         FROM auto_traders
-         WHERE ativo=true
-         ORDER BY id`
+         FROM auto_traders WHERE ativo=true ORDER BY id`
     );
-    const traders = Object.freeze((Array.isArray(rows) ? rows : []).map(mapTraderRiskPolicy));
+    const traders = Object.freeze((Array.isArray(rows) ? rows : []).map(row => mapTraderRiskPolicy(row, technicalCaps)));
     const invalidTraderPolicy = traders.some(item => item.valid !== true);
-    const dryRunLocked = dryRun.configured === true && dryRun.dry_run === true;
 
     return Object.freeze({
-        ok: dryRunLocked && !invalidTraderPolicy,
-        fail_closed: !dryRunLocked || invalidTraderPolicy,
-        business_policy: Object.freeze({
-            source: 'auto_traders.config_json',
-            active_traders: traders
-        }),
+        ok: systemConfig.financial_dry_run === true && !invalidTraderPolicy,
+        fail_closed: systemConfig.fail_closed === true || invalidTraderPolicy,
+        business_policy: Object.freeze({ source: 'auto_traders.config_json', active_traders: traders }),
         technical_caps: Object.freeze({
-            global_router_cap: caps.global_router_cap,
-            per_bridge_cap: caps.per_bridge_cap,
-            source: 'robo-bacbo/technical_risk_caps.js'
+            global_router_cap: systemConfig.global_router_cap,
+            per_bridge_cap: systemConfig.per_bridge_cap,
+            source: systemConfig.source === 'system_configs' ? 'system_configs' : 'safe-defaults'
         }),
         financial_mode: Object.freeze({
-            dry_run: dryRun.dry_run,
-            configured: dryRun.configured,
-            source: dryRun.source,
-            reason: dryRun.reason,
-            real_dispatch_blocked: dryRunLocked
+            dry_run: true,
+            configured: true,
+            source: systemConfig.source === 'system_configs' ? 'system_configs.financial_dry_run' : 'safe-defaults',
+            reason: systemConfig.reason,
+            real_dispatch_blocked: true,
+            immutable: true
         })
     });
 }
 
-module.exports = {
-    readDryRunLauncherState,
-    mapTraderRiskPolicy,
-    readRiskPolicyObservability
-};
+module.exports = { mapTraderRiskPolicy, readRiskPolicyObservability };

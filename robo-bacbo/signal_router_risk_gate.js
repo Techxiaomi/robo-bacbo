@@ -11,21 +11,11 @@ function cents(value) {
 }
 
 function reject(reason, details = {}, code = 'EXPOSURE_REJECTED') {
-    return Object.freeze({
-        approved: false,
-        code,
-        reason,
-        ...details
-    });
+    return Object.freeze({ approved: false, code, reason, ...details });
 }
 
 function approve(details) {
-    return Object.freeze({
-        approved: true,
-        code: 'EXPOSURE_APPROVED',
-        reason: null,
-        ...details
-    });
+    return Object.freeze({ approved: true, code: 'EXPOSURE_APPROVED', reason: null, ...details });
 }
 
 function evaluateAggregateExposure({
@@ -33,9 +23,10 @@ function evaluateAggregateExposure({
     eligibleAccountIds,
     saldoInicial,
     saldoAtual,
-    configJson
+    configJson,
+    technicalCaps
 }) {
-    const riskPolicy = resolveRiskPolicy({ configJson });
+    const riskPolicy = resolveRiskPolicy({ configJson, technicalCaps });
     if (!riskPolicy.valid) {
         return reject('INVALID_RISK_POLICY', {
             invalid_field: riskPolicy.field,
@@ -65,9 +56,7 @@ function evaluateAggregateExposure({
     }
 
     const aggregateCents = perAccountCents * accountIds.length;
-    if (!Number.isSafeInteger(aggregateCents) || aggregateCents <= 0) {
-        return reject('AGGREGATE_EXPOSURE_INVALID');
-    }
+    if (!Number.isSafeInteger(aggregateCents) || aggregateCents <= 0) return reject('AGGREGATE_EXPOSURE_INVALID');
 
     if (aggregateCents > currentCents) {
         return reject('INSUFFICIENT_AGGREGATE_BALANCE', {
@@ -91,7 +80,6 @@ function evaluateAggregateExposure({
     const stopLossCents = cents(riskPolicy.trader_limits.stop_loss);
     const projectedCents = currentCents - aggregateCents;
     const stopLossFloorCents = initialCents - stopLossCents;
-
     if (projectedCents <= stopLossFloorCents) {
         return reject('STOP_LOSS_PROJECTED', {
             aggregate_exposure: aggregateCents / 100,
@@ -121,6 +109,4 @@ function evaluateAggregateExposure({
     });
 }
 
-module.exports = {
-    evaluateAggregateExposure
-};
+module.exports = { evaluateAggregateExposure };

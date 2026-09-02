@@ -19,4 +19,4 @@ echo Sem Trader ativo + vinculo valido = zero navegadores.
 echo.
 
 cd /d "%ROOT%\robo-bacbo"
-node scripts\master_supervisor.js
+node scripts\run_with_system_config.js scripts\master_supervisor.js
