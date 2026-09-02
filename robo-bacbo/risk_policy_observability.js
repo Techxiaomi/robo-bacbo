@@ -32,24 +32,49 @@ function mapTraderRiskPolicy(row, technicalCaps) {
     });
 }
 
+async function readActiveTraderPolicies({ dbPool, technicalCaps }) {
+    try {
+        const [rows] = await dbPool.query(
+            `SELECT id, nome, config_json, status_operacao
+             FROM auto_traders WHERE ativo=true ORDER BY id`
+        );
+        return Object.freeze({
+            available: true,
+            reason: null,
+            traders: Object.freeze((Array.isArray(rows) ? rows : []).map(row => mapTraderRiskPolicy(row, technicalCaps)))
+        });
+    } catch (error) {
+        return Object.freeze({
+            available: false,
+            reason: `ACTIVE_TRADER_POLICY_DB_UNAVAILABLE:${error?.code || 'ERROR'}`,
+            traders: Object.freeze([])
+        });
+    }
+}
+
 async function readRiskPolicyObservability({ dbPool }) {
     if (!dbPool || typeof dbPool.query !== 'function') throw new TypeError('RISK_POLICY_OBSERVABILITY_DB_INVALID');
+
     const systemConfig = await readSystemConfig({ dbPool });
     const technicalCaps = {
         global_router_cap: systemConfig.global_router_cap,
         per_bridge_cap: systemConfig.per_bridge_cap
     };
-    const [rows] = await dbPool.query(
-        `SELECT id, nome, config_json, status_operacao
-         FROM auto_traders WHERE ativo=true ORDER BY id`
-    );
-    const traders = Object.freeze((Array.isArray(rows) ? rows : []).map(row => mapTraderRiskPolicy(row, technicalCaps)));
+    const traderSnapshot = await readActiveTraderPolicies({ dbPool, technicalCaps });
+    const traders = traderSnapshot.traders;
     const invalidTraderPolicy = traders.some(item => item.valid !== true);
+    const failClosed = systemConfig.fail_closed === true || traderSnapshot.available !== true || invalidTraderPolicy;
 
     return Object.freeze({
-        ok: systemConfig.financial_dry_run === true && !invalidTraderPolicy,
-        fail_closed: systemConfig.fail_closed === true || invalidTraderPolicy,
-        business_policy: Object.freeze({ source: 'auto_traders.config_json', active_traders: traders }),
+        ok: systemConfig.financial_dry_run === true && !failClosed,
+        fail_closed: failClosed,
+        reason: systemConfig.reason || traderSnapshot.reason || (invalidTraderPolicy ? 'INVALID_RISK_POLICY' : null),
+        business_policy: Object.freeze({
+            source: 'auto_traders.config_json',
+            available: traderSnapshot.available,
+            reason: traderSnapshot.reason,
+            active_traders: traders
+        }),
         technical_caps: Object.freeze({
             global_router_cap: systemConfig.global_router_cap,
             per_bridge_cap: systemConfig.per_bridge_cap,
@@ -66,4 +91,8 @@ async function readRiskPolicyObservability({ dbPool }) {
     });
 }
 
-module.exports = { mapTraderRiskPolicy, readRiskPolicyObservability };
+module.exports = {
+    mapTraderRiskPolicy,
+    readActiveTraderPolicies,
+    readRiskPolicyObservability
+};
