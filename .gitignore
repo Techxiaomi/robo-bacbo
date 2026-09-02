@@ -26,6 +26,18 @@ robo-bacbo/public/bacbo-map-snapshot.json
 coverage/
 .nyc_output/
 
+# Artefatos locais de operação / restauração
+# Não fazem parte do código-fonte autoritativo do repositório.
+/BR/
+/INT/
+/backup/
+/garnet/
+/runtime/
+/install.json
+
+# IMPORTANTE: /tools/ fica propositalmente visível até ser classificado.
+# Pode conter utilitários que devam ser versionados; não ignorar às cegas.
+
 # IDE / SO
 .vscode/
 .idea/
