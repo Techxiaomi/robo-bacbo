@@ -30,6 +30,20 @@
         .meta { padding:10px 12px; border-radius:8px; background:#111; border:1px solid #2c2c2c; }
         .meta-label { color:#777; font-size:10px; text-transform:uppercase; font-weight:800; letter-spacing:.5px; }
         .meta-value { margin-top:4px; font-size:12px; font-weight:800; color:#ddd; word-break:break-word; }
+        .risk-policy { margin-top:18px; padding-top:18px; border-top:1px solid #2f2f2f; }
+        .risk-title { font-size:14px; font-weight:900; }
+        .risk-sub { margin-top:4px; color:#777; font-size:11px; }
+        .risk-grid { margin-top:12px; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
+        .risk-card { padding:12px; border:1px solid #2c2c2c; border-radius:8px; background:#111; }
+        .risk-name { color:#8f8f8f; font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.45px; }
+        .risk-value { margin-top:5px; color:#fff; font-size:15px; font-weight:900; }
+        .risk-source { margin-top:5px; color:#666; font-size:10px; word-break:break-word; }
+        .trader-policy { margin-top:12px; border:1px solid #2c2c2c; border-radius:8px; overflow:hidden; }
+        .trader-head, .trader-row { display:grid; grid-template-columns:1.6fr .8fr .8fr 1.2fr; gap:8px; padding:10px 12px; align-items:center; }
+        .trader-head { background:#101010; color:#777; font-size:10px; font-weight:900; text-transform:uppercase; }
+        .trader-row { border-top:1px solid #252525; color:#ddd; font-size:12px; }
+        .trader-row.invalid { color:#ffadad; }
+        .risk-warning { margin-top:10px; color:#ffd774; font-size:11px; }
         .safety-actions { margin-top:16px; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
         .kill { border:1px solid #7a2e2e; background:#541c1c; color:#fff; border-radius:8px; padding:10px 14px; font-size:12px; font-weight:900; cursor:pointer; }
         .kill:hover { background:#6a2323; }
@@ -37,8 +51,10 @@
         .feedback { color:#aaa; font-size:12px; line-height:1.4; }
         .footer { margin-top:24px; color:#666; font-size:11px; }
         @media (max-width:700px) {
-            .grid, .safety-meta { grid-template-columns:1fr; }
+            .grid, .safety-meta, .risk-grid { grid-template-columns:1fr; }
             .safety-head { flex-direction:column; }
+            .trader-head { display:none; }
+            .trader-row { grid-template-columns:1fr 1fr; }
         }
     </style>
 </head>
@@ -92,6 +108,42 @@
             </div>
         </div>
 
+        <div class="risk-policy" aria-labelledby="risk-policy-title">
+            <div id="risk-policy-title" class="risk-title">Política de Risco / Hierarquia SSOT</div>
+            <div class="risk-sub">Limites de negócio do Trader são exibidos separadamente dos caps técnicos de infraestrutura e do modo financeiro.</div>
+
+            <div class="risk-grid">
+                <div class="risk-card">
+                    <div class="risk-name">Cap por Live Bridge</div>
+                    <div id="risk-bridge-cap" class="risk-value">—</div>
+                    <div id="risk-bridge-source" class="risk-source">—</div>
+                </div>
+                <div class="risk-card">
+                    <div class="risk-name">Cap global do Router</div>
+                    <div id="risk-global-cap" class="risk-value">—</div>
+                    <div id="risk-global-source" class="risk-source">—</div>
+                </div>
+                <div class="risk-card">
+                    <div class="risk-name">Modo financeiro</div>
+                    <div id="risk-dry-run" class="risk-value">—</div>
+                    <div id="risk-dry-run-source" class="risk-source">—</div>
+                </div>
+            </div>
+
+            <div class="trader-policy">
+                <div class="trader-head">
+                    <div>Trader ativo</div>
+                    <div>Stop Loss</div>
+                    <div>Stop Win</div>
+                    <div>Origem</div>
+                </div>
+                <div id="risk-traders">
+                    <div class="trader-row"><div>Consultando...</div><div>—</div><div>—</div><div>—</div></div>
+                </div>
+            </div>
+            <div id="risk-feedback" class="risk-warning"></div>
+        </div>
+
         <div class="safety-actions">
             <button id="financial-disarm" class="kill" type="button">BLOQUEAR EXECUÇÃO</button>
             <div id="financial-feedback" class="feedback">Remove qualquer armamento futuro e, se houver execução financeira ativa, encerra a stack para garantir o bloqueio.</div>
@@ -109,6 +161,18 @@
     const sessionEl = document.getElementById('financial-session');
     const feedbackEl = document.getElementById('financial-feedback');
     const button = document.getElementById('financial-disarm');
+    const bridgeCapEl = document.getElementById('risk-bridge-cap');
+    const bridgeSourceEl = document.getElementById('risk-bridge-source');
+    const globalCapEl = document.getElementById('risk-global-cap');
+    const globalSourceEl = document.getElementById('risk-global-source');
+    const dryRunEl = document.getElementById('risk-dry-run');
+    const dryRunSourceEl = document.getElementById('risk-dry-run-source');
+    const tradersEl = document.getElementById('risk-traders');
+    const riskFeedbackEl = document.getElementById('risk-feedback');
+
+    const money = value => Number.isFinite(Number(value))
+        ? Number(value).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
+        : '—';
 
     function render(status) {
         const blocked = status?.blocked === true;
@@ -119,17 +183,64 @@
         sessionEl.textContent = status?.session_readable === false ? '⚠️ SESSÃO ILEGÍVEL — FAIL-CLOSED' : '✅ CONFIRMADA';
     }
 
+    function renderRiskPolicy(snapshot) {
+        bridgeCapEl.textContent = money(snapshot?.technical_caps?.per_bridge_cap);
+        globalCapEl.textContent = money(snapshot?.technical_caps?.global_router_cap);
+        bridgeSourceEl.textContent = snapshot?.technical_caps?.source || '—';
+        globalSourceEl.textContent = snapshot?.technical_caps?.source || '—';
+
+        const dryRunLocked = snapshot?.financial_mode?.dry_run === true
+            && snapshot?.financial_mode?.configured === true;
+        dryRunEl.textContent = dryRunLocked
+            ? '✅ DRY RUN ATIVO'
+            : '⚠️ NÃO CONFIRMADO — FAIL-CLOSED';
+        dryRunSourceEl.textContent = snapshot?.financial_mode?.source || '—';
+
+        const traders = Array.isArray(snapshot?.business_policy?.active_traders)
+            ? snapshot.business_policy.active_traders
+            : [];
+
+        if (traders.length === 0) {
+            tradersEl.innerHTML = '<div class="trader-row"><div>Nenhum Trader ativo</div><div>—</div><div>—</div><div>auto_traders.config_json</div></div>';
+        } else {
+            tradersEl.innerHTML = traders.map(item => {
+                const invalid = item?.valid !== true;
+                const stopLoss = invalid ? 'INVALID_RISK_POLICY' : money(item.stop_loss);
+                const stopWin = invalid ? (item.invalid_field || 'inválido') : money(item.stop_win);
+                return `<div class="trader-row ${invalid ? 'invalid' : ''}">`
+                    + `<div>${item.trader_name || `Trader ${item.trader_id}`}</div>`
+                    + `<div>${stopLoss}</div>`
+                    + `<div>${stopWin}</div>`
+                    + `<div>${item.source || 'auto_traders.config_json'}</div>`
+                    + '</div>';
+            }).join('');
+        }
+
+        riskFeedbackEl.textContent = snapshot?.fail_closed === true
+            ? '⚠️ Hierarquia de risco não confirmada integralmente. Estado tratado como fail-closed.'
+            : '✅ Hierarquia confirmada: Trader → caps técnicos → DRY RUN.';
+    }
+
     async function refresh() {
         try {
-            const response = await fetch('/api/financial-safety/status', { cache: 'no-store' });
-            if (!response.ok) throw new Error(`HTTP_${response.status}`);
-            render(await response.json());
+            const [statusResponse, riskResponse] = await Promise.all([
+                fetch('/api/financial-safety/status', { cache: 'no-store' }),
+                fetch('/api/financial-safety/risk-policy', { cache: 'no-store' })
+            ]);
+            if (!statusResponse.ok) throw new Error(`STATUS_HTTP_${statusResponse.status}`);
+            if (!riskResponse.ok) throw new Error(`RISK_HTTP_${riskResponse.status}`);
+            render(await statusResponse.json());
+            renderRiskPolicy(await riskResponse.json());
         } catch (error) {
             stateEl.className = 'safety-state unknown';
             stateEl.textContent = '⚠️ ESTADO INDISPONÍVEL';
             runtimeEl.textContent = '⚠️ NÃO CONFIRMADA';
             nextStartEl.textContent = '⚠️ NÃO CONFIRMADA';
             sessionEl.textContent = '⚠️ FALHA NA VERIFICAÇÃO';
+            bridgeCapEl.textContent = '—';
+            globalCapEl.textContent = '—';
+            dryRunEl.textContent = '⚠️ NÃO CONFIRMADO — FAIL-CLOSED';
+            riskFeedbackEl.textContent = `⚠️ Falha ao carregar política de risco: ${error.message}`;
         }
     }
 
