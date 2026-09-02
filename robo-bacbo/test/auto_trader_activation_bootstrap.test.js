@@ -8,6 +8,7 @@ const path = require('node:path');
 const root = path.resolve(__dirname, '..');
 const {
     normalizeAccountIds,
+    sameAccountIds,
     taskId,
     channelsFor,
     readyWorkers
@@ -24,6 +25,12 @@ test('normaliza contas e deriva canais exclusivos por conta/mesa', () => {
         command: 'auto_trader_commands:4:bacbo_int',
         response: 'auto_trader_responses:4:bacbo_int'
     });
+});
+
+test('detecta mudança real de account_ids sem depender de ordem ou duplicatas', () => {
+    assert.equal(sameAccountIds({ account_ids: [1, 4] }, { account_ids: ['4', 1, 4] }), true);
+    assert.equal(sameAccountIds({ account_ids: [1] }, { account_ids: [1, 4] }), false);
+    assert.equal(sameAccountIds({}, { account_ids: [1] }), false);
 });
 
 test('gate READY exige supervisor fresco e todos os workers vinculados READY', () => {
@@ -53,6 +60,23 @@ test('bootstrap usa somente sync_balance e agrega todas as contas', () => {
     assert.match(source, /accounts\.reduce\(\(sum, account\) => sum \+ account\.balance, 0\)/);
     assert.match(source, /AUTO_TRADER_ACTIVATION_BALANCE_INCOMPLETE/);
     assert.doesNotMatch(source, /place_bet/);
+});
+
+test('rebinding ativo é fail-closed e recaptura baseline agregado', () => {
+    const source = read('auto_trader_activation_bootstrap.js');
+    assert.match(source, /ACTIVE_REBIND/);
+    assert.match(source, /AUTO_TRADER_REBIND_OPEN_FINANCIAL_ORDER/);
+    assert.match(source, /'PREPARANDO','PENDENTE','ENVIO_AMBIGUO'/);
+    assert.match(source, /ativo=false, status_operacao='ATIVANDO'/);
+    assert.match(source, /collectLinkedBalances\(context\)/);
+    assert.match(source, /primeActivation\(context, balanceResult\)/);
+    assert.match(source, /binding_reconfigurado/);
+    assert.match(source, /previousAccountIds/);
+
+    const arbiter = read('auto_trader_round_arbiter.js');
+    assert.match(arbiter, /SELECT mesa_id, ativo, status_operacao/);
+    assert.match(arbiter, /status_operacao \|\| ''\)\.toUpperCase\(\) === 'OPERANDO'/);
+    assert.match(arbiter, /FOR UPDATE/);
 });
 
 test('supervisor inclui ATIVANDO sem transformar qualquer trader desligado em worker', () => {
