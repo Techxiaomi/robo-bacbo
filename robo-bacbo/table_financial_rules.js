@@ -4,6 +4,7 @@ const express = require('express');
 const { obterMesaRuntime } = require('./mesa_runtime_context');
 
 const MONEY_LIMIT = 9_999_999_999.99;
+const LEGACY_VALIDATOR_BRIDGE_MARK = Symbol.for('robo-bacbo.table-financial-rules.validator-bridge');
 
 const TABLE_FINANCIAL_RULES = Object.freeze({
     BACBO_BR: Object.freeze({
@@ -99,6 +100,16 @@ function validateAutoTraderMoneyRules(config, tableCode) {
         };
     }
 
+    const gale2 = Number(config.gale_2_mult);
+    if (Number.isFinite(gale2) && gale2 > 0 && stake * gale2 > MONEY_LIMIT) {
+        return {
+            ok: false,
+            field: 'gale_2_mult',
+            reason: `gale_2_mult: com a stake configurada ultrapassa o limite financeiro na mesa ${rules.table_code}`,
+            rules
+        };
+    }
+
     const tieMode = String(config.tie_stake_mode || '').trim().toUpperCase();
     if (tieMode === 'VALOR') {
         const tieValue = Number(config.tie_stake_value);
@@ -110,9 +121,58 @@ function validateAutoTraderMoneyRules(config, tableCode) {
                 rules
             };
         }
+        if (Number.isFinite(gale2) && gale2 > 0 && tieValue * gale2 > MONEY_LIMIT) {
+            return {
+                ok: false,
+                field: 'tie_stake_value',
+                reason: `tie_stake_value: com gale_2_mult ultrapassa o limite financeiro na mesa ${rules.table_code}`,
+                rules
+            };
+        }
     }
 
     return { ok: true, field: null, reason: null, rules };
+}
+
+function installTableAwareConfigValidationBridge() {
+    const legacyModule = require('./bug051d_config_validation');
+    if (legacyModule[LEGACY_VALIDATOR_BRIDGE_MARK]) return true;
+    const original = legacyModule.validarConfiguracaoAutoTrader;
+    if (typeof original !== 'function') {
+        throw new Error('TABLE_FINANCIAL_RULES_LEGACY_VALIDATOR_UNAVAILABLE');
+    }
+
+    legacyModule.validarConfiguracaoAutoTrader = function validarConfiguracaoAutoTraderTableAware(config) {
+        const mesa = obterMesaRuntime();
+        const moneyValidation = validateAutoTraderMoneyRules(config, mesa.codigo);
+        if (!moneyValidation.ok) {
+            return {
+                ok: false,
+                campo: moneyValidation.field,
+                motivo: moneyValidation.reason
+            };
+        }
+
+        const rules = moneyValidation.rules;
+        const safeLegacyConfig = {
+            ...config,
+            stake_inicial: rules.min_stake
+        };
+        if (String(config?.tie_stake_mode || '').trim().toUpperCase() === 'VALOR') {
+            safeLegacyConfig.tie_stake_value = rules.tie_min;
+        }
+
+        return original(safeLegacyConfig);
+    };
+
+    Object.defineProperty(legacyModule, LEGACY_VALIDATOR_BRIDGE_MARK, {
+        value: true,
+        enumerable: false,
+        configurable: false,
+        writable: false
+    });
+    console.log('TABLE_FINANCIAL_RULES_VALIDATOR_BRIDGE_READY=true');
+    return true;
 }
 
 let installed = false;
@@ -178,5 +238,6 @@ module.exports = {
     isExactStep,
     quantizeMoney,
     validateAutoTraderMoneyRules,
+    installTableAwareConfigValidationBridge,
     installTableFinancialRulesGuard
 };
