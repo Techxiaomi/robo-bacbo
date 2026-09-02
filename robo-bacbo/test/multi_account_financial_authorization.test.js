@@ -94,9 +94,11 @@ test('preserva Stop Win, Stop Loss e saldo valido no gate scoped', () => {
 
 test('bootstrap instala autorizador scoped antes do bot2', () => {
     const start = fs.readFileSync(path.join(__dirname, '..', 'start.js'), 'utf8');
-    const installIndex = start.indexOf('await installMultiAccountFinancialAuthorization()');
+    const requireIndex = start.indexOf("require('./multi_account_financial_authorization')");
+    const installIndex = start.indexOf('.installMultiAccountFinancialAuthorization()', requireIndex);
     const botIndex = start.indexOf("require('./bot2_coletor')");
-    assert.ok(installIndex >= 0);
+    assert.ok(requireIndex >= 0);
+    assert.ok(installIndex > requireIndex);
     assert.ok(botIndex > installIndex);
 });
 
