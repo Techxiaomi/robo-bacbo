@@ -1,6 +1,7 @@
 'use strict';
 
 const { obterMesaRuntime } = require('./mesa_runtime_context');
+const { getTechnicalRiskCaps } = require('./technical_risk_caps');
 
 function normalizarAlvoFinanceiro(valor) {
     const alvo = String(valor || '').trim().toUpperCase();
@@ -13,6 +14,54 @@ function numeroLimitado(valor, minimo, maximo, padrao = 0) {
     const numero = Number(valor);
     if (!Number.isFinite(numero)) return padrao;
     return Math.max(minimo, Math.min(maximo, numero));
+}
+
+function avaliarPrecheckTecnicoPlano(plano, technicalCaps = getTechnicalRiskCaps()) {
+    if (!plano || plano.ok !== true) {
+        return Object.freeze({
+            permitido: false,
+            motivo: 'PLANO_INVALIDO',
+            exposicao: null,
+            per_bridge_cap: null
+        });
+    }
+
+    const exposicao = Number(plano.exposicao_etapa);
+    const perBridgeCap = Number(technicalCaps?.per_bridge_cap);
+
+    if (!Number.isFinite(exposicao) || exposicao <= 0) {
+        return Object.freeze({
+            permitido: false,
+            motivo: 'EXPOSICAO_TECNICA_INVALIDA',
+            exposicao: Number.isFinite(exposicao) ? exposicao : null,
+            per_bridge_cap: Number.isFinite(perBridgeCap) ? perBridgeCap : null
+        });
+    }
+
+    if (!Number.isFinite(perBridgeCap) || perBridgeCap <= 0) {
+        return Object.freeze({
+            permitido: false,
+            motivo: 'TECHNICAL_PER_BRIDGE_CAP_INVALID',
+            exposicao,
+            per_bridge_cap: Number.isFinite(perBridgeCap) ? perBridgeCap : null
+        });
+    }
+
+    if (exposicao > perBridgeCap) {
+        return Object.freeze({
+            permitido: false,
+            motivo: 'PER_BRIDGE_EXPOSURE_LIMIT_EXCEEDED',
+            exposicao,
+            per_bridge_cap: perBridgeCap
+        });
+    }
+
+    return Object.freeze({
+        permitido: true,
+        motivo: null,
+        exposicao,
+        per_bridge_cap: perBridgeCap
+    });
 }
 
 function resolverArbitragemSinaisAutoTrader(candidatosBrutos = []) {
@@ -235,13 +284,25 @@ function criarArbitroFinanceiroAutoTrader(deps = {}) {
             }
 
             if (!(await deps.prepararEntradaCicloAutoTrader(trader))) return false;
-            if (!(await deps.autorizarNovaEntradaFinanceiraTrader(trader))) return false;
 
             const planoDireto = deps.calcularPlanoAposta(cf, est, 0);
             if (!planoDireto.ok) {
                 log.error(`❌ Entrada arbitrada do trader ${trader.id} bloqueada: ${planoDireto.motivo}`);
                 return false;
             }
+
+            const precheckTecnico = avaliarPrecheckTecnicoPlano(planoDireto);
+            if (!precheckTecnico.permitido) {
+                log.warn(
+                    `⛔ MC21 TECHNICAL PRECHECK | Trader ${trader.id} | mesa=${mesaRuntime.codigo} | `
+                    + `reason=${precheckTecnico.motivo} | exposure=${precheckTecnico.exposicao ?? 'n/a'} | `
+                    + `per_bridge_cap=${precheckTecnico.per_bridge_cap ?? 'n/a'} | `
+                    + 'ZERO intenção, ZERO Router.'
+                );
+                return false;
+            }
+
+            if (!(await deps.autorizarNovaEntradaFinanceiraTrader(trader))) return false;
 
             const valorArredondado = planoDireto.valor_principal;
             const valorEmpateDireto = planoDireto.valor_empate;
@@ -456,6 +517,7 @@ function criarArbitroFinanceiroAutoTrader(deps = {}) {
 
 module.exports = {
     normalizarAlvoFinanceiro,
+    avaliarPrecheckTecnicoPlano,
     resolverArbitragemSinaisAutoTrader,
     criarArbitroFinanceiroAutoTrader
 };
