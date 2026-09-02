@@ -78,3 +78,16 @@ test('Acessos expoe somente status e desarme financeiro fail-closed', () => {
     assert.doesNotMatch(server, /financial-safety\/arm/);
     assert.doesNotMatch(accessPage, /HABILITAR EXECUÇÃO/);
 });
+
+test('status financeiro aceita session.json PowerShell com BOM e usa rotulos claros', () => {
+    assert.match(server, /function stripUtf8Bom\(text\)/);
+    assert.match(server, /replace\(\/\^\\uFEFF\//);
+    assert.match(server, /JSON\.parse\(stripUtf8Bom\(rawSession\)\)/);
+
+    assert.match(accessPage, /Execução atual/);
+    assert.match(accessPage, /Próxima inicialização/);
+    assert.match(accessPage, /Verificação/);
+    assert.match(accessPage, /✅ BLOQUEADA/);
+    assert.match(accessPage, /✅ CONFIRMADA/);
+    assert.match(accessPage, /SESSÃO ILEGÍVEL — FAIL-CLOSED/);
+});
