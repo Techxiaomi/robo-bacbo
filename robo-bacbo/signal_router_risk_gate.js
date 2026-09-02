@@ -1,6 +1,7 @@
 'use strict';
 
 const { normalizeAccountIds } = require('./trader_bound_tasks');
+const { resolveRiskPolicy } = require('./risk_policy');
 
 function cents(value) {
     const number = Number(value);
@@ -9,20 +10,10 @@ function cents(value) {
     return Number.isSafeInteger(result) && result >= 0 ? result : null;
 }
 
-function parseConfig(configJson) {
-    if (configJson && typeof configJson === 'object' && !Array.isArray(configJson)) return configJson;
-    try {
-        const parsed = JSON.parse(String(configJson || '{}'));
-        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-    } catch (_) {
-        return {};
-    }
-}
-
-function reject(reason, details = {}) {
+function reject(reason, details = {}, code = 'EXPOSURE_REJECTED') {
     return Object.freeze({
         approved: false,
-        code: 'EXPOSURE_REJECTED',
+        code,
         reason,
         ...details
     });
@@ -45,6 +36,15 @@ function evaluateAggregateExposure({
     configJson,
     globalExposureLimit
 }) {
+    const riskPolicy = resolveRiskPolicy({ configJson, globalExposureLimit });
+    if (!riskPolicy.valid) {
+        return reject('INVALID_RISK_POLICY', {
+            invalid_field: riskPolicy.field,
+            trader_limits: null,
+            technical_caps: null
+        }, 'INVALID_RISK_POLICY');
+    }
+
     const accountIds = normalizeAccountIds(eligibleAccountIds);
     if (accountIds.length === 0) return reject('NO_ELIGIBLE_BOUND_ACCOUNTS');
 
@@ -63,33 +63,36 @@ function evaluateAggregateExposure({
     if (aggregateCents > currentCents) {
         return reject('INSUFFICIENT_AGGREGATE_BALANCE', {
             aggregate_exposure: aggregateCents / 100,
-            saldo_atual: currentCents / 100
+            saldo_atual: currentCents / 100,
+            trader_limits: riskPolicy.trader_limits,
+            technical_caps: riskPolicy.technical_caps
         });
     }
 
-    const globalLimitCents = cents(globalExposureLimit);
-    if (globalLimitCents != null && globalLimitCents > 0 && aggregateCents > globalLimitCents) {
+    const technicalGlobalCap = riskPolicy.technical_caps.global_exposure;
+    const globalLimitCents = technicalGlobalCap == null ? null : cents(technicalGlobalCap);
+    if (globalLimitCents != null && aggregateCents > globalLimitCents) {
         return reject('GLOBAL_EXPOSURE_LIMIT_EXCEEDED', {
             aggregate_exposure: aggregateCents / 100,
-            global_limit: globalLimitCents / 100
+            global_limit: globalLimitCents / 100,
+            trader_limits: riskPolicy.trader_limits,
+            technical_caps: riskPolicy.technical_caps
         });
     }
 
-    const config = parseConfig(configJson);
-    const stopLossNumber = Number(config.stop_loss);
-    const stopLossCents = Number.isFinite(stopLossNumber) && stopLossNumber > 0
-        ? Math.round(stopLossNumber * 100)
-        : null;
+    const stopLossCents = cents(riskPolicy.trader_limits.stop_loss);
     const projectedCents = currentCents - aggregateCents;
-    const stopLossFloorCents = stopLossCents == null ? null : initialCents - stopLossCents;
+    const stopLossFloorCents = initialCents - stopLossCents;
 
-    if (stopLossFloorCents != null && projectedCents <= stopLossFloorCents) {
+    if (projectedCents <= stopLossFloorCents) {
         return reject('STOP_LOSS_PROJECTED', {
             aggregate_exposure: aggregateCents / 100,
             saldo_atual: currentCents / 100,
             saldo_projetado: projectedCents / 100,
             stop_loss: stopLossCents / 100,
-            stop_loss_floor: stopLossFloorCents / 100
+            stop_loss_floor: stopLossFloorCents / 100,
+            trader_limits: riskPolicy.trader_limits,
+            technical_caps: riskPolicy.technical_caps
         });
     }
 
@@ -101,9 +104,11 @@ function evaluateAggregateExposure({
         saldo_inicial: initialCents / 100,
         saldo_atual: currentCents / 100,
         saldo_projetado: projectedCents / 100,
-        stop_loss: stopLossCents == null ? null : stopLossCents / 100,
-        stop_loss_floor: stopLossFloorCents == null ? null : stopLossFloorCents / 100,
-        global_limit: globalLimitCents == null || globalLimitCents <= 0 ? null : globalLimitCents / 100
+        stop_loss: stopLossCents / 100,
+        stop_loss_floor: stopLossFloorCents / 100,
+        global_limit: globalLimitCents == null ? null : globalLimitCents / 100,
+        trader_limits: riskPolicy.trader_limits,
+        technical_caps: riskPolicy.technical_caps
     });
 }
 
