@@ -104,6 +104,7 @@ class ScopedTraderBalanceAuthorization {
         this.log = log;
         this.snapshots = new Map();
         this.subscriber = null;
+        this.startPromise = null;
         this.daily = criarControleDiarioAutoTrader({
             dbPool,
             timezone: process.env.AUTO_TRADER_TIMEZONE || process.env.TZ || 'America/Sao_Paulo'
@@ -143,21 +144,36 @@ class ScopedTraderBalanceAuthorization {
 
     async start() {
         if (this.subscriber?.isReady) return true;
-        const client = createClient({ url: redisUrl() });
-        client.on('error', error => {
-            this.log.error(`MULTI_ACCOUNT_AUTH_REDIS_ERROR: ${error?.message || error}`);
-        });
-        await client.connect();
-        const pattern = `auto_trader_responses:*:${this.tableKey}`;
-        await client.pSubscribe(pattern, (message, channel) => {
-            this.record(channel, message);
-        });
-        this.subscriber = client;
-        this.log.log(`MULTI_ACCOUNT_AUTH_BALANCE_READY=true table=${this.tableKey} pattern=${pattern}`);
-        return true;
+        if (this.startPromise) return this.startPromise;
+        this.startPromise = (async () => {
+            const client = createClient({ url: redisUrl() });
+            client.on('error', error => {
+                this.log.error(`MULTI_ACCOUNT_AUTH_REDIS_ERROR: ${error?.message || error}`);
+            });
+            await client.connect();
+            const pattern = `auto_trader_responses:*:${this.tableKey}`;
+            await client.pSubscribe(pattern, (message, channel) => {
+                this.record(channel, message);
+            });
+            this.subscriber = client;
+            this.log.log(`MULTI_ACCOUNT_AUTH_BALANCE_READY=true table=${this.tableKey} pattern=${pattern}`);
+            return true;
+        })();
+        try {
+            return await this.startPromise;
+        } finally {
+            this.startPromise = null;
+        }
     }
 
     async autorizar(trader) {
+        try {
+            await this.start();
+        } catch (error) {
+            this.log.error(`MULTI_ACCOUNT_AUTH_REJECTED trader=${trader?.id || 'n/a'} reason=REDIS_NOT_READY ${error.message}`);
+            return false;
+        }
+
         const validacaoConfig = validarConfiguracaoAutoTrader(trader?.config);
         if (!validacaoConfig.ok) {
             this.log.error(
