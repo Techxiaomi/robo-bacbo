@@ -130,6 +130,13 @@ test('Acessos expoe hierarquia SSOT de risco com origens explicitas no banco', (
     assert.match(riskAdmin, /\/api\/financial-safety\/system-config/);
 });
 
+test('Acessos mantém ordem visual Global depois Bridge em status e edição', () => {
+    assert.match(riskAdmin, /const globalStatusCard = document\.getElementById\('risk-global-cap'\)\?\.closest\('\.risk-card'\)/);
+    assert.match(riskAdmin, /const bridgeStatusCard = document\.getElementById\('risk-bridge-cap'\)\?\.closest\('\.risk-card'\)/);
+    assert.match(riskAdmin, /grid\.insertBefore\(globalStatusCard, bridgeStatusCard\)/);
+    assert.ok(riskAdmin.indexOf('Cap global solicitado') < riskAdmin.indexOf('Cap por Bridge solicitado'));
+});
+
 test('DRY RUN permanece inviolavel fora do launcher e fail-closed no DB runner', () => {
     assert.doesNotMatch(signalRouterLauncher, /SIGNAL_ROUTER_FINANCIAL_DRY_RUN=/);
     assert.match(signalRouterLauncher, /run_with_system_config\.js scripts\\signal_router\.js/);
