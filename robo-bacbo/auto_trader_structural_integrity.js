@@ -181,9 +181,12 @@ async function collectBalances(accountIds, tableKey, accountNames = new Map()) {
         await publisher.connect();
         await subscriber.connect();
 
-        const pending = accountIds.map(async accountId => {
+        const responses = accountIds.map(accountId => new Promise(resolve => {
+            resolvers.set(accountId, resolve);
+        }));
+
+        for (const accountId of accountIds) {
             const channel = channelsFor(accountId, tableKey).response;
-            const promise = new Promise(resolve => resolvers.set(accountId, resolve));
             await subscriber.subscribe(channel, message => {
                 let payload = null;
                 try { payload = JSON.parse(String(message || '')); } catch (_) { return; }
@@ -193,9 +196,11 @@ async function collectBalances(accountIds, tableKey, accountNames = new Map()) {
                 balances.set(accountId, Math.round(balance * 100) / 100);
                 resolvers.get(accountId)?.();
             });
-            return promise;
-        });
-        const promises = await Promise.all(pending);
+        }
+
+        console.log(
+            `AUTO_TRADER_STRUCTURAL_BALANCE_SUBSCRIBED table=${tableKey} accounts=${accountIds.join(',')}`
+        );
 
         for (const accountId of accountIds) {
             await publisher.publish(
@@ -204,11 +209,15 @@ async function collectBalances(accountIds, tableKey, accountNames = new Map()) {
             );
         }
 
+        console.log(
+            `AUTO_TRADER_STRUCTURAL_BALANCE_REQUESTED table=${tableKey} accounts=${accountIds.join(',')}`
+        );
+
         await Promise.race([
-            Promise.all(promises),
+            Promise.all(responses),
             new Promise((_, reject) => {
                 timeout = setTimeout(
-                    () => reject(new Error(`AUTO_TRADER_STRUCTURAL_BALANCE_TIMEOUT:${BALANCE_TIMEOUT_MS}`)),
+                    () => reject(new Error(`AUTO_TRADER_STRUCTURAL_BALANCE_TIMEOUT:${BALANCE_TIMEOUT_MS}:${balances.size}/${accountIds.length}`)),
                     BALANCE_TIMEOUT_MS
                 );
                 if (typeof timeout.unref === 'function') timeout.unref();
@@ -235,6 +244,22 @@ async function collectBalances(accountIds, tableKey, accountNames = new Map()) {
         try { if (subscriber.isOpen) await subscriber.quit(); } catch (_) {}
         try { if (publisher.isOpen) await publisher.quit(); } catch (_) {}
     }
+}
+
+async function cleanupOrphanBootstrapCarriers(mesaId, pool = createDbPool()) {
+    const [result] = await pool.query(
+        `DELETE FROM auto_traders
+         WHERE mesa_id=?
+           AND ativo=false
+           AND status_operacao='ATIVANDO'
+           AND nome LIKE '__binding_bootstrap__%'`,
+        [mesaId]
+    );
+    const removed = Number(result?.affectedRows) || 0;
+    if (removed > 0) {
+        console.warn(`AUTO_TRADER_BOOTSTRAP_ORPHANS_REMOVED mesa=${mesaId} count=${removed}`);
+    }
+    return removed;
 }
 
 async function createBootstrapCarrier(mesa, canonical, requestedName, pool = createDbPool()) {
@@ -338,6 +363,7 @@ async function handleCreate(handler, req, res, next) {
         req.body = { ...(req.body || {}), config: { ...canonical.config } };
 
         const pool = createDbPool();
+        await cleanupOrphanBootstrapCarriers(mesa.id, pool);
         const [[maxRow]] = await pool.query(
             'SELECT COALESCE(MAX(id), 0) AS max_id FROM auto_traders WHERE mesa_id=?',
             [mesa.id]
@@ -355,6 +381,10 @@ async function handleCreate(handler, req, res, next) {
                 const accounts = await eligibleAccounts(canonical.accountIds, mesa, pool);
                 const names = new Map(accounts.map(item => [item.account_id, item.account_name]));
                 balanceResult = await collectBalances(canonical.accountIds, tableKey, names);
+                console.log(
+                    `AUTO_TRADER_CREATE_BOOTSTRAP_BALANCE_READY carrier=${carrierId} ` +
+                    `accounts=${canonical.accountIds.join(',')} aggregate=R$${balanceResult.total.toFixed(2)}`
+                );
                 await deleteBootstrapCarrier(carrierId, mesa.id, pool);
 
                 const captured = await captureJsonHandler(
@@ -434,67 +464,6 @@ async function handleUpdate(handler, req, res, next) {
     return captured.send(captured.body);
 }
 
-async function manualSyncHandler(req, res) {
-    const mesa = obterMesaRuntime();
-    const traderId = Number(req.params.id);
-    if (!Number.isSafeInteger(traderId) || traderId <= 0) {
-        return res.status(400).json({ sucesso: false, erro: 'trader_id_invalido' });
-    }
-
-    const pool = createDbPool();
-    const [rows] = await pool.query(
-        `SELECT id, ativo, status_operacao, config_json
-         FROM auto_traders WHERE id=? AND mesa_id=? LIMIT 1`,
-        [traderId, mesa.id]
-    );
-    if (!Array.isArray(rows) || rows.length !== 1) {
-        return res.status(404).json({ sucesso: false, erro: 'auto_trader_nao_encontrado' });
-    }
-
-    let config = {};
-    try { config = JSON.parse(rows[0].config_json || '{}'); } catch (_) {}
-    let canonical;
-    let carrierId = 0;
-    try {
-        canonical = canonicalConfig(config);
-        const accounts = await eligibleAccounts(canonical.accountIds, mesa, pool);
-        const tableKey = String(mesa.codigo || '').trim().toLowerCase();
-        const active = rows[0].ativo === true || rows[0].ativo === 1;
-        if (!active) {
-            carrierId = await createBootstrapCarrier(mesa, canonical, `manual-sync-${traderId}`, pool);
-        }
-        await waitWorkersReady(canonical.accountIds, tableKey);
-        const names = new Map(accounts.map(item => [item.account_id, item.account_name]));
-        const balanceResult = await collectBalances(canonical.accountIds, tableKey, names);
-        await pool.query(
-            'UPDATE auto_traders SET saldo_atual=? WHERE id=? AND mesa_id=?',
-            [balanceResult.total, traderId, mesa.id]
-        );
-        await synchronizeBindings(traderId, mesa.id, canonical, pool);
-        console.log(
-            `AUTO_TRADER_MANUAL_BALANCE_SYNC trader=${traderId} accounts=${canonical.accountIds.join(',')} ` +
-            `aggregate=R$${balanceResult.total.toFixed(2)}`
-        );
-        return res.json({
-            sucesso: true,
-            fresco: true,
-            trader_id: traderId,
-            saldo_atual: balanceResult.total,
-            saldo_contas: balanceResult.accounts
-        });
-    } catch (error) {
-        console.error(`AUTO_TRADER_MANUAL_BALANCE_SYNC_FAILED trader=${traderId}:`, error?.message || error);
-        return res.status(Number(error?.statusCode) || 503).json({
-            sucesso: false,
-            fresco: false,
-            erro: 'saldo_contas_vinculadas_indisponivel',
-            detalhe: String(error?.message || error)
-        });
-    } finally {
-        try { await deleteBootstrapCarrier(carrierId, mesa.id, pool); } catch (_) {}
-    }
-}
-
 function installAutoTraderStructuralIntegrity() {
     if (installed) return true;
     const proto = express.application;
@@ -504,13 +473,8 @@ function installAutoTraderStructuralIntegrity() {
 
     const originalPost = proto.post;
     const originalPut = proto.put;
-    let manualRouteInstalled = false;
 
     proto.post = function postWithStructuralIntegrity(path, ...handlers) {
-        if (path === '/api/auto-trader' && !manualRouteInstalled) {
-            manualRouteInstalled = true;
-            originalPost.call(this, '/api/auto-trader/:id/sync-balance', manualSyncHandler);
-        }
         if (path !== '/api/auto-trader') return originalPost.call(this, path, ...handlers);
         const wrapped = handlers.map(handler => typeof handler === 'function'
             ? async function structuralCreate(req, res, next) {
@@ -558,5 +522,6 @@ module.exports = Object.freeze({
     canonicalConfig,
     workersReady,
     synchronizeBindings,
+    cleanupOrphanBootstrapCarriers,
     installAutoTraderStructuralIntegrity
 });
