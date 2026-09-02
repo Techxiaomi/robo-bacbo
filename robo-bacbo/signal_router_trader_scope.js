@@ -1,12 +1,14 @@
 'use strict';
 
 const { accountIdsFromConfig, normalizeAccountIds } = require('./trader_bound_tasks');
+const { evaluateAggregateExposure } = require('./signal_router_risk_gate');
 
 function freezeScope(value) {
     return Object.freeze({
         trader_id: Number(value.trader_id),
         table_key: String(value.table_key || '').trim().toLowerCase(),
-        account_ids: Object.freeze(normalizeAccountIds(value.account_ids))
+        account_ids: Object.freeze(normalizeAccountIds(value.account_ids)),
+        risk: value.risk ? Object.freeze({ ...value.risk }) : null
     });
 }
 
@@ -19,11 +21,12 @@ function filterTargetsByAccountIds(targets, accountIds) {
 }
 
 class FinancialTraderScopeResolver {
-    constructor({ dbPool }) {
+    constructor({ dbPool, globalExposureLimit = null }) {
         if (!dbPool || typeof dbPool.query !== 'function') {
             throw new TypeError('SIGNAL_ROUTER_TRADER_SCOPE_DB_INVALID');
         }
         this.dbPool = dbPool;
+        this.globalExposureLimit = globalExposureLimit;
     }
 
     async resolve(signal) {
@@ -40,6 +43,8 @@ class FinancialTraderScopeResolver {
         const [rows] = await this.dbPool.query(
             `SELECT ao.trader_id,
                     at.config_json,
+                    at.saldo_inicial,
+                    at.saldo_atual,
                     at.ativo,
                     at.status_operacao,
                     LOWER(m.codigo) AS table_key
@@ -93,10 +98,41 @@ class FinancialTraderScopeResolver {
             throw new Error('SIGNAL_ROUTER_TRADER_SCOPE_NO_ACCOUNTS');
         }
 
+        const placeholders = accountIds.map(() => '?').join(',');
+        const [eligibleRows] = await this.dbPool.query(
+            `SELECT h.id AS account_id
+             FROM betting_houses h
+             INNER JOIN betting_house_tables ht
+                ON ht.betting_house_id = h.id
+               AND ht.enabled = true
+             WHERE h.enabled = true
+               AND h.id IN (${placeholders})
+               AND LOWER(ht.table_key) = ?
+             ORDER BY h.id`,
+            [...accountIds, tableKey]
+        );
+        const eligibleAccountIds = normalizeAccountIds((eligibleRows || []).map(item => item.account_id));
+
+        const risk = evaluateAggregateExposure({
+            perAccountExposure: Number(signal.exposure_cents) / 100,
+            eligibleAccountIds,
+            saldoInicial: row.saldo_inicial,
+            saldoAtual: row.saldo_atual,
+            configJson: row.config_json,
+            globalExposureLimit: this.globalExposureLimit
+        });
+        if (!risk.approved) {
+            throw new Error(
+                `EXPOSURE_REJECTED reason=${risk.reason} trader=${traderId} ` +
+                `aggregate=${Number(risk.aggregate_exposure || 0).toFixed(2)}`
+            );
+        }
+
         return freezeScope({
             trader_id: traderId,
             table_key: tableKey,
-            account_ids: accountIds
+            account_ids: eligibleAccountIds,
+            risk
         });
     }
 }
