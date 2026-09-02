@@ -137,6 +137,15 @@ test('Acessos mantém ordem visual Global depois Bridge em status e edição', (
     assert.ok(riskAdmin.indexOf('Cap global solicitado') < riskAdmin.indexOf('Cap por Bridge solicitado'));
 });
 
+test('Acessos distingue configuração solicitada do estado efetivo sem mascarar bloqueio runtime', () => {
+    assert.match(riskAdmin, /REQUESTED = EFFECTIVE/);
+    assert.match(riskAdmin, /REQUESTED ≠ EFFECTIVE/);
+    assert.match(riskAdmin, /const effective = config\?\.effective \|\| \{\}/);
+    assert.match(riskAdmin, /requestedDryRun === effectiveDryRun/);
+    assert.match(riskAdmin, /PRODUÇÃO SOLICITADA/);
+    assert.doesNotMatch(riskAdmin, /EXECUÇÃO LIBERADA/);
+});
+
 test('DRY RUN permanece inviolavel fora do launcher e fail-closed no DB runner', () => {
     assert.doesNotMatch(signalRouterLauncher, /SIGNAL_ROUTER_FINANCIAL_DRY_RUN=/);
     assert.match(signalRouterLauncher, /run_with_system_config\.js scripts\\signal_router\.js/);
