@@ -54,6 +54,24 @@ function normalizeAccountIds(config) {
         .sort((a, b) => a - b);
 }
 
+function parseStoredConfig(value) {
+    if (!value) return {};
+    if (Buffer.isBuffer(value)) value = value.toString('utf8');
+    if (typeof value === 'object' && !Array.isArray(value)) return value;
+    try {
+        const parsed = JSON.parse(String(value));
+        return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch (_) {
+        return {};
+    }
+}
+
+function sameAccountIds(leftConfig, rightConfig) {
+    const left = normalizeAccountIds(leftConfig);
+    const right = normalizeAccountIds(rightConfig);
+    return left.length === right.length && left.every((id, index) => id === right[index]);
+}
+
 function taskId(accountId, tableKey) {
     return `account-${accountId}:${tableKey}`;
 }
@@ -88,9 +106,17 @@ async function loadActivationContext(req) {
     const existing = rows[0];
     const wantsActive = req?.body?.ativo === true || req?.body?.ativo === 1;
     const wasActive = existing.ativo === true || existing.ativo === 1;
-    if (!wantsActive || wasActive) return null;
+    if (!wantsActive) return null;
 
     const config = normalizarConfigAutoTrader(req?.body?.config || {});
+    const previousConfig = parseStoredConfig(existing.config_json);
+    const previousAccountIds = normalizeAccountIds(previousConfig);
+    const accountIds = normalizeAccountIds(config);
+    const mode = wasActive
+        ? (sameAccountIds(previousConfig, config) ? null : 'ACTIVE_REBIND')
+        : 'ACTIVATION';
+    if (!mode) return null;
+
     const tiePolicy = validarPoliticaProtecao(config);
     if (!tiePolicy.ok) {
         const error = new Error(tiePolicy.motivo || 'AUTO_TRADER_ACTIVATION_TIE_POLICY_INVALID');
@@ -98,11 +124,28 @@ async function loadActivationContext(req) {
         throw error;
     }
 
-    const accountIds = normalizeAccountIds(config);
     if (accountIds.length === 0) {
         const error = new Error('AUTO_TRADER_ACTIVATION_ACCOUNTS_REQUIRED');
         error.statusCode = 409;
         throw error;
+    }
+
+    if (mode === 'ACTIVE_REBIND') {
+        const [openOrders] = await pool.query(
+            `SELECT id, status_ordem, executor_order_id
+             FROM auditoria_ordens
+             WHERE trader_id=?
+               AND mesa_id=?
+               AND status_ordem IN ('PREPARANDO','PENDENTE','ENVIO_AMBIGUO')
+             ORDER BY id ASC
+             LIMIT 1`,
+            [traderId, mesa.id]
+        );
+        if (Array.isArray(openOrders) && openOrders.length > 0) {
+            const error = new Error(`AUTO_TRADER_REBIND_OPEN_FINANCIAL_ORDER:${openOrders[0].id}`);
+            error.statusCode = 409;
+            throw error;
+        }
     }
 
     const placeholders = accountIds.map(() => '?').join(',');
@@ -133,8 +176,11 @@ async function loadActivationContext(req) {
         traderId,
         mesa,
         tableKey: String(mesa.codigo || '').trim().toLowerCase(),
+        mode,
+        wasActive,
         config,
         configJson: JSON.stringify(config),
+        previousAccountIds,
         accountIds,
         accounts: (accounts || []).map(row => Object.freeze({
             id: Number(row.account_id),
@@ -146,14 +192,26 @@ async function loadActivationContext(req) {
 }
 
 async function markActivating(context) {
+    const expectedActive = context.wasActive ? 1 : 0;
     const [result] = await createDbPool().query(
         `UPDATE auto_traders
-         SET nome=?, config_json=?, status_operacao='ATIVANDO'
-         WHERE id=? AND mesa_id=? AND ativo=false`,
-        [context.requestedName, context.configJson, context.traderId, context.mesa.id]
+         SET nome=?, config_json=?, ativo=false, status_operacao='ATIVANDO'
+         WHERE id=? AND mesa_id=? AND ativo=?`,
+        [context.requestedName, context.configJson, context.traderId, context.mesa.id, expectedActive]
     );
     if (Number(result?.affectedRows) !== 1) {
-        throw new Error('AUTO_TRADER_ACTIVATION_STATE_CONFLICT');
+        throw new Error(
+            context.mode === 'ACTIVE_REBIND'
+                ? 'AUTO_TRADER_REBIND_STATE_CONFLICT'
+                : 'AUTO_TRADER_ACTIVATION_STATE_CONFLICT'
+        );
+    }
+    if (context.mode === 'ACTIVE_REBIND') {
+        console.log(
+            `AUTO_TRADER_ACTIVE_REBIND_PENDING trader=${context.traderId} table=${context.tableKey} ` +
+            `previous_accounts=${context.previousAccountIds.join(',')} accounts=${context.accountIds.join(',')}`
+        );
+        return;
     }
     console.log(
         `AUTO_TRADER_ACTIVATION_PENDING trader=${context.traderId} table=${context.tableKey} ` +
@@ -161,21 +219,26 @@ async function markActivating(context) {
     );
 }
 
-async function restoreInactive(context, reason) {
+async function restorePreviousState(context, reason) {
     const previous = context.existing;
+    const previousActive = previous.ativo === true || previous.ativo === 1 ? 1 : 0;
+    const previousStatus = previousActive === 0 && previous.status_operacao === 'ATIVANDO'
+        ? 'DESLIGADO'
+        : previous.status_operacao;
     await createDbPool().query(
         `UPDATE auto_traders
-         SET nome=?, ativo=false, config_json=?, saldo_inicial=?, saldo_atual=?,
+         SET nome=?, ativo=?, config_json=?, saldo_inicial=?, saldo_atual=?,
              status_operacao=?, reds_consecutivos=?, stop_reds_pausado_ate=?,
              trailing_pico_lucro=?, estado_ciclo=?, reds_virtuais_observados=?,
              sinais_operados_onda=?, ciclos_concluidos=?, pulos_restantes=?
          WHERE id=? AND mesa_id=?`,
         [
             previous.nome,
+            previousActive,
             previous.config_json,
             previous.saldo_inicial,
             previous.saldo_atual,
-            previous.status_operacao === 'ATIVANDO' ? 'DESLIGADO' : previous.status_operacao,
+            previousStatus,
             previous.reds_consecutivos,
             previous.stop_reds_pausado_ate,
             previous.trailing_pico_lucro,
@@ -189,7 +252,8 @@ async function restoreInactive(context, reason) {
         ]
     );
     console.warn(
-        `AUTO_TRADER_ACTIVATION_ROLLBACK trader=${context.traderId} reason=${String(reason || 'UNKNOWN').slice(0, 300)}`
+        `${context.mode === 'ACTIVE_REBIND' ? 'AUTO_TRADER_ACTIVE_REBIND_ROLLBACK' : 'AUTO_TRADER_ACTIVATION_ROLLBACK'} ` +
+        `trader=${context.traderId} reason=${String(reason || 'UNKNOWN').slice(0, 300)}`
     );
 }
 
@@ -362,18 +426,21 @@ function installActivationBootstrap() {
                     res.json = body => originalJson({
                         ...(body && typeof body === 'object' ? body : {}),
                         baseline_recapturado: true,
+                        binding_reconfigurado: context.mode === 'ACTIVE_REBIND',
+                        binding_anterior: context.previousAccountIds,
+                        binding_atual: context.accountIds,
                         saldo_inicial: balanceResult.total,
                         saldo_contas: balanceResult.accounts
                     });
 
                     await handler(req, res, next);
                     if (res.statusCode >= 400) {
-                        await restoreInactive(context, `DOWNSTREAM_HTTP_${res.statusCode}`);
+                        await restorePreviousState(context, `DOWNSTREAM_HTTP_${res.statusCode}`);
                     }
                     return undefined;
                 } catch (error) {
                     if (context) {
-                        try { await restoreInactive(context, error?.message || error); } catch (rollbackError) {
+                        try { await restorePreviousState(context, error?.message || error); } catch (rollbackError) {
                             console.error('AUTO_TRADER_ACTIVATION_ROLLBACK_FAILED:', rollbackError?.message || rollbackError);
                         }
                     }
@@ -383,7 +450,9 @@ function installActivationBootstrap() {
                     return originalJson({
                         sucesso: false,
                         erro: 'saldo_contas_vinculadas_indisponivel',
-                        mensagem: 'Não foi possível confirmar o saldo real de todas as contas vinculadas. O Auto-Trader permaneceu desligado.',
+                        mensagem: context?.mode === 'ACTIVE_REBIND'
+                            ? 'Não foi possível confirmar o saldo real de todas as novas contas vinculadas. A configuração ativa anterior foi restaurada.'
+                            : 'Não foi possível confirmar o saldo real de todas as contas vinculadas. O Auto-Trader permaneceu desligado.',
                         detalhe: String(error?.message || error),
                         primed
                     });
@@ -405,6 +474,7 @@ module.exports = Object.freeze({
     READY_TIMEOUT_MS,
     BALANCE_TIMEOUT_MS,
     normalizeAccountIds,
+    sameAccountIds,
     taskId,
     channelsFor,
     readyWorkers,
