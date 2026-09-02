@@ -92,6 +92,26 @@ test('preserva Stop Win, Stop Loss e saldo valido no gate scoped', () => {
     assert.equal(avaliarLimitesFinanceirosTrader(base, 70).motivo, 'STOP_LOSS');
 });
 
+test('falta de stop_loss rejeita politica em vez de assumir fallback', () => {
+    const result = avaliarLimitesFinanceirosTrader({
+        saldo_inicial: 100,
+        trailing_pico_lucro: 0,
+        config: { stop_win: 20, trailing_stop: false }
+    }, 100);
+
+    assert.equal(result.permitido, false);
+    assert.equal(result.motivo, 'INVALID_RISK_POLICY');
+    assert.equal(result.invalid_field, 'stop_loss');
+});
+
+test('fonte multi-conta nao contem fallback magico de stop', () => {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'multi_account_financial_authorization.js'), 'utf8');
+    assert.doesNotMatch(source, /stop_loss\s*\?\?\s*250/);
+    assert.doesNotMatch(source, /stop_win\s*\?\?\s*100/);
+    assert.match(source, /resolveRiskPolicy/);
+    assert.match(source, /INVALID_RISK_POLICY/);
+});
+
 test('bootstrap instala autorizador scoped antes do bot2', () => {
     const start = fs.readFileSync(path.join(__dirname, '..', 'start.js'), 'utf8');
     const requireIndex = start.indexOf("require('./multi_account_financial_authorization')");
@@ -105,4 +125,5 @@ test('bootstrap instala autorizador scoped antes do bot2', () => {
 test('Signal Router permanece travado em dry-run', () => {
     const launcher = fs.readFileSync(path.join(__dirname, '..', '..', 'atalhos', '07_SIGNAL_ROUTER.cmd'), 'utf8');
     assert.match(launcher, /SIGNAL_ROUTER_FINANCIAL_DRY_RUN=true/i);
+    assert.doesNotMatch(launcher, /SIGNAL_ROUTER_FINANCIAL_DRY_RUN=false/i);
 });
