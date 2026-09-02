@@ -6,10 +6,12 @@
         saveInProgress: false,
         selectedIds: new Set(),
         eligibleAccounts: [],
+        editingTraderId: null,
         originalFetch: null,
         originalOpen: null,
         originalEdit: null,
-        originalSave: null
+        originalSave: null,
+        originalSyncBalance: null
     };
 
     function currentTableKey() {
@@ -275,10 +277,56 @@
         };
     }
 
+    async function syncEditedTraderBalance() {
+        const traderId = Number(STATE.editingTraderId);
+        if (!Number.isSafeInteger(traderId) || traderId <= 0) {
+            window.alert(
+                'Este Auto-Trader ainda não foi salvo. O saldo real das contas selecionadas será capturado automaticamente no bootstrap ao salvar/ativar.'
+            );
+            return false;
+        }
+
+        const visor = document.getElementById('at-saldo-visor');
+        if (visor) {
+            visor.innerText = 'Sincronizando contas...';
+            visor.style.color = '#ffc107';
+        }
+
+        try {
+            const response = await STATE.originalFetch(`/api/auto-trader/${traderId}/sync-balance`, {
+                method: 'POST',
+                cache: 'no-store',
+                credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            });
+            let payload = null;
+            try { payload = await response.json(); } catch (_) {}
+            const saldo = Number(payload?.saldo_atual);
+            if (!response.ok || payload?.sucesso !== true || payload?.fresco !== true || !Number.isFinite(saldo)) {
+                throw new Error(String(payload?.detalhe || payload?.erro || `HTTP_${response.status}`));
+            }
+            if (visor) {
+                visor.innerText = `R$ ${saldo.toFixed(2).replace('.', ',')}`;
+                visor.style.color = '#28a745';
+            }
+            return true;
+        } catch (error) {
+            if (visor) {
+                visor.innerText = 'Saldo indisponível';
+                visor.style.color = '#dc3545';
+            }
+            console.error('Falha na sincronização multi-conta do saldo:', error);
+            window.alert(`Não foi possível sincronizar o saldo das contas vinculadas: ${String(error?.message || error)}`);
+            return false;
+        }
+    }
+
     function installFunctionWrappers() {
         if (typeof window.abrirFormularioAutoTrader === 'function' && !STATE.originalOpen) {
             STATE.originalOpen = window.abrirFormularioAutoTrader;
             window.abrirFormularioAutoTrader = async function(...args) {
+                STATE.editingTraderId = null;
                 const result = await STATE.originalOpen.apply(this, args);
                 await prepareAccounts([]);
                 return result;
@@ -288,6 +336,7 @@
         if (typeof window.prepararEdicaoAutoTrader === 'function' && !STATE.originalEdit) {
             STATE.originalEdit = window.prepararEdicaoAutoTrader;
             window.prepararEdicaoAutoTrader = async function(id, ...args) {
+                STATE.editingTraderId = Number(id);
                 const result = await STATE.originalEdit.call(this, id, ...args);
                 try {
                     const trader = await loadTrader(id);
@@ -315,6 +364,11 @@
                     STATE.saveInProgress = false;
                 }
             };
+        }
+
+        if (typeof window.sincronizarSaldoPython === 'function' && !STATE.originalSyncBalance) {
+            STATE.originalSyncBalance = window.sincronizarSaldoPython;
+            window.sincronizarSaldoPython = syncEditedTraderBalance;
         }
     }
 
