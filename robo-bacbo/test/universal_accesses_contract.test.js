@@ -136,7 +136,7 @@ test('DRY RUN permanece inviolavel fora do launcher e fail-closed no DB runner',
     assert.match(configRunner, /SIGNAL_ROUTER_FINANCIAL_DRY_RUN:\s*'true'/);
     assert.match(configService, /financial_dry_run:\s*true/);
     assert.match(configService, /FINANCIAL_DRY_RUN_FORCED_TRUE/);
-    assert.match(configService, /effectiveFinancialDryRun\s*=\s*true/);
+    assert.match(configService, /const effectiveDryRun\s*=\s*true/);
     assert.doesNotMatch(server, /financial-safety\/dry-run\/disable/);
 });
 
