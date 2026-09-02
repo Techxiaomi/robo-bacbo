@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Acessos | Bac Bo</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { margin:0; min-height:100vh; background:#121212; color:#fff; font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif; }
+        .wrap { max-width:980px; margin:0 auto; padding:28px 20px 48px; }
+        .top { display:flex; align-items:center; justify-content:space-between; gap:16px; padding-bottom:16px; border-bottom:1px solid #333; }
+        h1 { margin:0; font-size:22px; }
+        .sub { color:#888; margin-top:6px; font-size:12px; }
+        .badge { display:inline-flex; align-items:center; gap:6px; padding:6px 9px; border:1px solid #3f3f3f; border-radius:999px; background:#191919; color:#aaa; font-size:11px; font-weight:700; }
+        .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; margin-top:22px; }
+        .card { display:block; min-height:180px; padding:20px; border:1px solid #333; border-radius:12px; background:#181818; color:#fff; text-decoration:none; transition:.15s ease; }
+        .card:hover { transform:translateY(-1px); border-color:#555; background:#1d1d1d; }
+        .icon { font-size:28px; }
+        .title { margin-top:12px; font-size:18px; font-weight:800; }
+        .desc { margin-top:8px; color:#aaa; font-size:13px; line-height:1.5; }
+        .cta { margin-top:18px; color:#8fc7ff; font-size:12px; font-weight:800; }
+        .footer { margin-top:24px; color:#666; font-size:11px; }
+        @media (max-width:700px) { .grid { grid-template-columns:1fr; } }
+    </style>
+</head>
+<body>
+<div class="wrap">
+    <div class="top">
+        <div>
+            <h1>🔐 Acessos</h1>
+            <div class="sub">Administração universal de casas, contas e processos de Traders.</div>
+        </div>
+        <span class="badge">127.0.0.1:3010</span>
+    </div>
+
+    <div class="grid">
+        <a class="card" href="/betting-houses">
+            <div class="icon">🏦</div>
+            <div class="title">Casas e Contas</div>
+            <div class="desc">Cadastre e gerencie casas de apostas, contas, mesas habilitadas e configuração operacional das credenciais.</div>
+            <div class="cta">Abrir Casas e Contas →</div>
+        </a>
+
+        <a class="card" href="/supervisor">
+            <div class="icon">🧭</div>
+            <div class="title">Processos de Traders</div>
+            <div class="desc">Acompanhe o Master Supervisor e os Live Bridges vinculados aos Traders, incluindo conta, mesa, PID, estado e reinicializações.</div>
+            <div class="cta">Abrir Processos →</div>
+        </a>
+    </div>
+
+    <div class="footer">Portal universal. Não pertence a uma mesa específica e não depende do Node BR ou Node INT para servir a interface.</div>
+</div>
+</body>
+</html>
