@@ -79,6 +79,24 @@ test('administrative values above envelope persist as requested and are clamped 
     assert.ok(log.warnings.some(line => /SYSTEM_CONFIG_EFFECTIVE_CLAMP/.test(line) && /per_bridge_cap/.test(line)));
 });
 
+test('repeated reads expose discrepancies without repeating clamp warnings', async () => {
+    const dbPool = statefulPool({
+        global_router_cap: '250.00',
+        per_bridge_cap: '75.00',
+        financial_dry_run: 'true'
+    });
+    const log = silentLog();
+
+    const first = await readSystemConfig({ dbPool, log });
+    const second = await readSystemConfig({ dbPool, log });
+
+    assert.equal(first.clamped, true);
+    assert.equal(second.clamped, true);
+    assert.equal(first.discrepancies.length, 2);
+    assert.equal(second.discrepancies.length, 2);
+    assert.deepEqual(log.warnings, []);
+});
+
 test('requested financial_dry_run=false persists but runtime effective value remains true fail-closed', async () => {
     const dbPool = statefulPool();
     const log = silentLog();

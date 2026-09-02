@@ -174,14 +174,14 @@ function logDiscrepancies(snapshot, log = console) {
     }
 }
 
-async function readSystemConfig({ dbPool, log = console }) {
+async function readSystemConfig({ dbPool, log = console, emitDiscrepancies = false }) {
     if (!dbPool || typeof dbPool.query !== 'function') {
         const snapshot = buildSnapshot([], {
             source: 'safe-defaults',
             fail_closed: true,
             reason: 'SYSTEM_CONFIG_DB_INVALID'
         });
-        logDiscrepancies(snapshot, log);
+        if (emitDiscrepancies) logDiscrepancies(snapshot, log);
         return snapshot;
     }
     try {
@@ -194,7 +194,7 @@ async function readSystemConfig({ dbPool, log = console }) {
             CONFIG_KEYS
         );
         const snapshot = buildSnapshot(rows);
-        logDiscrepancies(snapshot, log);
+        if (emitDiscrepancies) logDiscrepancies(snapshot, log);
         return snapshot;
     } catch (error) {
         const snapshot = buildSnapshot([], {
@@ -202,7 +202,7 @@ async function readSystemConfig({ dbPool, log = console }) {
             fail_closed: true,
             reason: `SYSTEM_CONFIG_DB_UNAVAILABLE:${error?.code || 'ERROR'}`
         });
-        logDiscrepancies(snapshot, log);
+        if (emitDiscrepancies) logDiscrepancies(snapshot, log);
         return snapshot;
     }
 }
@@ -236,7 +236,7 @@ async function updateSystemConfig({
         [globalValue.toFixed(2), bridgeValue.toFixed(2), String(dryRunValue)]
     );
 
-    return readSystemConfig({ dbPool, log });
+    return readSystemConfig({ dbPool, log, emitDiscrepancies: true });
 }
 
 async function updateTechnicalCaps({ dbPool, globalRouterCap, perBridgeCap, log = console }) {
