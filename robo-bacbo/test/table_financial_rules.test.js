@@ -28,34 +28,38 @@ test('BR e INT possuem perfis financeiros explícitos e independentes', () => {
     assert.equal(br.table_code, 'BACBO_BR');
     assert.equal(int.table_code, 'BACBO_INT');
     assert.notEqual(br, int);
-    assert.deepEqual(br.chips, [5, 10, 25, 125, 500]);
+    assert.deepEqual(br.chips, [2.5, 5, 10, 25, 125, 500]);
     assert.deepEqual(int.chips, [5, 10, 25, 125, 500]);
+    assert.equal(br.chips.includes(5000), false);
 });
 
-test('contrato público expõe mínimo, step, tie e fichas sem estado mutável', () => {
+test('contrato público BR expõe mínimo, step, tie e fichas homologadas', () => {
     const rules = publicTableFinancialRules('BACBO_BR');
-    assert.equal(rules.min_stake, 5);
-    assert.equal(rules.stake_step, 5);
-    assert.equal(rules.tie_min, 5);
-    assert.equal(rules.tie_step, 5);
-    assert.deepEqual(rules.chips, [5, 10, 25, 125, 500]);
+    assert.equal(rules.min_stake, 2.5);
+    assert.equal(rules.stake_step, 2.5);
+    assert.equal(rules.tie_min, 2.5);
+    assert.equal(rules.tie_step, 2.5);
+    assert.deepEqual(rules.chips, [2.5, 5, 10, 25, 125, 500]);
     assert.equal(Object.isFrozen(rules), true);
     assert.equal(Object.isFrozen(rules.chips), true);
 });
 
-test('BR rejeita R$2,50 e aceita somente passos exatos do contrato', () => {
-    assert.equal(validateAutoTraderMoneyRules(baseConfig({ stake_inicial: 2.5 }), 'BACBO_BR').ok, false);
-    assert.equal(validateAutoTraderMoneyRules(baseConfig({ stake_inicial: 7.5 }), 'BACBO_BR').ok, false);
+test('BR aceita R$2,50 e demais passos exatos de R$2,50', () => {
+    assert.equal(validateAutoTraderMoneyRules(baseConfig({ stake_inicial: 2.5 }), 'BACBO_BR').ok, true);
+    assert.equal(validateAutoTraderMoneyRules(baseConfig({ stake_inicial: 7.5 }), 'BACBO_BR').ok, true);
     assert.equal(validateAutoTraderMoneyRules(baseConfig({ stake_inicial: 5 }), 'BACBO_BR').ok, true);
     assert.equal(validateAutoTraderMoneyRules(baseConfig({ stake_inicial: 10 }), 'BACBO_BR').ok, true);
+    assert.equal(validateAutoTraderMoneyRules(baseConfig({ stake_inicial: 3 }), 'BACBO_BR').ok, false);
 });
 
-test('Tie por valor usa mínimo e step da mesma mesa', () => {
-    const invalid = validateAutoTraderMoneyRules(baseConfig({ tie_stake_value: 2.5 }), 'BACBO_BR');
-    const valid = validateAutoTraderMoneyRules(baseConfig({ tie_stake_value: 10 }), 'BACBO_BR');
+test('Tie por valor usa mínimo e step da mesma mesa BR', () => {
+    const validMin = validateAutoTraderMoneyRules(baseConfig({ tie_stake_value: 2.5 }), 'BACBO_BR');
+    const valid = validateAutoTraderMoneyRules(baseConfig({ tie_stake_value: 7.5 }), 'BACBO_BR');
+    const invalid = validateAutoTraderMoneyRules(baseConfig({ tie_stake_value: 3 }), 'BACBO_BR');
+    assert.equal(validMin.ok, true);
+    assert.equal(valid.ok, true);
     assert.equal(invalid.ok, false);
     assert.equal(invalid.field, 'tie_stake_value');
-    assert.equal(valid.ok, true);
 });
 
 test('Tie percentual não é confundido com valor monetário digitado', () => {
@@ -67,13 +71,22 @@ test('Tie percentual não é confundido com valor monetário digitado', () => {
     assert.equal(result.ok, true);
 });
 
-test('quantização de preview respeita mínimo e step do contrato', () => {
+test('quantização de preview respeita mínimo e step BR de R$2,50', () => {
     const rules = getTableFinancialRules('BACBO_BR');
-    assert.equal(quantizeMoney(2.5, rules, 'stake'), 5);
-    assert.equal(quantizeMoney(7.5, rules, 'stake'), 10);
-    assert.equal(quantizeMoney(12.4, rules, 'tie'), 10);
+    assert.equal(quantizeMoney(2.5, rules, 'stake'), 2.5);
+    assert.equal(quantizeMoney(7.5, rules, 'stake'), 7.5);
+    assert.equal(quantizeMoney(12.4, rules, 'tie'), 12.5);
     assert.equal(isExactStep(10, rules.min_stake, rules.stake_step), true);
-    assert.equal(isExactStep(12.5, rules.min_stake, rules.stake_step), false);
+    assert.equal(isExactStep(12.5, rules.min_stake, rules.stake_step), true);
+});
+
+test('INT permanece com contrato anterior de R$5', () => {
+    const rules = publicTableFinancialRules('BACBO_INT');
+    assert.equal(rules.min_stake, 5);
+    assert.equal(rules.stake_step, 5);
+    assert.equal(rules.tie_min, 5);
+    assert.equal(rules.tie_step, 5);
+    assert.deepEqual(rules.chips, [5, 10, 25, 125, 500]);
 });
 
 test('mesa desconhecida falha fechada', () => {
