@@ -100,8 +100,8 @@ async function iniciar() {
     installTableFinancialRulesGuard();
     installActivationBootstrap();
     await installContinuousTraderBalance();
-    installAutoTraderStructuralIntegrity();
     installManualTraderBalanceSync();
+    installAutoTraderStructuralIntegrity();
     await require('./multi_account_financial_authorization')
         .installMultiAccountFinancialAuthorization();
 
