@@ -166,6 +166,7 @@ function envForTask(baseEnv, task) {
     return {
         ...(baseEnv || {}),
         BACBO_MESA_CODIGO: String(task.tableKey).trim().toUpperCase(),
+        METRICS_FILE_NAME: `backend.metrics.${namespace}.json`,
         OPERATIONS_METRICS_NAMESPACE: namespace,
         LIVE_BRIDGE_PROCESS_NAMESPACE: namespace
     };
