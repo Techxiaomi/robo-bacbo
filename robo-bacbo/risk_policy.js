@@ -1,5 +1,7 @@
 'use strict';
 
+const { getTechnicalRiskCaps } = require('./technical_risk_caps');
+
 const MAX_MONEY = 1000000;
 
 function plainObject(value) {
@@ -23,11 +25,6 @@ function positiveMoney(value) {
     return cents / 100;
 }
 
-function optionalTechnicalCap(value) {
-    if (value == null || value === '') return null;
-    return positiveMoney(value);
-}
-
 function invalidRiskPolicy(field, value = null) {
     return Object.freeze({
         valid: false,
@@ -39,7 +36,7 @@ function invalidRiskPolicy(field, value = null) {
     });
 }
 
-function resolveRiskPolicy({ configJson, globalExposureLimit = null } = {}) {
+function resolveRiskPolicy({ configJson, technicalCaps = getTechnicalRiskCaps() } = {}) {
     const config = parseTraderConfig(configJson);
     if (!config) return invalidRiskPolicy('config');
 
@@ -49,9 +46,17 @@ function resolveRiskPolicy({ configJson, globalExposureLimit = null } = {}) {
     const stopWin = positiveMoney(config.stop_win);
     if (stopWin == null) return invalidRiskPolicy('stop_win', config.stop_win ?? null);
 
-    const technicalGlobalCap = optionalTechnicalCap(globalExposureLimit);
-    if (globalExposureLimit != null && globalExposureLimit !== '' && technicalGlobalCap == null) {
-        return invalidRiskPolicy('technical_global_exposure_cap', globalExposureLimit);
+    const caps = plainObject(technicalCaps);
+    if (!caps) return invalidRiskPolicy('technical_caps');
+
+    const globalRouterCap = positiveMoney(caps.global_router_cap);
+    if (globalRouterCap == null) {
+        return invalidRiskPolicy('technical_global_router_cap', caps.global_router_cap ?? null);
+    }
+
+    const perBridgeCap = positiveMoney(caps.per_bridge_cap);
+    if (perBridgeCap == null) {
+        return invalidRiskPolicy('technical_per_bridge_cap', caps.per_bridge_cap ?? null);
     }
 
     return Object.freeze({
@@ -62,7 +67,8 @@ function resolveRiskPolicy({ configJson, globalExposureLimit = null } = {}) {
             stop_win: stopWin
         }),
         technical_caps: Object.freeze({
-            global_exposure: technicalGlobalCap
+            global_exposure: globalRouterCap,
+            per_bridge_exposure: perBridgeCap
         })
     });
 }

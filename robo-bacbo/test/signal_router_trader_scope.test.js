@@ -32,7 +32,7 @@ function operatingTrader(config = { account_ids: [4, 1, 4] }) {
     };
 }
 
-test('resolve trader scope from authoritative audit order and config account_ids', async () => {
+test('resolve trader scope from authoritative audit order and logs full risk hierarchy', async () => {
     const calls = [];
     const logs = [];
     const dbPool = {
@@ -56,10 +56,15 @@ test('resolve trader scope from authoritative audit order and config account_ids
     assert.equal(scope.risk.approved, true);
     assert.equal(scope.risk.aggregate_exposure, 10);
     assert.equal(scope.risk.trader_limits.stop_loss, 250);
-    assert.equal(scope.risk.technical_caps.global_exposure, null);
+    assert.deepEqual(scope.risk.technical_caps, {
+        global_exposure: 20,
+        per_bridge_exposure: 5
+    });
     assert.match(logs[0], /RISK_POLICY_HIERARCHY/);
     assert.match(logs[0], /trader_stop_loss=250\.00/);
-    assert.match(logs[0], /technical_global_cap=disabled/);
+    assert.match(logs[0], /technical_global_cap=20\.00/);
+    assert.match(logs[0], /technical_bridge_cap=5\.00/);
+    assert.match(logs[0], /per_account_exposure=5\.00/);
     assert.equal(calls.length, 2);
     assert.match(calls[0].sql, /auditoria_ordens/);
     assert.match(calls[0].sql, /executor_order_id/);

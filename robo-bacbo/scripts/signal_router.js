@@ -9,6 +9,7 @@ require('../env_loader').loadEnvFile(path.join(__dirname, '..', '..', '.env'));
 
 const { createBettingHouseService } = require('../betting_house_service');
 const { ResultFanIn } = require('../signal_result_fanin');
+const { getTechnicalRiskCaps } = require('../technical_risk_caps');
 const {
     filterTargetsByAccountIds,
     FinancialTraderScopeResolver
@@ -45,19 +46,6 @@ function positiveIntEnv(name, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER
         throw new Error(`SIGNAL_ROUTER_INVALID_${name}: ${raw}`);
     }
     return value;
-}
-
-function positiveMoneyEnv(name, { required = false, max = 1000000 } = {}) {
-    const raw = String(process.env[name] || '').trim();
-    if (!raw) {
-        if (required) throw new Error(`SIGNAL_ROUTER_${name}_REQUIRED`);
-        return null;
-    }
-    const value = Number(raw);
-    if (!Number.isFinite(value) || value <= 0 || value > max) {
-        throw new Error(`SIGNAL_ROUTER_INVALID_${name}: ${raw}`);
-    }
-    return Math.round(value * 100) / 100;
 }
 
 function validatedChannel(value, errorCode, { allowWildcard = false } = {}) {
@@ -423,7 +411,8 @@ async function main() {
     if (faninSimulation && !dryRun) {
         throw new Error('SIGNAL_ROUTER_FANIN_SIMULATION_REQUIRES_DRY_RUN');
     }
-    const globalMaxExposure = positiveMoneyEnv('SIGNAL_ROUTER_GLOBAL_MAX_EXPOSURE', { required: financialEnabled });
+    const technicalCaps = getTechnicalRiskCaps();
+    const globalMaxExposure = technicalCaps.global_router_cap;
 
     const dbPool = createDbPool();
     const service = createBettingHouseService({ dbPool, encryptionKey: process.env.BETTING_HOUSE_CREDENTIALS_KEY });
@@ -503,7 +492,9 @@ async function main() {
         console.log(`SIGNAL_ROUTER_FINANCIAL_FANOUT_ENABLED=${financialEnabled}`);
         console.log(`SIGNAL_ROUTER_FINANCIAL_DRY_RUN=${dryRun}`);
         console.log(`SIGNAL_ROUTER_FINANCIAL_FANIN_SIMULATION=${faninSimulation}`);
-        console.log(`SIGNAL_ROUTER_GLOBAL_MAX_EXPOSURE=${globalMaxExposure == null ? 'disabled' : globalMaxExposure.toFixed(2)}`);
+        console.log('SIGNAL_ROUTER_TECHNICAL_CAP_SOURCE=technical_risk_caps');
+        console.log(`SIGNAL_ROUTER_GLOBAL_MAX_EXPOSURE=${globalMaxExposure.toFixed(2)}`);
+        console.log(`SIGNAL_ROUTER_PER_BRIDGE_MAX_EXPOSURE=${technicalCaps.per_bridge_cap.toFixed(2)}`);
         console.log('SIGNAL_ROUTER_FINANCIAL_SCOPE=AUTHORITATIVE_TRADER_BINDINGS');
 
         let generatedSequence = 0;

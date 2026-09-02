@@ -8,11 +8,11 @@ const mysql = require('mysql2/promise');
 require('../env_loader').loadEnvFile(path.join(__dirname, '..', '..', '.env'));
 
 const { createBettingHouseService } = require('../betting_house_service');
+const { getTechnicalRiskCaps } = require('../technical_risk_caps');
 
 const HOUSE_ADAPTER_KEY = 'brasil-da-sorte';
 const DEFAULT_TABLE_KEY = 'bacbo_br';
 const SUPPORTED_TABLE_KEYS = new Set(['bacbo_br', 'bacbo_int']);
-const CONTROLLED_MAX_EXPOSURE_CAP = 5;
 
 let activePythonControl = null;
 let pendingExternalShutdownReason = null;
@@ -49,17 +49,11 @@ function safetyConfig() {
         throw new Error('LIVE_BRIDGE_NOT_ARMED: defina LIVE_BRIDGE_ARMED=YES para a execução controlada');
     }
 
-    const maxExposure = Number(process.env.LIVE_BRIDGE_MAX_EXPOSURE);
-    if (!Number.isFinite(maxExposure) || maxExposure <= 0 || maxExposure > CONTROLLED_MAX_EXPOSURE_CAP) {
-        throw new Error(
-            `LIVE_BRIDGE_MAX_EXPOSURE_INVALID: use valor > 0 e <= ${CONTROLLED_MAX_EXPOSURE_CAP}`
-        );
-    }
-
+    const technicalCaps = getTechnicalRiskCaps();
     return {
         mode: 'controlled',
         armed: true,
-        max_exposure: maxExposure
+        max_exposure: technicalCaps.per_bridge_cap
     };
 }
 
@@ -349,6 +343,7 @@ async function main() {
         console.log('CONFIG_TRANSPORT=STDIN_JSONL_CONTROL');
         console.log('SECRETS_LOGGED=false');
         console.log('LIVE_BRIDGE_MODE=controlled');
+        console.log('LIVE_BRIDGE_TECHNICAL_CAP_SOURCE=technical_risk_caps');
         console.log(`LIVE_BRIDGE_MAX_EXPOSURE=${safety.max_exposure.toFixed(2)}`);
 
         await runPython({

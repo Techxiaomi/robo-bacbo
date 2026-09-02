@@ -33,10 +33,9 @@ function evaluateAggregateExposure({
     eligibleAccountIds,
     saldoInicial,
     saldoAtual,
-    configJson,
-    globalExposureLimit
+    configJson
 }) {
-    const riskPolicy = resolveRiskPolicy({ configJson, globalExposureLimit });
+    const riskPolicy = resolveRiskPolicy({ configJson });
     if (!riskPolicy.valid) {
         return reject('INVALID_RISK_POLICY', {
             invalid_field: riskPolicy.field,
@@ -55,6 +54,16 @@ function evaluateAggregateExposure({
     if (initialCents == null) return reject('SALDO_INICIAL_INVALID');
     if (currentCents == null) return reject('SALDO_ATUAL_INVALID');
 
+    const perBridgeLimitCents = cents(riskPolicy.technical_caps.per_bridge_exposure);
+    if (perAccountCents > perBridgeLimitCents) {
+        return reject('PER_BRIDGE_EXPOSURE_LIMIT_EXCEEDED', {
+            per_account_exposure: perAccountCents / 100,
+            per_bridge_limit: perBridgeLimitCents / 100,
+            trader_limits: riskPolicy.trader_limits,
+            technical_caps: riskPolicy.technical_caps
+        });
+    }
+
     const aggregateCents = perAccountCents * accountIds.length;
     if (!Number.isSafeInteger(aggregateCents) || aggregateCents <= 0) {
         return reject('AGGREGATE_EXPOSURE_INVALID');
@@ -69,9 +78,8 @@ function evaluateAggregateExposure({
         });
     }
 
-    const technicalGlobalCap = riskPolicy.technical_caps.global_exposure;
-    const globalLimitCents = technicalGlobalCap == null ? null : cents(technicalGlobalCap);
-    if (globalLimitCents != null && aggregateCents > globalLimitCents) {
+    const globalLimitCents = cents(riskPolicy.technical_caps.global_exposure);
+    if (aggregateCents > globalLimitCents) {
         return reject('GLOBAL_EXPOSURE_LIMIT_EXCEEDED', {
             aggregate_exposure: aggregateCents / 100,
             global_limit: globalLimitCents / 100,
@@ -106,7 +114,8 @@ function evaluateAggregateExposure({
         saldo_projetado: projectedCents / 100,
         stop_loss: stopLossCents / 100,
         stop_loss_floor: stopLossFloorCents / 100,
-        global_limit: globalLimitCents == null ? null : globalLimitCents / 100,
+        global_limit: globalLimitCents / 100,
+        per_bridge_limit: perBridgeLimitCents / 100,
         trader_limits: riskPolicy.trader_limits,
         technical_caps: riskPolicy.technical_caps
     });

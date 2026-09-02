@@ -9,14 +9,13 @@ function riskConfig(stopLoss, stopWin = 50) {
     return JSON.stringify({ stop_loss: stopLoss, stop_win: stopWin });
 }
 
-test('approves aggregate exposure using only eligible bound accounts', () => {
+test('approves aggregate exposure using only eligible bound accounts and SSOT caps', () => {
     const result = evaluateAggregateExposure({
         perAccountExposure: 5,
         eligibleAccountIds: [4, 1, 4],
         saldoInicial: 100,
         saldoAtual: 95,
-        configJson: riskConfig(30),
-        globalExposureLimit: 20
+        configJson: riskConfig(30)
     });
 
     assert.equal(result.approved, true);
@@ -27,23 +26,39 @@ test('approves aggregate exposure using only eligible bound accounts', () => {
     assert.equal(result.saldo_projetado, 85);
     assert.equal(result.stop_loss_floor, 70);
     assert.deepEqual(result.trader_limits, { stop_loss: 30, stop_win: 50 });
-    assert.deepEqual(result.technical_caps, { global_exposure: 20 });
+    assert.deepEqual(result.technical_caps, {
+        global_exposure: 20,
+        per_bridge_exposure: 5
+    });
+});
+
+test('rejects whole batch when per-account exposure exceeds bridge technical cap', () => {
+    const result = evaluateAggregateExposure({
+        perAccountExposure: 5.01,
+        eligibleAccountIds: [1],
+        saldoInicial: 100,
+        saldoAtual: 100,
+        configJson: riskConfig(50)
+    });
+
+    assert.equal(result.approved, false);
+    assert.equal(result.reason, 'PER_BRIDGE_EXPOSURE_LIMIT_EXCEEDED');
+    assert.equal(result.per_bridge_limit, 5);
 });
 
 test('rejects whole batch when aggregate balance is insufficient', () => {
     const result = evaluateAggregateExposure({
-        perAccountExposure: 8,
-        eligibleAccountIds: [1, 4],
+        perAccountExposure: 5,
+        eligibleAccountIds: [1, 4, 7],
         saldoInicial: 20,
-        saldoAtual: 15,
-        configJson: riskConfig(20),
-        globalExposureLimit: 50
+        saldoAtual: 14,
+        configJson: riskConfig(20)
     });
 
     assert.equal(result.approved, false);
     assert.equal(result.code, 'EXPOSURE_REJECTED');
     assert.equal(result.reason, 'INSUFFICIENT_AGGREGATE_BALANCE');
-    assert.equal(result.aggregate_exposure, 16);
+    assert.equal(result.aggregate_exposure, 15);
 });
 
 test('rejects whole batch when projected balance reaches stop loss floor', () => {
@@ -52,8 +67,7 @@ test('rejects whole batch when projected balance reaches stop loss floor', () =>
         eligibleAccountIds: [1, 4],
         saldoInicial: 100,
         saldoAtual: 80,
-        configJson: riskConfig(30),
-        globalExposureLimit: 50
+        configJson: riskConfig(30)
     });
 
     assert.equal(result.approved, false);
@@ -65,19 +79,21 @@ test('rejects whole batch when projected balance reaches stop loss floor', () =>
 
 test('rejects whole batch when aggregate exposure exceeds global technical cap', () => {
     const result = evaluateAggregateExposure({
-        perAccountExposure: 7,
-        eligibleAccountIds: [1, 4, 7],
+        perAccountExposure: 5,
+        eligibleAccountIds: [1, 4, 7, 8, 9],
         saldoInicial: 100,
         saldoAtual: 100,
-        configJson: riskConfig(50),
-        globalExposureLimit: 20
+        configJson: riskConfig(50)
     });
 
     assert.equal(result.approved, false);
     assert.equal(result.reason, 'GLOBAL_EXPOSURE_LIMIT_EXCEEDED');
-    assert.equal(result.aggregate_exposure, 21);
+    assert.equal(result.aggregate_exposure, 25);
     assert.equal(result.global_limit, 20);
-    assert.deepEqual(result.technical_caps, { global_exposure: 20 });
+    assert.deepEqual(result.technical_caps, {
+        global_exposure: 20,
+        per_bridge_exposure: 5
+    });
 });
 
 test('fails closed when no eligible bound account exists', () => {
@@ -86,8 +102,7 @@ test('fails closed when no eligible bound account exists', () => {
         eligibleAccountIds: [],
         saldoInicial: 100,
         saldoAtual: 100,
-        configJson: riskConfig(50),
-        globalExposureLimit: 20
+        configJson: riskConfig(50)
     });
 
     assert.equal(result.approved, false);
@@ -101,8 +116,7 @@ test('missing stop_loss rejects with INVALID_RISK_POLICY instead of fallback', (
         eligibleAccountIds: [1, 4],
         saldoInicial: 100,
         saldoAtual: 100,
-        configJson: JSON.stringify({ stop_win: 50 }),
-        globalExposureLimit: 20
+        configJson: JSON.stringify({ stop_win: 50 })
     });
 
     assert.equal(result.approved, false);
@@ -117,8 +131,7 @@ test('invalid stop_loss rejects with INVALID_RISK_POLICY', () => {
         eligibleAccountIds: [1, 4],
         saldoInicial: 100,
         saldoAtual: 100,
-        configJson: JSON.stringify({ stop_loss: 0, stop_win: 50 }),
-        globalExposureLimit: 20
+        configJson: JSON.stringify({ stop_loss: 0, stop_win: 50 })
     });
 
     assert.equal(result.approved, false);

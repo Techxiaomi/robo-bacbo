@@ -20,22 +20,13 @@ function filterTargetsByAccountIds(targets, accountIds) {
         .sort((a, b) => Number(a.account_id) - Number(b.account_id));
 }
 
-function globalExposureLimitFromEnv() {
-    const value = Number(process.env.SIGNAL_ROUTER_GLOBAL_MAX_EXPOSURE);
-    if (!Number.isFinite(value) || value <= 0) return null;
-    return Math.round(value * 100) / 100;
-}
-
 class FinancialTraderScopeResolver {
-    constructor({ dbPool, globalExposureLimit = undefined, log = console }) {
+    constructor({ dbPool, log = console }) {
         if (!dbPool || typeof dbPool.query !== 'function') {
             throw new TypeError('SIGNAL_ROUTER_TRADER_SCOPE_DB_INVALID');
         }
         this.dbPool = dbPool;
         this.log = log;
-        this.globalExposureLimit = globalExposureLimit === undefined
-            ? globalExposureLimitFromEnv()
-            : globalExposureLimit;
     }
 
     async resolve(signal) {
@@ -127,8 +118,7 @@ class FinancialTraderScopeResolver {
             eligibleAccountIds,
             saldoInicial: row.saldo_inicial,
             saldoAtual: row.saldo_atual,
-            configJson: row.config_json,
-            globalExposureLimit: this.globalExposureLimit
+            configJson: row.config_json
         });
         if (!risk.approved) {
             throw new Error(
@@ -141,7 +131,9 @@ class FinancialTraderScopeResolver {
             `RISK_POLICY_HIERARCHY trader=${traderId} table=${tableKey} ` +
             `trader_stop_loss=${Number(risk.trader_limits.stop_loss).toFixed(2)} ` +
             `trader_stop_win=${Number(risk.trader_limits.stop_win).toFixed(2)} ` +
-            `technical_global_cap=${risk.technical_caps.global_exposure == null ? 'disabled' : Number(risk.technical_caps.global_exposure).toFixed(2)} ` +
+            `technical_global_cap=${Number(risk.technical_caps.global_exposure).toFixed(2)} ` +
+            `technical_bridge_cap=${Number(risk.technical_caps.per_bridge_exposure).toFixed(2)} ` +
+            `per_account_exposure=${Number(risk.per_account_exposure).toFixed(2)} ` +
             `aggregate_exposure=${Number(risk.aggregate_exposure).toFixed(2)} ` +
             `saldo_atual=${Number(risk.saldo_atual).toFixed(2)}`
         );
@@ -157,6 +149,5 @@ class FinancialTraderScopeResolver {
 
 module.exports = {
     filterTargetsByAccountIds,
-    globalExposureLimitFromEnv,
     FinancialTraderScopeResolver
 };
