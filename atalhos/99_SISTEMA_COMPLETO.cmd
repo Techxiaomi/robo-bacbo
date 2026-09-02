@@ -17,16 +17,16 @@ if errorlevel 1 goto :falha_operacional
 
 timeout /t 2 /nobreak >nul
 
-echo [2/2] Adicionando Supervisor e Router na MESMA janela...
+echo [2/2] Adicionando Supervisor, Router e Acessos na MESMA janela...
 call "%BASE%91_FINANCEIRO_ABAS.cmd"
 if errorlevel 1 goto :falha_financeiro
 
 echo.
-echo [OK] Sistema organizado em uma unica janela com 7 abas:
-echo      Garnet ^| Node INT ^| Node BR ^| Coletor INT ^| Coletor BR ^| Master Supervisor ^| Signal Router
+echo [OK] Sistema organizado em uma unica janela com 8 abas:
+echo      Garnet ^| Node INT ^| Node BR ^| Coletor INT ^| Coletor BR ^| Master Supervisor ^| Signal Router ^| Acessos
 echo.
-echo      Acessos web NAO sao abertos automaticamente.
-echo      Use 08_ABRIR_SUPERVISOR.cmd ou 09_ABRIR_CASAS_CONTAS.cmd quando quiser.
+echo      Portal universal: http://127.0.0.1:3010/accesses
+echo      Use 92_ACESSOS.cmd para abrir quando quiser.
 echo.
 pause
 exit /b 0
@@ -47,7 +47,7 @@ exit /b 1
 
 :falha_financeiro
 echo.
-echo [ERRO] Supervisor/Router nao foram adicionados a janela principal.
+echo [ERRO] Supervisor/Router/Acessos nao foram adicionados a janela principal.
 echo A stack operacional pode ter sido aberta normalmente.
 pause
 exit /b 1
