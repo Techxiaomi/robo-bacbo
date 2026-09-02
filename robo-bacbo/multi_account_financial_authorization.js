@@ -7,6 +7,7 @@ const { criarControleDiarioAutoTrader } = require('./bug051b_daily_counter');
 const { criarBarreiraSaldoFrescoStops } = require('./bug051c_balance_barrier');
 const { validarConfiguracaoAutoTrader } = require('./bug051d_config_validation');
 const { parseScopedBalance, aggregateTraderBalance, maxAgeMs } = require('./continuous_trader_balance');
+const { resolveRiskPolicy } = require('./risk_policy');
 
 const INSTALL_MARK = Symbol.for('robo-bacbo.multi-account-financial-authorization');
 const DEFAULT_REFRESH_TIMEOUT_MS = 12000;
@@ -84,9 +85,22 @@ function avaliarLimitesFinanceirosTrader(trader, saldoAtual) {
         };
     }
 
-    const cf = trader?.config || {};
-    const stopWin = Number(cf.stop_win ?? 100);
-    const stopLoss = Number(cf.stop_loss ?? 250);
+    const riskPolicy = resolveRiskPolicy({ configJson: trader?.config });
+    if (!riskPolicy.valid) {
+        return {
+            permitido: false,
+            motivo: 'INVALID_RISK_POLICY',
+            invalid_field: riskPolicy.field,
+            variacao: null,
+            saldo_atual: saldo,
+            trailing_pico_lucro: picoAnterior,
+            trailing_limite_disparo: null,
+            trailing_recuo: 0
+        };
+    }
+
+    const stopWin = riskPolicy.trader_limits.stop_win;
+    const stopLoss = riskPolicy.trader_limits.stop_loss;
     const variacao = Math.round((saldo - saldoInicial) * 100) / 100;
     const trailing = avaliarTrailingStopTrader(trader, variacao);
     const base = {
@@ -97,10 +111,10 @@ function avaliarLimitesFinanceirosTrader(trader, saldoAtual) {
         trailing_recuo: trailing.recuo
     };
 
-    if (Number.isFinite(stopWin) && stopWin > 0 && variacao >= stopWin) {
+    if (variacao >= stopWin) {
         return { permitido: false, motivo: 'STOP_WIN', ...base };
     }
-    if (Number.isFinite(stopLoss) && stopLoss > 0 && variacao <= -stopLoss) {
+    if (variacao <= -stopLoss) {
         return { permitido: false, motivo: 'STOP_LOSS', ...base };
     }
     if (trailing.acionado) {
@@ -252,6 +266,15 @@ class ScopedTraderBalanceAuthorization {
             return false;
         }
 
+        const riskPolicy = resolveRiskPolicy({ configJson: trader?.config });
+        if (!riskPolicy.valid) {
+            this.log.error(
+                `MULTI_ACCOUNT_AUTH_REJECTED trader=${trader?.id || 'n/a'} ` +
+                `reason=INVALID_RISK_POLICY field=${riskPolicy.field}`
+            );
+            return false;
+        }
+
         const validacaoConfig = validarConfiguracaoAutoTrader(trader?.config);
         if (!validacaoConfig.ok) {
             this.log.error(
@@ -303,6 +326,13 @@ class ScopedTraderBalanceAuthorization {
             this.log.warn(`MULTI_ACCOUNT_AUTH_REJECTED trader=${trader.id} reason=SALDO_INDISPONIVEL`);
             return false;
         }
+        if (avaliacao.motivo === 'INVALID_RISK_POLICY') {
+            this.log.error(
+                `MULTI_ACCOUNT_AUTH_REJECTED trader=${trader.id} ` +
+                `reason=INVALID_RISK_POLICY field=${avaliacao.invalid_field || 'unknown'}`
+            );
+            return false;
+        }
 
         trader.saldo_atual = avaliacao.saldo_atual;
         const picoAnterior = Math.max(0, Number(trader.trailing_pico_lucro) || 0);
@@ -324,7 +354,9 @@ class ScopedTraderBalanceAuthorization {
         if (avaliacao.permitido) {
             this.log.log(
                 `MULTI_ACCOUNT_AUTH_APPROVED trader=${trader.id} accounts=${snapshot.account_ids.join(',')} ` +
-                `balance=${snapshot.saldo_atual.toFixed(2)} variation=${avaliacao.variacao.toFixed(2)}`
+                `balance=${snapshot.saldo_atual.toFixed(2)} variation=${avaliacao.variacao.toFixed(2)} ` +
+                `trader_stop_loss=${riskPolicy.trader_limits.stop_loss.toFixed(2)} ` +
+                `trader_stop_win=${riskPolicy.trader_limits.stop_win.toFixed(2)}`
             );
             return true;
         }
