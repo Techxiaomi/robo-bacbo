@@ -4,6 +4,12 @@
     const grid = document.querySelector('.risk-grid');
     if (!grid || document.getElementById('risk-config-editor')) return;
 
+    const globalStatusCard = document.getElementById('risk-global-cap')?.closest('.risk-card');
+    const bridgeStatusCard = document.getElementById('risk-bridge-cap')?.closest('.risk-card');
+    if (globalStatusCard && bridgeStatusCard && globalStatusCard !== bridgeStatusCard) {
+        grid.insertBefore(globalStatusCard, bridgeStatusCard);
+    }
+
     const style = document.createElement('style');
     style.textContent = `
         .risk-editor{margin-top:12px;padding:12px;border:1px solid #2c2c2c;border-radius:8px;background:#111;display:grid;grid-template-columns:1fr 1fr auto auto;gap:10px;align-items:end}
