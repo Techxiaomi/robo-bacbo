@@ -1,0 +1,139 @@
+param(
+    [string]$Root = 'D:\Projetos\Bacbo'
+)
+
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+
+$atalhos = Join-Path $Root 'atalhos'
+$shortcutNames = @(
+    '01_GARNET.cmd',
+    '02_COLETOR_INT.cmd',
+    '03_NODE_INT.cmd',
+    '04_COLETOR_BR.cmd',
+    '05_NODE_BR.cmd',
+    '06_MASTER_SUPERVISOR.cmd',
+    '07_SIGNAL_ROUTER.cmd'
+)
+
+function Get-ProcessSnapshot {
+    Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, Name, CommandLine
+}
+
+function Stop-ProcessTree([int]$Pid, [string]$Label) {
+    if ($Pid -le 0 -or $Pid -eq $PID) { return $false }
+    $proc = Get-Process -Id $Pid -ErrorAction SilentlyContinue
+    if (-not $proc) { return $false }
+
+    Write-Host "[STOP] $Label | PID=$Pid" -ForegroundColor Yellow
+    & taskkill.exe /PID $Pid /T /F *> $null
+    return $true
+}
+
+function Get-ListeningPid([int]$Port) {
+    try {
+        $conn = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction Stop |
+            Select-Object -First 1
+        if ($conn) { return [int]$conn.OwningProcess }
+    }
+    catch {}
+    return 0
+}
+
+Write-Host '============================================================' -ForegroundColor Cyan
+Write-Host ' BACBO | ENCERRAMENTO TOTAL PARA MANUTENCAO' -ForegroundColor Cyan
+Write-Host '============================================================' -ForegroundColor Cyan
+Write-Host 'Escopo: somente modulos da stack BACBO e seus processos filhos.' -ForegroundColor DarkGray
+Write-Host ''
+
+$stopped = [System.Collections.Generic.HashSet[int]]::new()
+$snapshot = @(Get-ProcessSnapshot)
+
+# 1) Derruba as sete arvores iniciadas pelas abas do Windows Terminal.
+foreach ($shortcut in $shortcutNames) {
+    $escaped = [regex]::Escape((Join-Path $atalhos $shortcut))
+    $matches = $snapshot | Where-Object {
+        $_.Name -ieq 'cmd.exe' -and
+        $_.CommandLine -and
+        $_.CommandLine -match $escaped
+    }
+
+    foreach ($item in $matches) {
+        $pidValue = [int]$item.ProcessId
+        if ($stopped.Add($pidValue)) {
+            [void](Stop-ProcessTree -Pid $pidValue -Label $shortcut)
+        }
+    }
+}
+
+Start-Sleep -Milliseconds 800
+$snapshot = @(Get-ProcessSnapshot)
+
+# 2) Fallbacks para processos que podem ter sido destacados da aba raiz.
+$projectPatterns = @(
+    'scripts\\master_supervisor\.js',
+    'scripts\\signal_router\.js',
+    'scripts\\run_live_bridge\.js',
+    'tipminer_collector\.py',
+    'live_bridge\.py',
+    'Garnet-Supervisor\.ps1',
+    'Garnet-Tab\.ps1',
+    'Garnet-Launcher\.ps1'
+)
+
+foreach ($item in $snapshot) {
+    $commandLine = String($item.CommandLine)
+    if (-not $commandLine) { continue }
+
+    $matched = $false
+    foreach ($pattern in $projectPatterns) {
+        if ($commandLine -match $pattern) {
+            $matched = $true
+            break
+        }
+    }
+    if (-not $matched) { continue }
+
+    $pidValue = [int]$item.ProcessId
+    if ($stopped.Add($pidValue)) {
+        [void](Stop-ProcessTree -Pid $pidValue -Label $item.Name)
+    }
+}
+
+# 3) Fallback por portas exclusivas da stack local.
+foreach ($port in @(3000, 3001, 6379)) {
+    $ownerPid = Get-ListeningPid -Port $port
+    if ($ownerPid -gt 0 -and $stopped.Add($ownerPid)) {
+        [void](Stop-ProcessTree -Pid $ownerPid -Label "porta $port")
+    }
+}
+
+# 4) GarnetServer pode sobreviver ao supervisor em caso de falha abrupta.
+Get-Process -Name 'GarnetServer' -ErrorAction SilentlyContinue | ForEach-Object {
+    $pidValue = [int]$_.Id
+    if ($stopped.Add($pidValue)) {
+        [void](Stop-ProcessTree -Pid $pidValue -Label 'GarnetServer')
+    }
+}
+
+Start-Sleep -Seconds 1
+
+$remaining = @()
+foreach ($port in @(3000, 3001, 6379)) {
+    $ownerPid = Get-ListeningPid -Port $port
+    if ($ownerPid -gt 0) {
+        $remaining += "porta $port -> PID $ownerPid"
+    }
+}
+
+if ($remaining.Count -gt 0) {
+    Write-Host ''
+    Write-Host '[ATENCAO] Ainda existem listeners da stack:' -ForegroundColor Red
+    $remaining | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+    exit 1
+}
+
+Write-Host ''
+Write-Host '[OK] Stack BACBO encerrada para manutencao.' -ForegroundColor Green
+Write-Host '     Portas 3000, 3001 e 6379 sem listeners.' -ForegroundColor Green
+exit 0
