@@ -5,13 +5,17 @@ const assert = require('node:assert/strict');
 
 const { evaluateAggregateExposure } = require('../signal_router_risk_gate');
 
+function riskConfig(stopLoss, stopWin = 50) {
+    return JSON.stringify({ stop_loss: stopLoss, stop_win: stopWin });
+}
+
 test('approves aggregate exposure using only eligible bound accounts', () => {
     const result = evaluateAggregateExposure({
         perAccountExposure: 5,
         eligibleAccountIds: [4, 1, 4],
         saldoInicial: 100,
         saldoAtual: 95,
-        configJson: JSON.stringify({ stop_loss: 30 }),
+        configJson: riskConfig(30),
         globalExposureLimit: 20
     });
 
@@ -22,6 +26,8 @@ test('approves aggregate exposure using only eligible bound accounts', () => {
     assert.equal(result.aggregate_exposure, 10);
     assert.equal(result.saldo_projetado, 85);
     assert.equal(result.stop_loss_floor, 70);
+    assert.deepEqual(result.trader_limits, { stop_loss: 30, stop_win: 50 });
+    assert.deepEqual(result.technical_caps, { global_exposure: 20 });
 });
 
 test('rejects whole batch when aggregate balance is insufficient', () => {
@@ -30,7 +36,7 @@ test('rejects whole batch when aggregate balance is insufficient', () => {
         eligibleAccountIds: [1, 4],
         saldoInicial: 20,
         saldoAtual: 15,
-        configJson: JSON.stringify({ stop_loss: 20 }),
+        configJson: riskConfig(20),
         globalExposureLimit: 50
     });
 
@@ -46,7 +52,7 @@ test('rejects whole batch when projected balance reaches stop loss floor', () =>
         eligibleAccountIds: [1, 4],
         saldoInicial: 100,
         saldoAtual: 80,
-        configJson: JSON.stringify({ stop_loss: 30 }),
+        configJson: riskConfig(30),
         globalExposureLimit: 50
     });
 
@@ -57,13 +63,13 @@ test('rejects whole batch when projected balance reaches stop loss floor', () =>
     assert.equal(result.stop_loss_floor, 70);
 });
 
-test('rejects whole batch when aggregate exposure exceeds global limit', () => {
+test('rejects whole batch when aggregate exposure exceeds global technical cap', () => {
     const result = evaluateAggregateExposure({
         perAccountExposure: 7,
         eligibleAccountIds: [1, 4, 7],
         saldoInicial: 100,
         saldoAtual: 100,
-        configJson: JSON.stringify({ stop_loss: 50 }),
+        configJson: riskConfig(50),
         globalExposureLimit: 20
     });
 
@@ -71,6 +77,7 @@ test('rejects whole batch when aggregate exposure exceeds global limit', () => {
     assert.equal(result.reason, 'GLOBAL_EXPOSURE_LIMIT_EXCEEDED');
     assert.equal(result.aggregate_exposure, 21);
     assert.equal(result.global_limit, 20);
+    assert.deepEqual(result.technical_caps, { global_exposure: 20 });
 });
 
 test('fails closed when no eligible bound account exists', () => {
@@ -79,11 +86,43 @@ test('fails closed when no eligible bound account exists', () => {
         eligibleAccountIds: [],
         saldoInicial: 100,
         saldoAtual: 100,
-        configJson: JSON.stringify({ stop_loss: 50 }),
+        configJson: riskConfig(50),
         globalExposureLimit: 20
     });
 
     assert.equal(result.approved, false);
     assert.equal(result.code, 'EXPOSURE_REJECTED');
     assert.equal(result.reason, 'NO_ELIGIBLE_BOUND_ACCOUNTS');
+});
+
+test('missing stop_loss rejects with INVALID_RISK_POLICY instead of fallback', () => {
+    const result = evaluateAggregateExposure({
+        perAccountExposure: 5,
+        eligibleAccountIds: [1, 4],
+        saldoInicial: 100,
+        saldoAtual: 100,
+        configJson: JSON.stringify({ stop_win: 50 }),
+        globalExposureLimit: 20
+    });
+
+    assert.equal(result.approved, false);
+    assert.equal(result.code, 'INVALID_RISK_POLICY');
+    assert.equal(result.reason, 'INVALID_RISK_POLICY');
+    assert.equal(result.invalid_field, 'stop_loss');
+});
+
+test('invalid stop_loss rejects with INVALID_RISK_POLICY', () => {
+    const result = evaluateAggregateExposure({
+        perAccountExposure: 5,
+        eligibleAccountIds: [1, 4],
+        saldoInicial: 100,
+        saldoAtual: 100,
+        configJson: JSON.stringify({ stop_loss: 0, stop_win: 50 }),
+        globalExposureLimit: 20
+    });
+
+    assert.equal(result.approved, false);
+    assert.equal(result.code, 'INVALID_RISK_POLICY');
+    assert.equal(result.reason, 'INVALID_RISK_POLICY');
+    assert.equal(result.invalid_field, 'stop_loss');
 });
