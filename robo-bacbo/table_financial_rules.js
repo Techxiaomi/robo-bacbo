@@ -65,7 +65,7 @@ function isExactStep(value, min, step) {
     const stepValue = Number(step);
     if (!Number.isFinite(amount) || !Number.isFinite(minValue) || !Number.isFinite(stepValue)) return false;
     if (amount < minValue || amount > MONEY_LIMIT || stepValue <= 0) return false;
-    const units = amount / stepValue;
+    const units = (amount - minValue) / stepValue;
     return Math.abs(units - Math.round(units)) < 1e-9;
 }
 
@@ -74,8 +74,9 @@ function quantizeMoney(value, rules, kind = 'stake') {
     if (!Number.isFinite(amount) || amount <= 0) return 0;
     const min = kind === 'tie' ? Number(rules.tie_min) : Number(rules.min_stake);
     const step = kind === 'tie' ? Number(rules.tie_step) : Number(rules.stake_step);
-    const rounded = Math.round(amount / step) * step;
-    return Math.max(min, Math.round(rounded * 100) / 100);
+    if (amount <= min) return min;
+    const units = Math.round((amount - min) / step);
+    return Math.round((min + units * step) * 100) / 100;
 }
 
 function validateAutoTraderMoneyRules(config, tableCode) {
