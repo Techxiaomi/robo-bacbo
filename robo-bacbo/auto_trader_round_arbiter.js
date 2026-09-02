@@ -103,7 +103,7 @@ function criarArbitroFinanceiroAutoTrader(deps = {}) {
 
     async function traderPertenceMesaAtual(traderId) {
         const [linhas] = await dbPool.query(
-            `SELECT mesa_id
+            `SELECT mesa_id, ativo, status_operacao
              FROM auto_traders
              WHERE id=?
                AND mesa_id=?
@@ -114,11 +114,12 @@ function criarArbitroFinanceiroAutoTrader(deps = {}) {
             ]
         );
 
+        if (!Array.isArray(linhas) || linhas.length !== 1) return false;
+        const atual = linhas[0];
         return (
-            Array.isArray(linhas)
-            && linhas.length === 1
-            && Number(linhas[0].mesa_id)
-                === Number(mesaRuntime.id)
+            Number(atual.mesa_id) === Number(mesaRuntime.id)
+            && (atual.ativo === true || atual.ativo === 1)
+            && String(atual.status_operacao || '').toUpperCase() === 'OPERANDO'
         );
     }
 
@@ -201,8 +202,8 @@ function criarArbitroFinanceiroAutoTrader(deps = {}) {
         try {
             if (!(await traderPertenceMesaAtual(traderId))) {
                 log.warn(
-                    `⛔ MC22-M | Trader ${traderId} não pertence à mesa ${mesaRuntime.codigo}; `
-                    + 'entrada financeira bloqueada.'
+                    `⛔ MC22-M | Trader ${traderId} não está OPERANDO na mesa ${mesaRuntime.codigo}; ` +
+                    'entrada financeira bloqueada.'
                 );
                 return false;
             }
@@ -254,7 +255,7 @@ function criarArbitroFinanceiroAutoTrader(deps = {}) {
                 await conexaoIntencao.beginTransaction();
 
                 const [traderMesa] = await conexaoIntencao.query(
-                    `SELECT mesa_id
+                    `SELECT mesa_id, ativo, status_operacao
                      FROM auto_traders
                      WHERE id=?
                        AND mesa_id=?
@@ -268,8 +269,10 @@ function criarArbitroFinanceiroAutoTrader(deps = {}) {
                     !Array.isArray(traderMesa)
                     || traderMesa.length !== 1
                     || Number(traderMesa[0].mesa_id) !== Number(mesaRuntime.id)
+                    || !(traderMesa[0].ativo === true || traderMesa[0].ativo === 1)
+                    || String(traderMesa[0].status_operacao || '').toUpperCase() !== 'OPERANDO'
                 ) {
-                    throw new Error('Auto-Trader mudou de mesa antes da criação da intenção DIRETO');
+                    throw new Error('Auto-Trader não está OPERANDO na mesa antes da criação da intenção DIRETO');
                 }
 
                 intencaoDireto = await deps.criarIntencaoOrdem(conexaoIntencao, {
@@ -394,7 +397,7 @@ function criarArbitroFinanceiroAutoTrader(deps = {}) {
             if (!(await traderPertenceMesaAtual(trader.id))) {
                 log.warn(
                     `⛔ MC22-M | Trader ${trader.id} ignorado pelo árbitro: `
-                    + `não pertence à mesa ${mesaRuntime.codigo}.`
+                    + `não está OPERANDO na mesa ${mesaRuntime.codigo}.`
                 );
                 continue;
             }
