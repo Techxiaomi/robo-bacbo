@@ -370,6 +370,55 @@ function registerFanInExpectation(fanin, signal, targets, resultTimeoutMs) {
     return expectedTargets;
 }
 
+async function publishTerminalFinancialFailure({
+    publisher,
+    consolidatedChannel,
+    signal,
+    reason,
+    expectedAccounts = 0
+}) {
+    const expected = Number.isSafeInteger(Number(expectedAccounts))
+        && Number(expectedAccounts) >= 0
+        ? Number(expectedAccounts)
+        : 0;
+
+    const motivo = String(
+        reason || 'SIGNAL_ROUTER_TERMINAL_REJECTION'
+    ).trim().slice(0, 1000);
+
+    const result = Object.freeze({
+        action: 'multi_account_bet_result',
+        signal_id: signal.signal_id,
+        order_id: signal.signal_id,
+        table_key: signal.table_key,
+        status: 'FAILED',
+        executor_status: 'FALHOU',
+        expected_accounts: expected,
+        success_accounts: 0,
+        failed_accounts: expected,
+        accounts: Object.freeze([]),
+        confirmacao: null,
+        dry_run: false,
+        router_terminal_rejection: true,
+        motivo,
+        completed_at: Date.now()
+    });
+
+    const subscribers = await publisher.publish(
+        consolidatedChannel,
+        JSON.stringify(result)
+    );
+
+    console.log(
+        `SIGNAL_ROUTER_TERMINAL_REJECTION signal=${signal.signal_id} ` +
+        `table=${signal.table_key} reason=${motivo} ` +
+        `expected_accounts=${expected} dispatch=0 ` +
+        `result_subscribers=${subscribers}`
+    );
+
+    return result;
+}
+
 function buildDryRunConsolidated(signal, targets, now = Date.now()) {
     const expectedTargets = fanInTargets(signal, targets);
     const accounts = expectedTargets.map(item => ({
@@ -527,12 +576,39 @@ async function main() {
             let targets;
             try { targets = await cache.targets(signal.table_key); }
             catch (error) {
-                console.error(`SIGNAL_ROUTER_TARGET_DISCOVERY_FAILED signal=${signal.signal_id}: ${error?.message || error}`);
+                console.error(
+                    `SIGNAL_ROUTER_TARGET_DISCOVERY_FAILED signal=${signal.signal_id}: ${error?.message || error}`
+                );
+
+                if (signal.action === 'place_bet') {
+                    await publishTerminalFinancialFailure({
+                        publisher,
+                        consolidatedChannel,
+                        signal,
+                        reason:
+                            `SIGNAL_ROUTER_TARGET_DISCOVERY_FAILED: ${error?.message || error}`,
+                        expectedAccounts: 0
+                    });
+                }
+
                 return;
             }
             console.log(`SIGNAL_ROUTER_TARGETS signal=${signal.signal_id} count=${targets.length}`);
             if (targets.length === 0) {
-                console.warn(`SIGNAL_ROUTER_NO_TARGETS signal=${signal.signal_id} table=${signal.table_key}`);
+                console.warn(
+                    `SIGNAL_ROUTER_NO_TARGETS signal=${signal.signal_id} table=${signal.table_key}`
+                );
+
+                if (signal.action === 'place_bet') {
+                    await publishTerminalFinancialFailure({
+                        publisher,
+                        consolidatedChannel,
+                        signal,
+                        reason: 'SIGNAL_ROUTER_NO_TARGETS',
+                        expectedAccounts: 0
+                    });
+                }
+
                 return;
             }
 
@@ -542,10 +618,22 @@ async function main() {
                 try {
                     traderScope = await traderScopeResolver.resolve(signal);
                 } catch (error) {
+                    const terminalReason =
+                        `SIGNAL_ROUTER_TRADER_SCOPE_REJECTED: ${error?.message || error}`;
+
                     console.error(
                         `SIGNAL_ROUTER_TRADER_SCOPE_REJECTED signal=${signal.signal_id} ` +
                         `table=${signal.table_key} reason=${error?.message || error} dispatch=0`
                     );
+
+                    await publishTerminalFinancialFailure({
+                        publisher,
+                        consolidatedChannel,
+                        signal,
+                        reason: terminalReason,
+                        expectedAccounts: 0
+                    });
+
                     return;
                 }
 
@@ -563,13 +651,34 @@ async function main() {
                         `SIGNAL_ROUTER_NO_BOUND_TARGETS signal=${signal.signal_id} trader=${traderScope.trader_id} ` +
                         `table=${signal.table_key} dispatch=0`
                     );
+
+                    await publishTerminalFinancialFailure({
+                        publisher,
+                        consolidatedChannel,
+                        signal,
+                        reason: 'SIGNAL_ROUTER_NO_BOUND_TARGETS',
+                        expectedAccounts: 0
+                    });
+
                     return;
                 }
 
                 let availability;
                 try { availability = await resolveOnlineTargets(publisher, targets); }
                 catch (error) {
-                    console.error(`SIGNAL_ROUTER_ONLINE_DISCOVERY_FAILED signal=${signal.signal_id}: ${error?.message || error}`);
+                    console.error(
+                        `SIGNAL_ROUTER_ONLINE_DISCOVERY_FAILED signal=${signal.signal_id}: ${error?.message || error}`
+                    );
+
+                    await publishTerminalFinancialFailure({
+                        publisher,
+                        consolidatedChannel,
+                        signal,
+                        reason:
+                            `SIGNAL_ROUTER_ONLINE_DISCOVERY_FAILED: ${error?.message || error}`,
+                        expectedAccounts: targets.length
+                    });
+
                     return;
                 }
                 dispatchTargets = availability.filter(item => item.subscribers > 0).map(item => item.target);
@@ -586,10 +695,31 @@ async function main() {
                         `GLOBAL_EXPOSURE_LIMIT_EXCEEDED signal=${signal.signal_id} ` +
                         `global=${globalExposure.toFixed(2)} limit=${globalMaxExposure.toFixed(2)} online=${online}`
                     );
+
+                    await publishTerminalFinancialFailure({
+                        publisher,
+                        consolidatedChannel,
+                        signal,
+                        reason:
+                            `GLOBAL_EXPOSURE_LIMIT_EXCEEDED global=${globalExposure.toFixed(2)} limit=${globalMaxExposure.toFixed(2)}`,
+                        expectedAccounts: online
+                    });
+
                     return;
                 }
                 if (online === 0) {
-                    console.warn(`SIGNAL_ROUTER_NO_ONLINE_TARGETS signal=${signal.signal_id}`);
+                    console.warn(
+                        `SIGNAL_ROUTER_NO_ONLINE_TARGETS signal=${signal.signal_id}`
+                    );
+
+                    await publishTerminalFinancialFailure({
+                        publisher,
+                        consolidatedChannel,
+                        signal,
+                        reason: 'SIGNAL_ROUTER_NO_ONLINE_TARGETS',
+                        expectedAccounts: targets.length
+                    });
+
                     return;
                 }
                 if (dryRun) {
@@ -680,6 +810,7 @@ module.exports = {
     resolveOnlineTargets,
     fanInTargets,
     registerFanInExpectation,
+    publishTerminalFinancialFailure,
     buildDryRunConsolidated,
     TargetCache,
     RedisSignalDedup
