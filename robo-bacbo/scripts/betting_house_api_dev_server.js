@@ -11,7 +11,11 @@ require('../env_loader').loadEnvFile(path.join(__dirname, '..', '..', '.env'));
 const { installBettingHouseApi } = require('../betting_house_api');
 const { readSupervisorSnapshot } = require('../supervisor_telemetry_store');
 const { readRiskPolicyObservability } = require('../risk_policy_observability');
-const { updateTechnicalCaps } = require('../system_config_service');
+const {
+    readSystemConfig,
+    updateSystemConfig,
+    resetSystemConfig
+} = require('../system_config_service');
 
 const projectRoot = path.join(__dirname, '..', '..');
 const runtimeDir = path.join(projectRoot, 'runtime');
@@ -102,27 +106,47 @@ async function main() {
         }
     });
 
+    app.get('/api/financial-safety/system-config', async (req, res) => {
+        res.set('Cache-Control', 'no-store');
+        try {
+            res.json({ ok: true, config: await readSystemConfig({ dbPool }) });
+        } catch (error) {
+            res.status(503).json({ ok: false, reason: error?.message || 'SYSTEM_CONFIG_READ_FAILED' });
+        }
+    });
+
     app.put('/api/financial-safety/system-config', async (req, res) => {
         res.set('Cache-Control', 'no-store');
-        if (req.body?.financial_dry_run === false) {
-            res.status(409).json({ ok: false, reason: 'FINANCIAL_DRY_RUN_DISABLE_FORBIDDEN' });
-            return;
-        }
         try {
-            const config = await updateTechnicalCaps({
+            const config = await updateSystemConfig({
                 dbPool,
                 globalRouterCap: req.body?.global_router_cap,
-                perBridgeCap: req.body?.per_bridge_cap
+                perBridgeCap: req.body?.per_bridge_cap,
+                financialDryRun: req.body?.financial_dry_run
             });
             console.warn(
                 'SYSTEM_CONFIG_UPDATED',
-                `global_router_cap=${config.global_router_cap.toFixed(2)}`,
-                `per_bridge_cap=${config.per_bridge_cap.toFixed(2)}`,
-                'financial_dry_run=true'
+                `requested_global_router_cap=${config.requested.global_router_cap.toFixed(2)}`,
+                `effective_global_router_cap=${config.effective.global_router_cap.toFixed(2)}`,
+                `requested_per_bridge_cap=${config.requested.per_bridge_cap.toFixed(2)}`,
+                `effective_per_bridge_cap=${config.effective.per_bridge_cap.toFixed(2)}`,
+                `requested_financial_dry_run=${config.requested.financial_dry_run}`,
+                `effective_financial_dry_run=${config.effective.financial_dry_run}`
             );
             res.json({ ok: true, config });
         } catch (error) {
             res.status(400).json({ ok: false, reason: error?.message || 'SYSTEM_CONFIG_UPDATE_FAILED' });
+        }
+    });
+
+    app.delete('/api/financial-safety/system-config', async (req, res) => {
+        res.set('Cache-Control', 'no-store');
+        try {
+            const config = await resetSystemConfig({ dbPool });
+            console.warn('SYSTEM_CONFIG_RESET', 'source=SAFE_DEFAULTS');
+            res.json({ ok: true, config });
+        } catch (error) {
+            res.status(500).json({ ok: false, reason: error?.message || 'SYSTEM_CONFIG_RESET_FAILED' });
         }
     });
 

@@ -78,10 +78,15 @@ async function readRiskPolicyObservability({ dbPool }) {
         technical_caps: Object.freeze({
             global_router_cap: systemConfig.global_router_cap,
             per_bridge_cap: systemConfig.per_bridge_cap,
+            requested_global_router_cap: systemConfig.requested.global_router_cap,
+            requested_per_bridge_cap: systemConfig.requested.per_bridge_cap,
+            clamped: systemConfig.clamped,
+            discrepancies: systemConfig.discrepancies,
             source: systemConfig.source === 'system_configs' ? 'system_configs' : 'safe-defaults'
         }),
         financial_mode: Object.freeze({
             dry_run: true,
+            requested_dry_run: systemConfig.requested.financial_dry_run,
             configured: true,
             source: systemConfig.source === 'system_configs' ? 'system_configs.financial_dry_run' : 'safe-defaults',
             reason: systemConfig.reason,
