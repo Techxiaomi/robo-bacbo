@@ -80,15 +80,19 @@ function instalarCatalogoContasAutoTrader() {
 
     getOriginal = proto.get;
     proto.get = function getComCatalogo(path, ...handlers) {
-        if (!this.locals.__traderAccountCatalogInstalled) {
+        if (
+            path === '/api/auto-traders'
+            && !this.locals.__traderAccountCatalogInstalled
+        ) {
             this.locals.__traderAccountCatalogInstalled = true;
             getOriginal.call(this, '/api/trader-account-catalog', handler);
+            console.log('TRADER_ACCOUNT_CATALOG_ROUTE_INSTALLED=true anchor=/api/auto-traders');
         }
         return getOriginal.call(this, path, ...handlers);
     };
 
     installed = true;
-    console.log('TRADER_ACCOUNT_CATALOG_READY=true');
+    console.log('TRADER_ACCOUNT_CATALOG_READY=true mode=AUTH_ORDER_ANCHORED');
     return true;
 }
 
