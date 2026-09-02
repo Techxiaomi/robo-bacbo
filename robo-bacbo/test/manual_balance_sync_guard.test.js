@@ -42,7 +42,7 @@ test('UI bloqueia cliques repetidos e restaura botão em finally', () => {
 });
 
 test('bootstrap instala override backend e guarda UI antes do uso', () => {
-    assert.match(start, /installAutoTraderStructuralIntegrity\(\);\s*installManualTraderBalanceSync\(\);/);
+    assert.match(start, /installManualTraderBalanceSync\(\);\s*installAutoTraderStructuralIntegrity\(\);/);
     assert.match(index, /trader-balance-sync-guard-ui\.js/);
     assert.match(index, /__traderAccountBindingUi\.install\(\)/);
     assert.match(index, /__traderBalanceSyncGuardUi\.install\(\)/);
