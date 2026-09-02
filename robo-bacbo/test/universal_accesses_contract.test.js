@@ -1,0 +1,50 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const root = path.join(__dirname, '..');
+const repoRoot = path.join(root, '..');
+
+const server = fs.readFileSync(path.join(root, 'scripts', 'betting_house_api_dev_server.js'), 'utf8');
+const accessLink = fs.readFileSync(path.join(root, 'public', 'universal-access-link.js'), 'utf8');
+const accessPage = fs.readFileSync(path.join(root, 'public', 'accesses.html'), 'utf8');
+const index = fs.readFileSync(path.join(root, 'public', 'index.html'), 'utf8');
+const launcher = fs.readFileSync(path.join(repoRoot, 'atalhos', '91_FINANCEIRO_ABAS.cmd'), 'utf8');
+const stopScript = fs.readFileSync(path.join(repoRoot, 'atalhos', 'Stop-Sistema.ps1'), 'utf8');
+const accessShortcut = fs.readFileSync(path.join(repoRoot, 'atalhos', '92_ACESSOS.cmd'), 'utf8');
+
+test('portal universal usa somente a porta administrativa 3010', () => {
+    assert.match(server, /BETTING_HOUSE_API_DEV_PORT \|\| 3010/);
+    assert.match(server, /app\.get\('\/accesses'/);
+    assert.match(server, /app\.get\('\/betting-houses'/);
+    assert.match(server, /app\.get\('\/supervisor'/);
+    assert.match(accessShortcut, /127\.0\.0\.1:3010\/accesses/);
+    assert.doesNotMatch(accessShortcut, /:3000|:3001/);
+});
+
+test('portal agrega Casas Contas e Processos de Traders', () => {
+    assert.match(accessPage, /Casas e Contas/);
+    assert.match(accessPage, /Processos de Traders/);
+    assert.match(accessPage, /href="\/betting-houses"/);
+    assert.match(accessPage, /href="\/supervisor"/);
+});
+
+test('link discreto do painel abre Acessos em nova aba', () => {
+    assert.match(accessLink, /http:\/\/127\.0\.0\.1:3010\/accesses/);
+    assert.match(accessLink, /link\.target = '_blank'/);
+    assert.match(accessLink, /link\.rel = 'noopener'/);
+    assert.match(accessLink, /🔐 Acessos/);
+    assert.match(index, /\/universal-access-link\.js/);
+    assert.match(index, /__universalAccessLink\.install\(\)/);
+});
+
+test('stack completa inclui aba Acessos e encerramento cobre porta 3010', () => {
+    assert.match(launcher, /08_ACESSOS_SERVER\.cmd/);
+    assert.match(launcher, /--title "Acessos"/);
+    assert.match(stopScript, /08_ACESSOS_SERVER\.cmd/);
+    assert.match(stopScript, /3010/);
+    assert.match(stopScript, /betting_house_api_dev_server/);
+});
