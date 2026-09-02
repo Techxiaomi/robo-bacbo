@@ -20,6 +20,27 @@ function filterTargetsByAccountIds(targets, accountIds) {
         .sort((a, b) => Number(a.account_id) - Number(b.account_id));
 }
 
+function moneyLog(value) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number.toFixed(2) : 'n/a';
+}
+
+function logRiskHierarchy(log, { traderId, tableKey, risk }) {
+    const traderLimits = risk?.trader_limits || {};
+    const technicalCaps = risk?.technical_caps || {};
+    log.log(
+        `RISK_POLICY_HIERARCHY trader=${traderId} table=${tableKey} ` +
+        `approved=${risk?.approved === true} reason=${risk?.reason || '-'} ` +
+        `trader_stop_loss=${moneyLog(traderLimits.stop_loss)} ` +
+        `trader_stop_win=${moneyLog(traderLimits.stop_win)} ` +
+        `technical_global_cap=${moneyLog(technicalCaps.global_exposure)} ` +
+        `technical_bridge_cap=${moneyLog(technicalCaps.per_bridge_exposure)} ` +
+        `per_account_exposure=${moneyLog(risk?.per_account_exposure)} ` +
+        `aggregate_exposure=${moneyLog(risk?.aggregate_exposure)} ` +
+        `saldo_atual=${moneyLog(risk?.saldo_atual)}`
+    );
+}
+
 class FinancialTraderScopeResolver {
     constructor({ dbPool, log = console }) {
         if (!dbPool || typeof dbPool.query !== 'function') {
@@ -120,23 +141,15 @@ class FinancialTraderScopeResolver {
             saldoAtual: row.saldo_atual,
             configJson: row.config_json
         });
+
+        logRiskHierarchy(this.log, { traderId, tableKey, risk });
+
         if (!risk.approved) {
             throw new Error(
                 `EXPOSURE_REJECTED reason=${risk.reason} trader=${traderId} ` +
                 `aggregate=${Number(risk.aggregate_exposure || 0).toFixed(2)}`
             );
         }
-
-        this.log.log(
-            `RISK_POLICY_HIERARCHY trader=${traderId} table=${tableKey} ` +
-            `trader_stop_loss=${Number(risk.trader_limits.stop_loss).toFixed(2)} ` +
-            `trader_stop_win=${Number(risk.trader_limits.stop_win).toFixed(2)} ` +
-            `technical_global_cap=${Number(risk.technical_caps.global_exposure).toFixed(2)} ` +
-            `technical_bridge_cap=${Number(risk.technical_caps.per_bridge_exposure).toFixed(2)} ` +
-            `per_account_exposure=${Number(risk.per_account_exposure).toFixed(2)} ` +
-            `aggregate_exposure=${Number(risk.aggregate_exposure).toFixed(2)} ` +
-            `saldo_atual=${Number(risk.saldo_atual).toFixed(2)}`
-        );
 
         return freezeScope({
             trader_id: traderId,
@@ -149,5 +162,6 @@ class FinancialTraderScopeResolver {
 
 module.exports = {
     filterTargetsByAccountIds,
+    logRiskHierarchy,
     FinancialTraderScopeResolver
 };
