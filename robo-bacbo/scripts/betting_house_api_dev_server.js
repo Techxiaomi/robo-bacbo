@@ -10,6 +10,7 @@ require('../env_loader').loadEnvFile(path.join(__dirname, '..', '..', '.env'));
 
 const { installBettingHouseApi } = require('../betting_house_api');
 const { readSupervisorSnapshot } = require('../supervisor_telemetry_store');
+const { readRiskPolicyObservability } = require('../risk_policy_observability');
 
 const projectRoot = path.join(__dirname, '..', '..');
 const runtimeDir = path.join(projectRoot, 'runtime');
@@ -126,6 +127,21 @@ async function main() {
     app.get('/api/financial-safety/status', (req, res) => {
         res.set('Cache-Control', 'no-store');
         res.json(readFinancialSafetyStatus());
+    });
+
+    app.get('/api/financial-safety/risk-policy', async (req, res) => {
+        res.set('Cache-Control', 'no-store');
+        try {
+            const snapshot = await readRiskPolicyObservability({ dbPool, projectRoot });
+            res.json(snapshot);
+        } catch (error) {
+            console.error('RISK_POLICY_OBSERVABILITY_FAILED', error?.message || error);
+            res.status(503).json({
+                ok: false,
+                fail_closed: true,
+                reason: 'RISK_POLICY_OBSERVABILITY_UNAVAILABLE'
+            });
+        }
     });
 
     app.post('/api/financial-safety/disarm', (req, res) => {
