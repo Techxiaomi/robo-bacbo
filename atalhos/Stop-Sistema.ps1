@@ -13,7 +13,8 @@ $shortcutNames = @(
     '04_COLETOR_BR.cmd',
     '05_NODE_BR.cmd',
     '06_MASTER_SUPERVISOR.cmd',
-    '07_SIGNAL_ROUTER.cmd'
+    '07_SIGNAL_ROUTER.cmd',
+    '08_ACESSOS_SERVER.cmd'
 )
 
 function Get-ProcessSnapshot {
@@ -49,7 +50,6 @@ Write-Host ''
 $stopped = [System.Collections.Generic.HashSet[int]]::new()
 $snapshot = @(Get-ProcessSnapshot)
 
-# 1) Derruba as sete arvores iniciadas pelas abas do Windows Terminal.
 foreach ($shortcut in $shortcutNames) {
     $escaped = [regex]::Escape((Join-Path $atalhos $shortcut))
     $matches = $snapshot | Where-Object {
@@ -69,10 +69,10 @@ foreach ($shortcut in $shortcutNames) {
 Start-Sleep -Milliseconds 800
 $snapshot = @(Get-ProcessSnapshot)
 
-# 2) Fallbacks para processos que podem ter sido destacados da aba raiz.
 $projectPatterns = @(
     'scripts\\master_supervisor\.js',
     'scripts\\signal_router\.js',
+    'scripts\\betting_house_api_dev_server\.js',
     'scripts\\run_live_bridge\.js',
     'tipminer_collector\.py',
     'live_bridge\.py',
@@ -100,15 +100,13 @@ foreach ($item in $snapshot) {
     }
 }
 
-# 3) Fallback por portas exclusivas da stack local.
-foreach ($port in @(3000, 3001, 6379)) {
+foreach ($port in @(3000, 3001, 3010, 6379)) {
     $ownerPid = Get-ListeningPid -Port $port
     if ($ownerPid -gt 0 -and $stopped.Add($ownerPid)) {
         [void](Stop-ProcessTree -ProcessId $ownerPid -Label "porta $port")
     }
 }
 
-# 4) GarnetServer pode sobreviver ao supervisor em caso de falha abrupta.
 Get-Process -Name 'GarnetServer' -ErrorAction SilentlyContinue | ForEach-Object {
     $pidValue = [int]$_.Id
     if ($stopped.Add($pidValue)) {
@@ -119,7 +117,7 @@ Get-Process -Name 'GarnetServer' -ErrorAction SilentlyContinue | ForEach-Object 
 Start-Sleep -Seconds 1
 
 $remaining = @()
-foreach ($port in @(3000, 3001, 6379)) {
+foreach ($port in @(3000, 3001, 3010, 6379)) {
     $ownerPid = Get-ListeningPid -Port $port
     if ($ownerPid -gt 0) {
         $remaining += "porta $port -> PID $ownerPid"
@@ -135,5 +133,5 @@ if ($remaining.Count -gt 0) {
 
 Write-Host ''
 Write-Host '[OK] Stack BACBO encerrada para manutencao.' -ForegroundColor Green
-Write-Host '     Portas 3000, 3001 e 6379 sem listeners.' -ForegroundColor Green
+Write-Host '     Portas 3000, 3001, 3010 e 6379 sem listeners.' -ForegroundColor Green
 exit 0
