@@ -151,7 +151,7 @@ test('MC22-Z-D: atualizacoes de saldo persistem somente na mesa runtime', () => 
     );
 });
 
-test('MC22-Z-D: BACBO_BR conhecida continua financeiramente bloqueada e canais globais', () => {
+test('MC22-Z-D: BACBO_BR conhecida e financeiramente autorizada e canais globais do executor permanecem', () => {
     const codigoSegundaMesa =
         ['BACBO', 'BR'].join('_');
 
@@ -159,7 +159,7 @@ test('MC22-Z-D: BACBO_BR conhecida continua financeiramente bloqueada e canais g
         financeiro.mesaFinanceiraPermitida(
             codigoSegundaMesa
         ),
-        false
+        true
     );
 
     const executor = fs.readFileSync(

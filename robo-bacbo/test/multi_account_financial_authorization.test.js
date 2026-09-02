@@ -122,8 +122,16 @@ test('bootstrap instala autorizador scoped antes do bot2', () => {
     assert.ok(botIndex > installIndex);
 });
 
-test('Signal Router permanece travado em dry-run', () => {
+test('Signal Router recebe configuracao fail-closed pelo DB runner', () => {
     const launcher = fs.readFileSync(path.join(__dirname, '..', '..', 'atalhos', '07_SIGNAL_ROUTER.cmd'), 'utf8');
-    assert.match(launcher, /SIGNAL_ROUTER_FINANCIAL_DRY_RUN=true/i);
+    assert.match(
+        launcher,
+        /node\s+scripts[\\\/]+run_with_system_config\.js\s+scripts[\\\/]+signal_router\.js/i
+    );
+
+    assert.doesNotMatch(
+        launcher,
+        /SIGNAL_ROUTER_FINANCIAL_DRY_RUN\s*=/i
+    );
     assert.doesNotMatch(launcher, /SIGNAL_ROUTER_FINANCIAL_DRY_RUN=false/i);
 });

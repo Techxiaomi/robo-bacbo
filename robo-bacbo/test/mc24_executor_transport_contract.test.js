@@ -29,14 +29,24 @@ test('MC24-A: plano composto preserva identidade alvo/valor no transporte', () =
     );
 });
 
-test('MC24-A: Redis encaminha identidade e pernas compostas ao executor', () => {
+test('MC24-A: Signal Router recebe identidade e pernas compostas do runtime', () => {
     assert.match(
         redisRuntime,
-        /action:\s*'place_bet',\s*order_id:\s*orderId,\s*alvo:\s*dados\.alvo,\s*valor:\s*dados\.valor/s
+        /const signal = buildPlaceBetSignal\(\{\s*signal_id:\s*orderId,\s*source:\s*'bot2_coletor',\s*event_id:\s*orderId,\s*table_key:\s*tableKey,\s*alvo:\s*dados\.alvo,\s*valor_base:\s*dados\.valor,/s
     );
 
     assert.match(
         redisRuntime,
-        /if\s*\(Array\.isArray\(dados\.apostas\).*comando\.apostas\s*=\s*dados\.apostas/s
+        /\.\.\.\(Array\.isArray\(dados\.apostas\)\s*&&\s*dados\.apostas\.length\s*>\s*0\s*\?\s*\{\s*apostas:\s*dados\.apostas\s*\}\s*:\s*\{\}\)/
+    );
+
+    assert.match(
+        redisRuntime,
+        /publisher\.publish\(GLOBAL_SIGNAL_CHANNEL,\s*JSON\.stringify\(signal\)\)/
+    );
+
+    assert.doesNotMatch(
+        redisRuntime,
+        /REDIS_COMMAND_CHANNEL/
     );
 });

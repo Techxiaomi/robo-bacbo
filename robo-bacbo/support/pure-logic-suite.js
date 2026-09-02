@@ -89,7 +89,8 @@ function carregarLogicaPura() {
         String,
         Array,
         Object,
-        JSON
+        JSON,
+        resolveRiskPolicy: require("../risk_policy").resolveRiskPolicy
     };
     contexto.INTERRUPCOES_COLETOR_PROCESSADAS = new Map();
     contexto.LIMITE_INTERRUPCOES_COLETOR_MEMORIA = 1000;

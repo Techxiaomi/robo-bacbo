@@ -210,29 +210,29 @@ test('MC22-Y-B: history, ACK, mapa e ROAD usam escopo de mesa', () => {
     );
 });
 
-test('MC22-Y-B: Redis financeiro do executor permanece global', () => {
-    const source = fs.readFileSync(
-        path.join(root, 'redis_runtime_v3.js'),
+test('MC22-Y-B: financeiro usa exclusivamente o Signal Router global', () => {
+    const runtimeFinanceiro = fs.readFileSync(
+        require.resolve('../redis_runtime_v3.js'),
         'utf8'
     );
 
     assert.match(
-        source,
-        /const REDIS_COMMAND_CHANNEL = 'auto_trader_commands';/
+        runtimeFinanceiro,
+        /buildPlaceBetSignal/
     );
 
     assert.match(
-        source,
-        /const REDIS_RESPONSE_CHANNEL = 'auto_trader_responses';/
+        runtimeFinanceiro,
+        /GLOBAL_SIGNAL_CHANNEL/
+    );
+
+    assert.match(
+        runtimeFinanceiro,
+        /publisher\.publish\(GLOBAL_SIGNAL_CHANNEL,\s*JSON\.stringify\(signal\)\)/
     );
 
     assert.doesNotMatch(
-        source,
-        /REDIS_COMMAND_CHANNEL\s*=\s*ESCOPO_REDIS_MESA/
-    );
-
-    assert.doesNotMatch(
-        source,
-        /REDIS_RESPONSE_CHANNEL\s*=\s*ESCOPO_REDIS_MESA/
+        runtimeFinanceiro,
+        /REDIS_COMMAND_CHANNEL/
     );
 });
