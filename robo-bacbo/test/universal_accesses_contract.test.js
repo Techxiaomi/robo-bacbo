@@ -60,3 +60,21 @@ test('stack completa inclui aba Acessos e encerramento cobre porta 3010', () => 
     assert.match(stopScript, /3010/);
     assert.match(stopScript, /betting_house_api_dev_server/);
 });
+
+test('Acessos expoe somente status e desarme financeiro fail-closed', () => {
+    assert.match(server, /app\.get\('\/api\/financial-safety\/status'/);
+    assert.match(server, /app\.post\('\/api\/financial-safety\/disarm'/);
+    assert.match(server, /auto-trader\.arm/);
+    assert.match(server, /Disarm-AutoTrader\.ps1/);
+    assert.match(server, /runtimeMustStop/);
+    assert.match(server, /scheduleRuntimeDisarm\(\)/);
+
+    assert.match(accessPage, /Segurança Financeira/);
+    assert.match(accessPage, /BLOQUEAR EXECUÇÃO/);
+    assert.match(accessPage, /\/api\/financial-safety\/status/);
+    assert.match(accessPage, /\/api\/financial-safety\/disarm/);
+    assert.match(accessPage, /não pode habilitá-la/);
+
+    assert.doesNotMatch(server, /financial-safety\/arm/);
+    assert.doesNotMatch(accessPage, /HABILITAR EXECUÇÃO/);
+});
