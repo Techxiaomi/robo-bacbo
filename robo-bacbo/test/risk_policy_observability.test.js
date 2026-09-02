@@ -78,9 +78,14 @@ test('observability separates Trader limits, DB technical caps and forced DRY RU
     assert.deepEqual(snapshot.technical_caps, {
         global_router_cap: 12.5,
         per_bridge_cap: 3.25,
+        requested_global_router_cap: 12.5,
+        requested_per_bridge_cap: 3.25,
+        clamped: false,
+        discrepancies: [],
         source: 'system_configs'
     });
     assert.equal(snapshot.financial_mode.dry_run, true);
+    assert.equal(snapshot.financial_mode.requested_dry_run, true);
     assert.equal(snapshot.financial_mode.real_dispatch_blocked, true);
     assert.equal(snapshot.financial_mode.immutable, true);
     assert.equal(snapshot.financial_mode.source, 'system_configs.financial_dry_run');
@@ -98,6 +103,7 @@ test('stored financial_dry_run=false remains blocked and marks observability fai
     const snapshot = await readRiskPolicyObservability({ dbPool });
     assert.equal(snapshot.ok, false);
     assert.equal(snapshot.fail_closed, true);
+    assert.equal(snapshot.financial_mode.requested_dry_run, false);
     assert.equal(snapshot.financial_mode.dry_run, true);
     assert.equal(snapshot.financial_mode.real_dispatch_blocked, true);
     assert.equal(snapshot.financial_mode.immutable, true);
