@@ -157,6 +157,6 @@ test('Acessos exposes CRUD for requested config without duplicating safe envelop
     assert.match(ui, /cfg-dry-run/);
     assert.doesNotMatch(ui, /cfg-dry-run[^>]*disabled/);
     assert.match(ui, /method: 'DELETE'/);
-    assert.match(ui, /requested=/);
-    assert.match(ui, /effective=/);
+    assert.match(ui, /requested_value/);
+    assert.match(ui, /effective_value/);
 });
