@@ -19,8 +19,27 @@
         .title { margin-top:12px; font-size:18px; font-weight:800; }
         .desc { margin-top:8px; color:#aaa; font-size:13px; line-height:1.5; }
         .cta { margin-top:18px; color:#8fc7ff; font-size:12px; font-weight:800; }
+        .safety { margin-top:16px; padding:20px; border:1px solid #333; border-radius:12px; background:#181818; }
+        .safety-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; }
+        .safety-title { font-size:18px; font-weight:800; }
+        .safety-state { display:inline-flex; align-items:center; padding:7px 10px; border-radius:999px; font-size:11px; font-weight:900; letter-spacing:.4px; }
+        .safety-state.blocked { background:#12351f; color:#7be495; border:1px solid #245d35; }
+        .safety-state.enabled { background:#3b1515; color:#ff9c9c; border:1px solid #6f2a2a; }
+        .safety-state.unknown { background:#322b15; color:#ffd774; border:1px solid #665523; }
+        .safety-meta { margin-top:14px; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
+        .meta { padding:10px 12px; border-radius:8px; background:#111; border:1px solid #2c2c2c; }
+        .meta-label { color:#777; font-size:10px; text-transform:uppercase; font-weight:800; letter-spacing:.5px; }
+        .meta-value { margin-top:4px; font-size:12px; font-weight:800; color:#ddd; word-break:break-word; }
+        .safety-actions { margin-top:16px; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+        .kill { border:1px solid #7a2e2e; background:#541c1c; color:#fff; border-radius:8px; padding:10px 14px; font-size:12px; font-weight:900; cursor:pointer; }
+        .kill:hover { background:#6a2323; }
+        .kill:disabled { opacity:.5; cursor:default; }
+        .feedback { color:#aaa; font-size:12px; line-height:1.4; }
         .footer { margin-top:24px; color:#666; font-size:11px; }
-        @media (max-width:700px) { .grid { grid-template-columns:1fr; } }
+        @media (max-width:700px) {
+            .grid, .safety-meta { grid-template-columns:1fr; }
+            .safety-head { flex-direction:column; }
+        }
     </style>
 </head>
 <body>
@@ -49,7 +68,101 @@
         </a>
     </div>
 
+    <section class="safety" aria-labelledby="financial-safety-title">
+        <div class="safety-head">
+            <div>
+                <div id="financial-safety-title" class="safety-title">🛡️ Segurança Financeira</div>
+                <div class="desc">Estado universal do fusível financeiro. Esta página pode bloquear a execução imediatamente, mas não pode habilitá-la.</div>
+            </div>
+            <div id="financial-state" class="safety-state unknown">CONSULTANDO...</div>
+        </div>
+
+        <div class="safety-meta">
+            <div class="meta">
+                <div class="meta-label">Runtime atual</div>
+                <div id="financial-runtime" class="meta-value">—</div>
+            </div>
+            <div class="meta">
+                <div class="meta-label">Próximo startup</div>
+                <div id="financial-next-start" class="meta-value">—</div>
+            </div>
+            <div class="meta">
+                <div class="meta-label">Leitura da sessão</div>
+                <div id="financial-session" class="meta-value">—</div>
+            </div>
+        </div>
+
+        <div class="safety-actions">
+            <button id="financial-disarm" class="kill" type="button">BLOQUEAR EXECUÇÃO</button>
+            <div id="financial-feedback" class="feedback">O bloqueio remove qualquer armamento futuro e, se o runtime financeiro estiver ativo, encerra a stack para garantir fail-closed.</div>
+        </div>
+    </section>
+
     <div class="footer">Portal universal. Não pertence a uma mesa específica e não depende do Node BR ou Node INT para servir a interface.</div>
 </div>
+
+<script>
+(() => {
+    const stateEl = document.getElementById('financial-state');
+    const runtimeEl = document.getElementById('financial-runtime');
+    const nextStartEl = document.getElementById('financial-next-start');
+    const sessionEl = document.getElementById('financial-session');
+    const feedbackEl = document.getElementById('financial-feedback');
+    const button = document.getElementById('financial-disarm');
+
+    function render(status) {
+        const blocked = status?.blocked === true;
+        stateEl.className = `safety-state ${blocked ? 'blocked' : 'enabled'}`;
+        stateEl.textContent = blocked ? '🔒 BLOQUEADO' : '⚠️ FINANCEIRO HABILITADO';
+        runtimeEl.textContent = status?.runtime_active ? 'ATIVO' : 'BLOQUEADO';
+        nextStartEl.textContent = status?.armed_for_next_startup ? 'ARMADO' : 'BLOQUEADO';
+        sessionEl.textContent = status?.session_readable === false ? 'FALHA — FAIL-CLOSED' : 'OK';
+    }
+
+    async function refresh() {
+        try {
+            const response = await fetch('/api/financial-safety/status', { cache: 'no-store' });
+            if (!response.ok) throw new Error(`HTTP_${response.status}`);
+            render(await response.json());
+        } catch (error) {
+            stateEl.className = 'safety-state unknown';
+            stateEl.textContent = '⚠️ ESTADO INDISPONÍVEL';
+            runtimeEl.textContent = 'DESCONHECIDO';
+            nextStartEl.textContent = 'DESCONHECIDO';
+            sessionEl.textContent = 'FALHA';
+        }
+    }
+
+    button.addEventListener('click', async () => {
+        if (!window.confirm('Bloquear a execução financeira agora? Se o runtime estiver ativo, a stack será encerrada.')) return;
+
+        button.disabled = true;
+        feedbackEl.textContent = 'Solicitando bloqueio fail-closed...';
+
+        try {
+            const response = await fetch('/api/financial-safety/disarm', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: '{}'
+            });
+            const result = await response.json();
+            if (!response.ok) throw new Error(result?.reason || `HTTP_${response.status}`);
+
+            feedbackEl.textContent = result.runtime_stop_requested
+                ? 'Bloqueio solicitado. A stack será encerrada para garantir fail-closed.'
+                : 'Execução financeira bloqueada.';
+
+            await refresh();
+        } catch (error) {
+            feedbackEl.textContent = `Falha ao confirmar o bloqueio: ${error.message}`;
+        } finally {
+            button.disabled = false;
+        }
+    });
+
+    void refresh();
+    window.setInterval(refresh, 5000);
+})();
+</script>
 </body>
 </html>
