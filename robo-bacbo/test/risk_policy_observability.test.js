@@ -84,6 +84,7 @@ test('observability separates Trader limits, DB technical caps and forced DRY RU
     assert.equal(snapshot.financial_mode.real_dispatch_blocked, true);
     assert.equal(snapshot.financial_mode.immutable, true);
     assert.equal(snapshot.financial_mode.source, 'system_configs.financial_dry_run');
+    assert.equal(snapshot.business_policy.available, true);
     assert.equal(snapshot.business_policy.active_traders[0].stop_loss, 30);
     assert.equal(snapshot.business_policy.active_traders[0].stop_win, 20);
 });
@@ -95,7 +96,7 @@ test('stored financial_dry_run=false remains blocked and marks observability fai
     });
 
     const snapshot = await readRiskPolicyObservability({ dbPool });
-    assert.equal(snapshot.ok, true);
+    assert.equal(snapshot.ok, false);
     assert.equal(snapshot.fail_closed, true);
     assert.equal(snapshot.financial_mode.dry_run, true);
     assert.equal(snapshot.financial_mode.real_dispatch_blocked, true);
@@ -113,11 +114,12 @@ test('DB failure falls back to safe defaults and remains fail-closed', async () 
     };
 
     const snapshot = await readRiskPolicyObservability({ dbPool });
-    assert.equal(snapshot.ok, true);
+    assert.equal(snapshot.ok, false);
     assert.equal(snapshot.fail_closed, true);
     assert.equal(snapshot.technical_caps.global_router_cap, 20);
     assert.equal(snapshot.technical_caps.per_bridge_cap, 5);
     assert.equal(snapshot.technical_caps.source, 'safe-defaults');
     assert.equal(snapshot.financial_mode.dry_run, true);
     assert.equal(snapshot.financial_mode.real_dispatch_blocked, true);
+    assert.equal(snapshot.business_policy.available, false);
 });
