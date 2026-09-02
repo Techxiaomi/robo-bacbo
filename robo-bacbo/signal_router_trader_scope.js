@@ -27,11 +27,12 @@ function globalExposureLimitFromEnv() {
 }
 
 class FinancialTraderScopeResolver {
-    constructor({ dbPool, globalExposureLimit = undefined }) {
+    constructor({ dbPool, globalExposureLimit = undefined, log = console }) {
         if (!dbPool || typeof dbPool.query !== 'function') {
             throw new TypeError('SIGNAL_ROUTER_TRADER_SCOPE_DB_INVALID');
         }
         this.dbPool = dbPool;
+        this.log = log;
         this.globalExposureLimit = globalExposureLimit === undefined
             ? globalExposureLimitFromEnv()
             : globalExposureLimit;
@@ -135,6 +136,15 @@ class FinancialTraderScopeResolver {
                 `aggregate=${Number(risk.aggregate_exposure || 0).toFixed(2)}`
             );
         }
+
+        this.log.log(
+            `RISK_POLICY_HIERARCHY trader=${traderId} table=${tableKey} ` +
+            `trader_stop_loss=${Number(risk.trader_limits.stop_loss).toFixed(2)} ` +
+            `trader_stop_win=${Number(risk.trader_limits.stop_win).toFixed(2)} ` +
+            `technical_global_cap=${risk.technical_caps.global_exposure == null ? 'disabled' : Number(risk.technical_caps.global_exposure).toFixed(2)} ` +
+            `aggregate_exposure=${Number(risk.aggregate_exposure).toFixed(2)} ` +
+            `saldo_atual=${Number(risk.saldo_atual).toFixed(2)}`
+        );
 
         return freezeScope({
             trader_id: traderId,
