@@ -79,22 +79,22 @@
 
         <div class="safety-meta">
             <div class="meta">
-                <div class="meta-label">Runtime atual</div>
+                <div class="meta-label">Execução atual</div>
                 <div id="financial-runtime" class="meta-value">—</div>
             </div>
             <div class="meta">
-                <div class="meta-label">Próximo startup</div>
+                <div class="meta-label">Próxima inicialização</div>
                 <div id="financial-next-start" class="meta-value">—</div>
             </div>
             <div class="meta">
-                <div class="meta-label">Leitura da sessão</div>
+                <div class="meta-label">Verificação</div>
                 <div id="financial-session" class="meta-value">—</div>
             </div>
         </div>
 
         <div class="safety-actions">
             <button id="financial-disarm" class="kill" type="button">BLOQUEAR EXECUÇÃO</button>
-            <div id="financial-feedback" class="feedback">O bloqueio remove qualquer armamento futuro e, se o runtime financeiro estiver ativo, encerra a stack para garantir fail-closed.</div>
+            <div id="financial-feedback" class="feedback">Remove qualquer armamento futuro e, se houver execução financeira ativa, encerra a stack para garantir o bloqueio.</div>
         </div>
     </section>
 
@@ -113,10 +113,10 @@
     function render(status) {
         const blocked = status?.blocked === true;
         stateEl.className = `safety-state ${blocked ? 'blocked' : 'enabled'}`;
-        stateEl.textContent = blocked ? '🔒 BLOQUEADO' : '⚠️ FINANCEIRO HABILITADO';
-        runtimeEl.textContent = status?.runtime_active ? 'ATIVO' : 'BLOQUEADO';
-        nextStartEl.textContent = status?.armed_for_next_startup ? 'ARMADO' : 'BLOQUEADO';
-        sessionEl.textContent = status?.session_readable === false ? 'FALHA — FAIL-CLOSED' : 'OK';
+        stateEl.textContent = blocked ? '🔒 FINANCEIRO BLOQUEADO' : '⚠️ FINANCEIRO HABILITADO';
+        runtimeEl.textContent = status?.runtime_active ? '⚠️ HABILITADA' : '✅ BLOQUEADA';
+        nextStartEl.textContent = status?.armed_for_next_startup ? '⚠️ ARMADA' : '✅ BLOQUEADA';
+        sessionEl.textContent = status?.session_readable === false ? '⚠️ SESSÃO ILEGÍVEL — FAIL-CLOSED' : '✅ CONFIRMADA';
     }
 
     async function refresh() {
@@ -127,9 +127,9 @@
         } catch (error) {
             stateEl.className = 'safety-state unknown';
             stateEl.textContent = '⚠️ ESTADO INDISPONÍVEL';
-            runtimeEl.textContent = 'DESCONHECIDO';
-            nextStartEl.textContent = 'DESCONHECIDO';
-            sessionEl.textContent = 'FALHA';
+            runtimeEl.textContent = '⚠️ NÃO CONFIRMADA';
+            nextStartEl.textContent = '⚠️ NÃO CONFIRMADA';
+            sessionEl.textContent = '⚠️ FALHA NA VERIFICAÇÃO';
         }
     }
 
