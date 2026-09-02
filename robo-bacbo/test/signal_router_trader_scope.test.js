@@ -15,7 +15,20 @@ function financialSignal(overrides = {}) {
         signal_id: '550e8400-e29b-41d4-a716-446655440000',
         action: 'place_bet',
         table_key: 'bacbo_int',
+        exposure_cents: 500,
         ...overrides
+    };
+}
+
+function operatingTrader(config = { account_ids: [4, 1, 4] }) {
+    return {
+        trader_id: 9,
+        config_json: JSON.stringify({ stop_loss: 250, ...config }),
+        saldo_inicial: 100,
+        saldo_atual: 100,
+        ativo: 1,
+        status_operacao: 'OPERANDO',
+        table_key: 'bacbo_int'
     };
 }
 
@@ -24,13 +37,9 @@ test('resolve trader scope from authoritative audit order and config account_ids
     const dbPool = {
         async query(sql, params) {
             calls.push({ sql, params });
-            return [[{
-                trader_id: 9,
-                config_json: JSON.stringify({ account_ids: [4, 1, 4] }),
-                ativo: 1,
-                status_operacao: 'OPERANDO',
-                table_key: 'bacbo_int'
-            }]];
+            if (/auditoria_ordens/.test(sql)) return [[operatingTrader()]];
+            if (/betting_house_tables/.test(sql)) return [[{ account_id: 1 }, { account_id: 4 }]];
+            throw new Error('unexpected query');
         }
     };
 
@@ -40,7 +49,9 @@ test('resolve trader scope from authoritative audit order and config account_ids
     assert.equal(scope.trader_id, 9);
     assert.equal(scope.table_key, 'bacbo_int');
     assert.deepEqual(scope.account_ids, [1, 4]);
-    assert.equal(calls.length, 1);
+    assert.equal(scope.risk.approved, true);
+    assert.equal(scope.risk.aggregate_exposure, 10);
+    assert.equal(calls.length, 2);
     assert.match(calls[0].sql, /auditoria_ordens/);
     assert.match(calls[0].sql, /executor_order_id/);
     assert.deepEqual(calls[0].params, [
@@ -54,36 +65,30 @@ test('resolver uses legacy junction only when config has no account_ids', async 
     const dbPool = {
         async query(sql, params) {
             call += 1;
-            if (call === 1) {
-                return [[{
-                    trader_id: 9,
-                    config_json: JSON.stringify({}),
-                    ativo: true,
-                    status_operacao: 'OPERANDO',
-                    table_key: 'bacbo_int'
-                }]];
+            if (call === 1) return [[operatingTrader({})]];
+            if (call === 2) {
+                assert.match(sql, /auto_trader_account_bindings/);
+                assert.deepEqual(params, [9]);
+                return [[{ account_id: 4 }, { account_id: 1 }]];
             }
-            assert.match(sql, /auto_trader_account_bindings/);
-            assert.deepEqual(params, [9]);
-            return [[{ account_id: 4 }, { account_id: 1 }]];
+            assert.match(sql, /betting_house_tables/);
+            return [[{ account_id: 1 }, { account_id: 4 }]];
         }
     };
 
     const resolver = new FinancialTraderScopeResolver({ dbPool });
     const scope = await resolver.resolve(financialSignal());
     assert.deepEqual(scope.account_ids, [1, 4]);
-    assert.equal(call, 2);
+    assert.equal(call, 3);
 });
 
 test('financial scope fails closed when trader is not operating', async () => {
     const dbPool = {
         async query() {
             return [[{
-                trader_id: 9,
-                config_json: JSON.stringify({ account_ids: [1] }),
+                ...operatingTrader({ account_ids: [1] }),
                 ativo: 0,
-                status_operacao: 'DESLIGADO',
-                table_key: 'bacbo_int'
+                status_operacao: 'DESLIGADO'
             }]];
         }
     };
@@ -122,7 +127,7 @@ test('router source applies trader scope before online discovery and launcher ke
     const onlineIndex = routerSource.indexOf('resolveOnlineTargets(publisher, targets)');
 
     assert.ok(scopeIndex >= 0, 'trader scope resolver must be present');
-    assert.ok(filterIndex > scopeIndex, 'binding filter must run after authoritative scope resolution');
+    assert.ok(filterIndex > scopeIndex, 'binding/risk scope must run before target filtering');
     assert.ok(onlineIndex > filterIndex, 'online discovery must inspect only already-bound targets');
     assert.match(routerSource, /SIGNAL_ROUTER_TRADER_SCOPE_REJECTED/);
     assert.match(routerSource, /ignored_unbound=/);
