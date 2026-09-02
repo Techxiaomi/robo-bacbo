@@ -3,6 +3,7 @@
 const mysql = require('mysql2/promise');
 const canonicalBridge = require('./bacbo_canonical_bridge');
 const { obterMesaRuntime } = require('./mesa_runtime_context');
+const { withMysqlDeadlockRetry } = require('./mysql_deadlock_retry');
 
 let pool = null;
 let inicializacao = null;
@@ -161,21 +162,31 @@ async function persistirRodadaBacbo(round) {
     const timestampSegundos =
         Number(round.timestamp_ms) / 1000;
 
-    await db.query(
-        `INSERT INTO bacbo_rounds
-            (mesa_id, uuid, instant, \`result\`, winner)
-         VALUES (?, ?, FROM_UNIXTIME(?), ?, ?)
-         ON DUPLICATE KEY UPDATE
-            instant=VALUES(instant),
-            \`result\`=VALUES(\`result\`),
-            winner=VALUES(winner)`,
-        [
-            mesaRuntime.id,
-            round.uuid,
-            timestampSegundos,
-            round.result,
-            round.winner
-        ]
+    await withMysqlDeadlockRetry(
+        () => db.query(
+            `INSERT INTO bacbo_rounds
+                (mesa_id, uuid, instant, \`result\`, winner)
+             VALUES (?, ?, FROM_UNIXTIME(?), ?, ?)
+             ON DUPLICATE KEY UPDATE
+                instant=VALUES(instant),
+                \`result\`=VALUES(\`result\`),
+                winner=VALUES(winner)`,
+            [
+                mesaRuntime.id,
+                round.uuid,
+                timestampSegundos,
+                round.result,
+                round.winner
+            ]
+        ),
+        {
+            onRetry: ({ nextAttempt, delayMs }) => {
+                console.warn(
+                    `BACBO_ROUND_DEADLOCK_RETRY uuid=${round.uuid} ` +
+                    `attempt=${nextAttempt}/3 delay_ms=${delayMs}`
+                );
+            }
+        }
     );
 
     return true;
@@ -250,16 +261,7 @@ async function localizarUuidsExistentes(
     return existentes;
 }
 
-async function persistirHistoricoBacbo(rounds) {
-    const itens = roundsUnicos(rounds);
-
-    if (itens.length === 0) return 0;
-
-    await garantirSchema();
-
-    const mesaRuntime = obterMesaRuntime();
-    const mesaId = Number(mesaRuntime.id);
-    const db = criarPool();
+async function persistirHistoricoUmaTentativa(db, itens, mesaId) {
     const conexao = await db.getConnection();
     let novos = [];
 
@@ -279,39 +281,63 @@ async function persistirHistoricoBacbo(rounds) {
             )
         );
 
-        if (novos.length > 0) {
-            await conexao.beginTransaction();
+        if (novos.length === 0) return 0;
 
-            for (const round of novos) {
-                await conexao.query(
-                    `INSERT INTO bacbo_rounds
-                        (mesa_id, uuid, instant, \`result\`, winner)
-                     VALUES (?, ?, FROM_UNIXTIME(?), ?, ?)
-                     ON DUPLICATE KEY UPDATE
-                        instant=VALUES(instant),
-                        \`result\`=VALUES(\`result\`),
-                        winner=VALUES(winner)`,
-                    [
-                        mesaId,
-                        round.uuid,
-                        Number(round.timestamp_ms) / 1000,
-                        round.result,
-                        round.winner
-                    ]
-                );
-            }
+        await conexao.beginTransaction();
 
-            await conexao.commit();
+        for (const round of novos) {
+            await conexao.query(
+                `INSERT INTO bacbo_rounds
+                    (mesa_id, uuid, instant, \`result\`, winner)
+                 VALUES (?, ?, FROM_UNIXTIME(?), ?, ?)
+                 ON DUPLICATE KEY UPDATE
+                    instant=VALUES(instant),
+                    \`result\`=VALUES(\`result\`),
+                    winner=VALUES(winner)`,
+                [
+                    mesaId,
+                    round.uuid,
+                    Number(round.timestamp_ms) / 1000,
+                    round.result,
+                    round.winner
+                ]
+            );
         }
+
+        await conexao.commit();
+        return novos.length;
     } catch (erro) {
         try {
             await conexao.rollback();
         } catch (_) {}
-
         throw erro;
     } finally {
         conexao.release();
     }
+}
+
+async function persistirHistoricoBacbo(rounds) {
+    const itens = roundsUnicos(rounds);
+
+    if (itens.length === 0) return 0;
+
+    await garantirSchema();
+
+    const mesaRuntime = obterMesaRuntime();
+    const mesaId = Number(mesaRuntime.id);
+    const db = criarPool();
+
+    const novosPersistidos = await withMysqlDeadlockRetry(
+        () => persistirHistoricoUmaTentativa(db, itens, mesaId),
+        {
+            onRetry: ({ nextAttempt, delayMs }) => {
+                console.warn(
+                    `BACBO_HISTORY_DEADLOCK_RETRY mesa=${mesaId} ` +
+                    `attempt=${nextAttempt}/3 delay_ms=${delayMs}`
+                );
+            }
+        }
+    );
 
     try {
         await canonicalBridge.sincronizarHistorico(
@@ -324,11 +350,12 @@ async function persistirHistoricoBacbo(rounds) {
         );
     }
 
-    return novos.length;
+    return novosPersistidos;
 }
 
 module.exports = {
     garantirSchema,
     persistirRodadaBacbo,
-    persistirHistoricoBacbo
+    persistirHistoricoBacbo,
+    persistirHistoricoUmaTentativa
 };
