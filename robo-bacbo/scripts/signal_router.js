@@ -9,6 +9,10 @@ require('../env_loader').loadEnvFile(path.join(__dirname, '..', '..', '.env'));
 
 const { createBettingHouseService } = require('../betting_house_service');
 const { ResultFanIn } = require('../signal_result_fanin');
+const {
+    filterTargetsByAccountIds,
+    FinancialTraderScopeResolver
+} = require('../signal_router_trader_scope');
 
 const DEFAULT_GLOBAL_CHANNEL = 'global_signals';
 const DEFAULT_RESULT_CHANNEL = 'global_signal_results';
@@ -424,6 +428,7 @@ async function main() {
     const dbPool = createDbPool();
     const service = createBettingHouseService({ dbPool, encryptionKey: process.env.BETTING_HOUSE_CREDENTIALS_KEY });
     const cache = new TargetCache({ service, ttlMs: cacheTtlMs });
+    const traderScopeResolver = new FinancialTraderScopeResolver({ dbPool });
     const publisher = createClient({ url: redisUrl() });
     const subscriber = publisher.duplicate();
     const responseSubscriber = publisher.duplicate();
@@ -499,6 +504,7 @@ async function main() {
         console.log(`SIGNAL_ROUTER_FINANCIAL_DRY_RUN=${dryRun}`);
         console.log(`SIGNAL_ROUTER_FINANCIAL_FANIN_SIMULATION=${faninSimulation}`);
         console.log(`SIGNAL_ROUTER_GLOBAL_MAX_EXPOSURE=${globalMaxExposure == null ? 'disabled' : globalMaxExposure.toFixed(2)}`);
+        console.log('SIGNAL_ROUTER_FINANCIAL_SCOPE=AUTHORITATIVE_TRADER_BINDINGS');
 
         let generatedSequence = 0;
         await subscriber.subscribe(channel, async message => {
@@ -541,6 +547,34 @@ async function main() {
 
             let dispatchTargets = targets;
             if (signal.action === 'place_bet') {
+                let traderScope;
+                try {
+                    traderScope = await traderScopeResolver.resolve(signal);
+                } catch (error) {
+                    console.error(
+                        `SIGNAL_ROUTER_TRADER_SCOPE_REJECTED signal=${signal.signal_id} ` +
+                        `table=${signal.table_key} reason=${error?.message || error} dispatch=0`
+                    );
+                    return;
+                }
+
+                const unscopedCount = targets.length;
+                targets = filterTargetsByAccountIds(targets, traderScope.account_ids);
+                const ignoredUnbound = Math.max(0, unscopedCount - targets.length);
+                console.log(
+                    `SIGNAL_ROUTER_TRADER_SCOPE signal=${signal.signal_id} trader=${traderScope.trader_id} ` +
+                    `table=${signal.table_key} linked_accounts=${traderScope.account_ids.join(',')} ` +
+                    `eligible_accounts=${targets.map(item => item.account_id).join(',') || '-'} ` +
+                    `ignored_unbound=${ignoredUnbound}`
+                );
+                if (targets.length === 0) {
+                    console.warn(
+                        `SIGNAL_ROUTER_NO_BOUND_TARGETS signal=${signal.signal_id} trader=${traderScope.trader_id} ` +
+                        `table=${signal.table_key} dispatch=0`
+                    );
+                    return;
+                }
+
                 let availability;
                 try { availability = await resolveOnlineTargets(publisher, targets); }
                 catch (error) {
@@ -551,8 +585,10 @@ async function main() {
                 const online = dispatchTargets.length;
                 const globalExposure = calculateGlobalExposure(signal, online);
                 console.log(
-                    `SIGNAL_ROUTER_FINANCIAL_PRECHECK signal=${signal.signal_id} per_account=${(signal.exposure_cents / 100).toFixed(2)} ` +
-                    `online=${online} global=${globalExposure.toFixed(2)} limit=${globalMaxExposure.toFixed(2)}`
+                    `SIGNAL_ROUTER_FINANCIAL_PRECHECK signal=${signal.signal_id} trader=${traderScope.trader_id} ` +
+                    `per_account=${(signal.exposure_cents / 100).toFixed(2)} online=${online} ` +
+                    `online_accounts=${dispatchTargets.map(item => item.account_id).join(',') || '-'} ` +
+                    `global=${globalExposure.toFixed(2)} limit=${globalMaxExposure.toFixed(2)}`
                 );
                 if (globalExposure > globalMaxExposure + 1e-9) {
                     console.error(
@@ -570,6 +606,7 @@ async function main() {
                         registerFanInExpectation(fanin, signal, dispatchTargets, resultTimeoutMs);
                         console.log(
                             `SIGNAL_ROUTER_FINANCIAL_DRY_RUN_FANIN_SIMULATION signal=${signal.signal_id} ` +
+                            `trader=${traderScope.trader_id} accounts=${dispatchTargets.map(item => item.account_id).join(',')} ` +
                             `online=${online} global=${globalExposure.toFixed(2)} dispatch=0`
                         );
                         return;
@@ -579,6 +616,7 @@ async function main() {
                     const subscribers = await publisher.publish(consolidatedChannel, JSON.stringify(dryRunResult));
                     console.log(
                         `SIGNAL_ROUTER_FINANCIAL_DRY_RUN_COMPLETE signal=${signal.signal_id} ` +
+                        `trader=${traderScope.trader_id} accounts=${dispatchTargets.map(item => item.account_id).join(',')} ` +
                         `online=${online} global=${globalExposure.toFixed(2)} dispatch=0 ` +
                         `executor_status=${dryRunResult.executor_status} result_subscribers=${subscribers}`
                     );
