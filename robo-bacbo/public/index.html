@@ -12,6 +12,7 @@
     <script src="/mesa-switcher.js"></script>
     <script src="/trader-account-binding-ui.js"></script>
     <script src="/trader-financial-rules-ui.js"></script>
+    <script src="/trader-balance-sync-guard-ui.js"></script>
     <script src="/dom-ui2-transform.js"></script>
     <script src="/bacbo-result-map.js"></script>
     <script src="/bacbo-result-sum-integrity.js"></script>
@@ -58,6 +59,9 @@
                 }
                 if (typeof window.__traderFinancialRulesUi?.install !== 'function') {
                     throw new Error('UI de regras financeiras por mesa não carregada');
+                }
+                if (typeof window.__traderBalanceSyncGuardUi?.install !== 'function') {
+                    throw new Error('Guarda de sincronização de saldo não carregada');
                 }
                 if (window.__domUi2Ready !== true || typeof window.otimizarScriptPrincipalUI2 !== 'function') {
                     throw new Error('Transformador DOM UI-2 não carregado');
@@ -122,6 +126,9 @@
                 }
                 if (!window.__traderFinancialRulesUi.install()) {
                     throw new Error('UI de regras financeiras por mesa não foi instalada');
+                }
+                if (!window.__traderBalanceSyncGuardUi.install()) {
+                    throw new Error('Guarda de sincronização de saldo não foi instalada');
                 }
 
                 const finalizarInicializacao = () => {
