@@ -17,6 +17,10 @@ const sessionFile = path.join(runtimeDir, 'session.json');
 const armFile = path.join(runtimeDir, 'auto-trader.arm');
 const disarmScript = path.join(projectRoot, 'tools', 'Disarm-AutoTrader.ps1');
 
+function stripUtf8Bom(text) {
+    return String(text || '').replace(/^\uFEFF/, '');
+}
+
 function readFinancialSafetyStatus() {
     const armedForNextStartup = fs.existsSync(armFile);
     let runtimeActive = false;
@@ -24,7 +28,8 @@ function readFinancialSafetyStatus() {
 
     if (fs.existsSync(sessionFile)) {
         try {
-            const session = JSON.parse(fs.readFileSync(sessionFile, 'utf8'));
+            const rawSession = fs.readFileSync(sessionFile, 'utf8');
+            const session = JSON.parse(stripUtf8Bom(rawSession));
             runtimeActive = String(session?.auto_trader || '')
                 .trim()
                 .toUpperCase() === 'ON';
