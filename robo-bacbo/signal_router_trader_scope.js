@@ -20,13 +20,21 @@ function filterTargetsByAccountIds(targets, accountIds) {
         .sort((a, b) => Number(a.account_id) - Number(b.account_id));
 }
 
+function globalExposureLimitFromEnv() {
+    const value = Number(process.env.SIGNAL_ROUTER_GLOBAL_MAX_EXPOSURE);
+    if (!Number.isFinite(value) || value <= 0) return null;
+    return Math.round(value * 100) / 100;
+}
+
 class FinancialTraderScopeResolver {
-    constructor({ dbPool, globalExposureLimit = null }) {
+    constructor({ dbPool, globalExposureLimit = undefined }) {
         if (!dbPool || typeof dbPool.query !== 'function') {
             throw new TypeError('SIGNAL_ROUTER_TRADER_SCOPE_DB_INVALID');
         }
         this.dbPool = dbPool;
-        this.globalExposureLimit = globalExposureLimit;
+        this.globalExposureLimit = globalExposureLimit === undefined
+            ? globalExposureLimitFromEnv()
+            : globalExposureLimit;
     }
 
     async resolve(signal) {
@@ -139,5 +147,6 @@ class FinancialTraderScopeResolver {
 
 module.exports = {
     filterTargetsByAccountIds,
+    globalExposureLimitFromEnv,
     FinancialTraderScopeResolver
 };
