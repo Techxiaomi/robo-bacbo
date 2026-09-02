@@ -11,11 +11,11 @@ const TABLE_FINANCIAL_RULES = Object.freeze({
         table_key: 'bacbo_br',
         table_code: 'BACBO_BR',
         currency: 'BRL',
-        min_stake: 5,
-        stake_step: 5,
-        tie_min: 5,
-        tie_step: 5,
-        chips: Object.freeze([5, 10, 25, 125, 500]),
+        min_stake: 2.5,
+        stake_step: 2.5,
+        tie_min: 2.5,
+        tie_step: 2.5,
+        chips: Object.freeze([2.5, 5, 10, 25, 125, 500]),
         rounding: 'NEAREST_STEP'
     }),
     BACBO_INT: Object.freeze({
