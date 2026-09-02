@@ -14,6 +14,14 @@
         return `R$ ${Number(value).toFixed(2).replace('.', ',')}`;
     }
 
+    function chipLabel(value) {
+        const amount = Number(value);
+        if (!Number.isFinite(amount)) return String(value ?? '');
+        return Number.isInteger(amount)
+            ? String(amount)
+            : amount.toFixed(2).replace('.', ',');
+    }
+
     function validStep(value, min, step) {
         const amount = Number(value);
         const minValue = Number(min);
@@ -68,7 +76,7 @@
             const button = document.createElement('button');
             button.type = 'button';
             button.className = `ficha-btn f${String(chip).replace('.', '_')}`;
-            button.textContent = String(chip);
+            button.textContent = chipLabel(chip);
             button.title = `${rules.table_code} · adicionar ${money(chip)}`;
             button.setAttribute('aria-label', `Adicionar ${money(chip)}`);
             button.addEventListener('click', () => {
@@ -98,7 +106,7 @@
         if (!input) return;
         input.min = String(rules.tie_min);
         input.step = String(rules.tie_step);
-        input.placeholder = `Ex: ${rules.tie_min}`;
+        input.placeholder = `Ex: ${chipLabel(rules.tie_min)}`;
     }
 
     function validateFormMoney() {
