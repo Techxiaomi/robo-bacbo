@@ -48,6 +48,39 @@ test('fail-closed se faltar saldo fresco de uma conta vinculada', () => {
     assert.equal(snapshot.motivo, 'MISSING_ACCOUNT_BALANCE');
 });
 
+test('refresh de saldo stale publica somente nas contas vinculadas e reaproveita snapshots frescos', async () => {
+    const auth = new ScopedTraderBalanceAuthorization({
+        dbPool: fakeDb(),
+        tableKey: 'bacbo_br',
+        freshnessMs: 10,
+        log: { log() {}, warn() {}, error() {} }
+    });
+    const trader = { id: 18, config: { account_ids: [1, 4] } };
+    const published = [];
+    auth.subscriber = { isReady: true };
+    auth.publisher = {
+        isReady: true,
+        async publish(channel, payload) {
+            published.push({ channel, payload: JSON.parse(payload) });
+            const accountId = Number(channel.split(':')[1]);
+            auth.record(channel.replace('commands', 'responses'), JSON.stringify({ action: 'balance_update', balance: 15 }));
+            assert.ok([1, 4].includes(accountId));
+        }
+    };
+
+    auth.record('auto_trader_responses:1:bacbo_br', JSON.stringify({ action: 'balance_update', balance: 1 }), Date.now() - 1000);
+    auth.record('auto_trader_responses:4:bacbo_br', JSON.stringify({ action: 'balance_update', balance: 1 }), Date.now() - 1000);
+
+    const refreshed = await auth.refreshTraderBalance(trader);
+    assert.equal(refreshed.fresco, true);
+    assert.equal(refreshed.saldo_atual, 30);
+    assert.deepEqual(published.map(item => item.channel).sort(), [
+        'auto_trader_commands:1:bacbo_br',
+        'auto_trader_commands:4:bacbo_br'
+    ]);
+    assert.ok(published.every(item => item.payload.action === 'sync_balance'));
+});
+
 test('preserva Stop Win, Stop Loss e saldo valido no gate scoped', () => {
     const base = {
         saldo_inicial: 100,
