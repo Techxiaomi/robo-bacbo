@@ -103,7 +103,9 @@ test('status financeiro aceita session.json PowerShell com BOM e usa rotulos cla
 test('Acessos expoe hierarquia SSOT de risco com origens explicitas no banco', () => {
     assert.match(server, /readRiskPolicyObservability/);
     assert.match(server, /app\.get\('\/api\/financial-safety\/risk-policy'/);
+    assert.match(server, /app\.get\('\/api\/financial-safety\/system-config'/);
     assert.match(server, /app\.put\('\/api\/financial-safety\/system-config'/);
+    assert.match(server, /app\.delete\('\/api\/financial-safety\/system-config'/);
     assert.match(riskObservability, /readSystemConfig/);
     assert.match(riskObservability, /resolveRiskPolicy/);
     assert.match(riskObservability, /auto_traders\.config_json/);
@@ -121,7 +123,10 @@ test('Acessos expoe hierarquia SSOT de risco com origens explicitas no banco', (
     assert.match(accessPage, /DRY RUN ATIVO/);
     assert.match(accessPage, /\/api\/financial-safety\/risk-policy/);
     assert.match(accessPage, /escapeHtml/);
-    assert.match(riskAdmin, /SALVAR CAPS/);
+    assert.match(riskAdmin, />SALVAR<\/button>/);
+    assert.match(riskAdmin, /RESTAURAR PADRÃO/);
+    assert.match(riskAdmin, /requested_value/);
+    assert.match(riskAdmin, /effective_value/);
     assert.match(riskAdmin, /\/api\/financial-safety\/system-config/);
 });
 
@@ -131,7 +136,7 @@ test('DRY RUN permanece inviolavel fora do launcher e fail-closed no DB runner',
     assert.match(configRunner, /SIGNAL_ROUTER_FINANCIAL_DRY_RUN:\s*'true'/);
     assert.match(configService, /financial_dry_run:\s*true/);
     assert.match(configService, /FINANCIAL_DRY_RUN_FORCED_TRUE/);
-    assert.match(server, /FINANCIAL_DRY_RUN_DISABLE_FORBIDDEN/);
+    assert.match(configService, /effectiveFinancialDryRun\s*=\s*true/);
     assert.doesNotMatch(server, /financial-safety\/dry-run\/disable/);
 });
 
