@@ -1,6 +1,8 @@
 'use strict';
 
+const fs = require('fs');
 const path = require('path');
+const { spawn } = require('child_process');
 const express = require('express');
 const mysql = require('mysql2/promise');
 
@@ -8,6 +10,73 @@ require('../env_loader').loadEnvFile(path.join(__dirname, '..', '..', '.env'));
 
 const { installBettingHouseApi } = require('../betting_house_api');
 const { readSupervisorSnapshot } = require('../supervisor_telemetry_store');
+
+const projectRoot = path.join(__dirname, '..', '..');
+const runtimeDir = path.join(projectRoot, 'runtime');
+const sessionFile = path.join(runtimeDir, 'session.json');
+const armFile = path.join(runtimeDir, 'auto-trader.arm');
+const disarmScript = path.join(projectRoot, 'tools', 'Disarm-AutoTrader.ps1');
+
+function readFinancialSafetyStatus() {
+    const armedForNextStartup = fs.existsSync(armFile);
+    let runtimeActive = false;
+    let sessionReadable = true;
+
+    if (fs.existsSync(sessionFile)) {
+        try {
+            const session = JSON.parse(fs.readFileSync(sessionFile, 'utf8'));
+            runtimeActive = String(session?.auto_trader || '')
+                .trim()
+                .toUpperCase() === 'ON';
+        } catch {
+            sessionReadable = false;
+            runtimeActive = true;
+        }
+    }
+
+    return {
+        blocked: !armedForNextStartup && !runtimeActive,
+        armed_for_next_startup: armedForNextStartup,
+        runtime_active: runtimeActive,
+        session_readable: sessionReadable,
+        mode: (!armedForNextStartup && !runtimeActive) ? 'BLOCKED' : 'FINANCIAL_ENABLED'
+    };
+}
+
+function removeArmToken() {
+    try {
+        fs.rmSync(armFile, { force: true });
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function scheduleRuntimeDisarm() {
+    setTimeout(() => {
+        try {
+            const child = spawn(
+                'powershell.exe',
+                [
+                    '-NoLogo',
+                    '-NoProfile',
+                    '-ExecutionPolicy',
+                    'Bypass',
+                    '-File',
+                    disarmScript
+                ],
+                {
+                    detached: true,
+                    stdio: 'ignore',
+                    windowsHide: true
+                }
+            );
+            child.unref();
+        } catch (error) {
+            console.error('FINANCIAL_SAFETY_DISARM_SPAWN_FAILED', error?.message || error);
+        }
+    }, 150);
+}
 
 async function main() {
     const host = '127.0.0.1';
@@ -47,6 +116,48 @@ async function main() {
                 snapshot.supervisor?.running === true
             )
         });
+    });
+
+    app.get('/api/financial-safety/status', (req, res) => {
+        res.set('Cache-Control', 'no-store');
+        res.json(readFinancialSafetyStatus());
+    });
+
+    app.post('/api/financial-safety/disarm', (req, res) => {
+        const before = readFinancialSafetyStatus();
+        const tokenRemoved = removeArmToken();
+
+        if (!tokenRemoved) {
+            res.status(500).json({
+                ok: false,
+                blocked: false,
+                reason: 'ARM_TOKEN_REMOVE_FAILED'
+            });
+            return;
+        }
+
+        const runtimeMustStop = before.runtime_active === true;
+        const after = readFinancialSafetyStatus();
+
+        console.warn(
+            'FINANCIAL_SAFETY_DISARM_REQUESTED',
+            `runtime_active=${before.runtime_active}`,
+            `armed_for_next_startup=${before.armed_for_next_startup}`,
+            `runtime_stop=${runtimeMustStop}`
+        );
+
+        res.status(runtimeMustStop ? 202 : 200).json({
+            ok: true,
+            blocked: runtimeMustStop ? false : after.blocked,
+            runtime_stop_requested: runtimeMustStop,
+            message: runtimeMustStop
+                ? 'Bloqueio solicitado. A stack sera encerrada para garantir fail-closed.'
+                : 'Execucao financeira bloqueada.'
+        });
+
+        if (runtimeMustStop) {
+            scheduleRuntimeDisarm();
+        }
     });
 
     const publicDir = path.join(__dirname, '..', 'public');
