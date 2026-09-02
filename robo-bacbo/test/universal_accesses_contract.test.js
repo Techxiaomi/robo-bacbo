@@ -12,6 +12,7 @@ const server = fs.readFileSync(path.join(root, 'scripts', 'betting_house_api_dev
 const accessLink = fs.readFileSync(path.join(root, 'public', 'universal-access-link.js'), 'utf8');
 const accessPage = fs.readFileSync(path.join(root, 'public', 'accesses.html'), 'utf8');
 const index = fs.readFileSync(path.join(root, 'public', 'index.html'), 'utf8');
+const dashboard = fs.readFileSync(path.join(root, 'public', 'dashboard-app.html'), 'utf8');
 const launcher = fs.readFileSync(path.join(repoRoot, 'atalhos', '91_FINANCEIRO_ABAS.cmd'), 'utf8');
 const stopScript = fs.readFileSync(path.join(repoRoot, 'atalhos', 'Stop-Sistema.ps1'), 'utf8');
 const accessShortcut = fs.readFileSync(path.join(repoRoot, 'atalhos', '92_ACESSOS.cmd'), 'utf8');
@@ -32,11 +33,22 @@ test('portal agrega Casas Contas e Processos de Traders', () => {
     assert.match(accessPage, /href="\/supervisor"/);
 });
 
+test('cabecalho usa somente icones na ordem audio configuracoes acessos', () => {
+    assert.match(dashboard, /id="btn-som"[^>]*>🔊<\/span>/);
+    assert.match(dashboard, /class="gear-icon spin"[^>]*>⚙️<\/span>/);
+    assert.match(accessLink, /link\.textContent = '🔒'/);
+    assert.doesNotMatch(accessLink, /🔐 Acessos/);
+    assert.match(accessLink, /speaker\.title = 'Áudio'/);
+    assert.match(accessLink, /gear\.title = 'Configurações'/);
+    assert.match(accessLink, /link\.title = 'Acessos'/);
+    assert.match(accessLink, /title\.insertBefore\(link, gear\.nextSibling\)/);
+});
+
 test('link discreto do painel abre Acessos em nova aba', () => {
     assert.match(accessLink, /http:\/\/127\.0\.0\.1:3010\/accesses/);
     assert.match(accessLink, /link\.target = '_blank'/);
     assert.match(accessLink, /link\.rel = 'noopener'/);
-    assert.match(accessLink, /🔐 Acessos/);
+    assert.match(accessLink, /link\.className = 'gear-icon universal-access-icon'/);
     assert.match(index, /\/universal-access-link\.js/);
     assert.match(index, /__universalAccessLink\.install\(\)/);
 });
