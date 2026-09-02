@@ -27,7 +27,8 @@ function readFinancialSafetyStatus() {
     let sessionReadable = true;
     if (fs.existsSync(sessionFile)) {
         try {
-            const session = JSON.parse(stripUtf8Bom(fs.readFileSync(sessionFile, 'utf8')));
+            const rawSession = fs.readFileSync(sessionFile, 'utf8');
+            const session = JSON.parse(stripUtf8Bom(rawSession));
             runtimeActive = String(session?.auto_trader || '').trim().toUpperCase() === 'ON';
         } catch {
             sessionReadable = false;
