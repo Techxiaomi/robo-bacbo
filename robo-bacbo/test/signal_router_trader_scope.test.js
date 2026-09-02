@@ -23,7 +23,7 @@ function financialSignal(overrides = {}) {
 function operatingTrader(config = { account_ids: [4, 1, 4] }) {
     return {
         trader_id: 9,
-        config_json: JSON.stringify({ stop_loss: 250, ...config }),
+        config_json: JSON.stringify({ stop_loss: 250, stop_win: 100, ...config }),
         saldo_inicial: 100,
         saldo_atual: 100,
         ativo: 1,
@@ -34,6 +34,7 @@ function operatingTrader(config = { account_ids: [4, 1, 4] }) {
 
 test('resolve trader scope from authoritative audit order and config account_ids', async () => {
     const calls = [];
+    const logs = [];
     const dbPool = {
         async query(sql, params) {
             calls.push({ sql, params });
@@ -43,7 +44,10 @@ test('resolve trader scope from authoritative audit order and config account_ids
         }
     };
 
-    const resolver = new FinancialTraderScopeResolver({ dbPool });
+    const resolver = new FinancialTraderScopeResolver({
+        dbPool,
+        log: { log: message => logs.push(message) }
+    });
     const scope = await resolver.resolve(financialSignal());
 
     assert.equal(scope.trader_id, 9);
@@ -51,6 +55,11 @@ test('resolve trader scope from authoritative audit order and config account_ids
     assert.deepEqual(scope.account_ids, [1, 4]);
     assert.equal(scope.risk.approved, true);
     assert.equal(scope.risk.aggregate_exposure, 10);
+    assert.equal(scope.risk.trader_limits.stop_loss, 250);
+    assert.equal(scope.risk.technical_caps.global_exposure, null);
+    assert.match(logs[0], /RISK_POLICY_HIERARCHY/);
+    assert.match(logs[0], /trader_stop_loss=250\.00/);
+    assert.match(logs[0], /technical_global_cap=disabled/);
     assert.equal(calls.length, 2);
     assert.match(calls[0].sql, /auditoria_ordens/);
     assert.match(calls[0].sql, /executor_order_id/);
@@ -76,7 +85,7 @@ test('resolver uses legacy junction only when config has no account_ids', async 
         }
     };
 
-    const resolver = new FinancialTraderScopeResolver({ dbPool });
+    const resolver = new FinancialTraderScopeResolver({ dbPool, log: { log() {} } });
     const scope = await resolver.resolve(financialSignal());
     assert.deepEqual(scope.account_ids, [1, 4]);
     assert.equal(call, 3);
@@ -93,10 +102,28 @@ test('financial scope fails closed when trader is not operating', async () => {
         }
     };
 
-    const resolver = new FinancialTraderScopeResolver({ dbPool });
+    const resolver = new FinancialTraderScopeResolver({ dbPool, log: { log() {} } });
     await assert.rejects(
         () => resolver.resolve(financialSignal()),
         /SIGNAL_ROUTER_TRADER_SCOPE_TRADER_NOT_OPERATING/
+    );
+});
+
+test('financial scope rejects missing stop_loss as INVALID_RISK_POLICY', async () => {
+    const dbPool = {
+        async query(sql) {
+            if (/auditoria_ordens/.test(sql)) {
+                return [[operatingTrader({ stop_loss: undefined, account_ids: [1] })]];
+            }
+            if (/betting_house_tables/.test(sql)) return [[{ account_id: 1 }]];
+            throw new Error('unexpected query');
+        }
+    };
+
+    const resolver = new FinancialTraderScopeResolver({ dbPool, log: { log() {} } });
+    await assert.rejects(
+        () => resolver.resolve(financialSignal()),
+        /EXPOSURE_REJECTED reason=INVALID_RISK_POLICY/
     );
 });
 
