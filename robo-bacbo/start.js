@@ -22,6 +22,9 @@ const { instalarCatalogoContasAutoTrader } = require('./trader_account_catalog')
 const { installActivationBootstrap } = require('./auto_trader_activation_bootstrap');
 const { installContinuousTraderBalance } = require('./continuous_trader_balance');
 const { installAutoTraderStructuralIntegrity } = require('./auto_trader_structural_integrity');
+const {
+    installMultiAccountFinancialAuthorization
+} = require('./multi_account_financial_authorization');
 
 async function iniciar() {
     const canonicalBridge = require('./bacbo_canonical_bridge');
@@ -94,6 +97,7 @@ async function iniciar() {
     installActivationBootstrap();
     await installContinuousTraderBalance();
     installAutoTraderStructuralIntegrity();
+    await installMultiAccountFinancialAuthorization();
 
     require('./auto_pilot_history_barrier')
         .instalarAutoPilotHistoryBarrier();
