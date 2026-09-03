@@ -44,13 +44,15 @@ async function main() {
         ...process.env,
         SYSTEM_CONFIG_GLOBAL_ROUTER_CAP: config.global_router_cap.toFixed(2),
         SYSTEM_CONFIG_PER_BRIDGE_CAP: config.per_bridge_cap.toFixed(2),
+        SYSTEM_CONFIG_TECHNICAL_RISK_CAPS_ENABLED: String(config.technical_risk_caps_enabled === true),
         SIGNAL_ROUTER_FINANCIAL_DRY_RUN: 'true',
         SYSTEM_CONFIG_SOURCE: config.source
     };
 
     console.log(
-        `SYSTEM_CONFIG_LOADED source=${config.source} global_router_cap=${config.global_router_cap.toFixed(2)} ` +
-        `per_bridge_cap=${config.per_bridge_cap.toFixed(2)} financial_dry_run=true fail_closed=${config.fail_closed}`
+        `SYSTEM_CONFIG_LOADED source=${config.source} technical_risk_caps_enabled=${config.technical_risk_caps_enabled === true} ` +
+        `global_router_cap=${config.global_router_cap.toFixed(2)} per_bridge_cap=${config.per_bridge_cap.toFixed(2)} ` +
+        `financial_dry_run=true fail_closed=${config.fail_closed}`
     );
 
     const child = spawn(process.execPath, [path.join(__dirname, '..', target), ...process.argv.slice(3)], {
