@@ -7,6 +7,7 @@ const path = require('node:path');
 
 const {
     filterTargetsByAccountIds,
+    assertSignalMatchesAuditIntent,
     FinancialTraderScopeResolver
 } = require('../signal_router_trader_scope');
 
@@ -15,20 +16,29 @@ function financialSignal(overrides = {}) {
         signal_id: '550e8400-e29b-41d4-a716-446655440000',
         action: 'place_bet',
         table_key: 'bacbo_int',
+        alvo: 'PlayerWon',
+        valor: 5,
+        apostas: null,
         exposure_cents: 500,
         ...overrides
     };
 }
 
-function operatingTrader(config = { account_ids: [4, 1, 4] }) {
+function operatingTrader(config = { account_ids: [4, 1, 4] }, overrides = {}) {
     return {
         trader_id: 9,
+        audit_alvo: 'PlayerWon',
+        audit_risco_total: 5,
+        audit_valor_entrada: 5,
+        audit_valor_empate: 0,
+        audit_status_ordem: 'PREPARANDO',
         config_json: JSON.stringify({ stop_loss: 250, stop_win: 100, ...config }),
         saldo_inicial: 100,
         saldo_atual: 100,
         ativo: 1,
         status_operacao: 'OPERANDO',
-        table_key: 'bacbo_int'
+        table_key: 'bacbo_int',
+        ...overrides
     };
 }
 
@@ -92,6 +102,8 @@ test('resolve trader scope from authoritative audit order and logs full risk hie
         '550e8400-e29b-41d4-a716-446655440000',
         'bacbo_int'
     ]);
+    assert.match(auditCalls[0].sql, /ao\.status_ordem AS audit_status_ordem/);
+    assert.match(auditCalls[0].sql, /ao\.risco_total AS audit_risco_total/);
 });
 
 test('resolver uses legacy junction only when config has no account_ids', async () => {
@@ -115,6 +127,91 @@ test('resolver uses legacy junction only when config has no account_ids', async 
     const scope = await resolver.resolve(financialSignal());
     assert.deepEqual(scope.account_ids, [1, 4]);
     assert.equal(bindingReads, 1);
+});
+
+test('financial scope rejects replay of order that is no longer PREPARANDO', async () => {
+    const dbPool = {
+        async query(sql) {
+            if (/auditoria_ordens/.test(sql)) {
+                return [[operatingTrader({ account_ids: [1] }, { audit_status_ordem: 'FALHA_EXECUCAO' })]];
+            }
+            throw new Error('unexpected query');
+        }
+    };
+
+    const resolver = new FinancialTraderScopeResolver({ dbPool, log: { log() {} } });
+    await assert.rejects(
+        () => resolver.resolve(financialSignal()),
+        /SIGNAL_ROUTER_TRADER_SCOPE_ORDER_NOT_PREPARING/
+    );
+});
+
+test('financial scope rejects payload target different from persisted intent', async () => {
+    const dbPool = {
+        async query(sql) {
+            if (/auditoria_ordens/.test(sql)) return [[operatingTrader({ account_ids: [1] })]];
+            throw new Error('unexpected query');
+        }
+    };
+
+    const resolver = new FinancialTraderScopeResolver({ dbPool, log: { log() {} } });
+    await assert.rejects(
+        () => resolver.resolve(financialSignal({ alvo: 'BankerWon' })),
+        /SIGNAL_ROUTER_TRADER_SCOPE_INTENT_TARGET_MISMATCH/
+    );
+});
+
+test('financial scope rejects exposure different from persisted intent', async () => {
+    const dbPool = {
+        async query(sql) {
+            if (/auditoria_ordens/.test(sql)) return [[operatingTrader({ account_ids: [1] })]];
+            throw new Error('unexpected query');
+        }
+    };
+
+    const resolver = new FinancialTraderScopeResolver({ dbPool, log: { log() {} } });
+    await assert.rejects(
+        () => resolver.resolve(financialSignal({ valor: 2.5, exposure_cents: 250 })),
+        /SIGNAL_ROUTER_TRADER_SCOPE_INTENT_EXPOSURE_MISMATCH/
+    );
+});
+
+test('compound financial payload must match principal and Tie legs cent by cent', () => {
+    const audit = operatingTrader({ account_ids: [1, 4] }, {
+        audit_risco_total: 5,
+        audit_valor_entrada: 2.5,
+        audit_valor_empate: 2.5
+    });
+    const valid = financialSignal({
+        valor: 5,
+        exposure_cents: 500,
+        apostas: [
+            { alvo: 'PlayerWon', valor: 2.5 },
+            { alvo: 'Tie', valor: 2.5 }
+        ]
+    });
+    assert.equal(assertSignalMatchesAuditIntent(valid, audit), true);
+
+    assert.throws(
+        () => assertSignalMatchesAuditIntent({
+            ...valid,
+            apostas: [
+                { alvo: 'PlayerWon', valor: 5 }
+            ]
+        }, audit),
+        /SIGNAL_ROUTER_TRADER_SCOPE_INTENT_PLAN_MISMATCH/
+    );
+
+    assert.throws(
+        () => assertSignalMatchesAuditIntent({
+            ...valid,
+            apostas: [
+                { alvo: 'PlayerWon', valor: 2.5 },
+                { alvo: 'Tie', valor: 2 }
+            ]
+        }, audit),
+        /SIGNAL_ROUTER_TRADER_SCOPE_INTENT_PLAN_MISMATCH/
+    );
 });
 
 test('financial scope fails closed when trader is not operating', async () => {
