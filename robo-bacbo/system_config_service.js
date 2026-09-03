@@ -3,6 +3,7 @@
 const SAFE_DEFAULTS = Object.freeze({
     global_router_cap: 20.00,
     per_bridge_cap: 5.00,
+    technical_risk_caps_enabled: false,
     financial_dry_run: true
 });
 
@@ -16,6 +17,7 @@ const ADMIN_REQUEST_MAX = 99999.00;
 const CONFIG_KEYS = Object.freeze([
     'global_router_cap',
     'per_bridge_cap',
+    'technical_risk_caps_enabled',
     'financial_dry_run'
 ]);
 
@@ -53,10 +55,12 @@ async function ensureSystemConfigsTable(dbPool) {
         `INSERT IGNORE INTO system_configs (config_key, config_value) VALUES
          ('global_router_cap', ?),
          ('per_bridge_cap', ?),
+         ('technical_risk_caps_enabled', ?),
          ('financial_dry_run', ?)`,
         [
             SAFE_DEFAULTS.global_router_cap.toFixed(2),
             SAFE_DEFAULTS.per_bridge_cap.toFixed(2),
+            String(SAFE_DEFAULTS.technical_risk_caps_enabled),
             String(SAFE_DEFAULTS.financial_dry_run)
         ]
     );
@@ -90,6 +94,18 @@ function buildSnapshot(rows, extra = {}) {
         });
     }
 
+    const rawCapsEnabled = values.get('technical_risk_caps_enabled');
+    const parsedCapsEnabled = requestedBoolean(rawCapsEnabled);
+    const requestedCapsEnabled = parsedCapsEnabled ?? SAFE_DEFAULTS.technical_risk_caps_enabled;
+    if (rawCapsEnabled != null && parsedCapsEnabled == null) {
+        discrepancies.push({
+            key: 'technical_risk_caps_enabled',
+            requested_value: rawCapsEnabled,
+            effective_value: SAFE_DEFAULTS.technical_risk_caps_enabled,
+            reason: 'INVALID_REQUESTED_VALUE'
+        });
+    }
+
     const rawDryRun = values.get('financial_dry_run');
     const parsedDryRun = requestedBoolean(rawDryRun);
     const requestedDryRun = parsedDryRun ?? SAFE_DEFAULTS.financial_dry_run;
@@ -104,6 +120,7 @@ function buildSnapshot(rows, extra = {}) {
 
     const effectiveGlobal = Math.min(requestedGlobal, SAFE_ENVELOPE.global_router_cap);
     const effectiveBridge = Math.min(requestedBridge, SAFE_ENVELOPE.per_bridge_cap);
+    const effectiveCapsEnabled = requestedCapsEnabled;
     const effectiveDryRun = true;
 
     if (requestedGlobal !== effectiveGlobal) {
@@ -138,17 +155,20 @@ function buildSnapshot(rows, extra = {}) {
     return Object.freeze({
         global_router_cap: effectiveGlobal,
         per_bridge_cap: effectiveBridge,
+        technical_risk_caps_enabled: effectiveCapsEnabled,
         financial_dry_run: effectiveDryRun,
         requested_financial_dry_run: requestedDryRun,
         dry_run_forced: dryRunForced,
         requested: Object.freeze({
             global_router_cap: requestedGlobal,
             per_bridge_cap: requestedBridge,
+            technical_risk_caps_enabled: requestedCapsEnabled,
             financial_dry_run: requestedDryRun
         }),
         effective: Object.freeze({
             global_router_cap: effectiveGlobal,
             per_bridge_cap: effectiveBridge,
+            technical_risk_caps_enabled: effectiveCapsEnabled,
             financial_dry_run: effectiveDryRun
         }),
         discrepancies: frozenDiscrepancies,
@@ -189,7 +209,7 @@ async function readSystemConfig({ dbPool, log = console, emitDiscrepancies = fal
         const [rows] = await dbPool.query(
             `SELECT config_key, config_value
              FROM system_configs
-             WHERE config_key IN (?, ?, ?)
+             WHERE config_key IN (?, ?, ?, ?)
              ORDER BY config_key`,
             CONFIG_KEYS
         );
@@ -211,6 +231,7 @@ async function updateSystemConfig({
     dbPool,
     globalRouterCap,
     perBridgeCap,
+    technicalRiskCapsEnabled,
     financialDryRun,
     log = console
 }) {
@@ -220,10 +241,12 @@ async function updateSystemConfig({
 
     const globalValue = requestedMoney(globalRouterCap);
     const bridgeValue = requestedMoney(perBridgeCap);
+    const capsEnabledValue = requestedBoolean(technicalRiskCapsEnabled);
     const dryRunValue = requestedBoolean(financialDryRun);
 
     if (globalValue == null) throw new Error('SYSTEM_CONFIG_GLOBAL_ROUTER_CAP_INVALID');
     if (bridgeValue == null) throw new Error('SYSTEM_CONFIG_PER_BRIDGE_CAP_INVALID');
+    if (capsEnabledValue == null) throw new Error('SYSTEM_CONFIG_TECHNICAL_RISK_CAPS_ENABLED_INVALID');
     if (dryRunValue == null) throw new Error('SYSTEM_CONFIG_FINANCIAL_DRY_RUN_INVALID');
 
     await ensureSystemConfigsTable(dbPool);
@@ -231,20 +254,27 @@ async function updateSystemConfig({
         `INSERT INTO system_configs (config_key, config_value) VALUES
          ('global_router_cap', ?),
          ('per_bridge_cap', ?),
+         ('technical_risk_caps_enabled', ?),
          ('financial_dry_run', ?)
          ON DUPLICATE KEY UPDATE config_value=VALUES(config_value)`,
-        [globalValue.toFixed(2), bridgeValue.toFixed(2), String(dryRunValue)]
+        [
+            globalValue.toFixed(2),
+            bridgeValue.toFixed(2),
+            String(capsEnabledValue),
+            String(dryRunValue)
+        ]
     );
 
     return readSystemConfig({ dbPool, log, emitDiscrepancies: true });
 }
 
-async function updateTechnicalCaps({ dbPool, globalRouterCap, perBridgeCap, log = console }) {
+async function updateTechnicalCaps({ dbPool, globalRouterCap, perBridgeCap, enabled, log = console }) {
     const current = await readSystemConfig({ dbPool, log });
     return updateSystemConfig({
         dbPool,
         globalRouterCap,
         perBridgeCap,
+        technicalRiskCapsEnabled: enabled ?? current.requested.technical_risk_caps_enabled,
         financialDryRun: current.requested.financial_dry_run,
         log
     });
@@ -255,6 +285,7 @@ async function resetSystemConfig({ dbPool, log = console }) {
         dbPool,
         globalRouterCap: SAFE_DEFAULTS.global_router_cap,
         perBridgeCap: SAFE_DEFAULTS.per_bridge_cap,
+        technicalRiskCapsEnabled: SAFE_DEFAULTS.technical_risk_caps_enabled,
         financialDryRun: SAFE_DEFAULTS.financial_dry_run,
         log
     });
