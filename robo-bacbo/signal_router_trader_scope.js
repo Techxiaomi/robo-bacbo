@@ -21,6 +21,77 @@ function filterTargetsByAccountIds(targets, accountIds) {
         .sort((a, b) => Number(a.account_id) - Number(b.account_id));
 }
 
+function moneyCents(value, { allowZero = false } = {}) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number < 0 || (!allowZero && number <= 0)) return null;
+    const cents = Math.round(number * 100);
+    if (cents < 0 || (!allowZero && cents <= 0)) return null;
+    return cents;
+}
+
+function normalizeIntentTarget(value) {
+    const target = String(value || '').trim();
+    return ['PlayerWon', 'BankerWon', 'Tie'].includes(target) ? target : '';
+}
+
+function assertSignalMatchesAuditIntent(signal, row) {
+    const status = String(row?.audit_status_ordem ?? row?.status_ordem ?? '').trim().toUpperCase();
+    if (status !== 'PREPARANDO') {
+        throw new Error(`SIGNAL_ROUTER_TRADER_SCOPE_ORDER_NOT_PREPARING: ${status || '<empty>'}`);
+    }
+
+    const auditTarget = normalizeIntentTarget(row?.audit_alvo ?? row?.alvo);
+    const signalTarget = normalizeIntentTarget(signal?.alvo);
+    if (!auditTarget || !signalTarget || auditTarget !== signalTarget) {
+        throw new Error('SIGNAL_ROUTER_TRADER_SCOPE_INTENT_TARGET_MISMATCH');
+    }
+
+    const auditRiskCents = moneyCents(row?.audit_risco_total ?? row?.risco_total);
+    const auditEntryCents = moneyCents(row?.audit_valor_entrada ?? row?.valor_entrada);
+    const auditTieCents = moneyCents(row?.audit_valor_empate ?? row?.valor_empate, { allowZero: true });
+    if (
+        auditRiskCents === null
+        || auditEntryCents === null
+        || auditTieCents === null
+        || auditEntryCents + auditTieCents !== auditRiskCents
+    ) {
+        throw new Error('SIGNAL_ROUTER_TRADER_SCOPE_AUDIT_INTENT_INVALID');
+    }
+
+    const signalExposureCents = Number(signal?.exposure_cents);
+    if (!Number.isSafeInteger(signalExposureCents) || signalExposureCents <= 0 || signalExposureCents !== auditRiskCents) {
+        throw new Error('SIGNAL_ROUTER_TRADER_SCOPE_INTENT_EXPOSURE_MISMATCH');
+    }
+
+    const legs = Array.isArray(signal?.apostas) && signal.apostas.length > 0
+        ? signal.apostas
+        : null;
+
+    if (!legs) {
+        if (auditTieCents > 0) {
+            throw new Error('SIGNAL_ROUTER_TRADER_SCOPE_INTENT_PLAN_MISMATCH');
+        }
+        return true;
+    }
+
+    const expected = [{ alvo: auditTarget, cents: auditEntryCents }];
+    if (auditTieCents > 0) expected.push({ alvo: 'Tie', cents: auditTieCents });
+    if (legs.length !== expected.length) {
+        throw new Error('SIGNAL_ROUTER_TRADER_SCOPE_INTENT_PLAN_MISMATCH');
+    }
+
+    for (let index = 0; index < expected.length; index += 1) {
+        const leg = legs[index];
+        const legTarget = normalizeIntentTarget(leg?.alvo);
+        const legCents = moneyCents(leg?.valor);
+        if (legTarget !== expected[index].alvo || legCents !== expected[index].cents) {
+            throw new Error('SIGNAL_ROUTER_TRADER_SCOPE_INTENT_PLAN_MISMATCH');
+        }
+    }
+
+    return true;
+}
+
 class FinancialTraderScopeResolver {
     constructor({ dbPool, log = console }) {
         if (!dbPool || typeof dbPool.query !== 'function') throw new TypeError('SIGNAL_ROUTER_TRADER_SCOPE_DB_INVALID');
@@ -35,7 +106,13 @@ class FinancialTraderScopeResolver {
         if (!signalId || !tableKey) throw new Error('SIGNAL_ROUTER_TRADER_SCOPE_SIGNAL_INVALID');
 
         const [rows] = await this.dbPool.query(
-            `SELECT ao.trader_id, at.config_json, at.saldo_inicial, at.saldo_atual,
+            `SELECT ao.trader_id,
+                    ao.alvo AS audit_alvo,
+                    ao.risco_total AS audit_risco_total,
+                    ao.valor_entrada AS audit_valor_entrada,
+                    ao.valor_empate AS audit_valor_empate,
+                    ao.status_ordem AS audit_status_ordem,
+                    at.config_json, at.saldo_inicial, at.saldo_atual,
                     at.ativo, at.status_operacao, LOWER(m.codigo) AS table_key
              FROM auditoria_ordens ao
              INNER JOIN auto_traders at ON at.id = ao.trader_id AND at.mesa_id = ao.mesa_id
@@ -47,6 +124,8 @@ class FinancialTraderScopeResolver {
         if (!Array.isArray(rows) || rows.length !== 1) throw new Error('SIGNAL_ROUTER_TRADER_SCOPE_ORDER_NOT_UNIQUE');
 
         const row = rows[0];
+        assertSignalMatchesAuditIntent(signal, row);
+
         const traderId = Number(row.trader_id);
         const resolvedTable = String(row.table_key || '').trim().toLowerCase();
         const active = row.ativo === true || row.ativo === 1;
@@ -112,4 +191,9 @@ class FinancialTraderScopeResolver {
     }
 }
 
-module.exports = { filterTargetsByAccountIds, FinancialTraderScopeResolver };
+module.exports = {
+    filterTargetsByAccountIds,
+    moneyCents,
+    assertSignalMatchesAuditIntent,
+    FinancialTraderScopeResolver
+};
