@@ -135,7 +135,7 @@ try {
     Write-Host "Dump OK: $($dumpInfo.Length) bytes | SHA256=$dumpHash"
 
     Write-Step 'Copiando projeto'
-    $excludedDirs = @('.git','backups','migration-db','logs','__pycache__','.pytest_cache')
+    $excludedDirs = @('.git','backup','backups','migration-db','logs','__pycache__','.pytest_cache')
     if (-not $IncludeDependencies) { $excludedDirs += @('node_modules','venv','.venv') }
     $roboArgs = @($ProjectRoot,$projectDir,'/E','/R:1','/W:1','/NFL','/NDL','/NJH','/NJS','/NP','/XF','.env','*.pyc')
     if ($excludedDirs.Count -gt 0) { $roboArgs += '/XD'; $roboArgs += $excludedDirs }
