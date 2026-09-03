@@ -159,28 +159,6 @@ if ([IO.Path]::GetExtension($backupPath).ToLowerInvariant() -ne '.zip') {
     throw 'O arquivo de backup deve ser um .zip gerado por 01_BACKUP_COMPLETO.ps1.'
 }
 
-$defaultTargetRoot = 'D:\Projetos\Bacbo'
-if ([string]::IsNullOrWhiteSpace($TargetRoot)) {
-    Write-Host ''
-    $targetInput = Read-Host "Pasta de instalacao [$defaultTargetRoot]"
-    if ([string]::IsNullOrWhiteSpace($targetInput)) {
-        $TargetRoot = $defaultTargetRoot
-    }
-    else {
-        $TargetRoot = $targetInput.Trim().Trim('"').Trim("'")
-    }
-}
-else {
-    $TargetRoot = $TargetRoot.Trim().Trim('"').Trim("'")
-}
-
-if ([string]::IsNullOrWhiteSpace($TargetRoot)) {
-    throw 'Pasta de instalacao invalida.'
-}
-
-$TargetRoot = [IO.Path]::GetFullPath($TargetRoot)
-Write-Host "Destino selecionado: $TargetRoot"
-
 $mariaBin = Find-MariaDbBin
 $mariaExe = Join-Path $mariaBin 'mariadb.exe'
 $staging = Join-Path $env:TEMP ('Bacbo_Restore_' + [guid]::NewGuid().ToString('N'))
@@ -256,6 +234,20 @@ try {
 
     if ($dbName -notmatch '^[A-Za-z0-9_]+$') { throw "DB_NAME invalido no backup: $dbName" }
     if ($appUser -notmatch '^[A-Za-z0-9_]+$') { throw "DB_USER invalido no backup: $appUser" }
+
+    $defaultTargetRoot = 'D:\Projetos\Bacbo'
+    if ([string]::IsNullOrWhiteSpace($TargetRoot)) {
+        $typedTarget = Read-Host "Pasta de instalacao [$defaultTargetRoot]"
+        if ([string]::IsNullOrWhiteSpace($typedTarget)) {
+            $TargetRoot = $defaultTargetRoot
+        }
+        else {
+            $TargetRoot = $typedTarget.Trim().Trim('"')
+        }
+    }
+
+    $TargetRoot = [IO.Path]::GetFullPath($TargetRoot)
+    Write-Host "Destino selecionado: $TargetRoot"
 
     Write-Step 'Preparando destino da aplicacao'
 
