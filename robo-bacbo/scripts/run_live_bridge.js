@@ -9,6 +9,7 @@ require('../env_loader').loadEnvFile(path.join(__dirname, '..', '..', '.env'));
 
 const { createBettingHouseService } = require('../betting_house_service');
 const { getTechnicalRiskCaps } = require('../technical_risk_caps');
+const { createStartupTracker } = require('../live_bridge_startup_tracker');
 
 const HOUSE_ADAPTER_KEY = 'brasil-da-sorte';
 const DEFAULT_TABLE_KEY = 'bacbo_br';
@@ -215,9 +216,12 @@ function requestExternalShutdown(reason) {
     pendingExternalShutdownReason = normalizedReason;
 }
 
-function inspectPythonLine(line) {
+function inspectPythonLine(line, startupTracker = null) {
     const text = String(line || '').trim();
     if (!text) return;
+    if (startupTracker && typeof startupTracker.observe === 'function') {
+        startupTracker.observe(text);
+    }
     if (text === 'LIVE_BRIDGE_READY=true') {
         sendTelemetry('READY');
         return;
@@ -233,6 +237,7 @@ function inspectPythonLine(line) {
 
 function runPython({ pythonExecutable, pythonScript, config, cwd }) {
     return new Promise((resolve, reject) => {
+        const startupTracker = createStartupTracker();
         const child = spawn(pythonExecutable, ['-X', 'faulthandler', pythonScript], {
             cwd,
             env: sanitizedPythonEnv(),
@@ -252,7 +257,7 @@ function runPython({ pythonExecutable, pythonScript, config, cwd }) {
             while (newlineIndex >= 0) {
                 const line = stdoutBuffer.slice(0, newlineIndex).replace(/\r$/, '');
                 stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
-                inspectPythonLine(line);
+                inspectPythonLine(line, startupTracker);
                 newlineIndex = stdoutBuffer.indexOf('\n');
             }
         };
@@ -275,7 +280,7 @@ function runPython({ pythonExecutable, pythonScript, config, cwd }) {
             if (settled) return;
             settled = true;
             activePythonControl = null;
-            if (stdoutBuffer.trim()) inspectPythonLine(stdoutBuffer);
+            if (stdoutBuffer.trim()) inspectPythonLine(stdoutBuffer, startupTracker);
             try { child.stdin.end(); } catch (_) {}
             callback();
         };
