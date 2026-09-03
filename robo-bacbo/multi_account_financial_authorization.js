@@ -226,7 +226,13 @@ class ScopedTraderBalanceAuthorization {
 
             await Promise.all(accountIds.map(accountId => this.publisher.publish(
                 `auto_trader_commands:${accountId}:${this.tableKey}`,
-                JSON.stringify({ action: 'sync_balance', request_id: requestId })
+                JSON.stringify({
+                    action: 'sync_balance',
+                    request_id: requestId,
+                    routed_account_id: accountId,
+                    routed_session_id: `account-${accountId}:${this.tableKey}`,
+                    routed_table_key: this.tableKey
+                })
             )));
 
             const deadline = Date.now() + this.refreshTimeoutMs;
