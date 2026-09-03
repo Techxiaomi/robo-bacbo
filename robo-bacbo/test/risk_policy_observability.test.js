@@ -29,6 +29,7 @@ function validConfigRows(overrides = {}) {
     return [
         { config_key: 'global_router_cap', config_value: String(overrides.global_router_cap ?? 20) },
         { config_key: 'per_bridge_cap', config_value: String(overrides.per_bridge_cap ?? 5) },
+        { config_key: 'technical_risk_caps_enabled', config_value: String(overrides.technical_risk_caps_enabled ?? false) },
         { config_key: 'financial_dry_run', config_value: String(overrides.financial_dry_run ?? true) }
     ];
 }
@@ -61,9 +62,13 @@ test('invalid Trader policy is exposed as INVALID_RISK_POLICY', () => {
     assert.equal(mapped.stop_loss, null);
 });
 
-test('observability separates Trader limits, DB technical caps and forced DRY RUN mode', async () => {
+test('observability separates Trader limits, optional technical caps and forced DRY RUN mode', async () => {
     const dbPool = observabilityPool({
-        configRows: validConfigRows({ global_router_cap: 12.5, per_bridge_cap: 3.25 }),
+        configRows: validConfigRows({
+            global_router_cap: 120,
+            per_bridge_cap: 15,
+            technical_risk_caps_enabled: true
+        }),
         traderRows: [{
             id: 18,
             nome: 'Trader 18',
@@ -76,10 +81,12 @@ test('observability separates Trader limits, DB technical caps and forced DRY RU
     assert.equal(snapshot.ok, true);
     assert.equal(snapshot.fail_closed, false);
     assert.deepEqual(snapshot.technical_caps, {
-        global_router_cap: 12.5,
-        per_bridge_cap: 3.25,
-        requested_global_router_cap: 12.5,
-        requested_per_bridge_cap: 3.25,
+        enabled: true,
+        global_router_cap: 120,
+        per_bridge_cap: 15,
+        requested_global_router_cap: 120,
+        requested_per_bridge_cap: 15,
+        requested_enabled: true,
         clamped: false,
         discrepancies: [],
         source: 'system_configs'
@@ -110,7 +117,7 @@ test('stored financial_dry_run=false remains blocked and marks observability fai
     assert.match(String(snapshot.financial_mode.reason), /FINANCIAL_DRY_RUN_FORCED_TRUE/);
 });
 
-test('DB failure falls back to safe defaults and remains fail-closed', async () => {
+test('DB failure falls back to defaults with technical caps disabled and remains fail-closed', async () => {
     const dbPool = {
         async query() {
             const error = new Error('db unavailable');
@@ -122,6 +129,7 @@ test('DB failure falls back to safe defaults and remains fail-closed', async () 
     const snapshot = await readRiskPolicyObservability({ dbPool });
     assert.equal(snapshot.ok, false);
     assert.equal(snapshot.fail_closed, true);
+    assert.equal(snapshot.technical_caps.enabled, false);
     assert.equal(snapshot.technical_caps.global_router_cap, 20);
     assert.equal(snapshot.technical_caps.per_bridge_cap, 5);
     assert.equal(snapshot.technical_caps.source, 'safe-defaults');
