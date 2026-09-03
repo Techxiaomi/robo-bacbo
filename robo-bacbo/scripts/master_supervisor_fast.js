@@ -139,10 +139,11 @@ async function main() {
             void requestReconcile(`WAKE_${reason}`);
         });
 
+        // Este timer e propositalmente referenciado: o Supervisor precisa permanecer
+        // vivo mesmo com zero Auto-Traders ativos para perceber a proxima ativacao.
         pollTimer = setInterval(() => {
             void requestReconcile('POLL_FALLBACK');
         }, reconcileIntervalMs);
-        if (typeof pollTimer.unref === 'function') pollTimer.unref();
 
         await shutdownGate;
     } finally {
