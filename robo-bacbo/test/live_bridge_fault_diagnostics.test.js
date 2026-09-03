@@ -5,27 +5,31 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const repoRoot = path.join(__dirname, '..', '..');
-const diagnosticPath = path.join(repoRoot, 'robo-sync-pilot', 'sitecustomize.py');
+const root = path.join(__dirname, '..');
+const bridgePath = path.join(root, 'scripts', 'run_live_bridge.js');
 
 function source() {
-    return fs.readFileSync(diagnosticPath, 'utf8');
+    return fs.readFileSync(bridgePath, 'utf8');
 }
 
-test('fault diagnostics only arm for live_bridge.py', () => {
+test('live bridge always launches Python with faulthandler enabled', () => {
     const text = source();
-    assert.match(text, /Path\(str\(values\[0\]\)\)\.name\.lower\(\) == "live_bridge\.py"/);
-    assert.match(text, /if not _is_live_bridge_process\(\):\s*\n\s*return False/);
+    assert.match(text, /spawn\(pythonExecutable, \['-X', 'faulthandler', pythonScript\]/);
+    assert.match(text, /env\.PYTHONFAULTHANDLER\s*=\s*'1'/);
+    assert.match(text, /LIVE_BRIDGE_PYTHON_FAULTHANDLER=true/);
 });
 
-test('fault diagnostics persist native traceback with all threads', () => {
+test('live bridge captures Python stderr instead of inheriting it', () => {
     const text = source();
-    assert.match(text, /live-bridge-python-fault-\{os\.getpid\(\)\}\.log/);
-    assert.match(text, /faulthandler\.enable\(file=_fault_file, all_threads=True\)/);
-    assert.match(text, /LIVE_BRIDGE_FAULTHANDLER_ENABLED/);
+    assert.match(text, /stdio:\s*\['pipe', 'pipe', 'pipe'\]/);
+    assert.match(text, /child\.stderr\.on\('data', consumeStderr\)/);
+    assert.match(text, /LIVE_BRIDGE_PYTHON_STDERR_TAIL=/);
+    assert.match(text, /MAX_STDERR_TAIL_BYTES\s*=\s*64 \* 1024/);
 });
 
-test('fault diagnostics do not alter bridge financial or browser code', () => {
+test('fault diagnostics do not change financial or browser parameters', () => {
     const text = source();
-    assert.doesNotMatch(text, /place_bet|REDIS_COMMAND_CHANNEL|chromium\.launch|BROWSER_ARGS|AUTO_TRADER/);
+    assert.doesNotMatch(text, /chromium\.launch|BROWSER_ARGS/);
+    assert.match(text, /technical_caps_enabled:\s*technicalCaps\.enabled === true/);
+    assert.match(text, /max_exposure:\s*technicalCaps\.configured_per_bridge_cap/);
 });
