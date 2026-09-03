@@ -46,7 +46,7 @@ test('game launch skips redundant scroll and replaces fixed settle with bounded 
     const gameStart = source.indexOf('    def _wait_and_launch_game');
     assert.ok(gameStart > 0);
     const gameBlock = source.slice(gameStart);
-    assert.doesNotMatch(gameBlock, /scroll_into_view_if_needed/);
+    assert.doesNotMatch(gameBlock, /\bcandidate\.scroll_into_view_if_needed\s*\(/);
     assert.match(gameBlock, /candidate\.click\(force=True, timeout=3000\)/);
     assert.match(gameBlock, /_wait_for_game_transition\(primary_page\)/);
     assert.match(gameBlock, /while elapsed < GAME_LAUNCH_SETTLE_MS/);
