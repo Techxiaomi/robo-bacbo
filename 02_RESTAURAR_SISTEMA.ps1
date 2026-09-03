@@ -5,7 +5,9 @@ param(
 
     [string]$TargetRoot = '',
 
-    [switch]$Force
+    [switch]$Force,
+
+    [switch]$TestMode
 )
 
 $ErrorActionPreference = 'Stop'
@@ -113,7 +115,8 @@ function Invoke-MariaDb {
                 }
                 if (Test-Path -LiteralPath $stderrFile) {
                     $stderr = @(Get-Content -LiteralPath $stderrFile -ErrorAction SilentlyContinue)
-                } else {
+                }
+                else {
                     $stderr = @()
                 }
 
@@ -163,6 +166,12 @@ $mariaBin = Find-MariaDbBin
 $mariaExe = Join-Path $mariaBin 'mariadb.exe'
 $staging = Join-Path $env:TEMP ('Bacbo_Restore_' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $staging -Force | Out-Null
+
+$rootPassword = $null
+$testDbName = $null
+$testAppUser = $null
+$testTargetRoot = $null
+$dbPortForCleanup = '3306'
 
 try {
     Write-Step 'Extraindo backup'
@@ -227,6 +236,7 @@ try {
     $appUser = [string]$envMap['DB_USER']
     $appPassword = [string]$envMap['DB_PASSWORD']
     $dbPort = [string]$envMap['DB_PORT']
+    $dbPortForCleanup = $dbPort
 
     if ([string]$envMap['DB_HOST'] -notin @('127.0.0.1','localhost','::1')) {
         throw "O backup nao aponta para banco local. DB_HOST=$($envMap['DB_HOST'])"
@@ -235,14 +245,32 @@ try {
     if ($dbName -notmatch '^[A-Za-z0-9_]+$') { throw "DB_NAME invalido no backup: $dbName" }
     if ($appUser -notmatch '^[A-Za-z0-9_]+$') { throw "DB_USER invalido no backup: $appUser" }
 
-    $defaultTargetRoot = 'D:\Projetos\Bacbo'
-    if ([string]::IsNullOrWhiteSpace($TargetRoot)) {
-        $typedTarget = Read-Host "Pasta de instalacao [$defaultTargetRoot]"
-        if ([string]::IsNullOrWhiteSpace($typedTarget)) {
-            $TargetRoot = $defaultTargetRoot
-        }
-        else {
-            $TargetRoot = $typedTarget.Trim().Trim('"')
+    if ($TestMode) {
+        $testId = [guid]::NewGuid().ToString('N').Substring(0,8)
+        $testDbName = "bacbo_restore_test_$testId"
+        $testAppUser = "bacbo_rt_$testId"
+        $testTargetRoot = Join-Path $env:TEMP "Bacbo_Restore_Test_$testId"
+
+        $dbName = $testDbName
+        $appUser = $testAppUser
+        $TargetRoot = $testTargetRoot
+        $Force = $true
+
+        Write-Host 'RESTORE_TEST_MODE=true' -ForegroundColor Yellow
+        Write-Host "Banco temporario: $dbName"
+        Write-Host "Usuario temporario: $appUser"
+        Write-Host "Pasta temporaria: $TargetRoot"
+    }
+    else {
+        $defaultTargetRoot = 'D:\Projetos\Bacbo'
+        if ([string]::IsNullOrWhiteSpace($TargetRoot)) {
+            $typedTarget = Read-Host "Pasta de instalacao [$defaultTargetRoot]"
+            if ([string]::IsNullOrWhiteSpace($typedTarget)) {
+                $TargetRoot = $defaultTargetRoot
+            }
+            else {
+                $TargetRoot = $typedTarget.Trim().Trim('"')
+            }
         }
     }
 
@@ -267,7 +295,18 @@ try {
     $roboCode = $LASTEXITCODE
     if ($roboCode -gt 7) { throw "Falha no restore dos arquivos. robocopy exit code=$roboCode" }
 
-    Copy-Item -LiteralPath $envSource -Destination (Join-Path $TargetRoot '.env') -Force
+    $targetEnv = Join-Path $TargetRoot '.env'
+    Copy-Item -LiteralPath $envSource -Destination $targetEnv -Force
+
+    if ($TestMode) {
+        $targetEnvContent = Get-Content -LiteralPath $targetEnv
+        $targetEnvContent = $targetEnvContent | ForEach-Object {
+            if ($_ -match '^\s*DB_NAME\s*=') { "DB_NAME=$dbName" }
+            elseif ($_ -match '^\s*DB_USER\s*=') { "DB_USER=$appUser" }
+            else { $_ }
+        }
+        $targetEnvContent | Set-Content -LiteralPath $targetEnv -Encoding UTF8
+    }
 
     Write-Step 'Recriando banco e usuario MariaDB'
 
@@ -305,7 +344,6 @@ FLUSH PRIVILEGES;
         $dbName
     ) -InputFile $dumpFile | Out-Null
 
-    $rootPassword = $null
     Remove-Item -LiteralPath $adminSqlFile -Force -ErrorAction SilentlyContinue
 
     Write-Step 'Validando banco restaurado com usuario da aplicacao'
@@ -350,18 +388,59 @@ FLUSH PRIVILEGES;
     }
 
     Write-Host ''
-    Write-Host 'RESTAURACAO_COMPLETA_OK=true' -ForegroundColor Green
-    Write-Host "PROJECT_ROOT=$TargetRoot"
-    Write-Host "DATABASE=$dbName"
-    Write-Host "TABLES=$restoredTables"
-    Write-Host 'O sistema nao foi iniciado automaticamente. Inicie pelo mesmo CMD/atalho operacional usado normalmente.' -ForegroundColor Yellow
+    if ($TestMode) {
+        Write-Host 'RESTAURACAO_TESTE_OK=true' -ForegroundColor Green
+        Write-Host "TEST_DATABASE=$dbName"
+        Write-Host "TEST_TABLES=$restoredTables"
+        Write-Host 'O banco e a pasta temporarios serao removidos automaticamente.' -ForegroundColor Yellow
+    }
+    else {
+        Write-Host 'RESTAURACAO_COMPLETA_OK=true' -ForegroundColor Green
+        Write-Host "PROJECT_ROOT=$TargetRoot"
+        Write-Host "DATABASE=$dbName"
+        Write-Host "TABLES=$restoredTables"
+        Write-Host 'O sistema nao foi iniciado automaticamente. Inicie pelo mesmo CMD/atalho operacional usado normalmente.' -ForegroundColor Yellow
+    }
 }
 catch {
     Write-Host ''
-    Write-Host 'RESTAURACAO_COMPLETA_OK=false' -ForegroundColor Red
+    if ($TestMode) {
+        Write-Host 'RESTAURACAO_TESTE_OK=false' -ForegroundColor Red
+    }
+    else {
+        Write-Host 'RESTAURACAO_COMPLETA_OK=false' -ForegroundColor Red
+    }
     throw
 }
 finally {
+    if ($TestMode -and -not [string]::IsNullOrWhiteSpace([string]$rootPassword) -and -not [string]::IsNullOrWhiteSpace([string]$testDbName)) {
+        try {
+            $cleanupSql = @"
+DROP DATABASE IF EXISTS ``$testDbName``;
+DROP USER IF EXISTS '$testAppUser'@'127.0.0.1';
+DROP USER IF EXISTS '$testAppUser'@'localhost';
+FLUSH PRIVILEGES;
+"@
+            $cleanupSqlFile = Join-Path $staging 'restore-test-cleanup.sql'
+            $cleanupSql | Set-Content -LiteralPath $cleanupSqlFile -Encoding UTF8
+            Invoke-MariaDb -Exe $mariaExe -Password $rootPassword -Arguments @(
+                '--host=127.0.0.1',
+                "--port=$dbPortForCleanup",
+                '--user=root'
+            ) -InputFile $cleanupSqlFile | Out-Null
+            Write-Host 'RESTORE_TEST_DATABASE_CLEANUP=true' -ForegroundColor Green
+        }
+        catch {
+            Write-Warning "Nao foi possivel limpar automaticamente o banco/usuario temporario: $($_.Exception.Message)"
+        }
+    }
+
+    $rootPassword = $null
+
+    if ($TestMode -and -not [string]::IsNullOrWhiteSpace([string]$testTargetRoot) -and (Test-Path -LiteralPath $testTargetRoot)) {
+        Remove-Item -LiteralPath $testTargetRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
     if (Test-Path -LiteralPath $staging) {
         Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
     }
