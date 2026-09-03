@@ -8,8 +8,11 @@ const path = require('node:path');
 const root = path.resolve(__dirname, '..');
 const {
     OPEN_FINANCIAL_STATUSES,
+    AUTO_RECONCILE_METHOD,
     wantsActivation,
-    positiveTraderId
+    positiveTraderId,
+    ambiguityHasExecutionEvidence,
+    traderIsAmbiguityBlocked
 } = require('../auto_trader_ambiguity_reactivation_guard');
 
 function read(relativePath) {
@@ -39,7 +42,49 @@ test('guard preserva exatamente os estados financeiros abertos do MC21', () => {
     assert.match(source, /ordem_financeira_aberta/);
 });
 
-test('bloqueio antigo de ambiguidade pode ser limpo apenas quando open_orders=0', () => {
+test('somente ENVIO_AMBIGUO sem qualquer evidencia pode ser auto reconciliado', () => {
+    assert.equal(AUTO_RECONCILE_METHOD, 'AUTO_REACTIVATION_NO_EVIDENCE');
+    assert.equal(ambiguityHasExecutionEvidence({}), false);
+    assert.equal(ambiguityHasExecutionEvidence({ executor_confirmacao_metodo: null }), false);
+    assert.equal(ambiguityHasExecutionEvidence({ executor_confirmacao_metodo: 'SALDO_DEBITO' }), true);
+    assert.equal(ambiguityHasExecutionEvidence({ executor_saldo_antes: 100 }), true);
+    assert.equal(ambiguityHasExecutionEvidence({ executor_saldo_depois: 90 }), true);
+    assert.equal(ambiguityHasExecutionEvidence({ executor_debito_observado: 10 }), true);
+    assert.equal(ambiguityHasExecutionEvidence({ execucao_confirmada_em: 123 }), true);
+    assert.equal(ambiguityHasExecutionEvidence({ resultado_confirmado_em: 123 }), true);
+    assert.equal(ambiguityHasExecutionEvidence({ saldo_pos_confirmado_em: 123 }), true);
+
+    const source = read('auto_trader_ambiguity_reactivation_guard.js');
+    assert.match(source, /status_ordem='ENVIO_AMBIGUO'/);
+    assert.match(source, /executor_confirmacao_metodo IS NULL/);
+    assert.match(source, /executor_saldo_antes IS NULL/);
+    assert.match(source, /executor_saldo_depois IS NULL/);
+    assert.match(source, /executor_debito_observado IS NULL/);
+    assert.match(source, /execucao_confirmada_em IS NULL/);
+    assert.match(source, /resultado_confirmado_em IS NULL/);
+    assert.match(source, /saldo_pos_confirmado_em IS NULL/);
+    assert.match(source, /SET status_ordem='FALHOU'/);
+    assert.match(source, /AUTO_TRADER_AMBIGUITY_AUTO_RECONCILED/);
+});
+
+test('auto reconciliacao so roda para trader realmente bloqueado por ambiguidade', () => {
+    assert.equal(traderIsAmbiguityBlocked({ ativo: false, status_operacao: 'BLOQUEADO_AMBIGUIDADE' }), true);
+    assert.equal(traderIsAmbiguityBlocked({ ativo: 0, status_operacao: 'bloqueado_ambiguidade' }), true);
+    assert.equal(traderIsAmbiguityBlocked({ ativo: true, status_operacao: 'BLOQUEADO_AMBIGUIDADE' }), false);
+    assert.equal(traderIsAmbiguityBlocked({ ativo: false, status_operacao: 'STANDBY' }), false);
+});
+
+test('reconciliacao e transacional e revalida ordens abertas antes de liberar', () => {
+    const source = read('auto_trader_ambiguity_reactivation_guard.js');
+    assert.match(source, /beginTransaction\(\)/);
+    assert.match(source, /FOR UPDATE/);
+    assert.match(source, /reconcileEmptyAmbiguities/);
+    assert.match(source, /await connection\.commit\(\)/);
+    assert.match(source, /await connection\.rollback\(\)/);
+    assert.match(source, /AUTO_TRADER_AMBIGUITY_RECONCILE_CONFLICT/);
+});
+
+test('bloqueio antigo de ambiguidade e limpo quando nao resta ordem aberta', () => {
     const source = read('auto_trader_ambiguity_reactivation_guard.js');
     assert.match(source, /BLOQUEADO_AMBIGUIDADE/);
     assert.match(source, /AUTO_TRADER_AMBIGUITY_BLOCK_CLEARED_ON_REACTIVATION/);
