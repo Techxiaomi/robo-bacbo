@@ -9,10 +9,11 @@ const { normalizarConfigAutoTrader, estadoInicialCiclo } = require('./auto_trade
 const { validarPoliticaProtecao } = require('./tie_protection');
 const { obterMesaRuntime } = require('./mesa_runtime_context');
 const { readSupervisorSnapshot } = require('./supervisor_telemetry_store');
+const { signalSupervisorReconcile } = require('./supervisor_reconcile_signal');
 
 const READY_TIMEOUT_MS = 120000;
 const BALANCE_TIMEOUT_MS = 20000;
-const POLL_INTERVAL_MS = 500;
+const POLL_INTERVAL_MS = 250;
 const SUPPORTED_ADAPTER_KEY = 'brasil-da-sorte';
 
 let installed = false;
@@ -84,6 +85,7 @@ function channelsFor(accountId, tableKey) {
 }
 
 async function loadActivationContext(req) {
+    const activationStartedAt = Date.now();
     const traderId = positiveId(req?.params?.id, 'TRADER_ID');
     const mesa = obterMesaRuntime();
     const pool = createDbPool();
@@ -173,6 +175,7 @@ async function loadActivationContext(req) {
     }
 
     return Object.freeze({
+        activationStartedAt,
         traderId,
         mesa,
         tableKey: String(mesa.codigo || '').trim().toLowerCase(),
@@ -206,16 +209,30 @@ async function markActivating(context) {
                 : 'AUTO_TRADER_ACTIVATION_STATE_CONFLICT'
         );
     }
+
     if (context.mode === 'ACTIVE_REBIND') {
         console.log(
             `AUTO_TRADER_ACTIVE_REBIND_PENDING trader=${context.traderId} table=${context.tableKey} ` +
             `previous_accounts=${context.previousAccountIds.join(',')} accounts=${context.accountIds.join(',')}`
         );
-        return;
+    } else {
+        console.log(
+            `AUTO_TRADER_ACTIVATION_PENDING trader=${context.traderId} table=${context.tableKey} ` +
+            `accounts=${context.accountIds.join(',')}`
+        );
     }
+
+    const wakeDelivered = signalSupervisorReconcile(
+        context.mode === 'ACTIVE_REBIND' ? 'AUTO_TRADER_ACTIVE_REBIND' : 'AUTO_TRADER_ACTIVATION',
+        {
+            trader_id: context.traderId,
+            table_key: context.tableKey,
+            account_ids: context.accountIds
+        }
+    );
     console.log(
-        `AUTO_TRADER_ACTIVATION_PENDING trader=${context.traderId} table=${context.tableKey} ` +
-        `accounts=${context.accountIds.join(',')}`
+        `AUTO_TRADER_ACTIVATION_SUPERVISOR_WAKE trader=${context.traderId} delivered=${wakeDelivered} ` +
+        `elapsed_ms=${Date.now() - context.activationStartedAt}`
     );
 }
 
@@ -255,6 +272,11 @@ async function restorePreviousState(context, reason) {
         `${context.mode === 'ACTIVE_REBIND' ? 'AUTO_TRADER_ACTIVE_REBIND_ROLLBACK' : 'AUTO_TRADER_ACTIVATION_ROLLBACK'} ` +
         `trader=${context.traderId} reason=${String(reason || 'UNKNOWN').slice(0, 300)}`
     );
+    signalSupervisorReconcile('AUTO_TRADER_ACTIVATION_ROLLBACK', {
+        trader_id: context.traderId,
+        table_key: context.tableKey,
+        account_ids: context.accountIds
+    });
 }
 
 function readyWorkers(snapshot, context) {
@@ -275,7 +297,8 @@ async function waitWorkersReady(context) {
         if (readyWorkers(snapshot, context)) {
             console.log(
                 `AUTO_TRADER_ACTIVATION_WORKERS_READY trader=${context.traderId} ` +
-                `accounts=${context.accountIds.join(',')}`
+                `accounts=${context.accountIds.join(',')} ` +
+                `elapsed_ms=${Date.now() - context.activationStartedAt}`
             );
             return true;
         }
@@ -285,6 +308,7 @@ async function waitWorkersReady(context) {
 }
 
 async function collectLinkedBalances(context) {
+    const balanceStartedAt = Date.now();
     const redisUrl = String(process.env.REDIS_URL || 'redis://127.0.0.1:6379').trim();
     const publisher = createClient({ url: redisUrl });
     const subscriber = createClient({ url: redisUrl });
@@ -353,7 +377,9 @@ async function collectLinkedBalances(context) {
         console.log(
             `AUTO_TRADER_ACTIVATION_BALANCE_READY trader=${context.traderId} ` +
             `accounts=${accounts.map(item => `${item.account_id}=R$${item.balance.toFixed(2)}`).join(',')} ` +
-            `aggregate=R$${total.toFixed(2)}`
+            `aggregate=R$${total.toFixed(2)} ` +
+            `balance_wait_ms=${Date.now() - balanceStartedAt} ` +
+            `activation_elapsed_ms=${Date.now() - context.activationStartedAt}`
         );
 
         return Object.freeze({ total, accounts: Object.freeze(accounts) });
@@ -390,6 +416,10 @@ async function primeActivation(context, balanceResult) {
     if (Number(result?.affectedRows) !== 1) {
         throw new Error('AUTO_TRADER_ACTIVATION_COMMIT_CONFLICT');
     }
+    console.log(
+        `AUTO_TRADER_ACTIVATION_COMMITTED trader=${context.traderId} ` +
+        `elapsed_ms=${Date.now() - context.activationStartedAt}`
+    );
 }
 
 function installActivationBootstrap() {
