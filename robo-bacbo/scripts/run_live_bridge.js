@@ -53,7 +53,8 @@ function safetyConfig() {
     return {
         mode: 'controlled',
         armed: true,
-        max_exposure: technicalCaps.per_bridge_cap
+        technical_caps_enabled: technicalCaps.enabled === true,
+        max_exposure: technicalCaps.configured_per_bridge_cap
     };
 }
 
@@ -344,6 +345,7 @@ async function main() {
         console.log('SECRETS_LOGGED=false');
         console.log('LIVE_BRIDGE_MODE=controlled');
         console.log('LIVE_BRIDGE_TECHNICAL_CAP_SOURCE=technical_risk_caps');
+        console.log(`LIVE_BRIDGE_TECHNICAL_CAPS_ENABLED=${safety.technical_caps_enabled}`);
         console.log(`LIVE_BRIDGE_MAX_EXPOSURE=${safety.max_exposure.toFixed(2)}`);
 
         await runPython({
