@@ -11,6 +11,8 @@ const OPEN_FINANCIAL_STATUSES = Object.freeze([
     'ENVIO_AMBIGUO'
 ]);
 
+const AUTO_RECONCILE_METHOD = 'AUTO_REACTIVATION_NO_EVIDENCE';
+
 let installed = false;
 let putOriginal = null;
 let dbPool = null;
@@ -39,6 +41,77 @@ function positiveTraderId(value) {
     return Number.isSafeInteger(id) && id > 0 ? id : null;
 }
 
+function hasValue(value) {
+    return value !== null && value !== undefined && String(value).trim() !== '';
+}
+
+function ambiguityHasExecutionEvidence(order = {}) {
+    return hasValue(order.executor_confirmacao_metodo)
+        || order.executor_saldo_antes !== null && order.executor_saldo_antes !== undefined
+        || order.executor_saldo_depois !== null && order.executor_saldo_depois !== undefined
+        || order.executor_debito_observado !== null && order.executor_debito_observado !== undefined
+        || order.execucao_confirmada_em !== null && order.execucao_confirmada_em !== undefined
+        || order.resultado_confirmado_em !== null && order.resultado_confirmado_em !== undefined
+        || order.saldo_pos_confirmado_em !== null && order.saldo_pos_confirmado_em !== undefined;
+}
+
+function traderIsAmbiguityBlocked(trader = {}) {
+    const ativo = trader.ativo === true || trader.ativo === 1;
+    return !ativo
+        && String(trader.status_operacao || '').toUpperCase() === 'BLOQUEADO_AMBIGUIDADE';
+}
+
+async function reconcileEmptyAmbiguities(connection, traderId, mesaId) {
+    const [rows] = await connection.query(
+        `SELECT id, status_ordem, executor_order_id,
+                executor_confirmacao_metodo,
+                executor_saldo_antes, executor_saldo_depois,
+                executor_debito_observado, execucao_confirmada_em,
+                resultado_confirmado_em, saldo_pos_confirmado_em
+         FROM auditoria_ordens
+         WHERE trader_id=?
+           AND mesa_id=?
+           AND status_ordem='ENVIO_AMBIGUO'
+         ORDER BY id ASC
+         FOR UPDATE`,
+        [traderId, mesaId]
+    );
+
+    const safeIds = (rows || [])
+        .filter(order => !ambiguityHasExecutionEvidence(order))
+        .map(order => Number(order.id))
+        .filter(id => Number.isSafeInteger(id) && id > 0);
+
+    if (safeIds.length === 0) return [];
+
+    const placeholders = safeIds.map(() => '?').join(',');
+    const [result] = await connection.query(
+        `UPDATE auditoria_ordens
+         SET status_ordem='FALHOU',
+             executor_confirmacao_metodo=?
+         WHERE trader_id=?
+           AND mesa_id=?
+           AND status_ordem='ENVIO_AMBIGUO'
+           AND executor_confirmacao_metodo IS NULL
+           AND executor_saldo_antes IS NULL
+           AND executor_saldo_depois IS NULL
+           AND executor_debito_observado IS NULL
+           AND execucao_confirmada_em IS NULL
+           AND resultado_confirmado_em IS NULL
+           AND saldo_pos_confirmado_em IS NULL
+           AND id IN (${placeholders})`,
+        [AUTO_RECONCILE_METHOD, traderId, mesaId, ...safeIds]
+    );
+
+    if (Number(result?.affectedRows) !== safeIds.length) {
+        throw new Error(
+            `AUTO_TRADER_AMBIGUITY_RECONCILE_CONFLICT:${Number(result?.affectedRows)}/${safeIds.length}`
+        );
+    }
+
+    return safeIds;
+}
+
 async function inspectActivationState(req) {
     if (!wantsActivation(req)) return null;
 
@@ -51,38 +124,67 @@ async function inspectActivationState(req) {
 
     const mesa = obterMesaRuntime();
     const pool = createDbPool();
+    const connection = await pool.getConnection();
 
-    const [traders] = await pool.query(
-        `SELECT id, ativo, status_operacao
-         FROM auto_traders
-         WHERE id=? AND mesa_id=?
-         LIMIT 1`,
-        [traderId, mesa.id]
-    );
+    try {
+        await connection.beginTransaction();
 
-    if (!Array.isArray(traders) || traders.length !== 1) return null;
+        const [traders] = await connection.query(
+            `SELECT id, ativo, status_operacao
+             FROM auto_traders
+             WHERE id=? AND mesa_id=?
+             LIMIT 1
+             FOR UPDATE`,
+            [traderId, mesa.id]
+        );
 
-    const [openOrders] = await pool.query(
-        `SELECT id, status_ordem, executor_order_id
-         FROM auditoria_ordens
-         WHERE trader_id=?
-           AND mesa_id=?
-           AND status_ordem IN ('PREPARANDO','PENDENTE','ENVIO_AMBIGUO')
-         ORDER BY id ASC
-         LIMIT 1`,
-        [traderId, mesa.id]
-    );
+        if (!Array.isArray(traders) || traders.length !== 1) {
+            await connection.commit();
+            return null;
+        }
 
-    const openOrder = Array.isArray(openOrders) && openOrders.length > 0
-        ? openOrders[0]
-        : null;
+        const trader = { ...traders[0] };
+        let reconciledOrderIds = [];
 
-    return Object.freeze({
-        traderId,
-        mesa,
-        trader: { ...traders[0] },
-        openOrder: openOrder ? { ...openOrder } : null
-    });
+        if (traderIsAmbiguityBlocked(trader)) {
+            reconciledOrderIds = await reconcileEmptyAmbiguities(
+                connection,
+                traderId,
+                mesa.id
+            );
+        }
+
+        const [openOrders] = await connection.query(
+            `SELECT id, status_ordem, executor_order_id
+             FROM auditoria_ordens
+             WHERE trader_id=?
+               AND mesa_id=?
+               AND status_ordem IN ('PREPARANDO','PENDENTE','ENVIO_AMBIGUO')
+             ORDER BY id ASC
+             LIMIT 1
+             FOR UPDATE`,
+            [traderId, mesa.id]
+        );
+
+        await connection.commit();
+
+        const openOrder = Array.isArray(openOrders) && openOrders.length > 0
+            ? openOrders[0]
+            : null;
+
+        return Object.freeze({
+            traderId,
+            mesa,
+            trader,
+            reconciledOrderIds: Object.freeze([...reconciledOrderIds]),
+            openOrder: openOrder ? { ...openOrder } : null
+        });
+    } catch (error) {
+        try { await connection.rollback(); } catch (_) {}
+        throw error;
+    } finally {
+        connection.release();
+    }
 }
 
 function installAutoTraderAmbiguityReactivationGuard() {
@@ -107,6 +209,14 @@ function installAutoTraderAmbiguityReactivationGuard() {
                     const state = await inspectActivationState(req);
                     if (!state) return handler(req, res, next);
 
+                    if (state.reconciledOrderIds.length > 0) {
+                        console.warn(
+                            `AUTO_TRADER_AMBIGUITY_AUTO_RECONCILED trader=${state.traderId} ` +
+                            `table=${String(state.mesa.codigo || '').toLowerCase()} ` +
+                            `orders=${state.reconciledOrderIds.join(',')} method=${AUTO_RECONCILE_METHOD}`
+                        );
+                    }
+
                     if (state.openOrder) {
                         console.warn(
                             `AUTO_TRADER_REACTIVATION_BLOCKED_OPEN_ORDER trader=${state.traderId} ` +
@@ -117,16 +227,13 @@ function installAutoTraderAmbiguityReactivationGuard() {
                             sucesso: false,
                             erro: 'ordem_financeira_aberta',
                             mensagem:
-                                'O Auto-Trader não pode ser reativado enquanto existir uma ordem/intenção financeira aberta.',
+                                'O Auto-Trader não pode ser reativado enquanto existir uma ordem/intenção financeira aberta com evidência pendente de reconciliação.',
                             ordem_id: Number(state.openOrder.id),
                             status_ordem: String(state.openOrder.status_ordem || '')
                         });
                     }
 
-                    if (
-                        (state.trader.ativo === false || state.trader.ativo === 0)
-                        && String(state.trader.status_operacao || '').toUpperCase() === 'BLOQUEADO_AMBIGUIDADE'
-                    ) {
+                    if (traderIsAmbiguityBlocked(state.trader)) {
                         console.log(
                             `AUTO_TRADER_AMBIGUITY_BLOCK_CLEARED_ON_REACTIVATION trader=${state.traderId} ` +
                             `table=${String(state.mesa.codigo || '').toLowerCase()} open_orders=0`
@@ -161,7 +268,10 @@ function installAutoTraderAmbiguityReactivationGuard() {
 
 module.exports = Object.freeze({
     OPEN_FINANCIAL_STATUSES,
+    AUTO_RECONCILE_METHOD,
     wantsActivation,
     positiveTraderId,
+    ambiguityHasExecutionEvidence,
+    traderIsAmbiguityBlocked,
     installAutoTraderAmbiguityReactivationGuard
 });
