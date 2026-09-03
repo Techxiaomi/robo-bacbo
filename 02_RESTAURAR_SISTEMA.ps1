@@ -66,12 +66,39 @@ function Invoke-MariaDb {
     $oldPwd = $env:MYSQL_PWD
     try {
         $env:MYSQL_PWD = $Password
+
         if ([string]::IsNullOrWhiteSpace($InputFile)) {
             $output = & $Exe @Arguments 2>&1
-        } else {
-            $output = Get-Content -LiteralPath $InputFile -Raw | & $Exe @Arguments 2>&1
+            $code = $LASTEXITCODE
         }
-        $code = $LASTEXITCODE
+        else {
+            $stdoutFile = Join-Path $env:TEMP ('bacbo_mariadb_stdout_' + [guid]::NewGuid().ToString('N') + '.txt')
+            $stderrFile = Join-Path $env:TEMP ('bacbo_mariadb_stderr_' + [guid]::NewGuid().ToString('N') + '.txt')
+            try {
+                $process = Start-Process `
+                    -FilePath $Exe `
+                    -ArgumentList $Arguments `
+                    -NoNewWindow `
+                    -Wait `
+                    -PassThru `
+                    -RedirectStandardInput $InputFile `
+                    -RedirectStandardOutput $stdoutFile `
+                    -RedirectStandardError $stderrFile
+
+                $code = $process.ExitCode
+                $output = @()
+                if (Test-Path -LiteralPath $stdoutFile) {
+                    $output += Get-Content -LiteralPath $stdoutFile -ErrorAction SilentlyContinue
+                }
+                if (Test-Path -LiteralPath $stderrFile) {
+                    $output += Get-Content -LiteralPath $stderrFile -ErrorAction SilentlyContinue
+                }
+            }
+            finally {
+                Remove-Item -LiteralPath $stdoutFile,$stderrFile -Force -ErrorAction SilentlyContinue
+            }
+        }
+
         if ($code -ne 0) {
             throw "MariaDB retornou exit code $code.`n$($output -join [Environment]::NewLine)"
         }
@@ -80,13 +107,14 @@ function Invoke-MariaDb {
     finally {
         if ($null -eq $oldPwd) {
             Remove-Item Env:MYSQL_PWD -ErrorAction SilentlyContinue
-        } else {
+        }
+        else {
             $env:MYSQL_PWD = $oldPwd
         }
     }
 }
 
-function Convert-SecureStringToPlainText([Security.SecureString]$Secure) {
+function Convert-SecureStringToPlainText([System.Security.SecureString]$Secure) {
     $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Secure)
     try {
         return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
@@ -188,7 +216,8 @@ try {
         if ($existing.Count -gt 0 -and -not $Force) {
             throw "O destino ja contem arquivos: $TargetRoot. Use -Force somente se deseja restaurar por cima do destino existente."
         }
-    } else {
+    }
+    else {
         New-Item -ItemType Directory -Path $TargetRoot -Force | Out-Null
     }
 
