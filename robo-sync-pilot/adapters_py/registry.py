@@ -1,9 +1,9 @@
 from adapters_py.base_adapter import BettingHouseAdapter
-from adapters_py.brasil_da_sorte import BrasilDaSorteAdapter
+from adapters_py.brasil_da_sorte_fast import BrasilDaSorteFastAdapter
 
 
 _ADAPTERS = {
-    "brasil-da-sorte": BrasilDaSorteAdapter,
+    "brasil-da-sorte": BrasilDaSorteFastAdapter,
 }
 _FINANCIAL_METHODS = (
     "place_bet",
