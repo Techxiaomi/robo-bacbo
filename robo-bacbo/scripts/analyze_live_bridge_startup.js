@@ -24,6 +24,8 @@ const MARKERS = Object.freeze([
     ['BRIDGE_READY', /^LIVE_BRIDGE_READY=true$/],
 ]);
 
+const STRUCTURED_STAGE_PATTERN = /^LIVE_BRIDGE_STARTUP_STAGE=([A-Z0-9_]+)\b/;
+
 function parseArgs(argv) {
     const args = { accountId: null, tableKey: null, logPath: DEFAULT_LOG };
     for (let index = 0; index < argv.length; index += 1) {
@@ -66,6 +68,9 @@ function latestSession(records, accountId, tableKey) {
 }
 
 function markerFor(message) {
+    const structured = STRUCTURED_STAGE_PATTERN.exec(String(message || '').trim());
+    if (structured) return structured[1];
+
     for (const [name, pattern] of MARKERS) {
         if (pattern.test(message)) return name;
     }
@@ -152,6 +157,7 @@ if (require.main === module) {
 
 module.exports = Object.freeze({
     MARKERS,
+    STRUCTURED_STAGE_PATTERN,
     parseArgs,
     latestSession,
     markerFor,
