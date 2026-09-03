@@ -25,6 +25,22 @@ test('Brasil da Sorte fast adapter removes blind login sleeps but preserves poll
     assert.match(source, /BRASIL_DA_SORTE_LOGIN_FORM_OPENED=true/);
 });
 
+test('fast adapter performs only one HOME overlay pass before login trigger', () => {
+    const source = read(adapterPath);
+    const performStart = source.indexOf('    def _perform_login');
+    const openStart = source.indexOf('    def _open_login_form');
+    assert.ok(performStart > 0 && openStart > performStart);
+
+    const performBlock = source.slice(performStart, openStart);
+    const openBlock = source.slice(openStart);
+    assert.doesNotMatch(performBlock, /_dismiss_prelaunch_overlays/);
+    assert.doesNotMatch(performBlock, /_find_login_fields\(page\)/);
+    assert.doesNotMatch(openBlock, /_dismiss_prelaunch_overlays/);
+    assert.match(source, /BRASIL_DA_SORTE_POPUPS_CHECK_DONE=true/);
+    assert.match(source, /BRASIL_DA_SORTE_SESSION_PROBE_DONE=/);
+    assert.match(source, /BRASIL_DA_SORTE_LOGIN_BUTTON_FOUND=/);
+});
+
 test('adapter registry selects the reactive adapter without financial overrides', () => {
     const source = read(registryPath);
     assert.match(source, /from adapters_py\.brasil_da_sorte_fast import BrasilDaSorteFastAdapter/);
@@ -32,9 +48,12 @@ test('adapter registry selects the reactive adapter without financial overrides'
     assert.match(source, /ADAPTER_REGISTRY_FINANCIAL_OVERRIDE_FORBIDDEN/);
 });
 
-test('startup tracker recognizes the new reactive login stages', () => {
+test('startup tracker recognizes the reactive pre-login stages', () => {
     const source = read(trackerPath);
     assert.match(source, /HOME_NAVIGATED/);
+    assert.match(source, /POPUPS_CHECK_DONE/);
+    assert.match(source, /SESSION_PROBE_DONE/);
+    assert.match(source, /LOGIN_BUTTON_FOUND/);
     assert.match(source, /LOGIN_FORM_OPENED/);
     assert.match(source, /LOGIN_FORM_READY/);
 });
