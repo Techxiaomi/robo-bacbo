@@ -31,7 +31,9 @@ test('live bridge captures Python stderr instead of inheriting it', () => {
 
 test('stdin control thread bypasses BufferedReader during daemon shutdown', () => {
     const text = fs.readFileSync(pythonBridgePath, 'utf8');
-    const controlLoop = text.match(/def _stdin_control_loop\(\):([\s\S]*?)\n\ndef _required_nested/);
+    const controlLoop = text.match(
+        /def _stdin_control_loop\(\):([\s\S]*?)\r?\n\r?\ndef _required_nested/
+    );
     assert.ok(controlLoop, 'stdin control loop must remain explicit');
     assert.match(controlLoop[1], /control_stream\s*=\s*sys\.stdin\.buffer\.raw/);
     assert.match(controlLoop[1], /control_stream\.readline\(MAX_CONTROL_LINE_BYTES \+ 1\)/);
