@@ -72,6 +72,32 @@ function inteiroConfig(valor, padrao, minimo, maximo) {
     return Math.min(maximo, Math.max(minimo, inteiro));
 }
 
+function normalizarNamespaceMetricas(valor) {
+    const bruto = String(valor || '').trim().toLowerCase();
+    if (!bruto) return null;
+    const seguro = bruto
+        .replace(/[^a-z0-9_-]+/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^[-_]+|[-_]+$/g, '')
+        .slice(0, 96);
+    return seguro || null;
+}
+
+function nomeArquivoMetricas(nomeBruto, env = process.env) {
+    const namespace = normalizarNamespaceMetricas(env.OPERATIONS_METRICS_NAMESPACE);
+    if (!namespace) {
+        return nomeArquivoEscopadoPorMesa(nomeBruto, env);
+    }
+
+    const nome = path.basename(String(nomeBruto || '').trim());
+    if (!nome) throw new Error('OPERATIONS_METRICS_FILE_NAME_INVALID');
+    const extensao = path.extname(nome);
+    const base = extensao ? nome.slice(0, -extensao.length) : nome;
+    const sufixo = `.${namespace}`;
+    if (base.toLowerCase().endsWith(sufixo.toLowerCase())) return nome;
+    return `${base}${sufixo}${extensao}`;
+}
+
 function configMetricasOperacionais(opcoes = {}) {
     const env = opcoes.env || process.env;
     const baseDir = opcoes.baseDir || process.cwd();
@@ -87,13 +113,7 @@ function configMetricasOperacionais(opcoes = {}) {
 
     return {
         enabled: booleanoConfig(env.OPERATIONS_METRICS_ENABLED, true),
-        filePath: path.join(
-            metricsDir,
-            nomeArquivoEscopadoPorMesa(
-                nomeBruto,
-                env
-            )
-        ),
+        filePath: path.join(metricsDir, nomeArquivoMetricas(nomeBruto, env)),
         intervalMs: inteiroConfig(env.OPERATIONS_METRICS_INTERVAL_SECONDS, 15, 5, 300) * 1000,
         maxSamples: inteiroConfig(env.OPERATIONS_METRICS_MAX_SAMPLES, 2048, 128, 10000),
         maxRoutes: inteiroConfig(env.OPERATIONS_METRICS_MAX_ROUTES, 64, 16, 256),
@@ -474,6 +494,8 @@ function resetMetricasOperacionaisParaTeste(iniciadoEm = Date.now()) {
 module.exports = {
     booleanoConfig,
     inteiroConfig,
+    normalizarNamespaceMetricas,
+    nomeArquivoMetricas,
     configMetricasOperacionais,
     classeStatus,
     normalizarRota,

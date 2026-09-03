@@ -21,7 +21,9 @@ test('MC26: switcher deixa de ocupar uma faixa propria e monta junto ao titulo',
 test('MC26: identidade e status financeiro ficam compactos e semanticamente claros', () => {
     assert.match(switcher, /class="mc26-mesa-codigo"/);
     assert.match(switcher, /class="mc26-mesa-financeiro"/);
-    assert.match(switcher, /\? '💰 Ativo' : '🔒 Bloqueado'/);
+    assert.match(switcher, /BACBO_INT[\s\S]*?financeiro:\s*true/);
+    assert.match(switcher, /BACBO_BR[\s\S]*?financeiro:\s*true/);
+    assert.match(switcher, /💰 Ativo/);
     assert.match(switcher, /--mc26-mesa-accent: #28a745/);
     assert.match(switcher, /--mc26-mesa-accent: #f59e0b/);
     assert.match(switcher, /aria-label="Alternar mesa operacional"/);
@@ -46,7 +48,9 @@ test('MC26: Oraculo tardio recebe rotulo compacto sem alterar seu carregamento',
 test('MC26: compactacao nao altera a mecanica de troca de runtime', () => {
     assert.match(switcher, /url\.port = destino\.porta/);
     assert.match(switcher, /window\.location\.assign\(url\.toString\(\)\)/);
-    assert.match(switcher, /atual\?\.codigo === 'BACBO_INT' && destino\.codigo === 'BACBO_BR'/);
+    assert.match(switcher, /function detectarMesaAtual\(\)/);
+    assert.match(switcher, /Object\.values\(MESAS\)\.find\(mesa => mesa\.porta === porta\)/);
+    assert.match(switcher, /void trocarMesa\(event\.target\.value\)/);
     assert.doesNotMatch(switcher, /definirMesaRuntime/);
     assert.doesNotMatch(switcher, /BACBO_MESA_CODIGO\s*=/);
 });

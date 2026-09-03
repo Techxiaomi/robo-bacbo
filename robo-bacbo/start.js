@@ -18,6 +18,15 @@ const {
     confirmarContratoMesaTransporteRuntime
 } = require('./mesa_transport_context');
 const { instalarGuardaMesaBackend } = require('./mesa_backend_guard');
+const { instalarCatalogoContasAutoTrader } = require('./trader_account_catalog');
+const {
+    installTableAwareConfigValidationBridge,
+    installTableFinancialRulesGuard
+} = require('./table_financial_rules');
+const { installActivationBootstrap } = require('./auto_trader_activation_bootstrap');
+const { installContinuousTraderBalance } = require('./continuous_trader_balance');
+const { installAutoTraderStructuralIntegrity } = require('./auto_trader_structural_integrity');
+const { installManualTraderBalanceSync } = require('./manual_trader_balance_sync');
 
 async function iniciar() {
     const canonicalBridge = require('./bacbo_canonical_bridge');
@@ -86,6 +95,15 @@ async function iniciar() {
 
     confirmarContratoMesaTransporteRuntime();
     instalarGuardaMesaBackend();
+    instalarCatalogoContasAutoTrader();
+    installTableAwareConfigValidationBridge();
+    installTableFinancialRulesGuard();
+    installActivationBootstrap();
+    await installContinuousTraderBalance();
+    installManualTraderBalanceSync();
+    installAutoTraderStructuralIntegrity();
+    await require('./multi_account_financial_authorization')
+        .installMultiAccountFinancialAuthorization();
 
     require('./auto_pilot_history_barrier')
         .instalarAutoPilotHistoryBarrier();

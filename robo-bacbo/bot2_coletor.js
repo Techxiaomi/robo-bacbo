@@ -34,6 +34,7 @@ const {
 const {
     afirmarMesaFinanceiraAutorizada
 } = require("./mesa_financial_scope");
+const { resolveRiskPolicy } = require("./risk_policy");
 require("./env_loader").loadEnvFile(path.join(__dirname, "..", ".env"));
 
 // Erros globais realmente não tratados são fatais: continuar pode deixar estado financeiro incoerente.
@@ -5699,9 +5700,25 @@ function avaliarLimitesFinanceirosTrader(trader, snapshotSaldo) {
         };
     }
 
-    const cf = (trader && trader.config) || {};
-    const stopWin = Number(cf.stop_win ?? 100);
-    const stopLoss = Number(cf.stop_loss ?? 250);
+    const riskPolicy = resolveRiskPolicy({
+        configJson: (trader && trader.config) || null
+    });
+
+    if (!riskPolicy.valid) {
+        return {
+            permitido: false,
+            motivo: 'INVALID_RISK_POLICY',
+            invalid_field: riskPolicy.field,
+            variacao: null,
+            saldo_atual: saldoAtual,
+            trailing_pico_lucro: picoAnterior,
+            trailing_limite_disparo: null,
+            trailing_recuo: 0
+        };
+    }
+
+    const stopWin = riskPolicy.trader_limits.stop_win;
+    const stopLoss = riskPolicy.trader_limits.stop_loss;
     const variacao = Math.round((saldoAtual - saldoInicial) * 100) / 100;
     const trailing = avaliarTrailingStopTrader(trader, variacao);
 

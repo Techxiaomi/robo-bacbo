@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Acessos | Bac Bo</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { margin:0; min-height:100vh; background:#121212; color:#fff; font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif; }
+        .wrap { max-width:980px; margin:0 auto; padding:28px 20px 48px; }
+        .top { display:flex; align-items:center; justify-content:space-between; gap:16px; padding-bottom:16px; border-bottom:1px solid #333; }
+        h1 { margin:0; font-size:22px; }
+        .sub { color:#888; margin-top:6px; font-size:12px; }
+        .badge { display:inline-flex; align-items:center; gap:6px; padding:6px 9px; border:1px solid #3f3f3f; border-radius:999px; background:#191919; color:#aaa; font-size:11px; font-weight:700; }
+        .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; margin-top:22px; }
+        .card { display:block; min-height:180px; padding:20px; border:1px solid #333; border-radius:12px; background:#181818; color:#fff; text-decoration:none; transition:.15s ease; }
+        .card:hover { transform:translateY(-1px); border-color:#555; background:#1d1d1d; }
+        .icon { font-size:28px; }
+        .title { margin-top:12px; font-size:18px; font-weight:800; }
+        .desc { margin-top:8px; color:#aaa; font-size:13px; line-height:1.5; }
+        .cta { margin-top:18px; color:#8fc7ff; font-size:12px; font-weight:800; }
+        .safety { margin-top:16px; padding:20px; border:1px solid #333; border-radius:12px; background:#181818; }
+        .safety-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; }
+        .safety-title { font-size:18px; font-weight:800; }
+        .safety-state { display:inline-flex; align-items:center; padding:7px 10px; border-radius:999px; font-size:11px; font-weight:900; letter-spacing:.4px; }
+        .safety-state.blocked { background:#12351f; color:#7be495; border:1px solid #245d35; }
+        .safety-state.enabled { background:#3b1515; color:#ff9c9c; border:1px solid #6f2a2a; }
+        .safety-state.unknown { background:#322b15; color:#ffd774; border:1px solid #665523; }
+        .safety-meta { margin-top:14px; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
+        .meta { padding:10px 12px; border-radius:8px; background:#111; border:1px solid #2c2c2c; }
+        .meta-label { color:#777; font-size:10px; text-transform:uppercase; font-weight:800; letter-spacing:.5px; }
+        .meta-value { margin-top:4px; font-size:12px; font-weight:800; color:#ddd; word-break:break-word; }
+        .risk-policy { margin-top:18px; padding-top:18px; border-top:1px solid #2f2f2f; }
+        .risk-title { font-size:14px; font-weight:900; }
+        .risk-sub { margin-top:4px; color:#777; font-size:11px; }
+        .risk-grid { margin-top:12px; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
+        .risk-card { padding:12px; border:1px solid #2c2c2c; border-radius:8px; background:#111; }
+        .risk-name { color:#8f8f8f; font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.45px; }
+        .risk-value { margin-top:5px; color:#fff; font-size:15px; font-weight:900; }
+        .risk-source { margin-top:5px; color:#666; font-size:10px; word-break:break-word; }
+        .trader-policy { margin-top:12px; border:1px solid #2c2c2c; border-radius:8px; overflow:hidden; }
+        .trader-head, .trader-row { display:grid; grid-template-columns:1.6fr .8fr .8fr 1.2fr; gap:8px; padding:10px 12px; align-items:center; }
+        .trader-head { background:#101010; color:#777; font-size:10px; font-weight:900; text-transform:uppercase; }
+        .trader-row { border-top:1px solid #252525; color:#ddd; font-size:12px; }
+        .trader-row.invalid { color:#ffadad; }
+        .risk-warning { margin-top:10px; color:#ffd774; font-size:11px; }
+        .safety-actions { margin-top:16px; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+        .kill { border:1px solid #7a2e2e; background:#541c1c; color:#fff; border-radius:8px; padding:10px 14px; font-size:12px; font-weight:900; cursor:pointer; }
+        .kill:hover { background:#6a2323; }
+        .kill:disabled { opacity:.5; cursor:default; }
+        .feedback { color:#aaa; font-size:12px; line-height:1.4; }
+        .footer { margin-top:24px; color:#666; font-size:11px; }
+        @media (max-width:700px) {
+            .grid, .safety-meta, .risk-grid { grid-template-columns:1fr; }
+            .safety-head { flex-direction:column; }
+            .trader-head { display:none; }
+            .trader-row { grid-template-columns:1fr 1fr; }
+        }
+    </style>
+</head>
+<body>
+<div class="wrap">
+    <div class="top">
+        <div>
+            <h1>🔐 Acessos</h1>
+            <div class="sub">Administração universal de casas, contas e processos de Traders.</div>
+        </div>
+        <span class="badge">127.0.0.1:3010</span>
+    </div>
+
+    <div class="grid">
+        <a class="card" href="/betting-houses">
+            <div class="icon">🏦</div>
+            <div class="title">Casas e Contas</div>
+            <div class="desc">Cadastre e gerencie casas de apostas, contas, mesas habilitadas e configuração operacional das credenciais.</div>
+            <div class="cta">Abrir Casas e Contas →</div>
+        </a>
+
+        <a class="card" href="/supervisor">
+            <div class="icon">🧭</div>
+            <div class="title">Processos de Traders</div>
+            <div class="desc">Acompanhe o Master Supervisor e os Live Bridges vinculados aos Traders, incluindo conta, mesa, PID, estado e reinicializações.</div>
+            <div class="cta">Abrir Processos →</div>
+        </a>
+    </div>
+
+    <section class="safety" aria-labelledby="financial-safety-title">
+        <div class="safety-head">
+            <div>
+                <div id="financial-safety-title" class="safety-title">🛡️ Segurança Financeira</div>
+                <div class="desc">Estado universal do fusível financeiro. Esta página pode bloquear a execução imediatamente, mas não pode habilitá-la.</div>
+            </div>
+            <div id="financial-state" class="safety-state unknown">CONSULTANDO...</div>
+        </div>
+
+        <div class="safety-meta">
+            <div class="meta">
+                <div class="meta-label">Execução atual</div>
+                <div id="financial-runtime" class="meta-value">—</div>
+            </div>
+            <div class="meta">
+                <div class="meta-label">Próxima inicialização</div>
+                <div id="financial-next-start" class="meta-value">—</div>
+            </div>
+            <div class="meta">
+                <div class="meta-label">Verificação</div>
+                <div id="financial-session" class="meta-value">—</div>
+            </div>
+        </div>
+
+        <div class="risk-policy" aria-labelledby="risk-policy-title">
+            <div id="risk-policy-title" class="risk-title">Política de Risco / Hierarquia SSOT</div>
+            <div class="risk-sub">Limites de negócio do Trader são exibidos separadamente dos caps técnicos de infraestrutura e do modo financeiro.</div>
+
+            <div class="risk-grid">
+                <div class="risk-card">
+                    <div class="risk-name">Cap por Live Bridge</div>
+                    <div id="risk-bridge-cap" class="risk-value">—</div>
+                    <div id="risk-bridge-source" class="risk-source">—</div>
+                </div>
+                <div class="risk-card">
+                    <div class="risk-name">Cap global do Router</div>
+                    <div id="risk-global-cap" class="risk-value">—</div>
+                    <div id="risk-global-source" class="risk-source">—</div>
+                </div>
+                <div class="risk-card">
+                    <div class="risk-name">Modo financeiro</div>
+                    <div id="risk-dry-run" class="risk-value">—</div>
+                    <div id="risk-dry-run-source" class="risk-source">—</div>
+                </div>
+            </div>
+
+            <div class="trader-policy">
+                <div class="trader-head">
+                    <div>Trader ativo</div>
+                    <div>Stop Loss</div>
+                    <div>Stop Win</div>
+                    <div>Origem</div>
+                </div>
+                <div id="risk-traders">
+                    <div class="trader-row"><div>Consultando...</div><div>—</div><div>—</div><div>—</div></div>
+                </div>
+            </div>
+            <div id="risk-feedback" class="risk-warning"></div>
+        </div>
+
+        <div class="safety-actions">
+            <button id="financial-disarm" class="kill" type="button">BLOQUEAR EXECUÇÃO</button>
+            <div id="financial-feedback" class="feedback">Remove qualquer armamento futuro e, se houver execução financeira ativa, encerra a stack para garantir o bloqueio.</div>
+        </div>
+    </section>
+
+    <div class="footer">Portal universal. Não pertence a uma mesa específica e não depende do Node BR ou Node INT para servir a interface.</div>
+</div>
+
+<script>
+(() => {
+    const stateEl = document.getElementById('financial-state');
+    const runtimeEl = document.getElementById('financial-runtime');
+    const nextStartEl = document.getElementById('financial-next-start');
+    const sessionEl = document.getElementById('financial-session');
+    const feedbackEl = document.getElementById('financial-feedback');
+    const button = document.getElementById('financial-disarm');
+    const bridgeCapEl = document.getElementById('risk-bridge-cap');
+    const bridgeSourceEl = document.getElementById('risk-bridge-source');
+    const globalCapEl = document.getElementById('risk-global-cap');
+    const globalSourceEl = document.getElementById('risk-global-source');
+    const dryRunEl = document.getElementById('risk-dry-run');
+    const dryRunSourceEl = document.getElementById('risk-dry-run-source');
+    const tradersEl = document.getElementById('risk-traders');
+    const riskFeedbackEl = document.getElementById('risk-feedback');
+
+    const money = value => Number.isFinite(Number(value))
+        ? Number(value).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
+        : '—';
+
+    const escapeHtml = value => String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#039;');
+
+    function render(status) {
+        const blocked = status?.blocked === true;
+        stateEl.className = `safety-state ${blocked ? 'blocked' : 'enabled'}`;
+        stateEl.textContent = blocked ? '🔒 FINANCEIRO BLOQUEADO' : '⚠️ FINANCEIRO HABILITADO';
+        runtimeEl.textContent = status?.runtime_active ? '⚠️ HABILITADA' : '✅ BLOQUEADA';
+        nextStartEl.textContent = status?.armed_for_next_startup ? '⚠️ ARMADA' : '✅ BLOQUEADA';
+        sessionEl.textContent = status?.session_readable === false ? '⚠️ SESSÃO ILEGÍVEL — FAIL-CLOSED' : '✅ CONFIRMADA';
+    }
+
+    function renderRiskPolicy(snapshot) {
+        bridgeCapEl.textContent = money(snapshot?.technical_caps?.per_bridge_cap);
+        globalCapEl.textContent = money(snapshot?.technical_caps?.global_router_cap);
+        bridgeSourceEl.textContent = snapshot?.technical_caps?.source || '—';
+        globalSourceEl.textContent = snapshot?.technical_caps?.source || '—';
+
+        const dryRunLocked = snapshot?.financial_mode?.dry_run === true
+            && snapshot?.financial_mode?.configured === true;
+        dryRunEl.textContent = dryRunLocked
+            ? '✅ DRY RUN ATIVO'
+            : '⚠️ NÃO CONFIRMADO — FAIL-CLOSED';
+        dryRunSourceEl.textContent = snapshot?.financial_mode?.source || '—';
+
+        const traders = Array.isArray(snapshot?.business_policy?.active_traders)
+            ? snapshot.business_policy.active_traders
+            : [];
+
+        if (traders.length === 0) {
+            tradersEl.innerHTML = '<div class="trader-row"><div>Nenhum Trader ativo</div><div>—</div><div>—</div><div>auto_traders.config_json</div></div>';
+        } else {
+            tradersEl.innerHTML = traders.map(item => {
+                const invalid = item?.valid !== true;
+                const traderName = escapeHtml(item.trader_name || `Trader ${item.trader_id}`);
+                const stopLoss = invalid ? 'INVALID_RISK_POLICY' : money(item.stop_loss);
+                const stopWin = invalid ? escapeHtml(item.invalid_field || 'inválido') : money(item.stop_win);
+                const source = escapeHtml(item.source || 'auto_traders.config_json');
+                return `<div class="trader-row ${invalid ? 'invalid' : ''}">`
+                    + `<div>${traderName}</div>`
+                    + `<div>${stopLoss}</div>`
+                    + `<div>${stopWin}</div>`
+                    + `<div>${source}</div>`
+                    + '</div>';
+            }).join('');
+        }
+
+        riskFeedbackEl.textContent = snapshot?.fail_closed === true
+            ? '⚠️ Hierarquia de risco não confirmada integralmente. Estado tratado como fail-closed.'
+            : '✅ Hierarquia confirmada: Trader → caps técnicos → DRY RUN.';
+    }
+
+    async function refresh() {
+        try {
+            const [statusResponse, riskResponse] = await Promise.all([
+                fetch('/api/financial-safety/status', { cache: 'no-store' }),
+                fetch('/api/financial-safety/risk-policy', { cache: 'no-store' })
+            ]);
+            if (!statusResponse.ok) throw new Error(`STATUS_HTTP_${statusResponse.status}`);
+            if (!riskResponse.ok) throw new Error(`RISK_HTTP_${riskResponse.status}`);
+            render(await statusResponse.json());
+            renderRiskPolicy(await riskResponse.json());
+        } catch (error) {
+            stateEl.className = 'safety-state unknown';
+            stateEl.textContent = '⚠️ ESTADO INDISPONÍVEL';
+            runtimeEl.textContent = '⚠️ NÃO CONFIRMADA';
+            nextStartEl.textContent = '⚠️ NÃO CONFIRMADA';
+            sessionEl.textContent = '⚠️ FALHA NA VERIFICAÇÃO';
+            bridgeCapEl.textContent = '—';
+            globalCapEl.textContent = '—';
+            dryRunEl.textContent = '⚠️ NÃO CONFIRMADO — FAIL-CLOSED';
+            riskFeedbackEl.textContent = `⚠️ Falha ao carregar política de risco: ${error.message}`;
+        }
+    }
+
+    button.addEventListener('click', async () => {
+        if (!window.confirm('Bloquear a execução financeira agora? Se o runtime estiver ativo, a stack será encerrada.')) return;
+
+        button.disabled = true;
+        feedbackEl.textContent = 'Solicitando bloqueio fail-closed...';
+
+        try {
+            const response = await fetch('/api/financial-safety/disarm', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: '{}'
+            });
+            const result = await response.json();
+            if (!response.ok) throw new Error(result?.reason || `HTTP_${response.status}`);
+
+            feedbackEl.textContent = result.runtime_stop_requested
+                ? 'Bloqueio solicitado. A stack será encerrada para garantir fail-closed.'
+                : 'Execução financeira bloqueada.';
+
+            await refresh();
+        } catch (error) {
+            feedbackEl.textContent = `Falha ao confirmar o bloqueio: ${error.message}`;
+        } finally {
+            button.disabled = false;
+        }
+    });
+
+    void refresh();
+    window.setInterval(refresh, 5000);
+})();
+</script>
+</body>
+</html>

@@ -9,6 +9,18 @@ const {
     validarConfiguracaoAutoTrader
 } = require('../bug051d_config_validation');
 
+
+const {
+    definirMesaRuntime
+} = require('../mesa_runtime_context');
+
+definirMesaRuntime({
+    id: 1,
+    codigo: 'BACBO_INT',
+    nome: 'Internacional',
+    tipo_jogo: 'BACBO'
+});
+
 function configValida(overrides = {}) {
     return {
         stake_inicial: 5,

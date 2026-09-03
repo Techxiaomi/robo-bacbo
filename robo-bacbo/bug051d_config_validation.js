@@ -1,5 +1,8 @@
 'use strict';
 
+const { obterMesaRuntime } = require('./mesa_runtime_context');
+const { validateAutoTraderMoneyRules } = require('./table_financial_rules');
+
 const LIMITE_DECIMAL_DINHEIRO = 9_999_999_999.99;
 const LIMITE_MULTIPLICADOR_GALE = 1000;
 const LIMITE_PULOS = 1000;
@@ -16,11 +19,6 @@ function numeroEstrito(valor) {
 
 function inteiroEstrito(valor) {
     return numeroEstrito(valor) && Number.isInteger(valor);
-}
-
-function multiploDeCinco(valor) {
-    return numeroEstrito(valor)
-        && Math.abs((valor / 5) - Math.round(valor / 5)) < 1e-9;
 }
 
 function horarioValido(valor) {
@@ -124,24 +122,26 @@ function validarHorarios(config) {
     return null;
 }
 
-function validarConfiguracaoAutoTrader(config) {
+function validarConfiguracaoAutoTrader(config, tableCode = null) {
     if (!config || typeof config !== 'object' || Array.isArray(config)) {
         return falha('config', 'deve ser um objeto JSON');
     }
 
-    const stake = config.stake_inicial;
-    if (
-        !numeroEstrito(stake)
-        || stake < 5
-        || stake > LIMITE_DECIMAL_DINHEIRO
-        || !multiploDeCinco(stake)
-    ) {
-        return falha(
-            'stake_inicial',
-            'deve ser número entre R$ 5,00 e o limite financeiro, em múltiplos exatos de R$ 5,00'
-        );
+    let codigoMesa = String(tableCode || '').trim().toUpperCase();
+    if (!codigoMesa) {
+        try {
+            codigoMesa = String(obterMesaRuntime()?.codigo || '').trim().toUpperCase();
+        } catch (error) {
+            return falha('table', `mesa runtime indisponível: ${error.message}`);
+        }
     }
 
+    const validacaoDinheiro = validateAutoTraderMoneyRules(config, codigoMesa);
+    if (!validacaoDinheiro.ok) {
+        return falha(validacaoDinheiro.field, validacaoDinheiro.reason.replace(new RegExp(`^${validacaoDinheiro.field}:\\s*`), ''));
+    }
+
+    const stake = config.stake_inicial;
     const gale1 = config.gale_1_mult;
     const gale2 = config.gale_2_mult;
     if (!numeroEstrito(gale1) || gale1 < 1 || gale1 > LIMITE_MULTIPLICADOR_GALE) {
@@ -169,25 +169,6 @@ function validarConfiguracaoAutoTrader(config) {
             return falha(
                 'tie_stake_percent',
                 'deve ser número maior que 0 e menor ou igual a 100'
-            );
-        }
-    } else {
-        const valorTie = config.tie_stake_value;
-        if (
-            !numeroEstrito(valorTie)
-            || valorTie < 5
-            || valorTie > LIMITE_DECIMAL_DINHEIRO
-            || !multiploDeCinco(valorTie)
-        ) {
-            return falha(
-                'tie_stake_value',
-                'deve ser número entre R$ 5,00 e o limite financeiro, em múltiplos exatos de R$ 5,00'
-            );
-        }
-        if ((valorTie * gale2) > LIMITE_DECIMAL_DINHEIRO) {
-            return falha(
-                'tie_stake_value',
-                'com gale_2_mult ultrapassa o limite financeiro representável'
             );
         }
     }

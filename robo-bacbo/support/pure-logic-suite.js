@@ -89,7 +89,8 @@ function carregarLogicaPura() {
         String,
         Array,
         Object,
-        JSON
+        JSON,
+        resolveRiskPolicy: require("../risk_policy").resolveRiskPolicy
     };
     contexto.INTERRUPCOES_COLETOR_PROCESSADAS = new Map();
     contexto.LIMITE_INTERRUPCOES_COLETOR_MEMORIA = 1000;
@@ -684,9 +685,9 @@ test("nova entrada DIRETO passa pelos guards financeiros antes do executor no ar
 
     assert.ok(posLimite >= 0);
     assert.ok(posCiclo > posLimite);
-    assert.ok(posGuard > posCiclo);
-    assert.ok(posPlano > posGuard);
-    assert.ok(posIntencao > posPlano);
+    assert.ok(posPlano > posCiclo);
+    assert.ok(posGuard > posPlano);
+    assert.ok(posIntencao > posGuard);
     assert.ok(posExecutor > posIntencao);
 
     assert.match(

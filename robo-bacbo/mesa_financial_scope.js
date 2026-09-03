@@ -2,6 +2,7 @@
 
 const {
     MESA_PADRAO_CODIGO,
+    MESA_BR_CODIGO,
     normalizarCodigoMesa
 } = require('./mesa_context');
 
@@ -9,12 +10,16 @@ const {
     obterMesaRuntime
 } = require('./mesa_runtime_context');
 
+const MESAS_FINANCEIRAS_AUTORIZADAS = new Set([
+    MESA_PADRAO_CODIGO,
+    MESA_BR_CODIGO
+]);
+
 function mesaFinanceiraPermitida(
     codigo
 ) {
-    return (
+    return MESAS_FINANCEIRAS_AUTORIZADAS.has(
         normalizarCodigoMesa(codigo)
-        === MESA_PADRAO_CODIGO
     );
 }
 
@@ -55,6 +60,7 @@ function afirmarMesaFinanceiraAutorizada(
 }
 
 module.exports = {
+    MESAS_FINANCEIRAS_AUTORIZADAS,
     mesaFinanceiraPermitida,
     criarErroMesaFinanceira,
     afirmarMesaFinanceiraAutorizada

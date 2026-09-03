@@ -14,6 +14,9 @@ const {
 const {
     obterEscopoRedisMesa
 } = require('./mesa_redis_scope');
+const {
+    buildPlaceBetSignal
+} = require('./global_signal_publisher');
 
 let instalado = false;
 let publisher = null;
@@ -25,8 +28,8 @@ let timerReconexao = null;
 let filaBacbo = Promise.resolve();
 let sequenciaLocal = 0;
 
-const REDIS_COMMAND_CHANNEL = 'auto_trader_commands';
-const REDIS_RESPONSE_CHANNEL = 'auto_trader_responses';
+const GLOBAL_SIGNAL_CHANNEL = String(process.env.SIGNAL_ROUTER_GLOBAL_CHANNEL || 'global_signals').trim();
+const GLOBAL_SIGNAL_RESULT_CHANNEL = String(process.env.SIGNAL_ROUTER_RESULT_CHANNEL || 'global_signal_results').trim();
 
 const ESCOPO_REDIS_MESA =
     obterEscopoRedisMesa();
@@ -60,6 +63,32 @@ const LIVE_DELIVERY_ATTEMPTS =
 
 function objeto(valor) {
     return valor && typeof valor === 'object' && !Array.isArray(valor) ? valor : null;
+}
+
+function envBoolean(nome, padrao = false) {
+    const bruto = String(process.env[nome] ?? '').trim().toLowerCase();
+    if (!bruto) return padrao;
+    if (['1', 'true', 'yes', 'on', 'sim'].includes(bruto)) return true;
+    if (['0', 'false', 'no', 'off', 'nao', 'não'].includes(bruto)) return false;
+    throw new Error(`REDIS_RUNTIME_INVALID_${nome}: ${bruto}`);
+}
+
+function multiAccountRouterEnabled() {
+    return envBoolean('AUTO_TRADER_MULTI_ACCOUNT_ROUTER_ENABLED', false);
+}
+
+function afirmarCutoverMultiContaAtivo() {
+    if (!multiAccountRouterEnabled()) {
+        throw new Error('MULTI_ACCOUNT_ROUTER_REQUIRED');
+    }
+    return true;
+}
+
+function tableKeyRuntime() {
+    const codigo = String(ESCOPO_REDIS_MESA.codigo || '').trim().toUpperCase();
+    if (codigo === 'BR' || codigo === 'BACBO_BR') return 'bacbo_br';
+    if (codigo === 'INT' || codigo === 'BACBO_INT') return 'bacbo_int';
+    throw new Error(`MULTI_ACCOUNT_TABLE_KEY_UNSUPPORTED: ${codigo || '<empty>'}`);
 }
 
 function configurarTimeoutMinimoSaldo() {
@@ -147,7 +176,6 @@ function payloadNode(round) {
         redis_channel: BACBO_EVENTS_CHANNEL
     };
 
-    // Compatibilidade somente com somas; nenhum dado individual e criado ou inferido.
     if (round.winner === 'Player') payload.pontos_jogador = round.result;
     else if (round.winner === 'Banker') payload.pontos_banca = round.result;
     else if (round.winner === 'Tie') {
@@ -282,14 +310,10 @@ async function processarLiveRound(raiz) {
     try {
         await persistirRodadaBacbo(round);
     } catch (erro) {
-        // O motor ao vivo nao e derrubado por indisponibilidade temporaria do banco canonico.
         console.error(`⚠️ Persistencia bacbo_rounds falhou | uuid=${round.uuid}:`, erro.message);
     }
 
     const payload = payloadNode(round);
-    // O Runtime e o backend HTTP vivem no mesmo processo. Durante bootstrap, 503 significa apenas
-    // "ainda não pronto"; descartar a rodada aqui criaria um buraco artificial. Mantemos a fila FIFO
-    // bloqueada até o backend ficar pronto, preservando exatamente a ordem recebida.
     const entregue = await postNode('/receber-sinal', payload, 'Rodada live', LIVE_DELIVERY_ATTEMPTS);
     if (!entregue) {
         console.warn('⚠️ Rodada live não entregue ao backend; fila preservada sem marcar como processada.');
@@ -343,20 +367,12 @@ async function processarBacbo(mensagem) {
         return false;
     }
 
-    const mesaCodigo =
-        String(raiz.mesa_codigo || '')
-            .trim()
-            .toUpperCase();
-
-    if (
-        mesaCodigo !== ESCOPO_REDIS_MESA.codigo
-    ) {
+    const mesaCodigo = String(raiz.mesa_codigo || '').trim().toUpperCase();
+    if (mesaCodigo !== ESCOPO_REDIS_MESA.codigo) {
         console.warn(
-            `MC22-Y-B: evento Redis rejeitado | `
-            + `mesa=${mesaCodigo || '<ausente>'} | `
+            `MC22-Y-B: evento Redis rejeitado | mesa=${mesaCodigo || '<ausente>'} | `
             + `runtime=${ESCOPO_REDIS_MESA.codigo}.`
         );
-
         return false;
     }
 
@@ -367,9 +383,7 @@ async function processarBacbo(mensagem) {
         && payloadPossivelmenteLive.type !== undefined
         && payloadPossivelmenteLive.result !== undefined;
 
-    if (acao === 'live_round' || possuiSchemaLive) {
-        return processarLiveRound(raiz);
-    }
+    if (acao === 'live_round' || possuiSchemaLive) return processarLiveRound(raiz);
 
     const history = extrairHistory(raiz);
     if (history) return processarHistorico(raiz, history);
@@ -442,19 +456,50 @@ function criarClientes() {
     }
 }
 
-async function encaminharBetResult(dados) {
-    const orderId = String(dados?.order_id || '').trim().toLowerCase();
-    const status = String(dados?.status || '').trim().toUpperCase();
+async function encaminharResultadoMultiConta(dados) {
+    if (!dados || dados.action !== 'multi_account_bet_result') return false;
+    if (String(dados.table_key || '').trim().toLowerCase() !== tableKeyRuntime()) return false;
+
+    const orderId = String(dados.order_id || dados.signal_id || '').trim().toLowerCase();
+    const status = String(dados.executor_status || '').trim().toUpperCase();
     if (!orderId || !STATUS_VALIDOS.has(status)) return false;
+
+    const motivo = dados.dry_run === true
+        ? `MULTI_ACCOUNT_DRY_RUN_NO_DISPATCH: 0/${Number(dados.expected_accounts) || 0}`
+        : status === 'EXECUTADA'
+            ? `MULTI_ACCOUNT_${dados.status}: ${Number(dados.success_accounts) || 0}/${Number(dados.expected_accounts) || 0}`
+            : `MULTI_ACCOUNT_${dados.status || 'FAILED'}: ${Number(dados.success_accounts) || 0}/${Number(dados.expected_accounts) || 0}`;
+
+    console.log(
+        `🔀 MULTI-ACCOUNT RESULT | signal=${orderId} | aggregate=${dados.status} | `
+        + `executor=${status} | success=${dados.success_accounts}/${dados.expected_accounts}`
+    );
+
+    if (dados.simulation === true) {
+        console.log(
+            `🧪 MULTI-ACCOUNT SIMULATION | signal=${orderId} | aggregate=${dados.status} | `
+            + 'executor_status_delivery=skipped'
+        );
+        return true;
+    }
+
+    if (dados.dry_run === true) {
+        console.log(
+            `🛡️ MULTI-ACCOUNT DRY RUN | signal=${orderId} | dispatch=0 | `
+            + 'executor_status_delivery=enabled'
+        );
+    }
+
     return postNode('/executor-status', {
         order_id: orderId,
         status,
-        motivo: String(dados?.motivo || '').slice(0, 300),
-        confirmacao: dados?.confirmacao || null
-    }, `bet_result ${orderId}`, 3);
+        motivo: motivo.slice(0, 300),
+        confirmacao: dados.confirmacao || null
+    }, `multi_account_result ${orderId}`, 3);
 }
 
 async function garantirRedis() {
+    afirmarCutoverMultiContaAtivo();
     if (
         clientePronto(publisher)
         && clientePronto(responseSubscriber)
@@ -471,12 +516,15 @@ async function garantirRedis() {
         await conectar(bacboSubscriber);
 
         if (!responseSubscriber.__subscribed) {
-            await responseSubscriber.subscribe(REDIS_RESPONSE_CHANNEL, mensagem => {
+            await responseSubscriber.subscribe(GLOBAL_SIGNAL_RESULT_CHANNEL, mensagem => {
                 const dados = parseMensagem(mensagem);
-                if (!dados || dados.action !== 'bet_result') return;
-                void encaminharBetResult(dados);
+                if (!dados || dados.action !== 'multi_account_bet_result') return;
+                void encaminharResultadoMultiConta(dados).catch(erro => {
+                    console.error(`⚠️ Multi-account fan-in ignorado por erro controlado: ${erro?.message || erro}`);
+                });
             });
             responseSubscriber.__subscribed = true;
+            console.log(`🎧 Multi-account fan-in ativo em ${GLOBAL_SIGNAL_RESULT_CHANNEL}.`);
         }
 
         if (!bacboSubscriber.__subscribed) {
@@ -519,6 +567,35 @@ function respostaJson(status, corpo) {
     });
 }
 
+async function publicarViaRouterMultiConta(dados, orderId) {
+    const tableKey = tableKeyRuntime();
+    const signal = buildPlaceBetSignal({
+        signal_id: orderId,
+        source: 'bot2_coletor',
+        event_id: orderId,
+        table_key: tableKey,
+        alvo: dados.alvo,
+        valor_base: dados.valor,
+        ...(Array.isArray(dados.apostas) && dados.apostas.length > 0 ? { apostas: dados.apostas } : {})
+    });
+
+    const receptores = await publisher.publish(GLOBAL_SIGNAL_CHANNEL, JSON.stringify(signal));
+    if (!Number.isFinite(Number(receptores)) || Number(receptores) < 1) {
+        return respostaJson(503, { erro: 'Signal Router sem assinante ativo', aceita: false });
+    }
+
+    console.log(
+        `🔀 MULTI-ACCOUNT CUTOVER | order_id=${orderId} | signal=${signal.signal_id} | `
+        + `table=${tableKey} | router_subscribers=${receptores}`
+    );
+
+    return respostaJson(200, {
+        status: 'Ordem aceita pelo Signal Router multi-conta',
+        duplicada: false,
+        dados: { order_id: orderId, alvo: dados.alvo, valor: dados.valor }
+    });
+}
+
 async function fetchComExecutorRedis(input, init = {}) {
     const alvo = typeof input === 'string' || input instanceof URL
         ? String(input)
@@ -535,32 +612,19 @@ async function fetchComExecutorRedis(input, init = {}) {
     }
 
     try {
+        afirmarCutoverMultiContaAtivo();
         await garantirRedis();
-        const comando = {
-            action: 'place_bet',
-            order_id: orderId,
-            alvo: dados.alvo,
-            valor: dados.valor
-        };
-        if (Array.isArray(dados.apostas) && dados.apostas.length > 0) comando.apostas = dados.apostas;
-        const receptores = await publisher.publish(REDIS_COMMAND_CHANNEL, JSON.stringify(comando));
-        if (!Number.isFinite(Number(receptores)) || Number(receptores) < 1) {
-            return respostaJson(503, { erro: 'executor Redis sem assinante ativo', aceita: false });
-        }
-        return respostaJson(200, {
-            status: 'Ordem Redis aceita pelo transporte local',
-            duplicada: false,
-            dados: { order_id: orderId, alvo: dados.alvo, valor: dados.valor }
-        });
+        return await publicarViaRouterMultiConta(dados, orderId);
     } catch (erro) {
-        console.error(`⚠️ Redis executor V3: falha ao publicar place_bet ${orderId}:`, erro.message);
-        return respostaJson(503, { erro: 'transporte Redis do executor indisponível', aceita: false });
+        console.error(`⚠️ Redis executor V3: falha no cutover global ${orderId}:`, erro.message);
+        return respostaJson(503, { erro: 'Signal Router multi-conta obrigatorio e indisponivel', aceita: false });
     }
 }
 
 function instalarRedisRuntimeV3() {
     if (instalado) return;
     configurarTimeoutMinimoSaldo();
+    afirmarCutoverMultiContaAtivo();
     if (typeof globalThis.fetch !== 'function' || typeof globalThis.Response !== 'function') {
         throw new Error('Runtime Node sem fetch/Response nativos');
     }
@@ -573,15 +637,21 @@ function instalarRedisRuntimeV3() {
         console.error('⚠️ Schema bacbo_rounds não inicializou no bootstrap:', erro.message);
     });
     void garantirRedis().catch(erro => {
-        console.error('⚠️ Redis runtime V3 não conectou no bootstrap:', erro.message);
+        console.error('⚠️ Redis Runtime V3 não conectou no bootstrap:', erro.message);
         agendarReconexao();
     });
 
-    console.log(`🔌 Redis Runtime V3: ${BACBO_EVENTS_CHANNEL} -> schema novo -> Node; ${REDIS_COMMAND_CHANNEL} -> executor.`);
+    console.log(
+        `🔀 Redis Runtime V3 REAL CUTOVER: ${BACBO_EVENTS_CHANNEL} -> Node; `
+        + `${GLOBAL_SIGNAL_CHANNEL} -> Router; ${GLOBAL_SIGNAL_RESULT_CHANNEL} -> /executor-status.`
+    );
 }
 
 module.exports = {
     instalarRedisRuntimeV3,
     processarBacbo,
-    payloadNode
+    payloadNode,
+    multiAccountRouterEnabled,
+    afirmarCutoverMultiContaAtivo,
+    tableKeyRuntime
 };

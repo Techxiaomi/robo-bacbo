@@ -106,11 +106,21 @@ test(
 );
 
 test(
-    'MC23-A: ativacao operacional BR nao altera o gate financeiro INT-only',
+    'MC23-A: ativacao operacional BR preserva allowlist financeira explicita',
     () => {
         assert.match(
             financialSource,
-            /=== MESA_PADRAO_CODIGO/
+            /MESAS_FINANCEIRAS_AUTORIZADAS\s*=\s*new Set/
+        );
+
+        assert.match(
+            financialSource,
+            /MESA_PADRAO_CODIGO/
+        );
+
+        assert.match(
+            financialSource,
+            /MESA_BR_CODIGO/
         );
 
         assert.match(
@@ -118,9 +128,9 @@ test(
             /MESA_FINANCEIRA_NAO_AUTORIZADA/
         );
 
-        assert.doesNotMatch(
+        assert.match(
             financialSource,
-            /MESA_BR_CODIGO/
+            /MESAS_FINANCEIRAS_AUTORIZADAS\.has/
         );
     }
 );
