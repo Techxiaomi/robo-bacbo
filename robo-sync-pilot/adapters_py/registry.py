@@ -1,5 +1,6 @@
 from adapters_py.base_adapter import BettingHouseAdapter
 from adapters_py.brasil_da_sorte_fast import BrasilDaSorteFastAdapter
+from balance_sync_guard import install_balance_sync_guard
 
 
 _ADAPTERS = {
@@ -68,6 +69,12 @@ def create_adapter(browser, config):
         raise RuntimeError(f"ADAPTER_REGISTRY_UNSUPPORTED: {adapter_key or '<empty>'}")
 
     _assert_navigation_only_contract(adapter_class)
+
+    # Falha transitória de leitura de saldo não pode derrubar a bridge inteira.
+    # O guard atua somente em sync_balance; place_bet segue o caminho original.
+    import robo
+    install_balance_sync_guard(robo)
+
     adapter = adapter_class(browser=browser, config=config)
     if not isinstance(adapter, BettingHouseAdapter):
         raise RuntimeError("ADAPTER_REGISTRY_INSTANCE_INVALID")
