@@ -52,8 +52,14 @@ def _stdin_control_enabled(config):
 
 
 def _stdin_control_loop():
+    # O canal de controle permanece bloqueante por design, mas precisa ler do
+    # FileIO bruto. Uma thread daemon presa no BufferedReader de sys.stdin
+    # durante a finalizacao do CPython pode abortar o processo com
+    # _enter_buffered_busy / 0xC0000005. O raw stream nao possui esse lock.
+    control_stream = sys.stdin.buffer.raw
+
     while not robo.encerrar_executor.is_set():
-        raw = sys.stdin.buffer.readline(MAX_CONTROL_LINE_BYTES + 1)
+        raw = control_stream.readline(MAX_CONTROL_LINE_BYTES + 1)
         if raw == b"":
             if not robo.encerrar_executor.is_set():
                 print("LIVE_BRIDGE_PARENT_CHANNEL_CLOSED=true")
