@@ -12,16 +12,16 @@ function read(...parts) {
     return fs.readFileSync(path.join(...parts), 'utf8');
 }
 
-test('supervisor launcher uses fast event-driven mode with conservative 2s stagger', () => {
+test('supervisor launcher uses fast event-driven mode with conservative 1s stagger', () => {
     const launcher = read(repoRoot, 'atalhos', '06_MASTER_SUPERVISOR.cmd');
-    assert.match(launcher, /MASTER_SUPERVISOR_STAGGER_MS=2000/);
+    assert.match(launcher, /MASTER_SUPERVISOR_STAGGER_MS=1000/);
     assert.match(launcher, /MASTER_SUPERVISOR_RECONCILE_INTERVAL_MS=2000/);
     assert.match(launcher, /master_supervisor_fast\.js/);
 });
 
 test('fast supervisor consumes wake signal and keeps 2s polling fallback serialized', () => {
     const source = read(root, 'scripts', 'master_supervisor_fast.js');
-    assert.match(source, /DEFAULT_FAST_STAGGER_MS\s*=\s*2000/);
+    assert.match(source, /DEFAULT_FAST_STAGGER_MS\s*=\s*1000/);
     assert.match(source, /DEFAULT_FAST_RECONCILE_INTERVAL_MS\s*=\s*2000/);
     assert.match(source, /watchSupervisorReconcileSignal/);
     assert.match(source, /pendingReason/);
