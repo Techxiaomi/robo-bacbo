@@ -70,11 +70,6 @@ function Invoke-MariaDb {
 
     try {
         $env:MYSQL_PWD = $Password
-
-        # Windows PowerShell 5.x transforma stderr de executaveis nativos em NativeCommandError
-        # quando ErrorActionPreference=Stop. MariaDB 12 pode emitir warnings benignos no stderr
-        # mesmo retornando exit code 0. Portanto o stderr e capturado separadamente e somente
-        # o exit code nativo determina sucesso/falha.
         $ErrorActionPreference = 'Continue'
         $output = & $Exe @Arguments 2> $stderrFile
         $code = $LASTEXITCODE
@@ -307,16 +302,32 @@ try {
     $manifestPath = Join-Path $manifestDir 'backup-info.json'
     $manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
 
-    Get-ChildItem -LiteralPath $staging -File -Recurse |
-        ForEach-Object {
-            [pscustomobject]@{
-                file = $_.FullName.Substring($staging.Length + 1).Replace('\','/')
-                size = $_.Length
-                sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+    $hashEntries = @(
+        Get-ChildItem -LiteralPath $staging -File -Recurse |
+            Where-Object { $_.FullName -ne (Join-Path $manifestDir 'files.sha256.json') } |
+            ForEach-Object {
+                [pscustomobject]@{
+                    file = $_.FullName.Substring($staging.Length + 1).Replace('\','/')
+                    size = $_.Length
+                    sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+                }
             }
-        } |
-        ConvertTo-Json -Depth 3 |
-        Set-Content -LiteralPath (Join-Path $manifestDir 'files.sha256.json') -Encoding UTF8
+    )
+
+    if ($hashEntries.Count -eq 0) {
+        throw 'Manifesto de arquivos nao possui entradas.'
+    }
+
+    $hashListPath = Join-Path $manifestDir 'files.sha256.json'
+    ConvertTo-Json -InputObject $hashEntries -Depth 3 |
+        Set-Content -LiteralPath $hashListPath -Encoding UTF8
+
+    $hashValidation = @(Get-Content -LiteralPath $hashListPath -Raw | ConvertFrom-Json)
+    if ($hashValidation.Count -ne $hashEntries.Count) {
+        throw "Manifesto de hashes invalido. esperado=$($hashEntries.Count) lido=$($hashValidation.Count)"
+    }
+
+    Write-Host "Manifesto de hashes OK: $($hashEntries.Count) arquivo(s)."
 
     Write-Step 'Compactando backup'
 
