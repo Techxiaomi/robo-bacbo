@@ -14,7 +14,7 @@ const { discoverBoundTasks } = require('../trader_bound_tasks');
 const { writeSupervisorSnapshot } = require('../supervisor_telemetry_store');
 const { watchSupervisorReconcileSignal } = require('../supervisor_reconcile_signal');
 
-const DEFAULT_FAST_STAGGER_MS = 2000;
+const DEFAULT_FAST_STAGGER_MS = 1000;
 const DEFAULT_FAST_RECONCILE_INTERVAL_MS = 2000;
 const DEFAULT_BACKOFF_BASE_MS = 2000;
 const DEFAULT_BACKOFF_MAX_MS = 60000;
