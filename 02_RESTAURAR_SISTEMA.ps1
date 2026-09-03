@@ -64,12 +64,33 @@ function Invoke-MariaDb {
     )
 
     $oldPwd = $env:MYSQL_PWD
+    $oldErrorActionPreference = $ErrorActionPreference
+
     try {
         $env:MYSQL_PWD = $Password
 
         if ([string]::IsNullOrWhiteSpace($InputFile)) {
-            $output = & $Exe @Arguments 2>&1
-            $code = $LASTEXITCODE
+            $stderrFile = Join-Path $env:TEMP ('bacbo_mariadb_stderr_' + [guid]::NewGuid().ToString('N') + '.txt')
+            try {
+                $ErrorActionPreference = 'Continue'
+                $output = & $Exe @Arguments 2> $stderrFile
+                $code = $LASTEXITCODE
+                $ErrorActionPreference = $oldErrorActionPreference
+
+                $stderr = @()
+                if (Test-Path -LiteralPath $stderrFile) {
+                    $stderr = @(Get-Content -LiteralPath $stderrFile -ErrorAction SilentlyContinue)
+                }
+
+                if ($code -ne 0) {
+                    $details = @($output) + @($stderr)
+                    throw "MariaDB retornou exit code $code.`n$($details -join [Environment]::NewLine)"
+                }
+            }
+            finally {
+                $ErrorActionPreference = $oldErrorActionPreference
+                Remove-Item -LiteralPath $stderrFile -Force -ErrorAction SilentlyContinue
+            }
         }
         else {
             $stdoutFile = Join-Path $env:TEMP ('bacbo_mariadb_stdout_' + [guid]::NewGuid().ToString('N') + '.txt')
@@ -91,7 +112,14 @@ function Invoke-MariaDb {
                     $output += Get-Content -LiteralPath $stdoutFile -ErrorAction SilentlyContinue
                 }
                 if (Test-Path -LiteralPath $stderrFile) {
-                    $output += Get-Content -LiteralPath $stderrFile -ErrorAction SilentlyContinue
+                    $stderr = @(Get-Content -LiteralPath $stderrFile -ErrorAction SilentlyContinue)
+                } else {
+                    $stderr = @()
+                }
+
+                if ($code -ne 0) {
+                    $details = @($output) + @($stderr)
+                    throw "MariaDB retornou exit code $code.`n$($details -join [Environment]::NewLine)"
                 }
             }
             finally {
@@ -99,12 +127,10 @@ function Invoke-MariaDb {
             }
         }
 
-        if ($code -ne 0) {
-            throw "MariaDB retornou exit code $code.`n$($output -join [Environment]::NewLine)"
-        }
         return $output
     }
     finally {
+        $ErrorActionPreference = $oldErrorActionPreference
         if ($null -eq $oldPwd) {
             Remove-Item Env:MYSQL_PWD -ErrorAction SilentlyContinue
         }
