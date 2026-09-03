@@ -209,6 +209,11 @@ try {
 
     Copy-Item -LiteralPath $envFile -Destination (Join-Path $configDir '.env') -Force
 
+    $restoreScript = Join-Path $ProjectRoot '02_RESTAURAR_SISTEMA.ps1'
+    if (Test-Path -LiteralPath $restoreScript -PathType Leaf) {
+        Copy-Item -LiteralPath $restoreScript -Destination (Join-Path $staging '02_RESTAURAR_SISTEMA.ps1') -Force
+    }
+
     Write-Step 'Gerando manifestos'
 
     $gitCommit = $null
