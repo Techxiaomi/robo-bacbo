@@ -93,6 +93,20 @@ test('router and live bridge consume runtime SSOT instead of launcher cap variab
     assert.match(supervisorLauncher, /run_with_system_config\.js scripts\\master_supervisor\.js/);
 });
 
+test('live bridge propaga modo do cap e nunca envia sentinel de bypass ao Python', () => {
+    const bridge = source(path.join('scripts', 'run_live_bridge.js'));
+    const pythonBridge = fs.readFileSync(path.join(repoRoot, 'robo-sync-pilot', 'live_bridge.py'), 'utf8');
+
+    assert.match(bridge, /technical_caps_enabled:\s*technicalCaps\.enabled === true/);
+    assert.match(bridge, /max_exposure:\s*technicalCaps\.configured_per_bridge_cap/);
+    assert.doesNotMatch(bridge, /max_exposure:\s*technicalCaps\.per_bridge_cap/);
+
+    assert.doesNotMatch(pythonBridge, /CONTROLLED_MAX_EXPOSURE_CAP\s*=\s*5\.0/);
+    assert.match(pythonBridge, /MAX_CONFIGURABLE_TECHNICAL_CAP\s*=\s*99999\.0/);
+    assert.match(pythonBridge, /technical_caps_enabled = safety\.get\("technical_caps_enabled"\) is True/);
+    assert.match(pythonBridge, /if technical_caps_enabled and exposure > max_exposure \+ 1e-9:/);
+});
+
 test('financial dry run remains inviolable through DB config runner', () => {
     const routerLauncher = fs.readFileSync(path.join(repoRoot, 'atalhos', '07_SIGNAL_ROUTER.cmd'), 'utf8');
     const runner = source(path.join('scripts', 'run_with_system_config.js'));
