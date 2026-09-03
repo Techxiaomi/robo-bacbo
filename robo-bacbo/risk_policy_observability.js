@@ -76,10 +76,12 @@ async function readRiskPolicyObservability({ dbPool }) {
             active_traders: traders
         }),
         technical_caps: Object.freeze({
+            enabled: systemConfig.technical_risk_caps_enabled === true,
             global_router_cap: systemConfig.global_router_cap,
             per_bridge_cap: systemConfig.per_bridge_cap,
             requested_global_router_cap: systemConfig.requested.global_router_cap,
             requested_per_bridge_cap: systemConfig.requested.per_bridge_cap,
+            requested_enabled: systemConfig.requested.technical_risk_caps_enabled === true,
             clamped: systemConfig.clamped,
             discrepancies: systemConfig.discrepancies,
             source: systemConfig.source === 'system_configs' ? 'system_configs' : 'safe-defaults'
