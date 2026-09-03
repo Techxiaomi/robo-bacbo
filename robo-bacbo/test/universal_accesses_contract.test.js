@@ -112,6 +112,7 @@ test('Acessos expoe hierarquia SSOT de risco com origens explicitas no banco', (
     assert.match(riskObservability, /system_configs/);
     assert.match(configService, /global_router_cap/);
     assert.match(configService, /per_bridge_cap/);
+    assert.match(configService, /technical_risk_caps_enabled/);
     assert.match(configService, /financial_dry_run/);
     assert.match(riskCaps, /SAFE_TECHNICAL_RISK_CAPS/);
 
@@ -125,6 +126,7 @@ test('Acessos expoe hierarquia SSOT de risco com origens explicitas no banco', (
     assert.match(accessPage, /escapeHtml/);
     assert.match(riskAdmin, />SALVAR<\/button>/);
     assert.match(riskAdmin, /RESTAURAR PADRÃO/);
+    assert.match(riskAdmin, /Habilitar caps técnicos/);
     assert.match(riskAdmin, /requested_value/);
     assert.match(riskAdmin, /effective_value/);
     assert.match(riskAdmin, /\/api\/financial-safety\/system-config/);
@@ -134,13 +136,14 @@ test('Acessos mantém ordem visual Global depois Bridge em status e edição', (
     assert.match(riskAdmin, /const globalStatusCard = document\.getElementById\('risk-global-cap'\)\?\.closest\('\.risk-card'\)/);
     assert.match(riskAdmin, /const bridgeStatusCard = document\.getElementById\('risk-bridge-cap'\)\?\.closest\('\.risk-card'\)/);
     assert.match(riskAdmin, /grid\.insertBefore\(globalStatusCard, bridgeStatusCard\)/);
-    assert.ok(riskAdmin.indexOf('Cap global solicitado') < riskAdmin.indexOf('Cap por Bridge solicitado'));
+    assert.ok(riskAdmin.indexOf('Cap global de homologação') < riskAdmin.indexOf('Cap por Bridge de homologação'));
 });
 
 test('Acessos distingue configuração solicitada do estado efetivo sem mascarar bloqueio runtime', () => {
     assert.match(riskAdmin, /REQUESTED = EFFECTIVE/);
     assert.match(riskAdmin, /REQUESTED ≠ EFFECTIVE/);
     assert.match(riskAdmin, /const effective = config\?\.effective \|\| \{\}/);
+    assert.match(riskAdmin, /requestedCapsEnabled === effectiveCapsEnabled/);
     assert.match(riskAdmin, /requestedDryRun === effectiveDryRun/);
     assert.match(riskAdmin, /PRODUÇÃO SOLICITADA/);
     assert.doesNotMatch(riskAdmin, /EXECUÇÃO LIBERADA/);
