@@ -52,6 +52,17 @@ class RoutedIdentityGuardTests(unittest.TestCase):
         command.update(overrides)
         return command
 
+    def _sync_balance(self, **overrides):
+        command = {
+            "action": "sync_balance",
+            "request_id": "activation-balance-001",
+            "routed_account_id": 4,
+            "routed_session_id": "account-4:bacbo_int",
+            "routed_table_key": "bacbo_int",
+        }
+        command.update(overrides)
+        return command
+
     def test_identidade_exata_preserva_fluxo_original(self):
         robo, calls = self._robo()
         self.assertTrue(install_routed_identity_guard(robo, self._config()))
@@ -121,7 +132,22 @@ class RoutedIdentityGuardTests(unittest.TestCase):
         self.assertIn("received_session=<missing>", motivo)
         self.assertIn("received_table=<missing>", motivo)
 
-    def test_sync_balance_legado_sem_metadata_preserva_bootstrap_de_ativacao(self):
+    def test_sync_balance_com_identidade_exata_preserva_fluxo_original(self):
+        robo, calls = self._robo()
+        install_routed_identity_guard(robo, self._config())
+
+        result = robo.processar_comando_playwright(
+            object(),
+            {"page": object()},
+            self._sync_balance(),
+        )
+
+        self.assertEqual(result, "processed")
+        self.assertEqual(len(calls["process"]), 1)
+        self.assertEqual(calls["publish"], [])
+        self.assertEqual(calls["finalize"], [])
+
+    def test_sync_balance_sem_metadata_falha_fechado_sem_playwright(self):
         robo, calls = self._robo()
         install_routed_identity_guard(robo, self._config())
 
@@ -130,14 +156,21 @@ class RoutedIdentityGuardTests(unittest.TestCase):
             {"page": object()},
             {
                 "action": "sync_balance",
-                "request_id": "activation-balance-001",
+                "request_id": "activation-balance-missing-route-001",
             },
         )
 
-        self.assertEqual(result, "processed")
-        self.assertEqual(len(calls["process"]), 1)
-        self.assertEqual(calls["publish"], [])
+        self.assertIsNone(result)
+        self.assertEqual(calls["process"], [])
         self.assertEqual(calls["finalize"], [])
+        self.assertEqual(len(calls["publish"]), 1)
+        payload = calls["publish"][0]
+        self.assertEqual(payload["action"], "balance_error")
+        self.assertEqual(payload["request_id"], "activation-balance-missing-route-001")
+        self.assertIn("LIVE_BRIDGE_ROUTED_IDENTITY_MISMATCH", payload["error"])
+        self.assertIn("received_account=<missing>", payload["error"])
+        self.assertIn("received_session=<missing>", payload["error"])
+        self.assertIn("received_table=<missing>", payload["error"])
 
     def test_sync_balance_mal_roteado_publica_erro_correlacionado_sem_playwright(self):
         robo, calls = self._robo()
