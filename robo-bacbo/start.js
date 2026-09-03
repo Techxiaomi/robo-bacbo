@@ -23,6 +23,9 @@ const {
     installTableAwareConfigValidationBridge,
     installTableFinancialRulesGuard
 } = require('./table_financial_rules');
+const {
+    installAutoTraderAmbiguityReactivationGuard
+} = require('./auto_trader_ambiguity_reactivation_guard');
 const { installActivationBootstrap } = require('./auto_trader_activation_bootstrap');
 const { installContinuousTraderBalance } = require('./continuous_trader_balance');
 const { installAutoTraderStructuralIntegrity } = require('./auto_trader_structural_integrity');
@@ -98,6 +101,7 @@ async function iniciar() {
     instalarCatalogoContasAutoTrader();
     installTableAwareConfigValidationBridge();
     installTableFinancialRulesGuard();
+    installAutoTraderAmbiguityReactivationGuard();
     installActivationBootstrap();
     await installContinuousTraderBalance();
     installManualTraderBalanceSync();

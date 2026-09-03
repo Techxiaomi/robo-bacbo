@@ -254,7 +254,8 @@ def _controlled_cycle(
         now = time.monotonic()
         if now - last_keep_alive >= KEEP_ALIVE_INTERVAL_SECONDS:
             page = session.get("page")
-            robo.fechar_popup_inatividade(page)
+            if robo.fechar_popup_inatividade(page):
+                print("LIVE_BRIDGE_INACTIVITY_POPUP_DISMISSED=true")
             _require_adapter_session_healthy(page)
             last_keep_alive = now
 
