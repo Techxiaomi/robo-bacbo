@@ -1,6 +1,7 @@
 from adapters_py.base_adapter import BettingHouseAdapter
 from adapters_py.brasil_da_sorte_fast import BrasilDaSorteFastAdapter
 from balance_sync_guard import install_balance_sync_guard
+from routed_identity_guard import install_routed_identity_guard
 
 
 _ADAPTERS = {
@@ -74,6 +75,11 @@ def create_adapter(browser, config):
     # O guard atua somente em sync_balance; place_bet segue o caminho original.
     import robo
     install_balance_sync_guard(robo)
+
+    # Defesa em profundidade do cutover multi-mesa: mesmo em um canal Redis
+    # corretamente scoped, o comando precisa carregar a identidade exata do
+    # worker antes de alcançar o processador Playwright.
+    install_routed_identity_guard(robo, config)
 
     adapter = adapter_class(browser=browser, config=config)
     if not isinstance(adapter, BettingHouseAdapter):
