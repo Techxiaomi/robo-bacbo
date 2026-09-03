@@ -122,10 +122,12 @@ async function main() {
                 dbPool,
                 globalRouterCap: req.body?.global_router_cap,
                 perBridgeCap: req.body?.per_bridge_cap,
+                technicalRiskCapsEnabled: req.body?.technical_risk_caps_enabled,
                 financialDryRun: req.body?.financial_dry_run
             });
             console.warn(
                 'SYSTEM_CONFIG_UPDATED',
+                `technical_risk_caps_enabled=${config.effective.technical_risk_caps_enabled}`,
                 `requested_global_router_cap=${config.requested.global_router_cap.toFixed(2)}`,
                 `effective_global_router_cap=${config.effective.global_router_cap.toFixed(2)}`,
                 `requested_per_bridge_cap=${config.requested.per_bridge_cap.toFixed(2)}`,
@@ -151,6 +153,7 @@ async function main() {
     });
 
     app.post('/api/financial-safety/disarm', (req, res) => {
+        res.set('Cache-Control', 'no-store');
         const before = readFinancialSafetyStatus();
         if (!removeArmToken()) {
             res.status(500).json({ ok: false, blocked: false, reason: 'ARM_TOKEN_REMOVE_FAILED' });
