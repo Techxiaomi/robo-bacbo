@@ -154,7 +154,7 @@ test('launchers contain no cap values and DB config runner carries caps mode', (
     assert.doesNotMatch(routerLauncher, /SIGNAL_ROUTER_GLOBAL_MAX_EXPOSURE=/);
     assert.doesNotMatch(supervisorLauncher, /LIVE_BRIDGE_MAX_EXPOSURE=/);
     assert.match(routerLauncher, /run_with_system_config\.js scripts\\signal_router\.js/);
-    assert.match(supervisorLauncher, /run_with_system_config\.js scripts\\master_supervisor\.js/);
+    assert.match(supervisorLauncher, /run_with_system_config\.js scripts\\master_supervisor_fast\.js/);
     assert.match(runner, /SYSTEM_CONFIG_TECHNICAL_RISK_CAPS_ENABLED/);
     assert.match(runner, /SIGNAL_ROUTER_FINANCIAL_DRY_RUN: 'true'/);
 });
