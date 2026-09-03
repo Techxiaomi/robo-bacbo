@@ -3,6 +3,13 @@
 const { obterMesaRuntime } = require('./mesa_runtime_context');
 const { getTechnicalRiskCaps } = require('./technical_risk_caps');
 
+function erroRepresentaDryRunFinanceiro(erro) {
+    const statusExecutor = String(erro?.status_executor || '').trim().toUpperCase();
+    const mensagem = String(erro?.message || '');
+    return statusExecutor === 'FALHOU'
+        && mensagem.includes('MULTI_ACCOUNT_DRY_RUN_NO_DISPATCH');
+}
+
 function normalizarAlvoFinanceiro(valor) {
     const alvo = String(valor || '').trim().toUpperCase();
     if (['PLAYER', 'PLAYERWON', 'JOGADOR'].includes(alvo)) return 'Player';
@@ -429,6 +436,32 @@ function criarArbitroFinanceiroAutoTrader(deps = {}) {
                     return false;
                 }
 
+                if (erroRepresentaDryRunFinanceiro(e)) {
+                    const [auditoriaDryRun] = await dbPool.query(
+                        `UPDATE auditoria_ordens
+                         SET status_ordem='DRY_RUN', executor_confirmacao_metodo='DRY_RUN'
+                         WHERE id=? AND executor_order_id=? AND status_ordem='PREPARANDO'
+                           AND mesa_id=?`,
+                        [
+                            intencaoDireto.auditoria_id,
+                            ordemExecutorIdDireto,
+                            mesaRuntime.id
+                        ]
+                    );
+                    if (Number(auditoriaDryRun.affectedRows) !== 1) {
+                        log.error(
+                            `⚠️ MC21 DRY-RUN | Intenção ${intencaoDireto.auditoria_id} não pôde ser `
+                            + 'marcada DRY_RUN; PREPARANDO preservado para reconciliação.'
+                        );
+                        return false;
+                    }
+                    log.log(
+                        `🧪 MC21 DRY-RUN | Trader ${trader.id} | intenção ${intencaoDireto.auditoria_id} `
+                        + '| status=DRY_RUN | dispatch financeiro não executado.'
+                    );
+                    return false;
+                }
+
                 const statusFalha = await deps.marcarIntencaoAposFalhaEnvio(
                     intencaoDireto.auditoria_id,
                     e,
@@ -516,6 +549,7 @@ function criarArbitroFinanceiroAutoTrader(deps = {}) {
 }
 
 module.exports = {
+    erroRepresentaDryRunFinanceiro,
     normalizarAlvoFinanceiro,
     avaliarPrecheckTecnicoPlano,
     resolverArbitragemSinaisAutoTrader,
