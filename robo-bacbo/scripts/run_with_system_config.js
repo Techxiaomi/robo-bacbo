@@ -9,7 +9,8 @@ const { readSystemConfig } = require('../system_config_service');
 
 const ALLOWED_TARGETS = new Set([
     'scripts/signal_router.js',
-    'scripts/master_supervisor.js'
+    'scripts/master_supervisor.js',
+    'scripts/master_supervisor_fast.js'
 ]);
 
 function normalizedTarget(value) {
