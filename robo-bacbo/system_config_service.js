@@ -12,7 +12,8 @@ const SAFE_DEFAULTS = Object.freeze({
 const SAFE_ENVELOPE = Object.freeze({
     global_router_cap: ADMIN_REQUEST_MAX,
     per_bridge_cap: ADMIN_REQUEST_MAX,
-    financial_dry_run: true
+    financial_dry_run: true,
+    financial_modes: Object.freeze(['DRY_RUN', 'ARMED_REVIEW'])
 });
 
 const CONFIG_KEYS = Object.freeze([
@@ -34,6 +35,10 @@ function requestedBoolean(value) {
     if (normalized === 'true') return true;
     if (normalized === 'false') return false;
     return null;
+}
+
+function financialModeFromDryRun(requestedDryRun) {
+    return requestedDryRun === false ? 'ARMED_REVIEW' : 'DRY_RUN';
 }
 
 function normalizeRows(rows) {
@@ -122,19 +127,14 @@ function buildSnapshot(rows, extra = {}) {
     const effectiveGlobal = requestedGlobal;
     const effectiveBridge = requestedBridge;
     const effectiveCapsEnabled = requestedCapsEnabled;
-    const effectiveDryRun = true;
 
-    if (requestedDryRun !== effectiveDryRun) {
-        discrepancies.push({
-            key: 'financial_dry_run',
-            requested_value: requestedDryRun,
-            effective_value: effectiveDryRun,
-            reason: 'FINANCIAL_DRY_RUN_FORCED_TRUE'
-        });
-    }
+    // A execução automática permanece tecnicamente em dry-run nos dois modos.
+    // financial_dry_run=false é a chave administrativa oficial para ARMED_REVIEW:
+    // prepara/enfileira para revisão, mas nunca despacha place_bet automaticamente.
+    const effectiveDryRun = true;
+    const financialMode = financialModeFromDryRun(requestedDryRun);
 
     const invalidStoredValue = discrepancies.some(item => item.reason === 'INVALID_REQUESTED_VALUE');
-    const dryRunForced = requestedDryRun !== true;
     const frozenDiscrepancies = Object.freeze(discrepancies.map(item => Object.freeze({ ...item })));
 
     return Object.freeze({
@@ -142,27 +142,34 @@ function buildSnapshot(rows, extra = {}) {
         per_bridge_cap: effectiveBridge,
         technical_risk_caps_enabled: effectiveCapsEnabled,
         financial_dry_run: effectiveDryRun,
+        financial_mode: financialMode,
+        human_confirmation_required: financialMode === 'ARMED_REVIEW',
+        automatic_financial_dispatch: false,
         requested_financial_dry_run: requestedDryRun,
-        dry_run_forced: dryRunForced,
+        dry_run_forced: false,
         requested: Object.freeze({
             global_router_cap: requestedGlobal,
             per_bridge_cap: requestedBridge,
             technical_risk_caps_enabled: requestedCapsEnabled,
-            financial_dry_run: requestedDryRun
+            financial_dry_run: requestedDryRun,
+            financial_mode: financialMode
         }),
         effective: Object.freeze({
             global_router_cap: effectiveGlobal,
             per_bridge_cap: effectiveBridge,
             technical_risk_caps_enabled: effectiveCapsEnabled,
-            financial_dry_run: effectiveDryRun
+            financial_dry_run: effectiveDryRun,
+            financial_mode: financialMode,
+            human_confirmation_required: financialMode === 'ARMED_REVIEW',
+            automatic_financial_dispatch: false
         }),
         discrepancies: frozenDiscrepancies,
         clamped: frozenDiscrepancies.length > 0,
         source: extra.source || 'system_configs',
-        fail_closed: extra.fail_closed === true || invalidStoredValue || dryRunForced,
+        fail_closed: extra.fail_closed === true || invalidStoredValue,
         reason: extra.reason || (invalidStoredValue
             ? 'SYSTEM_CONFIG_INVALID_REQUESTED_VALUE'
-            : (dryRunForced ? 'FINANCIAL_DRY_RUN_FORCED_TRUE' : null))
+            : null)
     });
 }
 
@@ -283,6 +290,7 @@ module.exports = {
     CONFIG_KEYS,
     requestedMoney,
     requestedBoolean,
+    financialModeFromDryRun,
     ensureSystemConfigsTable,
     buildSnapshot,
     logDiscrepancies,

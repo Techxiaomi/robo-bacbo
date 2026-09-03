@@ -17,6 +17,13 @@ function normalizedTarget(value) {
     return String(value || '').trim().replaceAll('\\', '/');
 }
 
+function effectiveTargetForMode(target, financialMode) {
+    if (target === 'scripts/signal_router.js' && financialMode === 'ARMED_REVIEW') {
+        return 'scripts/signal_router_armed_review.js';
+    }
+    return target;
+}
+
 async function main() {
     const target = normalizedTarget(process.argv[2]);
     if (!ALLOWED_TARGETS.has(target)) {
@@ -41,22 +48,35 @@ async function main() {
         await dbPool.end();
     }
 
+    const financialMode = String(config.financial_mode || 'DRY_RUN').trim().toUpperCase();
+    if (!['DRY_RUN', 'ARMED_REVIEW'].includes(financialMode)) {
+        throw new Error(`SYSTEM_CONFIG_FINANCIAL_MODE_INVALID: ${financialMode}`);
+    }
+
+    const effectiveTarget = effectiveTargetForMode(target, financialMode);
     const env = {
         ...process.env,
         SYSTEM_CONFIG_GLOBAL_ROUTER_CAP: config.global_router_cap.toFixed(2),
         SYSTEM_CONFIG_PER_BRIDGE_CAP: config.per_bridge_cap.toFixed(2),
         SYSTEM_CONFIG_TECHNICAL_RISK_CAPS_ENABLED: String(config.technical_risk_caps_enabled === true),
         SIGNAL_ROUTER_FINANCIAL_DRY_RUN: 'true',
+        SIGNAL_ROUTER_FINANCIAL_MODE: financialMode,
         SYSTEM_CONFIG_SOURCE: config.source
     };
 
     console.log(
         `SYSTEM_CONFIG_LOADED source=${config.source} technical_risk_caps_enabled=${config.technical_risk_caps_enabled === true} ` +
         `global_router_cap=${config.global_router_cap.toFixed(2)} per_bridge_cap=${config.per_bridge_cap.toFixed(2)} ` +
-        `financial_dry_run=true fail_closed=${config.fail_closed}`
+        `financial_mode=${financialMode} automated_dispatch=false fail_closed=${config.fail_closed}`
     );
+    if (effectiveTarget !== target) {
+        console.warn(
+            `SYSTEM_CONFIG_ROUTER_MODE_SWITCH requested_target=${target} effective_target=${effectiveTarget} ` +
+            `financial_mode=${financialMode} human_confirmation_required=true`
+        );
+    }
 
-    const child = spawn(process.execPath, [path.join(__dirname, '..', target), ...process.argv.slice(3)], {
+    const child = spawn(process.execPath, [path.join(__dirname, '..', effectiveTarget), ...process.argv.slice(3)], {
         cwd: path.join(__dirname, '..'),
         env,
         stdio: 'inherit',
@@ -77,7 +97,14 @@ async function main() {
     });
 }
 
-main().catch(error => {
-    console.error('SYSTEM_CONFIG_RUNNER_FAILED:', error?.message || error);
-    process.exitCode = 1;
-});
+if (require.main === module) {
+    main().catch(error => {
+        console.error('SYSTEM_CONFIG_RUNNER_FAILED:', error?.message || error);
+        process.exitCode = 1;
+    });
+}
+
+module.exports = {
+    normalizedTarget,
+    effectiveTargetForMode
+};
