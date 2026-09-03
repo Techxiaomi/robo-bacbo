@@ -14,7 +14,7 @@ import robo
 MAX_CONFIG_BYTES = 64 * 1024
 MAX_CONTROL_LINE_BYTES = 4096
 SUPPORTED_TABLE_KEYS = {"bacbo_br", "bacbo_int"}
-CONTROLLED_MAX_EXPOSURE_CAP = 5.0
+MAX_CONFIGURABLE_TECHNICAL_CAP = 99999.0
 KEEP_ALIVE_INTERVAL_SECONDS = 15.0
 WORKER_SHUTDOWN_TIMEOUT_SECONDS = 15.0
 SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
@@ -142,14 +142,15 @@ def _validate_config(config):
     if str(safety.get("mode") or "").strip() != "controlled":
         raise RuntimeError("LIVE_BRIDGE_MODE_INVALID")
 
+    technical_caps_enabled = safety.get("technical_caps_enabled") is True
     try:
         max_exposure = float(safety.get("max_exposure"))
     except (TypeError, ValueError) as error:
         raise RuntimeError("LIVE_BRIDGE_MAX_EXPOSURE_INVALID") from error
 
-    if max_exposure <= 0 or max_exposure > CONTROLLED_MAX_EXPOSURE_CAP:
+    if max_exposure <= 0 or max_exposure > MAX_CONFIGURABLE_TECHNICAL_CAP:
         raise RuntimeError(
-            f"LIVE_BRIDGE_MAX_EXPOSURE_OUT_OF_RANGE: max={CONTROLLED_MAX_EXPOSURE_CAP:.2f}"
+            f"LIVE_BRIDGE_MAX_EXPOSURE_OUT_OF_RANGE: max={MAX_CONFIGURABLE_TECHNICAL_CAP:.2f}"
         )
 
     if not robo.auto_trader_habilitado():
@@ -159,7 +160,7 @@ def _validate_config(config):
     robo.URL_HOME_CASSINO = home_url
     robo.REDIS_COMMAND_CHANNEL = session["redis_command_channel"]
     robo.REDIS_RESPONSE_CHANNEL = session["redis_response_channel"]
-    return table_key, max_exposure, session
+    return table_key, technical_caps_enabled, max_exposure, session
 
 
 def _adapter_session_healthy(page):
@@ -199,7 +200,13 @@ def _reject_place_bet(command, reason):
     print(f"LIVE_BRIDGE_ORDER_REJECTED={reason}")
 
 
-def _process_controlled_command(playwright, session, command, max_exposure):
+def _process_controlled_command(
+    playwright,
+    session,
+    command,
+    technical_caps_enabled,
+    max_exposure,
+):
     action = str(command.get("action") or "").strip()
     page = session.get("page")
     _require_adapter_session_healthy(page)
@@ -212,7 +219,7 @@ def _process_controlled_command(playwright, session, command, max_exposure):
             return
 
         print(f"LIVE_BRIDGE_ORDER_EXPOSURE={exposure:.2f}")
-        if exposure > max_exposure + 1e-9:
+        if technical_caps_enabled and exposure > max_exposure + 1e-9:
             _reject_place_bet(
                 command,
                 f"LIVE_BRIDGE_MAX_EXPOSURE_EXCEEDED: exposure={exposure:.2f}, max={max_exposure:.2f}",
@@ -229,7 +236,12 @@ def _process_controlled_command(playwright, session, command, max_exposure):
     print(f"LIVE_BRIDGE_COMMAND_REJECTED={action or 'EMPTY'}")
 
 
-def _controlled_cycle(playwright, session, max_exposure):
+def _controlled_cycle(
+    playwright,
+    session,
+    technical_caps_enabled,
+    max_exposure,
+):
     last_keep_alive = 0.0
 
     while not robo.encerrar_executor.is_set():
@@ -248,12 +260,25 @@ def _controlled_cycle(playwright, session, max_exposure):
         if robo.encerrar_executor.is_set():
             return
 
-        _process_controlled_command(playwright, session, command, max_exposure)
+        _process_controlled_command(
+            playwright,
+            session,
+            command,
+            technical_caps_enabled,
+            max_exposure,
+        )
         session["ultima_manutencao"] = time.monotonic()
         robo.registrar_atividade_node()
 
 
-def _worker(config, max_exposure, runtime_session, ready_event, worker_error):
+def _worker(
+    config,
+    technical_caps_enabled,
+    max_exposure,
+    runtime_session,
+    ready_event,
+    worker_error,
+):
     session = {
         "browser": None,
         "context": None,
@@ -290,7 +315,12 @@ def _worker(config, max_exposure, runtime_session, ready_event, worker_error):
                 print("LIVE_BRIDGE_ADAPTER_PAGE_READY=true")
                 ready_event.set()
 
-                _controlled_cycle(playwright, session, max_exposure)
+                _controlled_cycle(
+                    playwright,
+                    session,
+                    technical_caps_enabled,
+                    max_exposure,
+                )
             finally:
                 robo.navegador_aberto.clear()
                 cleanup_error = None
@@ -345,7 +375,12 @@ def _worker(config, max_exposure, runtime_session, ready_event, worker_error):
 
 def main():
     config = _read_config_from_stdin()
-    table_key, max_exposure, runtime_session = _validate_config(config)
+    (
+        table_key,
+        technical_caps_enabled,
+        max_exposure,
+        runtime_session,
+    ) = _validate_config(config)
 
     robo.renovar_sessao_automaticamente = _disable_legacy_login
     robo.encerrar_executor.clear()
@@ -355,6 +390,10 @@ def main():
     print(f"LIVE_BRIDGE_SESSION_ID={runtime_session['session_id']}")
     print(f"LIVE_BRIDGE_TABLE={table_key}")
     print("LIVE_BRIDGE_MODE=controlled")
+    print(
+        "LIVE_BRIDGE_TECHNICAL_CAPS_ENABLED="
+        f"{'true' if technical_caps_enabled else 'false'}"
+    )
     print(f"LIVE_BRIDGE_MAX_EXPOSURE={max_exposure:.2f}")
     print(f"LIVE_BRIDGE_REDIS_COMMAND_CHANNEL={robo.REDIS_COMMAND_CHANNEL}")
     print(f"LIVE_BRIDGE_REDIS_RESPONSE_CHANNEL={robo.REDIS_RESPONSE_CHANNEL}")
@@ -375,7 +414,14 @@ def main():
 
     worker_thread = threading.Thread(
         target=_worker,
-        args=(config, max_exposure, runtime_session, ready_event, worker_error),
+        args=(
+            config,
+            technical_caps_enabled,
+            max_exposure,
+            runtime_session,
+            ready_event,
+            worker_error,
+        ),
         name=f"bacbo-live-adapter-worker-{runtime_session['session_id']}",
         daemon=True,
     )
