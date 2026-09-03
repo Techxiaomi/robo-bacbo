@@ -1,5 +1,7 @@
 'use strict';
 
+const ADMIN_REQUEST_MAX = 99999.00;
+
 const SAFE_DEFAULTS = Object.freeze({
     global_router_cap: 20.00,
     per_bridge_cap: 5.00,
@@ -8,12 +10,11 @@ const SAFE_DEFAULTS = Object.freeze({
 });
 
 const SAFE_ENVELOPE = Object.freeze({
-    global_router_cap: 20.00,
-    per_bridge_cap: 5.00,
+    global_router_cap: ADMIN_REQUEST_MAX,
+    per_bridge_cap: ADMIN_REQUEST_MAX,
     financial_dry_run: true
 });
 
-const ADMIN_REQUEST_MAX = 99999.00;
 const CONFIG_KEYS = Object.freeze([
     'global_router_cap',
     'per_bridge_cap',
@@ -118,27 +119,11 @@ function buildSnapshot(rows, extra = {}) {
         });
     }
 
-    const effectiveGlobal = Math.min(requestedGlobal, SAFE_ENVELOPE.global_router_cap);
-    const effectiveBridge = Math.min(requestedBridge, SAFE_ENVELOPE.per_bridge_cap);
+    const effectiveGlobal = requestedGlobal;
+    const effectiveBridge = requestedBridge;
     const effectiveCapsEnabled = requestedCapsEnabled;
     const effectiveDryRun = true;
 
-    if (requestedGlobal !== effectiveGlobal) {
-        discrepancies.push({
-            key: 'global_router_cap',
-            requested_value: requestedGlobal,
-            effective_value: effectiveGlobal,
-            reason: 'SAFE_ENVELOPE_CLAMP'
-        });
-    }
-    if (requestedBridge !== effectiveBridge) {
-        discrepancies.push({
-            key: 'per_bridge_cap',
-            requested_value: requestedBridge,
-            effective_value: effectiveBridge,
-            reason: 'SAFE_ENVELOPE_CLAMP'
-        });
-    }
     if (requestedDryRun !== effectiveDryRun) {
         discrepancies.push({
             key: 'financial_dry_run',
