@@ -10,9 +10,20 @@ class BrasilDaSorteFastAdapter(BrasilDaSorteAdapter):
         print("BRASIL_DA_SORTE_STAGE=HOME")
         self._navigate(page, self._home_url)
         print("BRASIL_DA_SORTE_HOME_NAVIGATED=true")
-        self._dismiss_prelaunch_overlays(page)
 
-        if self._login_button_visible(page):
+        # Uma unica varredura de overlays na HOME. O fluxo antigo repetia esta
+        # varredura em pre_launch -> _perform_login -> _open_login_form, gerando
+        # varios segundos de trabalho DOM redundante em paginas com muitos roots.
+        self._dismiss_prelaunch_overlays(page)
+        print("BRASIL_DA_SORTE_POPUPS_CHECK_DONE=true")
+
+        login_required = self._login_button_visible(page)
+        print(
+            "BRASIL_DA_SORTE_SESSION_PROBE_DONE="
+            f"login_required:{str(login_required).lower()}"
+        )
+
+        if login_required:
             if not self._username or not self._password:
                 raise RuntimeError("BRASIL_DA_SORTE_LOGIN_CREDENTIALS_REQUIRED")
             self._perform_login(page)
@@ -30,15 +41,13 @@ class BrasilDaSorteFastAdapter(BrasilDaSorteAdapter):
         return page
 
     def _perform_login(self, page):
-        # Sem espera fixa inicial: tenta usar o formulario imediatamente e, se
-        # ainda nao existir, abre-o e reaproveita o polling fail-closed de 250 ms.
-        self._dismiss_prelaunch_overlays(page)
-
-        username, password, root, auth_page = self._find_login_fields(page)
-        if username is None or password is None:
-            triggered = self._open_login_form(page)
-            print(f"BRASIL_DA_SORTE_LOGIN_TRIGGER_RESULT={str(triggered).lower()}")
-            username, password, root, auth_page = self._wait_for_login_fields(page)
+        # pre_launch ja provou que o botao Entrar esta visivel. Nao repete
+        # dismiss de overlays nem faz uma varredura completa por campos antes
+        # de abrir o formulario. Abre imediatamente e usa o polling fail-closed
+        # existente de 250 ms para aguardar os campos.
+        triggered = self._open_login_form(page)
+        print(f"BRASIL_DA_SORTE_LOGIN_TRIGGER_RESULT={str(triggered).lower()}")
+        username, password, root, auth_page = self._wait_for_login_fields(page)
 
         if username is None or password is None:
             self._log_login_dom_diagnostic(page)
@@ -54,19 +63,21 @@ class BrasilDaSorteFastAdapter(BrasilDaSorteAdapter):
         else:
             password.press("Enter")
 
-        # Nao dorme 1 s aqui. A confirmacao seguinte ja faz polling de 250 ms
-        # ate POST_LOGIN_CONFIRM_TIMEOUT_MS e permanece fail-closed.
+        # A confirmacao seguinte ja faz polling de 250 ms ate
+        # POST_LOGIN_CONFIRM_TIMEOUT_MS e permanece fail-closed.
         print("BRASIL_DA_SORTE_LOGIN_SUBMITTED=true")
 
     def _open_login_form(self, primary_page):
-        self._dismiss_prelaunch_overlays(primary_page)
-
+        # Sem nova varredura de overlays: pre_launch acabou de executa-la.
+        # Prioriza o botao direto no documento principal, que e o caminho
+        # observado em producao; so cai para pages/roots se necessario.
         direct = primary_page.locator("button", has_text=self.DIRECT_LOGIN_PATTERN)
         for index in range(min(direct.count(), 8)):
             candidate = direct.nth(index)
             try:
                 if not candidate.is_visible():
                     continue
+                print("BRASIL_DA_SORTE_LOGIN_BUTTON_FOUND=PRIMARY_DIRECT")
                 candidate.click(force=True, timeout=3000)
                 print("BRASIL_DA_SORTE_LOGIN_TRIGGERED=true")
                 print("BRASIL_DA_SORTE_LOGIN_FORM_OPENED=true")
@@ -83,6 +94,7 @@ class BrasilDaSorteFastAdapter(BrasilDaSorteAdapter):
                 if button is None:
                     continue
                 try:
+                    print("BRASIL_DA_SORTE_LOGIN_BUTTON_FOUND=ROLE_FALLBACK")
                     button.click(force=True, timeout=3000)
                     print("BRASIL_DA_SORTE_LOGIN_TRIGGERED=true")
                     print("BRASIL_DA_SORTE_LOGIN_FORM_OPENED=true")
