@@ -79,6 +79,18 @@ test('refresh de saldo stale publica somente nas contas vinculadas e reaproveita
         'auto_trader_commands:4:bacbo_br'
     ]);
     assert.ok(published.every(item => item.payload.action === 'sync_balance'));
+
+    for (const item of published) {
+        const accountId = Number(item.channel.split(':')[1]);
+
+        assert.equal(item.payload.routed_account_id, accountId);
+        assert.equal(
+            item.payload.routed_session_id,
+            `account-${accountId}:bacbo_br`
+        );
+        assert.equal(item.payload.routed_table_key, 'bacbo_br');
+        assert.ok(item.payload.request_id);
+    }
 });
 
 test('preserva Stop Win, Stop Loss e saldo valido no gate scoped', () => {
