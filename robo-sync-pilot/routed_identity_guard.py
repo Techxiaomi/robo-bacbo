@@ -32,11 +32,6 @@ def _command_identity(command):
     return account_id, session_id, table_key
 
 
-def _identity_missing(received):
-    account_id, session_id, table_key = received
-    return account_id is None and not session_id and not table_key
-
-
 def _identity_mismatch_reason(expected, received):
     expected_account, expected_session, expected_table = expected
     received_account, received_session, received_table = received
@@ -68,17 +63,6 @@ def install_routed_identity_guard(robo_module, config):
 
         received = _command_identity(item)
         if received == expected:
-            return original_process(playwright, session, command)
-
-        # Compatibilidade segura para o bootstrap de ativacao existente:
-        # sync_balance e apenas leitura e ja chega por um command channel
-        # exclusivo do worker account+table. Ausencia total de metadata roteada
-        # pode seguir; metadata parcial ou divergente continua fail-closed.
-        if action == "sync_balance" and _identity_missing(received):
-            print(
-                "LIVE_BRIDGE_ROUTED_IDENTITY_LEGACY_SYNC_BALANCE="
-                f"accepted account={expected[0]} session={expected[1]} table={expected[2]}"
-            )
             return original_process(playwright, session, command)
 
         reason = _identity_mismatch_reason(expected, received)
