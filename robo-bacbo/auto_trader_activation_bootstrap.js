@@ -343,7 +343,10 @@ async function collectLinkedBalances(context) {
             const channel = channelsFor(accountId, context.tableKey).command;
             await publisher.publish(channel, JSON.stringify({
                 action: 'sync_balance',
-                request_id: requestId
+                request_id: requestId,
+                routed_account_id: accountId,
+                routed_session_id: taskId(accountId, context.tableKey),
+                routed_table_key: context.tableKey
             }));
         }
 
