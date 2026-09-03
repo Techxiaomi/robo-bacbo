@@ -101,7 +101,7 @@ class RoutedIdentityGuardTests(unittest.TestCase):
         self.assertEqual(len(calls["finalize"]), 1)
         self.assertIn("received_session=account-4:bacbo_br", calls["finalize"][0][2]["motivo"])
 
-    def test_metadados_roteados_ausentes_nao_sao_aceitos(self):
+    def test_metadados_roteados_ausentes_nao_sao_aceitos_em_place_bet(self):
         robo, calls = self._robo()
         install_routed_identity_guard(robo, self._config())
 
@@ -120,6 +120,24 @@ class RoutedIdentityGuardTests(unittest.TestCase):
         self.assertIn("received_account=<missing>", motivo)
         self.assertIn("received_session=<missing>", motivo)
         self.assertIn("received_table=<missing>", motivo)
+
+    def test_sync_balance_legado_sem_metadata_preserva_bootstrap_de_ativacao(self):
+        robo, calls = self._robo()
+        install_routed_identity_guard(robo, self._config())
+
+        result = robo.processar_comando_playwright(
+            object(),
+            {"page": object()},
+            {
+                "action": "sync_balance",
+                "request_id": "activation-balance-001",
+            },
+        )
+
+        self.assertEqual(result, "processed")
+        self.assertEqual(len(calls["process"]), 1)
+        self.assertEqual(calls["publish"], [])
+        self.assertEqual(calls["finalize"], [])
 
     def test_sync_balance_mal_roteado_publica_erro_correlacionado_sem_playwright(self):
         robo, calls = self._robo()
@@ -144,6 +162,24 @@ class RoutedIdentityGuardTests(unittest.TestCase):
         self.assertEqual(payload["action"], "balance_error")
         self.assertEqual(payload["request_id"], "balance-route-001")
         self.assertIn("LIVE_BRIDGE_ROUTED_IDENTITY_MISMATCH", payload["error"])
+
+    def test_sync_balance_metadata_parcial_continua_fail_closed(self):
+        robo, calls = self._robo()
+        install_routed_identity_guard(robo, self._config())
+
+        robo.processar_comando_playwright(
+            object(),
+            {"page": object()},
+            {
+                "action": "sync_balance",
+                "request_id": "balance-partial-001",
+                "routed_account_id": 4,
+            },
+        )
+
+        self.assertEqual(calls["process"], [])
+        self.assertEqual(len(calls["publish"]), 1)
+        self.assertIn("LIVE_BRIDGE_ROUTED_IDENTITY_MISMATCH", calls["publish"][0]["error"])
 
     def test_reinstalacao_com_identidade_diferente_e_proibida(self):
         robo, _ = self._robo()
