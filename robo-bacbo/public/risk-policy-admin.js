@@ -28,18 +28,20 @@
     editor.id = 'risk-config-editor';
     editor.className = 'risk-editor';
     editor.innerHTML = `
-        <label>Cap global solicitado<input id="cfg-global-cap" type="number" min="0.01" step="0.01"></label>
-        <label>Cap por Bridge solicitado<input id="cfg-bridge-cap" type="number" min="0.01" step="0.01"></label>
+        <label>Cap global de homologação<input id="cfg-global-cap" type="number" min="0.01" max="99999" step="0.01"></label>
+        <label>Cap por Bridge de homologação<input id="cfg-bridge-cap" type="number" min="0.01" max="99999" step="0.01"></label>
         <button id="cfg-save" type="button">SALVAR</button>
         <button id="cfg-reset" class="secondary" type="button">RESTAURAR PADRÃO</button>
+        <div class="risk-editor-mode"><label><input id="cfg-caps-enabled" type="checkbox"> Habilitar caps técnicos</label> — desligado por padrão; ligue somente quando quiser homologar limites globais/por bridge.</div>
         <div class="risk-editor-mode"><label><input id="cfg-dry-run" type="checkbox"> Solicitação administrativa de DRY RUN</label> — este controle representa o valor solicitado; o runtime usa somente o valor efetivo informado pelo backend.</div>
         <div id="cfg-runtime-state" class="risk-runtime-state">Consultando requested/effective...</div>
-        <div id="cfg-message" class="risk-editor-msg">Fonte: system_configs. A UI separa configuração solicitada de estado efetivo.</div>
+        <div id="cfg-message" class="risk-editor-msg">Fonte: system_configs. Os valores dos caps permanecem editáveis mesmo quando o modo está desligado.</div>
     `;
     grid.insertAdjacentElement('afterend', editor);
 
     const globalInput = document.getElementById('cfg-global-cap');
     const bridgeInput = document.getElementById('cfg-bridge-cap');
+    const capsEnabledInput = document.getElementById('cfg-caps-enabled');
     const dryRunInput = document.getElementById('cfg-dry-run');
     const saveButton = document.getElementById('cfg-save');
     const resetButton = document.getElementById('cfg-reset');
@@ -48,6 +50,10 @@
 
     function modeLabel(value) {
         return value === true ? 'DRY RUN' : 'PRODUÇÃO SOLICITADA';
+    }
+
+    function capsLabel(value) {
+        return value === true ? 'CAPS ATIVOS' : 'CAPS DESABILITADOS';
     }
 
     function renderConfig(config) {
@@ -59,12 +65,15 @@
         bridgeInput.value = Number.isFinite(Number(requested.per_bridge_cap))
             ? Number(requested.per_bridge_cap).toFixed(2)
             : '';
+        capsEnabledInput.checked = requested.technical_risk_caps_enabled === true;
         dryRunInput.checked = requested.financial_dry_run !== false;
 
         const requestedGlobal = Number(requested.global_router_cap);
         const requestedBridge = Number(requested.per_bridge_cap);
         const effectiveGlobal = Number(effective.global_router_cap);
         const effectiveBridge = Number(effective.per_bridge_cap);
+        const requestedCapsEnabled = requested.technical_risk_caps_enabled === true;
+        const effectiveCapsEnabled = effective.technical_risk_caps_enabled === true;
         const requestedDryRun = requested.financial_dry_run !== false;
         const effectiveDryRun = effective.financial_dry_run !== false;
         const valuesAligned = Number.isFinite(requestedGlobal)
@@ -73,20 +82,23 @@
             && Number.isFinite(effectiveBridge)
             && requestedGlobal === effectiveGlobal
             && requestedBridge === effectiveBridge
+            && requestedCapsEnabled === effectiveCapsEnabled
             && requestedDryRun === effectiveDryRun;
 
         runtimeState.className = `risk-runtime-state ${valuesAligned ? 'aligned' : 'diverged'}`;
         runtimeState.textContent = valuesAligned
-            ? `✅ REQUESTED = EFFECTIVE — Global ${effectiveGlobal.toFixed(2)} | Bridge ${effectiveBridge.toFixed(2)} | ${modeLabel(effectiveDryRun)}`
-            : `⚠️ REQUESTED ≠ EFFECTIVE — solicitado: Global ${Number.isFinite(requestedGlobal) ? requestedGlobal.toFixed(2) : '—'} | Bridge ${Number.isFinite(requestedBridge) ? requestedBridge.toFixed(2) : '—'} | ${modeLabel(requestedDryRun)}; efetivo: Global ${Number.isFinite(effectiveGlobal) ? effectiveGlobal.toFixed(2) : '—'} | Bridge ${Number.isFinite(effectiveBridge) ? effectiveBridge.toFixed(2) : '—'} | ${modeLabel(effectiveDryRun)}`;
+            ? `✅ REQUESTED = EFFECTIVE — ${capsLabel(effectiveCapsEnabled)} | Global ${effectiveGlobal.toFixed(2)} | Bridge ${effectiveBridge.toFixed(2)} | ${modeLabel(effectiveDryRun)}`
+            : `⚠️ REQUESTED ≠ EFFECTIVE — solicitado: ${capsLabel(requestedCapsEnabled)} | Global ${Number.isFinite(requestedGlobal) ? requestedGlobal.toFixed(2) : '—'} | Bridge ${Number.isFinite(requestedBridge) ? requestedBridge.toFixed(2) : '—'} | ${modeLabel(requestedDryRun)}; efetivo: ${capsLabel(effectiveCapsEnabled)} | Global ${Number.isFinite(effectiveGlobal) ? effectiveGlobal.toFixed(2) : '—'} | Bridge ${Number.isFinite(effectiveBridge) ? effectiveBridge.toFixed(2) : '—'} | ${modeLabel(effectiveDryRun)}`;
 
         if (config?.clamped === true) {
             const details = (config.discrepancies || [])
                 .map(item => `${item.key}: solicitado=${item.requested_value}, efetivo=${item.effective_value}`)
                 .join(' | ');
             message.textContent = `⚠️ Backend informou divergência requested/effective. ${details}`;
+        } else if (effectiveCapsEnabled) {
+            message.textContent = `✅ Caps técnicos ATIVOS: Global R$ ${effectiveGlobal.toFixed(2)} | Bridge R$ ${effectiveBridge.toFixed(2)}.`;
         } else {
-            message.textContent = '✅ Backend informou valores solicitados e efetivos alinhados.';
+            message.textContent = `✅ Caps técnicos DESABILITADOS. Valores preservados para futura homologação: Global R$ ${effectiveGlobal.toFixed(2)} | Bridge R$ ${effectiveBridge.toFixed(2)}.`;
         }
     }
 
@@ -107,6 +119,7 @@
                 body: JSON.stringify({
                     global_router_cap: Number(globalInput.value),
                     per_bridge_cap: Number(bridgeInput.value),
+                    technical_risk_caps_enabled: capsEnabledInput.checked,
                     financial_dry_run: dryRunInput.checked
                 })
             });
