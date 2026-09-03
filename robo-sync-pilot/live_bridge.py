@@ -294,7 +294,8 @@ def _worker(
 
     try:
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=False, args=BROWSER_ARGS)
+            print("LIVE_BRIDGE_BROWSER_HEADLESS=true")
+            browser = playwright.chromium.launch(headless=True, args=BROWSER_ARGS)
             adapter = create_adapter(browser=browser, config=config)
             session["browser"] = browser
 
