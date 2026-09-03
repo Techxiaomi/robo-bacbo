@@ -65,16 +65,37 @@ function Invoke-MariaDb {
     )
 
     $oldPwd = $env:MYSQL_PWD
+    $oldErrorActionPreference = $ErrorActionPreference
+    $stderrFile = Join-Path $env:TEMP ('bacbo_mariadb_stderr_' + [guid]::NewGuid().ToString('N') + '.txt')
+
     try {
         $env:MYSQL_PWD = $Password
-        $output = & $Exe @Arguments 2>&1
+
+        # Windows PowerShell 5.x transforma stderr de executaveis nativos em NativeCommandError
+        # quando ErrorActionPreference=Stop. MariaDB 12 pode emitir warnings benignos no stderr
+        # mesmo retornando exit code 0. Portanto o stderr e capturado separadamente e somente
+        # o exit code nativo determina sucesso/falha.
+        $ErrorActionPreference = 'Continue'
+        $output = & $Exe @Arguments 2> $stderrFile
         $code = $LASTEXITCODE
-        if ($code -ne 0) {
-            throw "MariaDB retornou exit code $code.`n$($output -join [Environment]::NewLine)"
+        $ErrorActionPreference = $oldErrorActionPreference
+
+        $stderr = @()
+        if (Test-Path -LiteralPath $stderrFile) {
+            $stderr = @(Get-Content -LiteralPath $stderrFile -ErrorAction SilentlyContinue)
         }
+
+        if ($code -ne 0) {
+            $details = @($output) + @($stderr)
+            throw "MariaDB retornou exit code $code.`n$($details -join [Environment]::NewLine)"
+        }
+
         return $output
     }
     finally {
+        $ErrorActionPreference = $oldErrorActionPreference
+        Remove-Item -LiteralPath $stderrFile -Force -ErrorAction SilentlyContinue
+
         if ($null -eq $oldPwd) {
             Remove-Item Env:MYSQL_PWD -ErrorAction SilentlyContinue
         } else {
@@ -144,8 +165,13 @@ try {
 
     $dumpFile = Join-Path $databaseDir 'bacbo.sql'
     $oldPwd = $env:MYSQL_PWD
+    $oldErrorActionPreference = $ErrorActionPreference
+    $dumpStderrFile = Join-Path $env:TEMP ('bacbo_dump_stderr_' + [guid]::NewGuid().ToString('N') + '.txt')
+
     try {
         $env:MYSQL_PWD = $dbPass
+        $ErrorActionPreference = 'Continue'
+
         & $dumpExe `
             "--host=$dbHost" `
             "--port=$dbPort" `
@@ -159,10 +185,25 @@ try {
             '--no-tablespaces' `
             '--default-character-set=utf8mb4' `
             $dbName `
-            "--result-file=$dumpFile"
+            "--result-file=$dumpFile" `
+            2> $dumpStderrFile
+
         $dumpExit = $LASTEXITCODE
+        $ErrorActionPreference = $oldErrorActionPreference
+
+        $dumpStderr = @()
+        if (Test-Path -LiteralPath $dumpStderrFile) {
+            $dumpStderr = @(Get-Content -LiteralPath $dumpStderrFile -ErrorAction SilentlyContinue)
+        }
+
+        if ($dumpExit -ne 0) {
+            throw "mariadb-dump falhou com exit code $dumpExit.`n$($dumpStderr -join [Environment]::NewLine)"
+        }
     }
     finally {
+        $ErrorActionPreference = $oldErrorActionPreference
+        Remove-Item -LiteralPath $dumpStderrFile -Force -ErrorAction SilentlyContinue
+
         if ($null -eq $oldPwd) {
             Remove-Item Env:MYSQL_PWD -ErrorAction SilentlyContinue
         } else {
@@ -170,7 +211,6 @@ try {
         }
     }
 
-    if ($dumpExit -ne 0) { throw "mariadb-dump falhou com exit code $dumpExit." }
     if (-not (Test-Path -LiteralPath $dumpFile)) { throw 'Dump nao foi criado.' }
     $dumpInfo = Get-Item -LiteralPath $dumpFile
     if ($dumpInfo.Length -le 0) { throw 'Dump foi criado vazio.' }
