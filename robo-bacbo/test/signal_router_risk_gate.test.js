@@ -9,13 +9,19 @@ function riskConfig(stopLoss, stopWin = 50) {
     return JSON.stringify({ stop_loss: stopLoss, stop_win: stopWin });
 }
 
-test('approves aggregate exposure using only eligible bound accounts and SSOT caps', () => {
+const HOMOLOGATION_CAPS = Object.freeze({
+    global_router_cap: 20,
+    per_bridge_cap: 5
+});
+
+test('approves aggregate exposure using only eligible bound accounts and explicit homologation caps', () => {
     const result = evaluateAggregateExposure({
         perAccountExposure: 5,
         eligibleAccountIds: [4, 1, 4],
         saldoInicial: 100,
         saldoAtual: 95,
-        configJson: riskConfig(30)
+        configJson: riskConfig(30),
+        technicalCaps: HOMOLOGATION_CAPS
     });
 
     assert.equal(result.approved, true);
@@ -32,13 +38,14 @@ test('approves aggregate exposure using only eligible bound accounts and SSOT ca
     });
 });
 
-test('rejects whole batch when per-account exposure exceeds bridge technical cap', () => {
+test('rejects whole batch when per-account exposure exceeds enabled bridge homologation cap', () => {
     const result = evaluateAggregateExposure({
         perAccountExposure: 5.01,
         eligibleAccountIds: [1],
         saldoInicial: 100,
         saldoAtual: 100,
-        configJson: riskConfig(50)
+        configJson: riskConfig(50),
+        technicalCaps: HOMOLOGATION_CAPS
     });
 
     assert.equal(result.approved, false);
@@ -77,13 +84,14 @@ test('rejects whole batch when projected balance reaches stop loss floor', () =>
     assert.equal(result.stop_loss_floor, 70);
 });
 
-test('rejects whole batch when aggregate exposure exceeds global technical cap', () => {
+test('rejects whole batch when aggregate exposure exceeds enabled global homologation cap', () => {
     const result = evaluateAggregateExposure({
         perAccountExposure: 5,
         eligibleAccountIds: [1, 4, 7, 8, 9],
         saldoInicial: 100,
         saldoAtual: 100,
-        configJson: riskConfig(50)
+        configJson: riskConfig(50),
+        technicalCaps: HOMOLOGATION_CAPS
     });
 
     assert.equal(result.approved, false);
