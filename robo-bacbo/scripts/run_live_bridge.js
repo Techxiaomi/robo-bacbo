@@ -13,6 +13,7 @@ const { getTechnicalRiskCaps } = require('../technical_risk_caps');
 const HOUSE_ADAPTER_KEY = 'brasil-da-sorte';
 const DEFAULT_TABLE_KEY = 'bacbo_br';
 const SUPPORTED_TABLE_KEYS = new Set(['bacbo_br', 'bacbo_int']);
+const MAX_STDERR_TAIL_BYTES = 64 * 1024;
 
 let activePythonControl = null;
 let pendingExternalShutdownReason = null;
@@ -119,6 +120,7 @@ function sanitizedPythonEnv() {
     env.PYTHONUNBUFFERED = '1';
     env.PYTHONIOENCODING = 'utf-8';
     env.PYTHONUTF8 = '1';
+    env.PYTHONFAULTHANDLER = '1';
     return env;
 }
 
@@ -231,16 +233,17 @@ function inspectPythonLine(line) {
 
 function runPython({ pythonExecutable, pythonScript, config, cwd }) {
     return new Promise((resolve, reject) => {
-        const child = spawn(pythonExecutable, [pythonScript], {
+        const child = spawn(pythonExecutable, ['-X', 'faulthandler', pythonScript], {
             cwd,
             env: sanitizedPythonEnv(),
-            stdio: ['pipe', 'pipe', 'inherit'],
+            stdio: ['pipe', 'pipe', 'pipe'],
             windowsHide: false
         });
 
         let settled = false;
         let shutdownRequested = false;
         let stdoutBuffer = '';
+        let stderrTail = '';
 
         const consumeStdout = chunk => {
             process.stdout.write(chunk);
@@ -254,6 +257,20 @@ function runPython({ pythonExecutable, pythonScript, config, cwd }) {
             }
         };
 
+        const consumeStderr = chunk => {
+            process.stderr.write(chunk);
+            stderrTail += chunk.toString('utf8');
+            if (Buffer.byteLength(stderrTail, 'utf8') > MAX_STDERR_TAIL_BYTES) {
+                stderrTail = stderrTail.slice(-MAX_STDERR_TAIL_BYTES);
+            }
+        };
+
+        const logStderrTail = () => {
+            const text = stderrTail.trim();
+            if (!text) return;
+            console.error(`LIVE_BRIDGE_PYTHON_STDERR_TAIL=${JSON.stringify(text.slice(-MAX_STDERR_TAIL_BYTES))}`);
+        };
+
         const finish = callback => {
             if (settled) return;
             settled = true;
@@ -264,6 +281,7 @@ function runPython({ pythonExecutable, pythonScript, config, cwd }) {
         };
 
         const fail = error => {
+            logStderrTail();
             sendTelemetry('ERROR', { error: String(error?.message || error).slice(0, 1000) });
             finish(() => reject(error));
         };
@@ -284,12 +302,20 @@ function runPython({ pythonExecutable, pythonScript, config, cwd }) {
         activePythonControl = Object.freeze({ requestShutdown });
 
         child.stdout.on('data', consumeStdout);
+        child.stderr.on('data', consumeStderr);
         child.stdout.once('error', fail);
+        child.stderr.once('error', fail);
         child.once('error', fail);
         child.once('exit', (code, signal) => {
             finish(() => {
-                if (signal) return reject(new Error(`LIVE_BRIDGE_PYTHON_SIGNAL: ${signal}`));
-                if (code !== 0) return reject(new Error(`LIVE_BRIDGE_PYTHON_EXIT_CODE: ${code}`));
+                if (signal) {
+                    logStderrTail();
+                    return reject(new Error(`LIVE_BRIDGE_PYTHON_SIGNAL: ${signal}`));
+                }
+                if (code !== 0) {
+                    logStderrTail();
+                    return reject(new Error(`LIVE_BRIDGE_PYTHON_EXIT_CODE: ${code}`));
+                }
                 resolve();
             });
         });
@@ -347,6 +373,7 @@ async function main() {
         console.log('LIVE_BRIDGE_TECHNICAL_CAP_SOURCE=technical_risk_caps');
         console.log(`LIVE_BRIDGE_TECHNICAL_CAPS_ENABLED=${safety.technical_caps_enabled}`);
         console.log(`LIVE_BRIDGE_MAX_EXPOSURE=${safety.max_exposure.toFixed(2)}`);
+        console.log('LIVE_BRIDGE_PYTHON_FAULTHANDLER=true');
 
         await runPython({
             pythonExecutable: resolvePythonExecutable(projectRoot),
