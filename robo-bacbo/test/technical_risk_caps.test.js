@@ -90,7 +90,7 @@ test('router and live bridge consume runtime SSOT instead of launcher cap variab
     assert.doesNotMatch(routerLauncher, /SIGNAL_ROUTER_GLOBAL_MAX_EXPOSURE=/);
     assert.doesNotMatch(supervisorLauncher, /LIVE_BRIDGE_MAX_EXPOSURE=/);
     assert.match(routerLauncher, /run_with_system_config\.js scripts\\signal_router\.js/);
-    assert.match(supervisorLauncher, /run_with_system_config\.js scripts\\master_supervisor\.js/);
+    assert.match(supervisorLauncher, /run_with_system_config\.js scripts\\master_supervisor_fast\.js/);
 });
 
 test('live bridge propaga modo do cap e nunca envia sentinel de bypass ao Python', () => {
