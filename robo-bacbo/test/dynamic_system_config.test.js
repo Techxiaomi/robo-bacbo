@@ -48,7 +48,7 @@ function silentLog() {
     };
 }
 
-test('empty DB seeds caps disabled by default and runtime remains dry-run', async () => {
+test('empty DB seeds caps disabled by default and runtime remains DRY_RUN', async () => {
     const dbPool = statefulPool();
     const config = await readSystemConfig({ dbPool, log: silentLog() });
     assert.equal(config.requested.global_router_cap, SAFE_DEFAULTS.global_router_cap);
@@ -56,6 +56,9 @@ test('empty DB seeds caps disabled by default and runtime remains dry-run', asyn
     assert.equal(config.requested.technical_risk_caps_enabled, false);
     assert.equal(config.effective.technical_risk_caps_enabled, false);
     assert.equal(config.effective.financial_dry_run, true);
+    assert.equal(config.financial_mode, 'DRY_RUN');
+    assert.equal(config.human_confirmation_required, false);
+    assert.equal(config.automatic_financial_dispatch, false);
 });
 
 test('homologation cap values remain editable and persist without R$20/R$5 clamp', async () => {
@@ -93,25 +96,28 @@ test('caps can be disabled while preserving their editable homologation values',
     assert.equal(config.effective.technical_risk_caps_enabled, false);
 });
 
-test('requested financial_dry_run=false persists but runtime effective value remains true fail-closed', async () => {
+test('financial_dry_run=false becomes ARMED_REVIEW without enabling automatic dispatch', async () => {
     const dbPool = statefulPool();
-    const log = silentLog();
     const config = await updateSystemConfig({
         dbPool,
         globalRouterCap: 20,
         perBridgeCap: 5,
         technicalRiskCapsEnabled: false,
         financialDryRun: false,
-        log
+        log: silentLog()
     });
 
     assert.equal(dbPool.state.get('financial_dry_run'), 'false');
     assert.equal(config.requested.financial_dry_run, false);
+    assert.equal(config.requested.financial_mode, 'ARMED_REVIEW');
+    assert.equal(config.financial_mode, 'ARMED_REVIEW');
     assert.equal(config.effective.financial_dry_run, true);
     assert.equal(config.financial_dry_run, true);
-    assert.equal(config.dry_run_forced, true);
-    assert.equal(config.fail_closed, true);
-    assert.ok(log.warnings.some(line => /FINANCIAL_DRY_RUN_FORCED_TRUE/.test(line)));
+    assert.equal(config.human_confirmation_required, true);
+    assert.equal(config.automatic_financial_dispatch, false);
+    assert.equal(config.dry_run_forced, false);
+    assert.equal(config.fail_closed, false);
+    assert.equal(config.clamped, false);
 });
 
 test('invalid administrative types are rejected before persistence', async () => {
@@ -130,21 +136,22 @@ test('invalid administrative types are rejected before persistence', async () =>
     );
 });
 
-test('DELETE/reset restores caps disabled and requested defaults', async () => {
+test('DELETE/reset restores caps disabled and DRY_RUN', async () => {
     const dbPool = statefulPool({
         global_router_cap: '250.00',
         per_bridge_cap: '75.00',
         technical_risk_caps_enabled: 'true',
-        financial_dry_run: 'true'
+        financial_dry_run: 'false'
     });
     const config = await resetSystemConfig({ dbPool, log: silentLog() });
     assert.equal(dbPool.state.get('global_router_cap'), SAFE_DEFAULTS.global_router_cap.toFixed(2));
     assert.equal(dbPool.state.get('per_bridge_cap'), SAFE_DEFAULTS.per_bridge_cap.toFixed(2));
     assert.equal(dbPool.state.get('technical_risk_caps_enabled'), 'false');
-    assert.equal(config.effective.technical_risk_caps_enabled, false);
+    assert.equal(dbPool.state.get('financial_dry_run'), 'true');
+    assert.equal(config.financial_mode, 'DRY_RUN');
 });
 
-test('launchers contain no cap values and DB config runner carries caps mode', () => {
+test('launchers keep automatic dry-run guard and runner carries administrative mode', () => {
     const repoRoot = path.join(__dirname, '..', '..');
     const routerLauncher = fs.readFileSync(path.join(repoRoot, 'atalhos', '07_SIGNAL_ROUTER.cmd'), 'utf8');
     const supervisorLauncher = fs.readFileSync(path.join(repoRoot, 'atalhos', '06_MASTER_SUPERVISOR.cmd'), 'utf8');
@@ -157,17 +164,20 @@ test('launchers contain no cap values and DB config runner carries caps mode', (
     assert.match(supervisorLauncher, /run_with_system_config\.js scripts\\master_supervisor_fast\.js/);
     assert.match(runner, /SYSTEM_CONFIG_TECHNICAL_RISK_CAPS_ENABLED/);
     assert.match(runner, /SIGNAL_ROUTER_FINANCIAL_DRY_RUN: 'true'/);
+    assert.match(runner, /SIGNAL_ROUTER_FINANCIAL_MODE: financialMode/);
+    assert.match(runner, /signal_router_armed_review\.js/);
 });
 
-test('Acessos exposes editable cap values and explicit enable switch', () => {
+test('Acessos exposes ARMED_REVIEW toggle and explicit human-confirmation warning', () => {
     const server = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'betting_house_api_dev_server.js'), 'utf8');
     const ui = fs.readFileSync(path.join(__dirname, '..', 'public', 'risk-policy-admin.js'), 'utf8');
 
     assert.match(server, /app\.get\('\/api\/financial-safety\/system-config'/);
     assert.match(server, /app\.put\('\/api\/financial-safety\/system-config'/);
-    assert.match(server, /technicalRiskCapsEnabled/);
-    assert.match(ui, /cfg-caps-enabled/);
-    assert.match(ui, /technical_risk_caps_enabled/);
-    assert.match(ui, /max="99999"/);
+    assert.match(server, /FINANCIAL_MODE_AUDIT/);
+    assert.match(ui, /cfg-armed-review/);
+    assert.match(ui, /ARMADO — CONFIRMAÇÃO HUMANA OBRIGATÓRIA/);
+    assert.match(ui, /financial_dry_run: !armedReviewInput\.checked/);
+    assert.match(ui, /automatic_financial_dispatch/);
     assert.match(ui, /method: 'DELETE'/);
 });

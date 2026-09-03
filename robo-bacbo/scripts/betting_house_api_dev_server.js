@@ -65,6 +65,22 @@ function scheduleRuntimeDisarm() {
     }, 150);
 }
 
+function auditFinancialModeChange({ before, after, req, action }) {
+    const from = String(before?.financial_mode || 'DRY_RUN');
+    const to = String(after?.financial_mode || 'DRY_RUN');
+    if (from === to && action !== 'RESET') return;
+    console.warn(
+        'FINANCIAL_MODE_AUDIT',
+        `action=${action}`,
+        `from=${from}`,
+        `to=${to}`,
+        'source=ADMIN_UI',
+        `remote=${String(req?.ip || req?.socket?.remoteAddress || 'unknown')}`,
+        `human_confirmation_required=${after?.human_confirmation_required === true}`,
+        `automatic_dispatch=${after?.automatic_financial_dispatch === true}`
+    );
+}
+
 async function main() {
     const host = '127.0.0.1';
     const port = Number(process.env.BETTING_HOUSE_API_DEV_PORT || 3010);
@@ -118,6 +134,7 @@ async function main() {
     app.put('/api/financial-safety/system-config', async (req, res) => {
         res.set('Cache-Control', 'no-store');
         try {
+            const before = await readSystemConfig({ dbPool });
             const config = await updateSystemConfig({
                 dbPool,
                 globalRouterCap: req.body?.global_router_cap,
@@ -125,6 +142,7 @@ async function main() {
                 technicalRiskCapsEnabled: req.body?.technical_risk_caps_enabled,
                 financialDryRun: req.body?.financial_dry_run
             });
+            auditFinancialModeChange({ before, after: config, req, action: 'UPDATE' });
             console.warn(
                 'SYSTEM_CONFIG_UPDATED',
                 `technical_risk_caps_enabled=${config.effective.technical_risk_caps_enabled}`,
@@ -133,7 +151,9 @@ async function main() {
                 `requested_per_bridge_cap=${config.requested.per_bridge_cap.toFixed(2)}`,
                 `effective_per_bridge_cap=${config.effective.per_bridge_cap.toFixed(2)}`,
                 `requested_financial_dry_run=${config.requested.financial_dry_run}`,
-                `effective_financial_dry_run=${config.effective.financial_dry_run}`
+                `financial_mode=${config.financial_mode}`,
+                `effective_financial_dry_run=${config.effective.financial_dry_run}`,
+                `automatic_dispatch=${config.automatic_financial_dispatch}`
             );
             res.json({ ok: true, config });
         } catch (error) {
@@ -144,8 +164,10 @@ async function main() {
     app.delete('/api/financial-safety/system-config', async (req, res) => {
         res.set('Cache-Control', 'no-store');
         try {
+            const before = await readSystemConfig({ dbPool });
             const config = await resetSystemConfig({ dbPool });
-            console.warn('SYSTEM_CONFIG_RESET', 'source=SAFE_DEFAULTS');
+            auditFinancialModeChange({ before, after: config, req, action: 'RESET' });
+            console.warn('SYSTEM_CONFIG_RESET', 'source=SAFE_DEFAULTS', `financial_mode=${config.financial_mode}`);
             res.json({ ok: true, config });
         } catch (error) {
             res.status(500).json({ ok: false, reason: error?.message || 'SYSTEM_CONFIG_RESET_FAILED' });
