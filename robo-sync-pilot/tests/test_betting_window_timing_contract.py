@@ -30,6 +30,15 @@ class BettingWindowTimingContract(unittest.TestCase):
         self.assertIn("robo.ErroJanelaApostasTimeout", source)
         self.assertIn("robo.pagina_indica_conexao_caida(page)", source)
 
+    def test_timeout_logs_identify_exact_phase_without_changing_policy(self):
+        source = TIMING.read_text(encoding="utf-8")
+        self.assertIn("BETTING_WINDOW_TIMEOUT_PHASE=OPEN", source)
+        self.assertIn("reason=NO_ACTIONABLE_CHIP", source)
+        self.assertIn("BETTING_WINDOW_TIMEOUT_PHASE=FULL_PLAN", source)
+        self.assertIn("reason=PLAN_NOT_FULLY_ACTIONABLE", source)
+        self.assertIn("elapsed_ms=", source)
+        self.assertIn("limit_ms=", source)
+
     def test_live_bridge_installs_only_timing_layer(self):
         source = LIVE_BRIDGE.read_text(encoding="utf-8")
         self.assertIn("import betting_window_timing", source)
