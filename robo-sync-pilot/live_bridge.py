@@ -8,6 +8,7 @@ import time
 from playwright.sync_api import sync_playwright
 
 from adapters_py.registry import create_adapter, registered_adapter_keys
+import betting_window_timing
 import robo
 
 
@@ -390,6 +391,7 @@ def main():
         runtime_session,
     ) = _validate_config(config)
 
+    betting_window_timing.install(robo)
     robo.renovar_sessao_automaticamente = _disable_legacy_login
     robo.encerrar_executor.clear()
 
