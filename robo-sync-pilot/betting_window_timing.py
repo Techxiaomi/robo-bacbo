@@ -65,6 +65,92 @@ def _frame_with_actionable_chip(robo, page):
     return None
 
 
+def _diagnose_full_plan_blockers(robo, page, planos):
+    """
+    Diagnostico somente-leitura do mesmo contrato exigido pelo gate MC24.
+
+    Nao produz clique real: usa apenas consultas DOM, trial=True e o hit-test
+    ja existente. O retorno serve exclusivamente para explicar qual requisito
+    impediu o plano completo de ficar acionavel no timeout.
+    """
+    frame = robo.localizar_frame_mesa(page)
+    if frame is None:
+        return ["FRAME_MESA_NOT_FOUND"]
+
+    blockers = []
+
+    for plano in planos:
+        alvo_nome = str(plano.get("alvo") or "UNKNOWN")
+        seletor = str(plano.get("seletor_alvo") or "")
+
+        try:
+            alvo = robo.primeiro_elemento_dom_visivel(
+                frame.locator(f"[data-role='{seletor}']")
+            )
+        except Exception as error:
+            if robo.erro_driver_playwright(error):
+                raise
+            alvo = None
+
+        if alvo is None:
+            blockers.append(f"TARGET_NOT_VISIBLE:{alvo_nome}")
+        else:
+            try:
+                alvo.click(
+                    trial=True,
+                    timeout=BETTING_CHIP_TRIAL_TIMEOUT_MS,
+                )
+            except Exception as error:
+                if robo.erro_driver_playwright(error):
+                    raise
+                blockers.append(f"TARGET_NOT_ACTIONABLE:{alvo_nome}")
+
+            try:
+                ponto = robo.resolver_ponto_seguro_alvo(alvo)
+            except Exception as error:
+                if robo.erro_driver_playwright(error):
+                    raise
+                ponto = {"ok": False}
+
+            if not isinstance(ponto, dict) or ponto.get("ok") is not True:
+                blockers.append(f"TARGET_HIT_TEST_FAILED:{alvo_nome}")
+
+        for ficha, _ in plano.get("cliques_necessarios", []):
+            try:
+                chip = robo.localizar_ficha(frame, ficha)
+            except Exception as error:
+                if robo.erro_driver_playwright(error):
+                    raise
+                chip = None
+
+            if chip is None:
+                blockers.append(f"CHIP_NOT_VISIBLE:{int(ficha)}")
+                continue
+
+            try:
+                if robo.ficha_explicitamente_selecionada(chip):
+                    continue
+            except Exception as error:
+                if robo.erro_driver_playwright(error):
+                    raise
+
+            try:
+                chip.click(
+                    trial=True,
+                    timeout=BETTING_CHIP_TRIAL_TIMEOUT_MS,
+                )
+            except Exception as error:
+                if robo.erro_driver_playwright(error):
+                    raise
+                blockers.append(f"CHIP_NOT_ACTIONABLE:{int(ficha)}")
+
+    if not blockers:
+        return ["NO_STATIC_BLOCKER_FOUND"]
+
+    # Remove duplicatas preservando a ordem para deixar o log curto e estavel.
+    return list(dict.fromkeys(blockers))
+
+
 def wait_for_betting_window(robo, page, planos):
     """
     Gate temporal em duas fases para a latencia natural da Evolution.
@@ -128,11 +214,16 @@ def wait_for_betting_window(robo, page, planos):
         page.wait_for_timeout(BETTING_WINDOW_POLL_MS)
 
     elapsed_ms = int((time.monotonic() - started) * 1000)
+    blockers = _diagnose_full_plan_blockers(robo, page, planos)
     print(
         "BETTING_WINDOW_TIMEOUT_PHASE=FULL_PLAN "
         f"elapsed_ms={elapsed_ms} "
         f"limit_ms={BETTING_WINDOW_TOTAL_TIMEOUT_MS} "
         "reason=PLAN_NOT_FULLY_ACTIONABLE"
+    )
+    print(
+        "BETTING_WINDOW_BLOCKERS="
+        + ",".join(blockers)
     )
     raise robo.ErroJanelaApostasTimeout(
         "JANELA_FECHADA_TIMEOUT: plano financeiro nao ficou integralmente "
