@@ -100,6 +100,13 @@ def wait_for_betting_window(robo, page, planos):
         _dismiss_inactivity_popup(robo, page)
         page.wait_for_timeout(BETTING_WINDOW_POLL_MS)
     else:
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        print(
+            "BETTING_WINDOW_TIMEOUT_PHASE=OPEN "
+            f"elapsed_ms={elapsed_ms} "
+            f"limit_ms={BETTING_WINDOW_OPEN_GRACE_MS} "
+            "reason=NO_ACTIONABLE_CHIP"
+        )
         raise robo.ErroJanelaApostasTimeout(
             "JANELA_NAO_ABRIU_TIMEOUT: nenhuma ficha ficou acionavel em "
             f"{BETTING_WINDOW_OPEN_GRACE_MS}ms"
@@ -120,6 +127,13 @@ def wait_for_betting_window(robo, page, planos):
         _dismiss_inactivity_popup(robo, page)
         page.wait_for_timeout(BETTING_WINDOW_POLL_MS)
 
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    print(
+        "BETTING_WINDOW_TIMEOUT_PHASE=FULL_PLAN "
+        f"elapsed_ms={elapsed_ms} "
+        f"limit_ms={BETTING_WINDOW_TOTAL_TIMEOUT_MS} "
+        "reason=PLAN_NOT_FULLY_ACTIONABLE"
+    )
     raise robo.ErroJanelaApostasTimeout(
         "JANELA_FECHADA_TIMEOUT: plano financeiro nao ficou integralmente "
         f"acionavel em {BETTING_WINDOW_TOTAL_TIMEOUT_MS}ms"
