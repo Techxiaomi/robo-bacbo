@@ -12,6 +12,7 @@ const {
     wantsActivation,
     positiveTraderId,
     ambiguityHasExecutionEvidence,
+    traderIsInactive,
     traderIsAmbiguityBlocked
 } = require('../auto_trader_ambiguity_reactivation_guard');
 
@@ -67,11 +68,19 @@ test('somente ENVIO_AMBIGUO sem qualquer evidencia pode ser auto reconciliado', 
     assert.match(source, /AUTO_TRADER_AMBIGUITY_AUTO_RECONCILED/);
 });
 
-test('auto reconciliacao so roda para trader realmente bloqueado por ambiguidade', () => {
+test('auto reconciliacao roda para qualquer trader inativo, inclusive DESLIGADO', () => {
+    assert.equal(traderIsInactive({ ativo: false, status_operacao: 'DESLIGADO' }), true);
+    assert.equal(traderIsInactive({ ativo: 0, status_operacao: 'STANDBY' }), true);
+    assert.equal(traderIsInactive({ ativo: false, status_operacao: 'BLOQUEADO_AMBIGUIDADE' }), true);
+    assert.equal(traderIsInactive({ ativo: true, status_operacao: 'DESLIGADO' }), false);
+
     assert.equal(traderIsAmbiguityBlocked({ ativo: false, status_operacao: 'BLOQUEADO_AMBIGUIDADE' }), true);
     assert.equal(traderIsAmbiguityBlocked({ ativo: 0, status_operacao: 'bloqueado_ambiguidade' }), true);
     assert.equal(traderIsAmbiguityBlocked({ ativo: true, status_operacao: 'BLOQUEADO_AMBIGUIDADE' }), false);
     assert.equal(traderIsAmbiguityBlocked({ ativo: false, status_operacao: 'STANDBY' }), false);
+
+    const source = read('auto_trader_ambiguity_reactivation_guard.js');
+    assert.match(source, /if \(traderIsInactive\(trader\)\)/);
 });
 
 test('reconciliacao e transacional e revalida ordens abertas antes de liberar', () => {
