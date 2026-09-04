@@ -24,7 +24,10 @@ class BettingWindowTimingContract(unittest.TestCase):
 
         helper = None
         for node in tree.body:
-            if isinstance(node, ast.FunctionDef) and node.name == "_frame_with_actionable_chip":
+            if (
+                isinstance(node, ast.FunctionDef)
+                and node.name == "_frame_with_visible_betting_surface"
+            ):
                 helper = node
                 break
 
@@ -70,7 +73,7 @@ class BettingWindowTimingContract(unittest.TestCase):
     def test_timeout_logs_identify_exact_phase_without_changing_policy(self):
         source = TIMING.read_text(encoding="utf-8")
         self.assertIn("BETTING_WINDOW_TIMEOUT_PHASE=OPEN", source)
-        self.assertIn("reason=NO_ACTIONABLE_CHIP", source)
+        self.assertIn("reason=BETTING_DOM_NOT_VISIBLE", source)
         self.assertIn("BETTING_WINDOW_TIMEOUT_PHASE=FULL_PLAN", source)
         self.assertIn("reason=PLAN_NOT_FULLY_ACTIONABLE", source)
         self.assertIn("elapsed_ms=", source)
