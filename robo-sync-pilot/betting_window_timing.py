@@ -147,8 +147,86 @@ def _diagnose_full_plan_blockers(robo, page, planos):
     if not blockers:
         return ["NO_STATIC_BLOCKER_FOUND"]
 
-    # Remove duplicatas preservando a ordem para deixar o log curto e estavel.
     return list(dict.fromkeys(blockers))
+
+
+def _safe_frame_url(url):
+    raw = str(url or "")
+    raw = raw.split("#", 1)[0]
+    raw = raw.split("?", 1)[0]
+    return raw[:240]
+
+
+def _dump_dom_snapshot(robo, page):
+    """
+    Snapshot somente-leitura para descobrir mudancas de DOM/iframe da Evolution.
+
+    Nao executa cliques nem altera estado. Limita o volume e remove query/hash
+    das URLs para evitar vazar tokens de sessao no console.
+    """
+    try:
+        frames = list(page.frames)
+    except Exception as error:
+        if robo.erro_driver_playwright(error):
+            raise
+        print(f"BETTING_DOM_SNAPSHOT_ERROR=FRAMES:{type(error).__name__}")
+        return
+
+    print(f"BETTING_DOM_FRAME_COUNT={len(frames)}")
+
+    for index, frame in enumerate(frames[:16]):
+        try:
+            frame_url = _safe_frame_url(frame.url)
+        except Exception:
+            frame_url = ""
+
+        try:
+            frame_name = str(frame.name or "")[:120]
+        except Exception:
+            frame_name = ""
+
+        print(
+            f"BETTING_DOM_FRAME index={index} name={frame_name!r} url={frame_url!r}"
+        )
+
+        try:
+            snapshot = frame.evaluate(
+                """() => {
+                    const nodes = Array.from(document.querySelectorAll(
+                        '[data-role],[data-value],button,[role],iframe'
+                    )).slice(0, 160);
+                    return nodes.map((el) => ({
+                        tag: String(el.tagName || '').toLowerCase(),
+                        id: String(el.id || '').slice(0, 100),
+                        cls: String(el.className || '').slice(0, 180),
+                        dataRole: String(el.getAttribute('data-role') || '').slice(0, 140),
+                        dataValue: String(el.getAttribute('data-value') || '').slice(0, 80),
+                        role: String(el.getAttribute('role') || '').slice(0, 80),
+                        ariaLabel: String(el.getAttribute('aria-label') || '').slice(0, 140),
+                        disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true'),
+                        visible: Boolean(el.getClientRects().length)
+                    }));
+                }"""
+            )
+        except Exception as error:
+            if robo.erro_driver_playwright(error):
+                raise
+            print(
+                f"BETTING_DOM_FRAME_SNAPSHOT_ERROR index={index} "
+                f"error={type(error).__name__}"
+            )
+            continue
+
+        for item_index, item in enumerate(snapshot[:160]):
+            print(
+                "BETTING_DOM_NODE "
+                f"frame={index} node={item_index} "
+                f"tag={item.get('tag')!r} id={item.get('id')!r} "
+                f"class={item.get('cls')!r} data_role={item.get('dataRole')!r} "
+                f"data_value={item.get('dataValue')!r} role={item.get('role')!r} "
+                f"aria_label={item.get('ariaLabel')!r} "
+                f"disabled={item.get('disabled')} visible={item.get('visible')}"
+            )
 
 
 def wait_for_betting_window(robo, page, planos):
@@ -193,6 +271,7 @@ def wait_for_betting_window(robo, page, planos):
             f"limit_ms={BETTING_WINDOW_OPEN_GRACE_MS} "
             "reason=NO_ACTIONABLE_CHIP"
         )
+        _dump_dom_snapshot(robo, page)
         raise robo.ErroJanelaApostasTimeout(
             "JANELA_NAO_ABRIU_TIMEOUT: nenhuma ficha ficou acionavel em "
             f"{BETTING_WINDOW_OPEN_GRACE_MS}ms"
@@ -225,6 +304,7 @@ def wait_for_betting_window(robo, page, planos):
         "BETTING_WINDOW_BLOCKERS="
         + ",".join(blockers)
     )
+    _dump_dom_snapshot(robo, page)
     raise robo.ErroJanelaApostasTimeout(
         "JANELA_FECHADA_TIMEOUT: plano financeiro nao ficou integralmente "
         f"acionavel em {BETTING_WINDOW_TOTAL_TIMEOUT_MS}ms"
