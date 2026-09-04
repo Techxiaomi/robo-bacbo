@@ -23,6 +23,12 @@ def _require_connection_healthy(robo, page):
         )
 
 
+def _sanitize_error(error, limit=500):
+    text = f"{type(error).__name__}: {error}"
+    text = " ".join(text.replace("\r", " ").replace("\n", " ").split())
+    return text[:limit]
+
+
 def _frame_with_actionable_chip(robo, page):
     """
     Detecta somente a abertura tecnica da janela.
@@ -65,6 +71,72 @@ def _frame_with_actionable_chip(robo, page):
     return None
 
 
+def _probe_chip_dom(robo, chip, ficha):
+    try:
+        probe = chip.evaluate(
+            """el => {
+                const r = el.getBoundingClientRect();
+                const cx = r.left + (r.width / 2);
+                const cy = r.top + (r.height / 2);
+                const hit = document.elementFromPoint(cx, cy);
+                const css = getComputedStyle(el);
+                return {
+                    tag: String(el.tagName || '').toLowerCase(),
+                    cls: String(el.className || '').slice(0, 220),
+                    dataRole: String(el.getAttribute('data-role') || ''),
+                    dataValue: String(el.getAttribute('data-value') || ''),
+                    disabledProp: Boolean(el.disabled),
+                    ariaDisabled: String(el.getAttribute('aria-disabled') || ''),
+                    ariaPressed: String(el.getAttribute('aria-pressed') || ''),
+                    ariaSelected: String(el.getAttribute('aria-selected') || ''),
+                    dataSelected: String(el.getAttribute('data-selected') || ''),
+                    dataIsSelected: String(el.getAttribute('data-is-selected') || ''),
+                    dataActive: String(el.getAttribute('data-active') || ''),
+                    dataState: String(el.getAttribute('data-state') || ''),
+                    pointerEvents: String(css.pointerEvents || ''),
+                    visibility: String(css.visibility || ''),
+                    opacity: String(css.opacity || ''),
+                    width: Number(r.width || 0),
+                    height: Number(r.height || 0),
+                    hitTag: hit ? String(hit.tagName || '').toLowerCase() : '',
+                    hitClass: hit ? String(hit.className || '').slice(0, 220) : '',
+                    hitDataRole: hit ? String(hit.getAttribute('data-role') || '') : '',
+                    hitDataValue: hit ? String(hit.getAttribute('data-value') || '') : '',
+                    selfContainsHit: Boolean(hit && (hit === el || el.contains(hit)))
+                };
+            }"""
+        )
+    except Exception as error:
+        if robo.erro_driver_playwright(error):
+            raise
+        print(
+            f"BETTING_CHIP_DOM_PROBE_ERROR value={int(ficha)} "
+            f"error={_sanitize_error(error)}"
+        )
+        return
+
+    print(
+        "BETTING_CHIP_DOM "
+        f"value={int(ficha)} "
+        f"tag={probe.get('tag')!r} class={probe.get('cls')!r} "
+        f"data_role={probe.get('dataRole')!r} data_value={probe.get('dataValue')!r} "
+        f"disabled_prop={probe.get('disabledProp')} "
+        f"aria_disabled={probe.get('ariaDisabled')!r} "
+        f"aria_pressed={probe.get('ariaPressed')!r} "
+        f"aria_selected={probe.get('ariaSelected')!r} "
+        f"data_selected={probe.get('dataSelected')!r} "
+        f"data_is_selected={probe.get('dataIsSelected')!r} "
+        f"data_active={probe.get('dataActive')!r} data_state={probe.get('dataState')!r} "
+        f"pointer_events={probe.get('pointerEvents')!r} "
+        f"visibility={probe.get('visibility')!r} opacity={probe.get('opacity')!r} "
+        f"size={probe.get('width')}x{probe.get('height')} "
+        f"hit_tag={probe.get('hitTag')!r} hit_class={probe.get('hitClass')!r} "
+        f"hit_data_role={probe.get('hitDataRole')!r} "
+        f"hit_data_value={probe.get('hitDataValue')!r} "
+        f"self_contains_hit={probe.get('selfContainsHit')}"
+    )
+
+
 def _diagnose_full_plan_blockers(robo, page, planos):
     """
     Diagnostico somente-leitura do mesmo contrato exigido pelo gate MC24.
@@ -104,6 +176,10 @@ def _diagnose_full_plan_blockers(robo, page, planos):
                 if robo.erro_driver_playwright(error):
                     raise
                 blockers.append(f"TARGET_NOT_ACTIONABLE:{alvo_nome}")
+                print(
+                    f"BETTING_TARGET_TRIAL_ERROR target={alvo_nome} "
+                    f"error={_sanitize_error(error)}"
+                )
 
             try:
                 ponto = robo.resolver_ponto_seguro_alvo(alvo)
@@ -128,11 +204,19 @@ def _diagnose_full_plan_blockers(robo, page, planos):
                 continue
 
             try:
-                if robo.ficha_explicitamente_selecionada(chip):
-                    continue
+                selected = robo.ficha_explicitamente_selecionada(chip)
             except Exception as error:
                 if robo.erro_driver_playwright(error):
                     raise
+                selected = False
+
+            print(
+                f"BETTING_CHIP_SELECTED_PROBE value={int(ficha)} "
+                f"selected={str(bool(selected)).lower()}"
+            )
+
+            if selected:
+                continue
 
             try:
                 chip.click(
@@ -143,6 +227,11 @@ def _diagnose_full_plan_blockers(robo, page, planos):
                 if robo.erro_driver_playwright(error):
                     raise
                 blockers.append(f"CHIP_NOT_ACTIONABLE:{int(ficha)}")
+                print(
+                    f"BETTING_CHIP_TRIAL_ERROR value={int(ficha)} "
+                    f"error={_sanitize_error(error)}"
+                )
+                _probe_chip_dom(robo, chip, ficha)
 
     if not blockers:
         return ["NO_STATIC_BLOCKER_FOUND"]
