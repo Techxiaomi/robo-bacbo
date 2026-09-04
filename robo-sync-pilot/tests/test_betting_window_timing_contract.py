@@ -1,0 +1,42 @@
+import ast
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+TIMING = ROOT / "betting_window_timing.py"
+LIVE_BRIDGE = ROOT / "live_bridge.py"
+
+
+class BettingWindowTimingContract(unittest.TestCase):
+    def test_two_phase_timing_is_bounded(self):
+        source = TIMING.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        self.assertIsNotNone(tree)
+        self.assertIn("BETTING_WINDOW_OPEN_GRACE_MS = 12000", source)
+        self.assertIn("BETTING_WINDOW_TOTAL_TIMEOUT_MS = 25000", source)
+        self.assertIn("open_deadline", source)
+        self.assertIn("total_deadline", source)
+
+    def test_open_detection_uses_non_mutating_playwright_trial(self):
+        source = TIMING.read_text(encoding="utf-8")
+        self.assertIn("trial=True", source)
+        self.assertIn("_frame_with_actionable_chip", source)
+        self.assertNotIn("force=True", source)
+
+    def test_full_plan_gate_remains_authoritative(self):
+        source = TIMING.read_text(encoding="utf-8")
+        self.assertGreaterEqual(source.count("robo.localizar_frame_aposta(page, planos)"), 2)
+        self.assertIn("robo.ErroJanelaApostasTimeout", source)
+        self.assertIn("robo.pagina_indica_conexao_caida(page)", source)
+
+    def test_live_bridge_installs_only_timing_layer(self):
+        source = LIVE_BRIDGE.read_text(encoding="utf-8")
+        self.assertIn("import betting_window_timing", source)
+        self.assertIn("betting_window_timing.install(robo)", source)
+        self.assertNotIn("financial_dry_run", source)
+        self.assertNotIn("ARMED_REVIEW", source)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
