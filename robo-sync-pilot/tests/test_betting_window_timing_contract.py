@@ -18,11 +18,19 @@ class BettingWindowTimingContract(unittest.TestCase):
         self.assertIn("open_deadline", source)
         self.assertIn("total_deadline", source)
 
-    def test_open_detection_uses_non_mutating_playwright_trial(self):
+    def test_open_detection_uses_visible_bacbo_dom_not_chip_trial(self):
         source = TIMING.read_text(encoding="utf-8")
-        self.assertIn("trial=True", source)
-        self.assertIn("_frame_with_actionable_chip", source)
-        self.assertNotIn("force=True", source)
+        self.assertIn("_frame_with_visible_betting_surface", source)
+        self.assertIn("[data-role='bacbo-betting-grid']", source)
+        self.assertIn("bacbo-bet-spot-Player", source)
+        self.assertIn("bacbo-bet-spot-Tie", source)
+        self.assertIn("bacbo-bet-spot-Banker", source)
+        self.assertIn("evidence=VISIBLE_BACBO_DOM", source)
+
+        helper = source.split("def _frame_with_visible_betting_surface", 1)[1]
+        helper = helper.split("def _probe_chip_dom", 1)[0]
+        self.assertNotIn("trial=True", helper)
+        self.assertNotIn("force=True", helper)
 
     def test_full_plan_gate_remains_authoritative(self):
         source = TIMING.read_text(encoding="utf-8")
@@ -33,7 +41,7 @@ class BettingWindowTimingContract(unittest.TestCase):
     def test_timeout_logs_identify_exact_phase_without_changing_policy(self):
         source = TIMING.read_text(encoding="utf-8")
         self.assertIn("BETTING_WINDOW_TIMEOUT_PHASE=OPEN", source)
-        self.assertIn("reason=NO_ACTIONABLE_CHIP", source)
+        self.assertIn("reason=BETTING_DOM_NOT_VISIBLE", source)
         self.assertIn("BETTING_WINDOW_TIMEOUT_PHASE=FULL_PLAN", source)
         self.assertIn("reason=PLAN_NOT_FULLY_ACTIONABLE", source)
         self.assertIn("elapsed_ms=", source)
