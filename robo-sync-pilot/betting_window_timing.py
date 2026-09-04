@@ -29,13 +29,16 @@ def _sanitize_error(error, limit=500):
     return text[:limit]
 
 
-def _frame_with_actionable_chip(robo, page):
+def _frame_with_visible_betting_surface(robo, page):
     """
-    Detecta somente a abertura tecnica da janela.
+    Detecta somente a abertura tecnica da janela por evidencia DOM nao mutante.
 
-    trial=True nao produz clique financeiro; apenas prova que pelo menos uma
-    ficha visivel ja esta acionavel pelo Playwright. O plano completo continua
-    sendo validado exclusivamente por robo.localizar_frame_aposta().
+    O dump real da Evolution confirmou que as fichas sao div[data-role='chip']
+    visiveis e que o grid Bac Bo/alvos continuam presentes. Nao usamos
+    click(trial=True) como prova de abertura porque esse criterio pode produzir
+    falso negativo em elementos div mesmo quando a superficie de aposta esta
+    renderizada. O plano completo continua sendo validado exclusivamente por
+    robo.localizar_frame_aposta().
     """
     try:
         frames = list(page.frames)
@@ -44,29 +47,47 @@ def _frame_with_actionable_chip(robo, page):
             raise
         return None
 
+    required_roles = (
+        "bacbo-bet-spot-Player",
+        "bacbo-bet-spot-Tie",
+        "bacbo-bet-spot-Banker",
+    )
+
     for frame in frames:
         try:
+            grid = frame.locator("[data-role='bacbo-betting-grid']")
+            if grid.count() <= 0 or not grid.first.is_visible():
+                continue
+
             chips = frame.locator(robo.BETTING_CHIP_SELECTOR)
-            count = min(max(0, int(chips.count())), 64)
+            chip_count = min(max(0, int(chips.count())), 64)
+            has_visible_chip = False
+            for index in range(chip_count):
+                try:
+                    if chips.nth(index).is_visible():
+                        has_visible_chip = True
+                        break
+                except Exception as error:
+                    if robo.erro_driver_playwright(error):
+                        raise
+
+            if not has_visible_chip:
+                continue
+
+            all_targets_visible = True
+            for role in required_roles:
+                target = frame.locator(f"[data-role='{role}']")
+                if target.count() <= 0 or not target.first.is_visible():
+                    all_targets_visible = False
+                    break
+
+            if all_targets_visible:
+                return frame
+
         except Exception as error:
             if robo.erro_driver_playwright(error):
                 raise
             continue
-
-        for index in range(count):
-            try:
-                chip = chips.nth(index)
-                if not chip.is_visible():
-                    continue
-                chip.click(
-                    trial=True,
-                    timeout=BETTING_CHIP_TRIAL_TIMEOUT_MS,
-                )
-                return frame
-            except Exception as error:
-                if robo.erro_driver_playwright(error):
-                    raise
-                continue
 
     return None
 
@@ -322,7 +343,8 @@ def wait_for_betting_window(robo, page, planos):
     """
     Gate temporal em duas fases para a latencia natural da Evolution.
 
-    Fase 1: aguarda a mesa liberar pelo menos uma ficha acionavel, sem clique.
+    Fase 1: aguarda o DOM real da mesa exibir grid Bac Bo, alvos e ao menos
+    uma ficha visivel, sem usar click/trial como prova de abertura.
     Fase 2: preserva integralmente o gate MC24 original e exige que TODAS as
     fichas/alvos do plano estejam acionaveis antes de devolver o frame.
 
@@ -345,9 +367,12 @@ def wait_for_betting_window(robo, page, planos):
             )
             return frame
 
-        if _frame_with_actionable_chip(robo, page) is not None:
+        if _frame_with_visible_betting_surface(robo, page) is not None:
             opened_ms = int((time.monotonic() - started) * 1000)
-            print(f"BETTING_WINDOW_OPEN_DETECTED_MS={opened_ms}")
+            print(
+                "BETTING_WINDOW_OPEN_DETECTED_MS="
+                f"{opened_ms} evidence=VISIBLE_BACBO_DOM"
+            )
             break
 
         _dismiss_inactivity_popup(robo, page)
@@ -358,12 +383,12 @@ def wait_for_betting_window(robo, page, planos):
             "BETTING_WINDOW_TIMEOUT_PHASE=OPEN "
             f"elapsed_ms={elapsed_ms} "
             f"limit_ms={BETTING_WINDOW_OPEN_GRACE_MS} "
-            "reason=NO_ACTIONABLE_CHIP"
+            "reason=BETTING_DOM_NOT_VISIBLE"
         )
         _dump_dom_snapshot(robo, page)
         raise robo.ErroJanelaApostasTimeout(
-            "JANELA_NAO_ABRIU_TIMEOUT: nenhuma ficha ficou acionavel em "
-            f"{BETTING_WINDOW_OPEN_GRACE_MS}ms"
+            "JANELA_NAO_ABRIU_TIMEOUT: grid Bac Bo, alvos e fichas nao "
+            f"ficaram simultaneamente visiveis em {BETTING_WINDOW_OPEN_GRACE_MS}ms"
         )
 
     while time.monotonic() <= total_deadline:
