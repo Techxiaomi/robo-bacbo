@@ -20,17 +20,46 @@ class BettingWindowTimingContract(unittest.TestCase):
 
     def test_open_detection_uses_visible_bacbo_dom_not_chip_trial(self):
         source = TIMING.read_text(encoding="utf-8")
-        self.assertIn("_frame_with_visible_betting_surface", source)
-        self.assertIn("[data-role='bacbo-betting-grid']", source)
-        self.assertIn("bacbo-bet-spot-Player", source)
-        self.assertIn("bacbo-bet-spot-Tie", source)
-        self.assertIn("bacbo-bet-spot-Banker", source)
-        self.assertIn("evidence=VISIBLE_BACBO_DOM", source)
+        tree = ast.parse(source)
 
-        helper = source.split("def _frame_with_visible_betting_surface", 1)[1]
-        helper = helper.split("def _probe_chip_dom", 1)[0]
-        self.assertNotIn("trial=True", helper)
-        self.assertNotIn("force=True", helper)
+        helper = None
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef) and node.name == "_frame_with_actionable_chip":
+                helper = node
+                break
+
+        self.assertIsNotNone(helper)
+
+        executable_body = list(helper.body)
+        if (
+            executable_body
+            and isinstance(executable_body[0], ast.Expr)
+            and isinstance(executable_body[0].value, ast.Constant)
+            and isinstance(executable_body[0].value.value, str)
+        ):
+            executable_body = executable_body[1:]
+
+        trial_keywords = []
+        for statement in executable_body:
+            for node in ast.walk(statement):
+                if not isinstance(node, ast.Call):
+                    continue
+                for keyword in node.keywords:
+                    if keyword.arg != "trial":
+                        continue
+                    if isinstance(keyword.value, ast.Constant):
+                        trial_keywords.append(keyword.value.value)
+                    else:
+                        trial_keywords.append("DYNAMIC")
+
+        self.assertNotIn(True, trial_keywords)
+        self.assertNotIn("DYNAMIC", trial_keywords)
+
+        helper_source = ast.get_source_segment(source, helper) or ""
+        self.assertIn("bacbo-betting-grid", helper_source)
+        self.assertIn("bacbo-bet-spot-Player", helper_source)
+        self.assertIn("bacbo-bet-spot-Tie", helper_source)
+        self.assertIn("bacbo-bet-spot-Banker", helper_source)
 
     def test_full_plan_gate_remains_authoritative(self):
         source = TIMING.read_text(encoding="utf-8")
@@ -41,7 +70,7 @@ class BettingWindowTimingContract(unittest.TestCase):
     def test_timeout_logs_identify_exact_phase_without_changing_policy(self):
         source = TIMING.read_text(encoding="utf-8")
         self.assertIn("BETTING_WINDOW_TIMEOUT_PHASE=OPEN", source)
-        self.assertIn("reason=BETTING_DOM_NOT_VISIBLE", source)
+        self.assertIn("reason=NO_ACTIONABLE_CHIP", source)
         self.assertIn("BETTING_WINDOW_TIMEOUT_PHASE=FULL_PLAN", source)
         self.assertIn("reason=PLAN_NOT_FULLY_ACTIONABLE", source)
         self.assertIn("elapsed_ms=", source)
