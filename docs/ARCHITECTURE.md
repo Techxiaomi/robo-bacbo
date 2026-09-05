@@ -1,208 +1,217 @@
 # Arquitetura Atual
 
-Atualizado em 2026-08-17 para refletir o `main` após BUG-001…BUG-015, SEC-002/003/004 e OBS-001/003.
+Atualizado em 2026-09-05 para refletir a arquitetura Redis/Garnet vigente na branch de trabalho.
 
 ## Visão geral
 
 ```text
-Navegador / Painel
-    |
-    | HTTP REST + Socket.IO
-    v
-robo-bacbo/bot2_coletor.js
-(Node.js / Express / MySQL / Socket.IO)
-    |                         ^
-    | MySQL                   | POST /executor-status
-    v                         |
-Banco                    robo-sync-pilot/robo.py
-                         (Flask + Playwright)
-                              ^
-                              | POST /apostar
-                              |
-                         ordem + order_id
-                              |
-                              +---------------- Node
+Fontes de mesa / TipMiner
+        |
+        v
+robo-sync-pilot/tipminer_collector.py
+        |
+        | Redis Pub/Sub + chaves escopadas por mesa
+        v
+Garnet / Redis local
+        |
+        v
+robo-bacbo/start.js
+        |
+        +--> identidade/schema da mesa
+        +--> Redis Runtime V3
+        +--> sincronização de histórico
+        +--> guards / bridges / serviços
+        +--> bot2_coletor.js
+                |
+                +--> MySQL
+                +--> Express / Socket.IO / painel
+                +--> estratégias, robôs, auditoria e estado
 
-Mesa Bac Bo / Playwright
-    |
-    | WebSocket: resultado resolvido
-    v
-robo.py
-    |
-    | POST /receber-sinal
-    v
-Node
+Orquestrador Node por conta/mesa
+robo-bacbo/scripts/run_live_bridge.js
+        |
+        | spawn + configuração JSON por stdin
+        v
+robo-sync-pilot/live_bridge.py
+        |
+        v
+robo-sync-pilot/robo.py + Playwright
+        ^
+        | Redis response channel por sessão
+        |
+Garnet / Redis
+        ^
+        | Redis command channel por sessão
+        |
+      Node.js
 ```
 
-Os dois processos usam o mesmo `INTERNAL_API_TOKEN` nas rotas internas. Node e Flask usam loopback por padrão.
+A fronteira Node ↔ executor Python é orientada a eventos por Redis. O executor Python atual é Redis-only e não expõe Flask.
 
-## Backend Node.js
+## 1. Composition root Node.js
 
-Arquivo principal: `robo-bacbo/bot2_coletor.js`.
+Entrypoint: `robo-bacbo/start.js`.
 
-Responsabilidades atuais:
+O bootstrap carrega o ambiente e instala componentes em ordem deliberada antes de carregar o backend principal. Entre os passos atuais estão:
 
-- bootstrap e migrations incrementais do MySQL;
-- CRUD de estratégias, origens, Robôs/Canais e Auto-Traders;
-- painel web e Socket.IO;
-- autenticação administrativa por sessão quando configurada/obrigatória;
-- recepção e validação de continuidade das rodadas;
-- histórico bruto e estatísticas dos padrões;
-- matching de estratégias, DIRETO/Gales e proteção de empate;
-- roteamento Web/Telegram dos Robôs/Canais;
-- regras financeiras do Auto-Trader;
-- geração e auditoria do lifecycle das ordens;
-- logging e métricas locais.
+- logging operacional;
+- bridge Socket.IO do mapa/live;
+- presenter/lifecycle Telegram;
+- schema e identidade da mesa;
+- integridade de soma dos resultados;
+- contexto de transporte da mesa;
+- Redis Runtime V3;
+- sincronização TipMiner/history;
+- snapshot do mapa;
+- migração de configuração Telegram;
+- barreira de drenagem de histórico;
+- guards de backend, conta, regras por mesa e integridade estrutural;
+- serviços de saldo e autorização multi-conta;
+- barreira de histórico do Auto Pilot IA;
+- carga final de `bot2_coletor.js`.
 
-### Inicialização
+Falha crítica no bootstrap encerra o processo em vez de deixar um runtime parcialmente inicializado.
 
-O backend é fail-closed. Banco, schema, limpeza idempotente e carga das estruturas em memória precisam terminar antes de APIs dependentes e Socket.IO serem considerados prontos. Falha crítica de bootstrap encerra o processo em vez de deixá-lo parcialmente operacional.
+## 2. Backend Node.js
 
-### Processamento das rodadas
+`robo-bacbo/bot2_coletor.js` continua concentrando grande parte do backend histórico e permanece um hotspot de dívida técnica.
 
-O coletor envia `coletor_sessao` e `coletor_seq`. O Node mantém dois conceitos separados:
+Responsabilidades atuais incluem:
 
-- **admissão de continuidade**: reserva a sequência recebida sincronamente antes do primeiro I/O;
-- **processamento pós-ACK**: roda em FIFO único, impedindo que uma rodada seguinte ultrapasse a anterior enquanto ela aguarda MySQL ou executor.
+- Express e Socket.IO para painel e APIs locais;
+- MySQL e persistência operacional;
+- estratégias e padrões;
+- Robôs/Canais;
+- Auto Pilot IA;
+- estado e auditoria do Auto-Trader;
+- processamento de resultados por mesa;
+- telemetria e logs;
+- integração com os bridges de transporte atuais.
 
-Duplicatas/fora de ordem são ignoradas. Restart do coletor, salto de sequência ou desaparecimento de metadados são tratados como buraco confirmado e separam a sessão lógica; pausas temporais também separam sessões sem inferir resultado financeiro.
+A presença de rotas HTTP no Node não significa transporte HTTP Node ↔ Python. O backend ainda possui contratos HTTP locais próprios e compatibilidade interna com código legado.
 
-### Tabelas conhecidas
+## 3. Redis Runtime e ingestão de resultados
 
-O backend cria as nove estruturas usadas pela aplicação a partir de banco vazio:
+`robo-sync-pilot/tipminer_collector.py` usa Redis e publica os dados em recursos escopados por `BACBO_MESA_CODIGO`.
 
-- `origens`
-- `estrategias`
-- `historico_resultados`
-- `giros_recentes`
-- `robos_canais`
-- `destinatarios_robo`
-- `historico_disparos_robos`
-- `auto_traders`
-- `auditoria_ordens`
+Os principais recursos incluem:
 
-O bootstrap em MySQL 8.4 vazio é validado no CI.
+- history key por mesa;
+- latest round key por mesa;
+- events channel por mesa;
+- history ACK key por mesa.
 
-## Executor / coletor Python
+No Node, `redis_runtime_v3.js` e os serviços associados processam o data plane Redis somente depois de a identidade da mesa estar fixada.
 
-Arquivo principal: `robo-sync-pilot/robo.py`.
+A arquitetura preserva isolamento entre mesas e evita que uma instância consuma eventos pertencentes a outro escopo lógico.
 
-Responsabilidades atuais:
+## 4. Executor Python
 
-- servidor Flask local para receber ordens;
-- journal local de `order_id` para deduplicação entre restarts;
-- controle de readiness do Playwright;
-- fila de ordens com TTL;
-- Playwright Chromium em modo headless;
-- reaproveitamento/renovação de sessão autenticada;
-- captura do WebSocket da mesa;
-- deduplicação defensiva de frames `Resolved` antes de consumir `coletor_seq`;
-- extração dos resultados e dados;
-- leitura/sincronização do saldo por seletor configurável;
-- execução dos cliques de ficha/alvo;
-- callback autenticado do resultado local da tentativa DOM.
+### `robo.py`
 
-### Deduplicação de resultados
+`robo-sync-pilot/robo.py` declara explicitamente configuração `REDIS-ONLY DO EXECUTOR`.
 
-Quando o payload fornece uma identidade explícita de rodada (`roundId` e variantes conhecidas), ela é usada como chave. Na ausência, o coletor usa vencedor + dados normalizados dentro de uma janela temporal curta e deslizante (`RESULT_DEDUP_WINDOW_SECONDS`). A deduplicação ocorre antes de incrementar `coletor_seq`.
+O módulo contém:
 
-### Lifecycle da ordem
+- Playwright;
+- fila local de comandos;
+- listener Redis;
+- canais de command/response;
+- controle de shutdown cooperativo;
+- idempotência local;
+- readiness do navegador;
+- validação de janela/DOM;
+- processamento dos comandos recebidos do barramento.
 
-O fluxo financeiro atual é:
+O executor não inicia servidor Flask e não depende de endpoint `/apostar` para receber comandos.
+
+### `live_bridge.py`
+
+`robo-sync-pilot/live_bridge.py` encapsula uma sessão operacional de Playwright por conta/mesa.
+
+A configuração inicial é enviada pelo processo pai Node via stdin e contém, entre outros dados:
+
+- identidade da conta;
+- identidade da mesa;
+- `session_id`;
+- `redis_command_channel`;
+- `redis_response_channel`;
+- configuração de controle e parâmetros técnicos.
+
+Os canais são validados antes da operação e precisam ser distintos.
+
+### Orquestrador Node
+
+`robo-bacbo/scripts/run_live_bridge.js` resolve conta/mesa no banco, cria canais Redis escopados por sessão, inicia `live_bridge.py` como processo filho e mantém um canal de controle por stdin para shutdown coordenado.
+
+O stdout/stderr do filho também é usado para telemetria e diagnóstico do startup.
+
+## 5. Bridge de compatibilidade do executor
+
+`robo-bacbo/redis_executor_bridge.js` existe para compatibilizar partes antigas do backend com a arquitetura Redis sem exigir uma reescrita monolítica.
+
+Ele:
+
+- conecta publisher/subscribers Redis;
+- publica comandos no barramento;
+- assina respostas do executor;
+- recebe eventos Bac Bo do Redis;
+- traduz chamadas internas legadas destinadas ao `EXECUTOR_URL` para publicação Redis.
+
+O ponto importante é que essa tradução acontece dentro do processo Node. A URL histórica pode ainda existir como chave de compatibilidade/configuração, mas o Python atual não hospeda o endpoint HTTP correspondente.
+
+## 6. Persistência
+
+MySQL continua sendo a persistência durável principal para configuração, histórico, estado operacional e auditoria.
+
+Redis/Garnet é o barramento de comunicação e estado efêmero/operacional; não substitui o MySQL como fonte durável de toda a aplicação.
+
+## 7. Interface administrativa
+
+Express e Socket.IO continuam servindo o painel e APIs locais do Node.
+
+Essas interfaces são independentes da fronteira de transporte Node ↔ executor Python.
+
+## 8. Diagnósticos
+
+Utilitários de diagnóstico Python ficam em:
 
 ```text
-Node
-  |
-  | INSERT auditoria_ordens = PREPARANDO + order_id
-  v
-POST /apostar
-  |
-  | executor pronto? journal persistido? fila dentro do TTL?
-  v
-Playwright
-  |
-  | tentativa DOM
-  v
-POST /executor-status
-  |
-  +--> EXECUTADA -> Node promove PREPARANDO para PENDENTE
-  +--> FALHOU    -> FALHA_EXECUCAO
-  +--> EXPIRADA  -> ORDEM_EXPIRADA
-  +--> AMBIGUA   -> ENVIO_AMBIGUO
+robo-sync-pilot/diagnostics/
 ```
 
-Uma nova ordem não é aceita se o Playwright não estiver pronto. Ordem já aceita/persistida continua reconhecida idempotentemente após restart, sem reenfileirar automaticamente.
+Atualmente:
 
-`EXECUTADA` significa somente que os cliques planejados foram concluídos localmente sem erro observável. Não é confirmação transacional da plataforma externa.
+- `dry_run_discovery.py`;
+- `evolution_chip_dom_probe.py`.
 
-## Gerador de sessão
+O launcher Node `scripts/run_dry_run.js` aponta para o novo caminho do discovery.
 
-`robo-sync-pilot/gerar_sessao.py` abre um navegador visível para login manual e grava o `storage_state`. Esse arquivo pode conter cookies/localStorage autenticados e deve ser tratado como credencial.
+## 9. Sessão Playwright
 
-## Contratos internos
+`robo-sync-pilot/gerar_sessao.py` permanece como ferramenta operacional para criar/renovar o `storage_state` autenticado.
 
-### Python → Node: `POST /receber-sinal`
+Arquivos de sessão, `.env`, cookies e credenciais não devem ser versionados.
 
-Payload de rodada pode conter:
+## 10. Observabilidade
 
-- `vencedor`
-- `resultado_bruto`
-- `pontos_jogador`
-- `pontos_banca`
-- `dados_jogador`
-- `dados_banca`
-- `coletor_sessao`
-- `coletor_seq`
-- `interrupcao_fluxo`
-- `timestamp_coleta`
+O Node possui logging e snapshots locais de métricas/estado operacional. Artefatos gerados em runtime ficam fora do Git.
 
-Mensagens de sincronização de saldo usam `saldo_atual` e `timestamp_coleta` na mesma rota.
+O live bridge também expõe marcadores de startup, readiness, shutdown e erro pelo stdout/stderr para o supervisor/orquestrador.
 
-### Node → Python: `POST /apostar`
+## 11. Limites de consistência
 
-Campos:
+A arquitetura melhora isolamento, correlação e recuperação local, mas continua sujeita a dependências externas:
 
-- `order_id`: UUID da ordem;
-- `alvo`: `PlayerWon`, `BankerWon` ou `Tie`;
-- `valor`: valor monetário da ordem.
+- disponibilidade do Redis/Garnet;
+- disponibilidade do MySQL;
+- sessão autenticada;
+- mudanças de DOM ou comportamento da plataforma;
+- disponibilidade da fonte de resultados;
+- crash durante efeitos externos não transacionais.
 
-O ACK HTTP representa aceite idempotente na fila, não execução final.
+Não se deve afirmar exactly-once absoluto para um efeito externo executado via interface gráfica. As garantias locais de idempotência, identidade, ordenação e auditoria reduzem ambiguidade, mas não transformam a plataforma externa em uma API transacional.
 
-### Python → Node: `POST /executor-status`
+## 12. Regra de evolução
 
-Campos:
-
-- `order_id`;
-- `status`: `EXECUTADA`, `FALHOU`, `EXPIRADA` ou `AMBIGUA`;
-- `motivo`: contexto local limitado da tentativa.
-
-O Node registra o waiter antes do POST para que um callback que chegue antes do próprio ACK HTTP não seja perdido.
-
-## Interface administrativa
-
-O painel e as rotas `/api/*` podem usar sessão opaca em memória com cookie `HttpOnly`, `SameSite=Strict` e TTL. Fora do loopback, credenciais administrativas são obrigatórias. O handshake Socket.IO exige a mesma autorização quando o modo administrativo está ativo.
-
-As rotas internas `/receber-sinal` e `/executor-status` permanecem separadas da sessão administrativa e usam `INTERNAL_API_TOKEN`; `/apostar` usa o mesmo token no Flask.
-
-## Observabilidade
-
-O Node possui:
-
-- log estruturado JSONL rotativo com redaction;
-- snapshot de métricas runtime;
-- snapshot de métricas HTTP/operacionais;
-- encerramento em `uncaughtException` e `unhandledRejection` após log.
-
-Os snapshots locais ficam em `logs/` por padrão e não são versionados.
-
-## Limites externos
-
-Continuam fora do controle transacional do projeto:
-
-- disponibilidade e comportamento da plataforma de destino;
-- mudanças de DOM/WebSocket;
-- validade da sessão/credenciais;
-- disponibilidade do MySQL e rede;
-- confirmação idempotente do efeito financeiro externo.
-
-Por isso, o projeto evita afirmar exactly-once absoluto do clique/aposta externa. O `order_id`, journal, estados de auditoria, readiness, TTL e callback reduzem a ambiguidade local, mas não substituem uma API transacional do destino.
+Alterações arquiteturais devem ser pequenas, isoladas e testáveis. Compatibilidades antigas só devem ser removidas quando todos os chamadores atuais tiverem sido migrados e houver cobertura que prove a ausência de regressão.

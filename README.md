@@ -1,52 +1,52 @@
 # Bac Bo Automation
 
-Projeto integrado de automação/monitoramento da mesa Bac Bo, composto por backend Node.js e executor/coletor Python com Playwright.
+Projeto local de automação, monitoramento e execução controlada para mesas Bac Bo, dividido entre um backend Node.js e componentes Python orientados a eventos.
 
-O `main` não representa mais apenas o snapshot inicial: ele incorpora as correções funcionais, de segurança, observabilidade e cobertura automatizada documentadas em `CHANGELOG.md`, `docs/CURRENT_STATE.md` e `docs/KNOWN_ISSUES.md`.
+## Arquitetura atual
 
-## Componentes
+O runtime principal está organizado em três camadas:
 
-- `robo-bacbo/`: backend Node.js / Express / MySQL / Socket.IO, painel, estratégias, Robôs/Canais, Auto-Trader, auditoria e telemetria local.
-- `robo-sync-pilot/`: Flask + Playwright, sessão da plataforma, captura das rodadas, sincronização de saldo e execução das ordens.
-- `docs/`: arquitetura, estado atual, riscos, segurança e regras de evolução.
-- `scripts/check_secrets.py`: verificação preventiva de segredos antes de commits.
+- `robo-bacbo/`: backend Node.js / Express / MySQL / Socket.IO, bootstrap, painel, estratégias, Robôs/Canais, estado operacional, telemetria e integração Redis;
+- `robo-sync-pilot/`: coletores e executor Python com Playwright;
+- Garnet/Redis local: barramento assíncrono usado para eventos de mesa e para os canais de comando/resposta do executor.
 
-## Fluxo principal
+O executor Python não expõe mais servidor Flask nem recebe ordens por HTTP. O transporte Node → executor e executor → Node usa canais Redis.
+
+### Fluxo de alto nível
 
 ```text
-Mesa / Playwright
-   |  resultado + coletor_sessao/coletor_seq
-   v
-POST /receber-sinal
-   |
-   v
-Node + MySQL
-   |  intenção PREPARANDO + order_id
-   v
-POST /apostar
-   |
-   v
-Executor Playwright
-   |  callback EXECUTADA/FALHOU/EXPIRADA/AMBIGUA
-   v
-POST /executor-status
-   |
-   v
-Node / auditoria
+TipMiner / fontes de mesa
+        |
+        v
+coletor Python
+        |
+        | Redis: bacbo_events:<mesa>
+        v
+Node.js / Redis Runtime
+        |
+        | processamento, persistência e regras
+        v
+MySQL / painel / robôs / auditoria
+
+Node.js / orquestrador de live bridge
+        |
+        | inicia live_bridge.py e fornece configuração por stdin
+        v
+Python + Playwright
+        ^
+        | Redis response channel
+        |
+Redis command channel
+        ^
+        |
+      Node.js
 ```
 
-O processamento de rodadas no Node preserva ACK rápido para o coletor, mas serializa o trabalho pós-ACK em FIFO. O coletor também deduplica frames `Resolved` repetidos antes de consumir `coletor_seq`.
+Há compatibilidade interna no backend para código legado que ainda formula uma chamada ao `EXECUTOR_URL`; `redis_executor_bridge.js` intercepta essa chamada dentro do próprio processo Node e a converte em publicação Redis. Isso não cria um servidor HTTP no Python.
 
-## Primeira configuração local
+## Bootstrap Node.js
 
-1. Copie `.env.example` para `.env` na raiz do projeto.
-2. Preencha somente na sua máquina as credenciais, URLs e seletores reais.
-3. Gere um `INTERNAL_API_TOKEN` longo e aleatório e use o mesmo valor nos dois processos.
-4. Nunca versione `.env`, `robo-sync-pilot/sessao_salva.json` ou outros arquivos de sessão/credenciais.
-
-Por padrão, Node e Flask ficam em loopback. As rotas internas `/receber-sinal`, `/apostar` e `/executor-status` exigem `INTERNAL_API_TOKEN`. Fora do loopback, o painel/API administrativa exige `ADMIN_USERNAME` e `ADMIN_PASSWORD` e o backend falha fechado se a configuração estiver incompleta.
-
-### Backend Node.js
+O entrypoint é:
 
 ```bash
 cd robo-bacbo
@@ -54,9 +54,50 @@ npm install
 npm start
 ```
 
-### Executor Python
+`npm start` executa `start.js`, que carrega `.env`, instala os bridges de observabilidade/UI, prepara schema e identidade da mesa, instala o Redis Runtime V3, sincroniza histórico TipMiner, aplica guards de configuração e somente então carrega `bot2_coletor.js`.
 
-No Windows:
+O bootstrap é fail-closed: falhas críticas impedem a inicialização parcial do backend.
+
+## Python
+
+### Coletor TipMiner
+
+`robo-sync-pilot/tipminer_collector.py` publica histórico e rodadas live em canais Redis escopados por mesa.
+
+### Executor Playwright
+
+`robo-sync-pilot/robo.py` contém o núcleo do executor e usa Redis Pub/Sub para comandos e respostas. A configuração padrão inclui:
+
+- `REDIS_URL`;
+- canal de comandos;
+- canal de respostas;
+- fila local de trabalho;
+- proteção de encerramento cooperativo;
+- idempotência local;
+- Playwright.
+
+`robo-sync-pilot/live_bridge.py` é o processo isolado de execução por conta/mesa. Ele recebe configuração inicial por stdin do orquestrador Node e opera com canais Redis específicos da sessão.
+
+### Diagnósticos
+
+Ferramentas auxiliares ficam em:
+
+```text
+robo-sync-pilot/diagnostics/
+```
+
+Incluindo `dry_run_discovery.py` e `evolution_chip_dom_probe.py`.
+
+`gerar_sessao.py` permanece na raiz do projeto Python porque é uma ferramenta operacional para criação/renovação do `storage_state` local.
+
+## Primeira configuração local
+
+1. Copie `.env.example` para `.env` na raiz.
+2. Preencha credenciais, URLs, IDs de mesa e parâmetros locais necessários.
+3. Nunca versione `.env`, arquivos de sessão autenticada, cookies, tokens ou backups contendo credenciais.
+4. Garanta que Garnet/Redis esteja disponível antes dos componentes que dependem do barramento.
+
+### Executor Python no Windows
 
 ```bat
 cd robo-sync-pilot
@@ -68,36 +109,36 @@ python gerar_sessao.py
 python robo.py
 ```
 
-`gerar_sessao.py` só precisa ser executado quando for necessário criar ou renovar o `storage_state` local.
+O projeto também possui launchers/orquestradores que iniciam instâncias por conta/mesa sem exigir execução manual de `robo.py` em todos os cenários.
 
 ## Validação
 
-Antes de qualquer commit:
+Antes de commits:
 
 ```bash
 python scripts/check_secrets.py
 ```
 
-Testes locais principais:
+Node:
 
 ```bash
 cd robo-bacbo
 npm test
 ```
 
+Python:
+
 ```bash
 cd robo-sync-pilot
-python tests/test_pure_logic.py
+python -m unittest discover -s tests -v
 ```
 
-O GitHub Actions também executa gates de integração com MySQL descartável, autenticação HTTP/Socket.IO, restart/idempotência do executor, Chromium em DOM controlado e E2E controlado coletor → Node → executor → auditoria.
+## Documentação viva
 
-## Documentação de referência
+- `docs/CURRENT_STATE.md`: estado funcional e operacional atual;
+- `docs/ARCHITECTURE.md`: topologia, contratos e responsabilidades atuais;
+- `docs/KNOWN_ISSUES.md`: riscos e pendências conhecidas;
+- `docs/SECURITY_BASELINE.md`: regras de segurança e versionamento;
+- `PROJECT_RULES.md`: regras obrigatórias para alterações.
 
-- `docs/CURRENT_STATE.md`: fonte principal para o estado funcional atual.
-- `docs/KNOWN_ISSUES.md`: riscos residuais e itens já mitigados.
-- `docs/ARCHITECTURE.md`: contratos e fluxo arquitetural atual.
-- `docs/SECURITY_BASELINE.md`: regras de segurança e versionamento.
-- `PROJECT_RULES.md`: regras obrigatórias para novas alterações.
-
-Mudanças devem permanecer pequenas, isoladas, testáveis e compatíveis com os contratos existentes entre frontend, Node, Python e MySQL.
+Snapshots e handoffs antigos ficam em `docs/archive/` e não devem ser tratados como descrição da arquitetura corrente.

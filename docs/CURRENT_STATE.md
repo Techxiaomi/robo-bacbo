@@ -1,145 +1,151 @@
 # Estado Atual do Projeto
 
-Atualizado em 2026-08-17 após os patches BUG-001…BUG-015, BUG-001R, SEC-002/003A/003B/004, OBS-001A…H e OBS-003A…H.
+Atualizado em 2026-09-05 após os Rounds 3A e 3B de higiene estrutural.
 
-Este arquivo descreve o estado atual do `main`, não o snapshot inicial.
+Este documento descreve o estado corrente da arquitetura de runtime. Snapshots antigos ficam em `docs/archive/` e não devem ser usados como referência operacional atual.
 
 ## Arquitetura em operação
 
-O projeto continua dividido em dois processos principais:
+O projeto é composto por quatro blocos principais:
 
-- `robo-bacbo`: Node.js / Express / MySQL / Socket.IO, responsável pelo painel, estratégias, robôs/canais, estado, histórico e motor do Auto-Trader;
-- `robo-sync-pilot`: Python / Flask / Playwright, responsável pela sessão do site, captura das rodadas, leitura de saldo e execução das ordens na interface da mesa.
+- `robo-bacbo`: Node.js / Express / MySQL / Socket.IO, responsável por bootstrap, painel, estratégias, robôs/canais, estado operacional, auditoria e integração Redis;
+- `robo-sync-pilot/tipminer_collector.py`: coletor Python que publica histórico e rodadas em Redis, com escopo por mesa;
+- `robo-sync-pilot/live_bridge.py` + `robo.py`: executor Python / Playwright isolado por conta/mesa, orientado a eventos;
+- Garnet/Redis local: barramento assíncrono para ingestão de eventos e para command/response do executor.
 
-O Python envia resultados autenticados para `POST /receber-sinal`. O Node envia ordens autenticadas para `POST /apostar`.
+O executor Python atual não utiliza Flask. Não existe servidor Python recebendo ordens em `/apostar`.
 
-## Implementado e conectado
+## Transporte atual
 
-### Segurança e transporte
+### Resultados e histórico
 
-- credenciais e segredos reais ficam em `.env`, fora do Git;
-- `INTERNAL_API_TOKEN` autentica os dois canais internos Node ↔ Python;
-- executor Flask usa loopback por padrão;
-- Node usa `NODE_HOST=127.0.0.1` por padrão e valida `Host`/`Origin` no HTTP e Socket.IO;
-- painel e APIs administrativas suportam login por sessão opaca em memória, cookie `HttpOnly` + `SameSite=Strict` e TTL;
-- fora do loopback, credenciais administrativas são obrigatórias e o backend falha fechado se estiverem incompletas;
-- `/receber-sinal` permanece separado da sessão administrativa e continua protegido pelo token interno;
-- token Telegram não é devolvido pelo `GET /api/robos`.
+O coletor TipMiner usa Redis para publicar dados em recursos escopados por mesa. O Node fixa a identidade da mesa antes de ativar o data plane Redis e processa histórico/live por meio do Redis Runtime atual.
 
-### Banco e inicialização
+### Comandos e respostas do executor
 
-- criação inicial das tabelas necessárias ocorre pelo próprio backend;
-- migrations incrementais tratam somente coluna já existente como condição idempotente esperada;
-- limpeza de padrões IA órfãos ocorre no startup;
-- inicialização é fail-closed: APIs e Socket.IO não são liberados até banco/schema/memória estarem prontos;
-- falha crítica de preparação encerra o processo em vez de manter backend parcialmente inicializado;
-- o bootstrap a partir de MySQL vazio é validado automaticamente no CI contra MySQL 8.4.
+As instâncias de live bridge usam canais Redis específicos da sessão:
 
-### Estratégias, padrões e histórico
+```text
+auto_trader_commands:<account_id>:<table_key>
+auto_trader_responses:<account_id>:<table_key>
+```
 
-- CRUD de estratégias e origens;
-- detecção sequencial de padrões;
-- entrada DIRETO e Gales;
-- separação lógica de sessões após pausa, restart do coletor, salto de sequência ou buraco confirmado Python→Node;
-- frames `Resolved` repetidos são deduplicados no coletor antes de consumir `coletor_seq`: usa `roundId`/variantes quando disponíveis e, na ausência, vencedor+dados dentro de uma janela curta configurável;
-- resultados finalizados persistidos em `historico_resultados`;
-- histórico de distribuição de Robôs/Canais persistido quando houve participação efetiva;
-- cards de padrões recalculam estatísticas pelo histórico bruto de `giros_recentes`, respeitando `id_sessao`;
-- períodos 24H, Hoje, Semana, Mês e Geral disponíveis nos cards;
-- exclusão de Robô/Canal remove de forma transacional os padrões IA filhos e históricos relacionados.
+`run_live_bridge.js` resolve conta/mesa, prepara a configuração e inicia `live_bridge.py` como processo filho. A configuração inicial e comandos de shutdown do processo pai trafegam por stdin; ordens e respostas operacionais trafegam pelo Redis.
 
-### Robôs / canais
+`robo.py` também mantém canais Redis padrão para o executor legado/compatível quando executado diretamente.
 
-- CRUD visual de Robôs/Canais e destinatários;
-- canal Web integrado ao ciclo real do sinal;
-- Telegram com confirmação de entrega e união multicanal sem duplicar histórico;
-- filtros por origem, avulsos, exceções, proprietário de padrão dinâmico e assertividade mínima;
-- Drawdown Control conservador/dinâmico com `standby_ate` persistido;
-- Stop Reds consecutivos como hard stop independente do Auto-Trader.
+### Compatibilidade HTTP interna no Node
 
-### Auto-Trader
+O backend ainda possui rotas HTTP próprias e partes históricas do código podem formular chamadas para a URL configurada do executor. `redis_executor_bridge.js` converte essas chamadas dentro do runtime Node em publicação Redis.
 
-- `STANDBY` → `OPERANDO` ao primeiro resultado válido da mesa;
-- desligamento manual persiste `DESLIGADO` sem apagar status explícitos de stop;
-- baseline financeiro capturado pelo backend a partir de saldo global fresco;
-- edição/toggle não reseta `saldo_inicial`/`saldo_atual`;
-- janela de horário normal, full-day e overnight;
-- Stop Win e Stop Loss usando saldo real/fresco;
-- Stop Reds com pausa automática ou desligamento manualmente reversível;
-- Trailing Stop por recuo explícito a partir do pico de lucro persistido;
-- sequências já iniciadas, inclusive Gales, seguem até o desfecho para preservar auditoria;
-- ordens Node→Python usam `order_id` UUID; o executor persiste os últimos IDs aceitos em journal atômico e mantém a deduplicação através de restart;
-- antes de qualquer POST financeiro ao executor, o Node persiste uma intenção `PREPARANDO` em `auditoria_ordens` com o mesmo `order_id`; DIRETO só incrementa `entradas_feitas` quando o ACK transforma essa intenção em `PENDENTE`;
-- no GALE, o `LOSS` da ordem anterior e a intenção `PREPARANDO` da próxima exposição são gravados na mesma transação antes do POST externo;
-- o Flask só aceita um `order_id` novo quando o Playwright está efetivamente conectado/pronto; duplicatas já persistidas continuam idempotentes mesmo durante indisponibilidade;
-- cada nova ordem aceita recebe timestamp local e TTL (`EXECUTOR_ORDER_TTL_SECONDS`, padrão 8 s); se envelhecer antes da interação DOM, não é clicada e o executor reporta `EXPIRADA`;
-- `/apostar` continua sendo o ACK de fila, mas o Node agora mantém um waiter por `order_id` e só considera `enviarOrdemAoExecutor()` concluído após callback autenticado em `/executor-status`; o callback pode chegar antes do ACK HTTP sem se perder;
-- `executar_aposta_na_tela()` retorna `EXECUTADA` somente quando todos os cliques DOM planejados terminam sem erro local, `FALHOU` quando nenhum clique de alvo ocorreu e `AMBIGUA` quando houve clique(s) de alvo antes de uma falha; isso confirma a tentativa local no DOM, não aceite transacional pela plataforma externa;
-- `FALHOU` marca `FALHA_EXECUCAO`, `EXPIRADA` marca `ORDEM_EXPIRADA`, callback `AMBIGUA`/timeout permanece `ENVIO_AMBIGUO`, e recusa explícita sem aceite permanece `FALHA_ENVIO`;
-- journal ilegível/corrompido bloqueia o startup do executor e falha de persistência impede a ordem de entrar na fila;
-- auditoria financeira usa estados explícitos, inclusive `DADOS_INCOMPLETOS` quando há buraco confirmado de coleta;
-- resultados autenticados mantêm ACK HTTP rápido, mas reservam `coletor_sessao/coletor_seq` sincronamente antes de qualquer I/O e executam todo o trabalho pós-ACK em uma fila FIFO única; uma rodada não pode ultrapassar outra enquanto a anterior aguarda MySQL ou callback do executor.
+Portanto:
 
-### Saldo da corretora
+- HTTP continua existindo no backend/painel Node;
+- não há transporte HTTP direto Node → Flask/Python;
+- não há callback HTTP iniciado pelo Python para um servidor Flask inexistente;
+- referências históricas a `EXECUTOR_URL` podem permanecer como camada de compatibilidade interna enquanto seus chamadores não forem totalmente migrados.
 
-- leitura do saldo real por seletor CSS explícito no Playwright;
-- sincronização autenticada Python→Node por mudança e heartbeat;
-- snapshot de saldo possui freshness configurável;
-- após restart do Node o saldo volta a desconhecido até nova sincronização.
+## Bootstrap Node
 
-### Observabilidade
+`npm start` executa `robo-bacbo/start.js`.
 
-- falhas críticas de migration, CRUD, persistência, rollback e processamento pós-ACK são registradas;
-- `uncaughtException` e `unhandledRejection` encerram o Node após log;
-- promises Telegram em background possuem `catch` contextual;
-- executor Python registra falhas HTTP, WebSocket, Auto-Login, Playwright e restart externo;
-- logging estruturado JSONL no Node com rotação por tamanho e retenção configurável;
-- redaction de chaves sensíveis e segredos conhecidos do `.env`;
-- falha do sink de arquivo não derruba o backend e o console original continua disponível;
-- snapshot runtime local em `logs/backend.metrics.json` por padrão, gravado de forma atômica e configurável por ambiente;
-- métricas runtime incluem uptime, RSS/heap/external/array buffers, event-loop delay p50/p95/p99/max/média, contagem de logs por nível, último warn/error e falhas dos sinks;
-- snapshot operacional separado em `logs/backend.operations.json` por padrão, também atômico, configurável e com timer `unref()`;
-- métricas HTTP inbound agregam contagem, classes 2xx/3xx/4xx/5xx, requisições em andamento e latência média/p50/p95/p99/max por rota normalizada, sem query string ou IDs variáveis;
-- chamadas HTTP outbound são agregadas apenas por categoria `executor`, `telegram` e `other`, com sucesso/falha, classes de status e latência, sem persistir URL, token ou payload;
-- freshness operacional registra apenas instante/idade do último resultado e do último saldo aceitos por `/receber-sinal`, sem persistir valores financeiros ou conteúdo do sinal;
-- amostras e quantidade de rotas são limitadas em memória para evitar cardinalidade/crescimento ilimitado;
-- timers de métricas usam `unref()`, portanto não mantêm o processo Node aberto; falha dos sinks de métricas não derruba o backend.
+A ordem atual inclui:
 
-### Testes e CI
+1. carregamento de `.env`;
+2. logging operacional e bridges de apresentação;
+3. preparação do schema/identidade da mesa;
+4. integridade dos resultados;
+5. contexto de transporte;
+6. instalação do Redis Runtime V3;
+7. sincronização inicial TipMiner/history;
+8. barreira de histórico;
+9. guards por mesa, conta e configuração;
+10. serviços de saldo e integridade estrutural;
+11. autorização multi-conta;
+12. Auto Pilot history barrier;
+13. carga de `bot2_coletor.js`.
 
-- suíte Node com `node:test` para lógica pura;
-- testes de contrato HTTP para login/logout e middleware administrativo;
-- testes do logger estruturado/rotativo, métricas runtime e métricas operacionais/persistência atômica;
-- métricas operacionais possuem teste real com `http.createServer + fetch`, cobrindo transparência da resposta, hook HTTP/fetch, normalização de rota, freshness e ausência de query sensível no snapshot;
-- suíte Python `unittest` sobre parsing, payloads, transporte interno, persistência de `order_id` e deduplicação de frames `Resolved`;
-- GitHub Actions executa sintaxe + Node + Python em PRs e pushes para `main`;
-- job separado sobe MySQL 8.4 descartável e inicia o `bot2_coletor.js` real com Express/MySQL2/Socket.IO;
-- smoke HTTP real valida Origin, login/logout, sessão administrativa, painel/API e autenticação de `/receber-sinal`;
-- o mesmo smoke valida o handshake Socket.IO real: sem sessão é rejeitado, com cookie administrativo válido conecta e o cookie invalidado no logout deixa de conectar;
-- integração confirma as nove tabelas esperadas em banco vazio e garante que o próprio smoke de infraestrutura não cria giro nem ordem financeira;
-- job Playwright separado instala Chromium e executa DOM controlado local, validando parsing/saldo, `EXECUTADA` no fluxo completo, `FALHOU` sem clique e `AMBIGUA` quando a falha ocorre após o primeiro clique de alvo;
-- job E2E controlado usa a função real `processar_resultado` do Python, o backend Node real, MySQL 8.4 e executor HTTP fake autenticado; além de comprovar `PREPARANDO`/callback antecipado, o fake atrasa deliberadamente a execução enquanto a rodada seguinte já é enviada, validando que o FIFO pós-ACK preserva a ordem causal e ainda fecha a auditoria em `WIN`;
-- job `Executor restart idempotency integration` recria o runtime Flask com o mesmo journal e valida duplicata após restart, conflito de payload, nova ordem e falha fechada com journal corrompido.
+O bootstrap continua fail-closed em falha crítica.
 
-## Riscos e trabalhos ainda pendentes
+## Multi-mesa e identidade
 
-- rotacionar operacionalmente credenciais que tenham sido compartilhadas antes da externalização para `.env`;
-- readiness, TTL e callback de resultado DOM já fecham a janela de ordem velha/não pronta e impedem promoção para `PENDENTE` sem `EXECUTADA`; ainda assim, `EXECUTADA` significa apenas que os cliques locais terminaram sem erro observável, não que a plataforma externa confirmou atomicamente a aposta;
-- deduplicação do `order_id` já sobrevive a restart, mas um crash exatamente durante o clique Playwright pode continuar deixando o efeito externo ambíguo; IDs persistidos não são reenfileirados automaticamente, priorizando evitar aposta duplicada;
-- métricas runtime e HTTP operacionais locais já existem, porém ainda não há agregador externo, histórico central de longo prazo nem alertas automáticos;
-- latência de consultas MySQL e tempos internos de operações de negócio pós-ACK ainda não são instrumentados separadamente; isso deve ser adicionado somente se houver necessidade operacional clara, para não envolver o pool/banco de forma invasiva;
-- mudanças no DOM/WebSocket, sessão e comportamento da plataforma de destino continuam sendo dependência externa operacional e podem divergir dos ambientes controlados validados no CI;
-- arquivos grandes e multifuncionais ainda merecem modularização gradual, porém somente com cobertura suficiente e patches pequenos.
+O runtime usa identidade explícita de mesa e escopos próprios para dados, Redis e configuração. Os launchers locais selecionam a mesa por ambiente, sem exigir cópias físicas separadas `BR/` e `INT/` do projeto.
 
-## Dependências externas
+As antigas pastas locais `BR/` e `INT/` foram classificadas como cópias locais obsoletas e removidas durante a higiene do workspace; não fazem parte do Git.
 
-- MySQL configurado e acessível;
-- credenciais válidas do site de destino;
-- Chromium/Playwright disponível no ambiente do executor;
-- estrutura DOM/WebSocket compatível com os seletores e eventos esperados;
-- `CASINO_BALANCE_SELECTOR` correto para sincronização de saldo;
-- `.env` local com tokens, credenciais e URLs necessários.
+## Executor Playwright
+
+`robo.py` mantém:
+
+- Playwright;
+- fila local de comandos;
+- Redis Pub/Sub;
+- shutdown cooperativo;
+- readiness do navegador;
+- idempotência local;
+- validações de identidade e de janela/DOM;
+- processamento serializado das tarefas recebidas.
+
+`live_bridge.py` valida identidade da conta, mesa, sessão e canais Redis antes de iniciar o runtime Playwright.
+
+## Diagnósticos
+
+Os diagnósticos Python foram reorganizados para:
+
+```text
+robo-sync-pilot/diagnostics/
+```
+
+Conteúdo atual:
+
+- `__init__.py`;
+- `dry_run_discovery.py`;
+- `evolution_chip_dom_probe.py`.
+
+O teste `tests/test_evolution_chip_dom_probe.py` importa o módulo pelo novo pacote e o launcher Node do discovery aponta para o caminho atualizado.
+
+Na validação local do Round 3B:
+
+- `py_compile` passou;
+- teste focado do probe passou 3/3;
+- `python -m unittest discover -s tests -v` passou 58/58.
+
+## Sessão e segredos
+
+- `.env` permanece exclusivamente local;
+- `backups/` permanece fora do versionamento;
+- arquivos de sessão autenticada não devem ser commitados;
+- `gerar_sessao.py` continua sendo a ferramenta operacional para criar/renovar `storage_state`.
+
+## Higiene estrutural recente
+
+### Round 3A
+
+Foram removidos patchers BUG-051 one-shot e workflows temporários de migração que já não pertenciam ao fluxo atual.
+
+### Round 3B
+
+Ferramentas de diagnóstico foram movidas para pacote dedicado sem alterar o comportamento funcional.
+
+### Round 3C
+
+A documentação viva foi alinhada à arquitetura Redis/Garnet e os snapshots de 2026-08-17 foram movidos para `docs/archive/`.
+
+## Testes e CI
+
+A suíte Python atual usa `unittest`. A suíte Node usa `node:test` via `npm test`.
+
+O workflow `.github/workflows/ci.yml` atual executa em pull requests para `main` e contém gates básicos de sintaxe/testes Node e Python. Testes locais adicionais continuam sendo usados proporcionalmente ao tipo de alteração.
+
+## Riscos e dívida técnica
+
+- `bot2_coletor.js` continua grande e multifuncional; modularização deve ser gradual e coberta por testes;
+- bridges de compatibilidade ainda existem e só devem ser removidos após migração completa dos chamadores;
+- Redis/Garnet é uma dependência operacional central do data plane atual;
+- MySQL continua sendo dependência durável central;
+- DOM, sessão e comportamento de serviços externos continuam sujeitos a mudança;
+- efeitos externos via Playwright não oferecem garantia transacional exactly-once absoluta.
 
 ## Regra de manutenção
 
-Não reescrever o projeto por conveniência. Manter patches pequenos, isolados e testáveis. Antes de alterar código de produção, registrar causa, arquivos/funções afetados, mudança mínima, risco de regressão e forma de validação.
+Não reescrever componentes grandes apenas para uniformizar arquitetura. Preferir migrações pequenas, verificáveis e reversíveis; remover compatibilidade somente quando evidência de uso e testes permitirem.
