@@ -209,32 +209,149 @@
                 const s = est.detalhes?.[periodo];
                 if (!s) return '';
 
+                // Compatibilidade: os cálculos de assertividade e total
+                // continuam usando exclusivamente o contrato legado.
                 let tiesNum = 0;
-                const htmlTies = ['direto', 'gale1', 'gale2'].map(nivel => {
-                    const itens = Object.entries(s.ties?.[nivel] || {})
-                        .filter(([, quantidade]) => Number(quantidade) > 0)
-                        .map(([multiplicador, quantidade]) => {
-                            const qtd = Number(quantidade) || 0;
-                            tiesNum += qtd;
-                            return `<strong>${qtd}</strong> - ${multiplicador}`;
-                        });
-                    return itens.length
-                        ? `<div style="font-size: 10px; margin-bottom:2px;">${nivel.toUpperCase()}: ${itens.join(' | ')}</div>`
-                        : '';
-                }).join('');
+                ['direto', 'gale1', 'gale2'].forEach(nivel => {
+                    Object.values(s.ties?.[nivel] || {}).forEach(q => {
+                        tiesNum += Number(q) || 0;
+                    });
+                });
 
-                const greensSemTie = (Number(s.green_direto) || 0) + (Number(s.gale1) || 0) + (Number(s.gale2) || 0);
+                const greensSemTie =
+                    (Number(s.green_direto) || 0)
+                    + (Number(s.gale1) || 0)
+                    + (Number(s.gale2) || 0);
+
                 const greensTotal = greensSemTie + tiesNum;
                 const reds = Number(s.red) || 0;
                 const total = greensTotal + reds;
-                const pctGreen = total > 0 ? ((greensSemTie / total) * 100).toFixed(1) : '0.0';
-                const pctTie = total > 0 ? ((tiesNum / total) * 100).toFixed(1) : '0.0';
-                const pctRed = total > 0 ? ((reds / total) * 100).toFixed(1) : '0.0';
-                const assertividade = total > 0 ? ((greensTotal / total) * 100).toFixed(1) : '0.0';
 
-                return `<div id="detalhe-${idPrefixo}-${est.id}-${periodo}" class="detalhes-tecnicos detalhes-grupo-${idPrefixo}-${est.id}" style="display:block; margin-top:auto;"><div style="display:flex; justify-content:space-between; border-bottom:1px solid #444; margin-bottom:5px; padding-bottom:4px;"><span>Entradas: <strong>${total}</strong></span><span>Assertividade: <strong style="color:${getCor(assertividade)};">${assertividade}%</strong></span></div><div class="linha-detalhe" style="align-items:center;"><span>✅ Greens: <strong style="color:#28a745;">${greensSemTie}</strong> <small style="color:#aaa;">(${pctGreen}%)</small></span><div style="display:flex; gap:10px; font-size:11px; color:#ccc;"><span>Dir: <strong>${Number(s.green_direto) || 0}</strong></span><span>G1: <strong>${Number(s.gale1) || 0}</strong></span><span>G2: <strong>${Number(s.gale2) || 0}</strong></span></div></div><div class="linha-detalhe" style="flex-direction:column;"><span>🟡 Empates: <strong style="color:#ffc107;">${tiesNum}</strong> <small style="color:#aaa;">(${pctTie}%)</small></span><div class="tie-box">${htmlTies || '<span style="font-size:10px; color:#666;">Sem empates</span>'}</div></div><div class="linha-detalhe" style="margin-top:5px; border-bottom:none; padding-bottom:0;"><span>❌ Reds: <strong style="color:#ff7777;">${reds}</strong> <small style="color:#aaa;">(${pctRed}%)</small></span></div></div>`;
+                const pctGreen = total > 0
+                    ? ((greensSemTie / total) * 100).toFixed(1)
+                    : '0.0';
+
+                const pctRed = total > 0
+                    ? ((reds / total) * 100).toFixed(1)
+                    : '0.0';
+
+                const assertividade = total > 0
+                    ? ((greensTotal / total) * 100).toFixed(1)
+                    : '0.0';
+
+                const telemetria = s.tie_telemetry || {};
+                const nSeguro = valor => {
+                    const n = Number(valor);
+                    return Number.isFinite(n) && n > 0 ? n : 0;
+                };
+
+                const observados = nSeguro(telemetria?.observados?.total);
+                const protegidos = nSeguro(telemetria?.protegidos?.total);
+                const semProtecao = nSeguro(telemetria?.sem_protecao?.total);
+                const desconhecidos = nSeguro(
+                    telemetria?.protecao_desconhecida?.total
+                );
+
+                const linhaNivel = chave => {
+                    const item = telemetria?.[chave] || {};
+                    return `Dir ${nSeguro(item.direto)} • G1 ${nSeguro(item.gale1)} • G2 ${nSeguro(item.gale2)}`;
+                };
+
+                const impacto =
+                    telemetria?.impacto_sem_protecao
+                    ?? telemetria?.sem_protecao?.impacto
+                    ?? {};
+
+                const impactoConhecido = impacto?.conhecido === true;
+
+                const moeda = valor => {
+                    const n = Number(valor);
+                    if (!Number.isFinite(n)) return null;
+
+                    return n.toLocaleString('pt-BR', {
+                        style: 'currency',
+                        currency: 'BRL'
+                    });
+                };
+
+                let impactoTexto = 'Sem impacto sem proteção no período';
+
+                if (semProtecao > 0) {
+                    if (impactoConhecido) {
+                        const devolvido = moeda(
+                            impacto?.valor_estornado
+                            ?? impacto?.estornado
+                        );
+
+                        const retido = moeda(
+                            impacto?.valor_retido
+                            ?? impacto?.retido
+                        );
+
+                        const partes = [];
+                        if (devolvido) partes.push(`90% devolvido: ${devolvido}`);
+                        if (retido) partes.push(`10% retido: ${retido}`);
+
+                        impactoTexto = partes.length > 0
+                            ? partes.join(' • ')
+                            : 'Impacto marcado como conhecido, mas sem valores monetários disponíveis.';
+                    } else {
+                        impactoTexto =
+                            'Não calculado: base monetária por evento não está registrada; política 90% devolvido / 10% retido.';
+                    }
+                }
+
+                const htmlTieTelemetry = `
+                    <div class="tie-box" style="display:grid; gap:5px;">
+                        <div>
+                            <strong style="color:#ffc107;">Empates observados: ${observados}</strong>
+                            <div style="font-size:10px; color:#aaa;">${linhaNivel('observados')}</div>
+                        </div>
+                        <div>
+                            <span style="color:#28a745;">Protegidos: <strong>${protegidos}</strong></span>
+                            <div style="font-size:10px; color:#888;">${linhaNivel('protegidos')}</div>
+                        </div>
+                        <div>
+                            <span style="color:#ff9f43;">Sem proteção: <strong>${semProtecao}</strong></span>
+                            <div style="font-size:10px; color:#888;">${linhaNivel('sem_protecao')}</div>
+                        </div>
+                        ${desconhecidos > 0 ? `
+                            <div>
+                                <span style="color:#aaa;">Proteção desconhecida: <strong>${desconhecidos}</strong></span>
+                                <div style="font-size:10px; color:#777;">${linhaNivel('protecao_desconhecida')}</div>
+                            </div>
+                        ` : ''}
+                        <div style="font-size:10px; color:${impactoConhecido ? '#ddd' : '#888'};">
+                            Impacto financeiro: ${impactoTexto}
+                        </div>
+                    </div>
+                `;
+
+                return `
+                    <div id="detalhe-${idPrefixo}-${est.id}-${periodo}"
+                         class="detalhes-tecnicos detalhes-grupo-${idPrefixo}-${est.id}"
+                         style="display:block; margin-top:auto;">
+                        <div style="display:flex; justify-content:space-between; border-bottom:1px solid #444; margin-bottom:5px; padding-bottom:4px;">
+                            <span>Entradas: <strong>${total}</strong></span>
+                            <span>Assertividade: <strong style="color:${getCor(assertividade)};">${assertividade}%</strong></span>
+                        </div>
+                        <div class="linha-detalhe" style="align-items:center;">
+                            <span>✅ Greens: <strong style="color:#28a745;">${greensSemTie}</strong> <small style="color:#aaa;">(${pctGreen}%)</small></span>
+                            <div style="display:flex; gap:10px; font-size:11px; color:#ccc;">
+                                <span>Dir: <strong>${Number(s.green_direto) || 0}</strong></span>
+                                <span>G1: <strong>${Number(s.gale1) || 0}</strong></span>
+                                <span>G2: <strong>${Number(s.gale2) || 0}</strong></span>
+                            </div>
+                        </div>
+                        <div class="linha-detalhe" style="flex-direction:column;">
+                            ${htmlTieTelemetry}
+                        </div>
+                        <div class="linha-detalhe" style="margin-top:5px; border-bottom:none; padding-bottom:0;">
+                            <span>❌ Reds: <strong style="color:#ff7777;">${reds}</strong> <small style="color:#aaa;">(${pctRed}%)</small></span>
+                        </div>
+                    </div>
+                `;
             };
-
             let switchHtml = '';
             if (!isAtivo) {
                 if (est.is_dinamico) {
