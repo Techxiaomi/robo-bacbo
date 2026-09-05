@@ -6,6 +6,7 @@ const {
 } = require('./strategy_profile_write_validation');
 
 const {
+    dinamico,
     parseConfigRobo,
     selecionarEstrategiasDoRobo
 } = require('./strategy_profile_policy');
@@ -722,6 +723,391 @@ async function validarEdicaoRoboRoute({
     });
 }
 
+
+function substituirNomeOrigemNoConfig(
+    config,
+    origemAnterior,
+    origemNova
+) {
+    const parsed =
+        parseConfigRobo(
+            config
+        );
+
+    if (!parsed.ok) {
+        return Object.freeze({
+            ok: false,
+            reason:
+                parsed.reason,
+            config: null
+        });
+    }
+
+    const lista =
+        Array.isArray(
+            parsed.config.origens
+        )
+            ? parsed.config.origens
+            : [];
+
+    const substituida =
+        lista.map(
+            origem =>
+                origem === origemAnterior
+                    ? origemNova
+                    : origem
+        );
+
+    return Object.freeze({
+        ok: true,
+        reason: null,
+
+        config: Object.freeze({
+            ...parsed.config,
+
+            origens:
+                Object.freeze(
+                    [...new Set(substituida)]
+                )
+        })
+    });
+}
+
+function snapshotRenameOrigem({
+    estado,
+    origemAnterior,
+    origemNova
+}) {
+    const origens =
+        (
+            Array.isArray(
+                estado?.origens
+            )
+                ? estado.origens
+                : []
+        ).map(
+            origem =>
+                String(
+                    origem?.nome ?? ''
+                ).trim() === origemAnterior
+                    ? {
+                        ...origem,
+                        nome: origemNova
+                    }
+                    : origem
+        );
+
+    const estrategias =
+        (
+            Array.isArray(
+                estado?.estrategias
+            )
+                ? estado.estrategias
+                : []
+        ).map(
+            estrategia =>
+                !dinamico(
+                    estrategia?.is_dinamico
+                )
+                && String(
+                    estrategia?.origem ?? ''
+                ).trim() === origemAnterior
+                    ? {
+                        ...estrategia,
+                        origem: origemNova
+                    }
+                    : estrategia
+        );
+
+    return Object.freeze({
+        origens:
+            Object.freeze(origens),
+
+        estrategias:
+            Object.freeze(estrategias)
+    });
+}
+
+function validarRenameOrigemEstrutural({
+    mesaId,
+    origemAnterior,
+    origemNova,
+    estado,
+    robos
+}) {
+    const anterior =
+        String(
+            origemAnterior ?? ''
+        ).trim();
+
+    const nova =
+        String(
+            origemNova ?? ''
+        ).trim();
+
+    if (
+        !anterior
+        || !nova
+    ) {
+        return Object.freeze({
+            ok: false,
+            status: 400,
+
+            body: Object.freeze({
+                sucesso: false,
+                erro:
+                    'NOME_ORIGEM_INVALIDO'
+            })
+        });
+    }
+
+    const snapshot =
+        snapshotRenameOrigem({
+            estado,
+            origemAnterior:
+                anterior,
+            origemNova:
+                nova
+        });
+
+    const configsAtualizadas = [];
+
+    for (
+        const robo
+        of (
+            Array.isArray(robos)
+                ? robos
+                : []
+        )
+    ) {
+        const resultadoConfig =
+            substituirNomeOrigemNoConfig(
+                robo?.config_json,
+                anterior,
+                nova
+            );
+
+        if (!resultadoConfig.ok) {
+            return Object.freeze({
+                ok: false,
+                status: 409,
+
+                body: Object.freeze({
+                    sucesso: false,
+                    erro:
+                        'ORIGEM_RENAME_ROBO_CONFIG_INVALIDA',
+
+                    robo_id:
+                        Number(robo?.id),
+
+                    motivo:
+                        resultadoConfig.reason
+                })
+            });
+        }
+
+        const validacao =
+            validarEscritaRobo({
+                roboId:
+                    Number(robo?.id),
+
+                mesaId:
+                    Number(mesaId),
+
+                config:
+                    resultadoConfig.config,
+
+                origens:
+                    snapshot.origens,
+
+                estrategias:
+                    snapshot.estrategias
+            });
+
+        if (!validacao.ok) {
+            return Object.freeze({
+                ok: false,
+                status:
+                    validacao.status,
+
+                body: Object.freeze({
+                    ...validacao.body,
+
+                    robo_id:
+                        Number(robo?.id),
+
+                    origem_anterior:
+                        anterior,
+
+                    origem_nova:
+                        nova
+                })
+            });
+        }
+
+        configsAtualizadas.push(
+            Object.freeze({
+                id:
+                    Number(robo?.id),
+
+                config:
+                    resultadoConfig.config
+            })
+        );
+    }
+
+    return Object.freeze({
+        ok: true,
+        status: 200,
+
+        body: Object.freeze({
+            sucesso: true
+        }),
+
+        snapshot,
+
+        robos:
+            Object.freeze(
+                configsAtualizadas
+            )
+    });
+}
+
+function validarDeleteOrigemEstrutural({
+    mesaId,
+    origem,
+    estado,
+    robos
+}) {
+    const nomeOrigem =
+        String(
+            origem ?? ''
+        ).trim();
+
+    const estrategias =
+        (
+            Array.isArray(
+                estado?.estrategias
+            )
+                ? estado.estrategias
+                : []
+        ).filter(
+            estrategia =>
+                Number(
+                    estrategia?.mesa_id
+                ) === Number(mesaId)
+                && !dinamico(
+                    estrategia?.is_dinamico
+                )
+                && String(
+                    estrategia?.origem ?? ''
+                ).trim() === nomeOrigem
+        );
+
+    if (
+        estrategias.length > 0
+    ) {
+        return Object.freeze({
+            ok: false,
+            status: 409,
+
+            body: Object.freeze({
+                sucesso: false,
+                erro:
+                    'ORIGEM_EM_USO_POR_ESTRATEGIAS',
+
+                origem:
+                    nomeOrigem,
+
+                estrategias:
+                    Object.freeze(
+                        estrategias.map(
+                            item =>
+                                String(item.id)
+                        )
+                    )
+            })
+        });
+    }
+
+    const robosReferenciando = [];
+
+    for (
+        const robo
+        of (
+            Array.isArray(robos)
+                ? robos
+                : []
+        )
+    ) {
+        const parsed =
+            parseConfigRobo(
+                robo?.config_json
+            );
+
+        if (!parsed.ok) {
+            return Object.freeze({
+                ok: false,
+                status: 409,
+
+                body: Object.freeze({
+                    sucesso: false,
+                    erro:
+                        'ORIGEM_DELETE_ROBO_CONFIG_INVALIDA',
+
+                    robo_id:
+                        Number(robo?.id),
+
+                    motivo:
+                        parsed.reason
+                })
+            });
+        }
+
+        if (
+            parsed.config.origens.includes(
+                nomeOrigem
+            )
+        ) {
+            robosReferenciando.push(
+                Number(robo?.id)
+            );
+        }
+    }
+
+    if (
+        robosReferenciando.length > 0
+    ) {
+        return Object.freeze({
+            ok: false,
+            status: 409,
+
+            body: Object.freeze({
+                sucesso: false,
+                erro:
+                    'ORIGEM_EM_USO_POR_ROBOS',
+
+                origem:
+                    nomeOrigem,
+
+                robos:
+                    Object.freeze(
+                        robosReferenciando
+                    )
+            })
+        });
+    }
+
+    return Object.freeze({
+        ok: true,
+        status: 200,
+
+        body: Object.freeze({
+            sucesso: true
+        })
+    });
+}
+
 module.exports = {
     buscarOrigem,
     buscarEstrategiaManual,
@@ -735,5 +1121,10 @@ module.exports = {
     validarEdicaoEstrategiaRoute,
 
     validarCriacaoRoboRoute,
-    validarEdicaoRoboRoute
+    validarEdicaoRoboRoute,
+
+    substituirNomeOrigemNoConfig,
+    snapshotRenameOrigem,
+    validarRenameOrigemEstrutural,
+    validarDeleteOrigemEstrutural
 };

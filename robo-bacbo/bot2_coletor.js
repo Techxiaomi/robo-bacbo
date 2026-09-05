@@ -39,7 +39,12 @@ const {
     validarCriacaoEstrategiaRoute,
     validarEdicaoEstrategiaRoute,
     validarCriacaoRoboRoute,
-    validarEdicaoRoboRoute
+    validarEdicaoRoboRoute,
+
+    carregarMesaEstrutural,
+    listarRobosEstruturais,
+    validarRenameOrigemEstrutural,
+    validarDeleteOrigemEstrutural
 } = require("./strategy_profile_route_support");
 require("./env_loader").loadEnvFile(path.join(__dirname, "..", ".env"));
 
@@ -2387,7 +2392,8 @@ app.put("/api/origem/:id", async (req, res) => {
                 .status(400)
                 .json({
                     sucesso: false,
-                    erro: 'nome_origem_invalido'
+                    erro:
+                        'nome_origem_invalido'
                 });
         }
 
@@ -2421,14 +2427,47 @@ app.put("/api/origem/:id", async (req, res) => {
                 .status(404)
                 .json({
                     sucesso: false,
-                    erro: 'origem_nao_encontrada'
+                    erro:
+                        'origem_nao_encontrada'
                 });
         }
 
         const nomeAnterior =
             String(
                 origens[0].nome || ''
-            );
+            ).trim();
+
+        const estado =
+            await carregarMesaEstrutural({
+                dbPool: conexao,
+                mesaId
+            });
+
+        const robos =
+            await listarRobosEstruturais({
+                dbPool: conexao,
+                mesaId
+            });
+
+        const validacao =
+            validarRenameOrigemEstrutural({
+                mesaId,
+                origemAnterior:
+                    nomeAnterior,
+                origemNova:
+                    novoNome,
+                estado,
+                robos
+            });
+
+        if (!validacao.ok) {
+            await conexao.rollback();
+            transacaoAberta = false;
+
+            return res
+                .status(validacao.status)
+                .json(validacao.body);
+        }
 
         const [resultadoOrigem] =
             await conexao.query(
@@ -2466,6 +2505,37 @@ app.put("/api/origem/:id", async (req, res) => {
             ]
         );
 
+        for (
+            const robo
+            of validacao.robos
+        ) {
+            const [resultadoRobo] =
+                await conexao.query(
+                    `UPDATE robos_canais
+                     SET config_json=?
+                     WHERE id=?
+                       AND mesa_id=?`,
+                    [
+                        JSON.stringify(
+                            robo.config
+                        ),
+
+                        robo.id,
+                        mesaId
+                    ]
+                );
+
+            if (
+                Number(
+                    resultadoRobo.affectedRows
+                ) !== 1
+            ) {
+                throw new Error(
+                    'ORIGEM_RENAME_ROBO_MUDOU_DURANTE_TRANSACAO'
+                );
+            }
+        }
+
         await conexao.commit();
         transacaoAberta = false;
 
@@ -2478,23 +2548,25 @@ app.put("/api/origem/:id", async (req, res) => {
         return res.json({
             sucesso: true
         });
-    } catch (e) {
+    }
+    catch (e) {
         if (
             conexao
             && transacaoAberta
         ) {
             try {
                 await conexao.rollback();
-            } catch (rollbackError) {
+            }
+            catch (rollbackError) {
                 console.error(
-                    '? MC23-B rollback origem:',
+                    'MC23-B rollback origem:',
                     rollbackError.message
                 );
             }
         }
 
         console.error(
-            `? PUT /api/origem/${req.params.id} falhou:`,
+            `PUT /api/origem/${req.params.id} falhou:`,
             e.message
         );
 
@@ -2503,7 +2575,8 @@ app.put("/api/origem/:id", async (req, res) => {
             .json({
                 sucesso: false
             });
-    } finally {
+    }
+    finally {
         if (conexao) {
             conexao.release();
         }
@@ -2511,12 +2584,85 @@ app.put("/api/origem/:id", async (req, res) => {
 });
 
 app.delete("/api/origem/:id", async (req, res) => {
+    let conexao = null;
+    let transacaoAberta = false;
+
     try {
         const mesaId =
             mesaIdRuntimeApi();
 
+        conexao =
+            await dbPool.getConnection();
+
+        await conexao.beginTransaction();
+        transacaoAberta = true;
+
+        const [origens] =
+            await conexao.query(
+                `SELECT id, nome
+                 FROM origens
+                 WHERE id=?
+                   AND mesa_id=?
+                 LIMIT 1
+                 FOR UPDATE`,
+                [
+                    req.params.id,
+                    mesaId
+                ]
+            );
+
+        if (
+            origens.length === 0
+        ) {
+            await conexao.rollback();
+            transacaoAberta = false;
+
+            return res
+                .status(404)
+                .json({
+                    sucesso: false,
+                    erro:
+                        'origem_nao_encontrada'
+                });
+        }
+
+        const nomeOrigem =
+            String(
+                origens[0].nome || ''
+            ).trim();
+
+        const estado =
+            await carregarMesaEstrutural({
+                dbPool: conexao,
+                mesaId
+            });
+
+        const robos =
+            await listarRobosEstruturais({
+                dbPool: conexao,
+                mesaId
+            });
+
+        const validacao =
+            validarDeleteOrigemEstrutural({
+                mesaId,
+                origem:
+                    nomeOrigem,
+                estado,
+                robos
+            });
+
+        if (!validacao.ok) {
+            await conexao.rollback();
+            transacaoAberta = false;
+
+            return res
+                .status(validacao.status)
+                .json(validacao.body);
+        }
+
         const [resultado] =
-            await dbPool.query(
+            await conexao.query(
                 `DELETE FROM origens
                  WHERE id=?
                    AND mesa_id=?`,
@@ -2531,13 +2677,13 @@ app.delete("/api/origem/:id", async (req, res) => {
                 resultado.affectedRows
             ) !== 1
         ) {
-            return res
-                .status(404)
-                .json({
-                    sucesso: false,
-                    erro: 'origem_nao_encontrada'
-                });
+            throw new Error(
+                'ORIGEM_DELETE_MUDOU_DURANTE_TRANSACAO'
+            );
         }
+
+        await conexao.commit();
+        transacaoAberta = false;
 
         ioServer.emit(
             'atualizar_interface'
@@ -2546,9 +2692,20 @@ app.delete("/api/origem/:id", async (req, res) => {
         return res.json({
             sucesso: true
         });
-    } catch (e) {
+    }
+    catch (e) {
+        if (
+            conexao
+            && transacaoAberta
+        ) {
+            try {
+                await conexao.rollback();
+            }
+            catch (_) {}
+        }
+
         console.error(
-            `? DELETE /api/origem/${req.params.id} falhou:`,
+            `DELETE /api/origem/${req.params.id} falhou:`,
             e.message
         );
 
@@ -2557,6 +2714,11 @@ app.delete("/api/origem/:id", async (req, res) => {
             .json({
                 sucesso: false
             });
+    }
+    finally {
+        if (conexao) {
+            conexao.release();
+        }
     }
 });
 

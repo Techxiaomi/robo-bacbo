@@ -2,6 +2,18 @@
 
 const mysql = require('mysql2/promise');
 
+const {
+    carregarMesaEstrutural
+} = require('./strategy_profile_route_support');
+
+const {
+    validarEscritaRobo
+} = require('./strategy_profile_write_validation');
+
+const {
+    parseConfigRobo
+} = require('./strategy_profile_policy');
+
 let pool = null;
 const cachePreferencias = new Map();
 const CACHE_MS = 5000;
@@ -88,6 +100,85 @@ function normalizarConfig(configBruto) {
     };
 }
 
+function validarMigracaoConfigTelegram({
+    row,
+    estado
+}) {
+    const parsed =
+        parseConfigRobo(
+            row?.config_json
+        );
+
+    if (!parsed.ok) {
+        return Object.freeze({
+            ok: false,
+            status: 409,
+
+            body: Object.freeze({
+                sucesso: false,
+                erro:
+                    'TELEGRAM_CONFIG_ESTRUTURAL_INDETERMINADA',
+
+                robo_id:
+                    Number(row?.id),
+
+                motivo:
+                    parsed.reason
+            })
+        });
+    }
+
+    const normalizado =
+        normalizarConfig(
+            parsed.config
+        );
+
+    if (!normalizado.alterado) {
+        return Object.freeze({
+            ok: true,
+            alterado: false,
+            config:
+                parsed.config
+        });
+    }
+
+    const validacao =
+        validarEscritaRobo({
+            roboId:
+                Number(row?.id),
+
+            mesaId:
+                Number(row?.mesa_id),
+
+            config:
+                normalizado.config,
+
+            origens:
+                estado?.origens,
+
+            estrategias:
+                estado?.estrategias
+        });
+
+    if (!validacao.ok) {
+        return Object.freeze({
+            ok: false,
+            status:
+                validacao.status,
+
+            body:
+                validacao.body
+        });
+    }
+
+    return Object.freeze({
+        ok: true,
+        alterado: true,
+        config:
+            normalizado.config
+    });
+}
+
 function invalidarCache() {
     cachePreferencias.clear();
 }
@@ -95,39 +186,178 @@ function invalidarCache() {
 async function migrarConfiguracoesTelegram() {
     const db = dbPool();
     let conexao = null;
+
     try {
-        const [linhas] = await db.query('SELECT id, config_json FROM robos_canais ORDER BY id ASC');
+        const [linhas] =
+            await db.query(
+                'SELECT id, mesa_id, config_json FROM robos_canais ORDER BY id ASC'
+            );
+
+        const estadosPorMesa =
+            new Map();
+
         const alteracoes = [];
 
         for (const row of linhas) {
-            const normalizado = normalizarConfig(row.config_json);
-            if (!normalizado.alterado) continue;
-            alteracoes.push({ id: Number(row.id), config: normalizado.config });
+            const mesaId =
+                Number(row.mesa_id);
+
+            if (
+                !Number.isInteger(mesaId)
+                || mesaId <= 0
+            ) {
+                const erro =
+                    new Error(
+                        'TELEGRAM_CONFIG_MESA_INVALIDA'
+                    );
+
+                erro.code =
+                    'TELEGRAM_CONFIG_MESA_INVALIDA';
+
+                erro.robo_id =
+                    Number(row.id);
+
+                throw erro;
+            }
+
+            if (
+                !estadosPorMesa.has(mesaId)
+            ) {
+                const estado =
+                    await carregarMesaEstrutural({
+                        dbPool: db,
+                        mesaId
+                    });
+
+                estadosPorMesa.set(
+                    mesaId,
+                    estado
+                );
+            }
+
+            const validacao =
+                validarMigracaoConfigTelegram({
+                    row,
+
+                    estado:
+                        estadosPorMesa.get(
+                            mesaId
+                        )
+                });
+
+            if (!validacao.ok) {
+                const erro =
+                    new Error(
+                        String(
+                            validacao.body?.erro
+                            || 'TELEGRAM_CONFIG_ESTRUTURAL_INVALIDA'
+                        )
+                    );
+
+                erro.code =
+                    String(
+                        validacao.body?.erro
+                        || 'TELEGRAM_CONFIG_ESTRUTURAL_INVALIDA'
+                    );
+
+                erro.detalhe =
+                    validacao.body;
+
+                throw erro;
+            }
+
+            if (
+                !validacao.alterado
+            ) {
+                continue;
+            }
+
+            alteracoes.push({
+                id:
+                    Number(row.id),
+
+                mesa_id:
+                    mesaId,
+
+                config:
+                    validacao.config
+            });
         }
 
-        if (alteracoes.length === 0) return 0;
+        if (
+            alteracoes.length === 0
+        ) {
+            return 0;
+        }
 
-        conexao = await db.getConnection();
+        conexao =
+            await db.getConnection();
+
         await conexao.beginTransaction();
+
         for (const item of alteracoes) {
-            await conexao.query(
-                'UPDATE robos_canais SET config_json=? WHERE id=?',
-                [JSON.stringify(item.config), item.id]
-            );
+            const [resultado] =
+                await conexao.query(
+                    'UPDATE robos_canais SET config_json=? WHERE id=? AND mesa_id=?',
+                    [
+                        JSON.stringify(
+                            item.config
+                        ),
+
+                        item.id,
+                        item.mesa_id
+                    ]
+                );
+
+            if (
+                Number(
+                    resultado.affectedRows
+                ) !== 1
+            ) {
+                throw new Error(
+                    'TELEGRAM_CONFIG_ROBO_MUDOU_DURANTE_MIGRACAO'
+                );
+            }
         }
+
         await conexao.commit();
+
         invalidarCache();
-        console.log(`📨 Telegram: preferências visuais normalizadas | ${alteracoes.length} robô(s).`);
+
+        console.log(
+            `📨 Telegram: preferências visuais normalizadas | ${alteracoes.length} robô(s).`
+        );
+
         return alteracoes.length;
-    } catch (erro) {
+    }
+    catch (erro) {
         if (conexao) {
-            try { await conexao.rollback(); } catch (_) {}
+            try {
+                await conexao.rollback();
+            }
+            catch (_) {}
         }
-        // Em instalação nova a tabela pode ainda não existir; o cadastro novo já grava o formato atual.
-        if (erro && (erro.code === 'ER_NO_SUCH_TABLE' || Number(erro.errno) === 1146)) return 0;
+
+        if (
+            erro
+            && (
+                erro.code ===
+                    'ER_NO_SUCH_TABLE'
+
+                || Number(
+                    erro.errno
+                ) === 1146
+            )
+        ) {
+            return 0;
+        }
+
         throw erro;
-    } finally {
-        if (conexao) conexao.release();
+    }
+    finally {
+        if (conexao) {
+            conexao.release();
+        }
     }
 }
 
@@ -178,6 +408,7 @@ async function resolverPreferencias(nomeRobo, chatId) {
 }
 
 module.exports = {
+    validarMigracaoConfigTelegram,
     migrarConfiguracoesTelegram,
     resolverPreferencias,
     preferenciasDoConfig,
