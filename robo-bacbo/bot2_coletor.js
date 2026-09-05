@@ -9,6 +9,12 @@ const {
     calcularPlanoAposta,
     calcularPnLEtapa
 } = require("./tie_protection");
+const {
+    classificarTieObservado,
+    agregarLinhasTiePorPeriodo,
+    normalizarProtecaoSnapshot
+} = require('./tie_telemetry');
+
 const { Server } = require("socket.io");
 const { criarAutoPilotService } = require("./auto_pilot_ia");
 const { analisarOraculo, extrairMesaAtual, normalizarResultadoOraculo } = require("./oraculo_dinamico");
@@ -126,6 +132,12 @@ async function limparPadroesDinamicosOrfaos() {
                 [mesaId, ...ids]
             );
             await conexao.query(
+                `DELETE FROM historico_tie_observado
+                 WHERE mesa_id=?
+                   AND estrategia_id IN (${placeholders})`,
+                [mesaId, ...ids]
+            );
+            await conexao.query(
                 `DELETE FROM estrategias
                  WHERE mesa_id=?
                    AND id IN (${placeholders})
@@ -222,6 +234,38 @@ async function prepararBancoDeDados() {
                 nivel VARCHAR(20),
                 multiplicador VARCHAR(10),
                 data_hora DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        await dbPool.query(`
+            CREATE TABLE IF NOT EXISTS historico_tie_observado (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                mesa_id SMALLINT UNSIGNED NOT NULL,
+                giro_resultado_id INT NOT NULL,
+                estrategia_id VARCHAR(100) NOT NULL,
+                escopo VARCHAR(20) NOT NULL,
+                robo_id INT NOT NULL DEFAULT 0,
+                nivel VARCHAR(20) NOT NULL,
+                multiplicador VARCHAR(20) DEFAULT '',
+                proteger_empate_snapshot BOOLEAN DEFAULT NULL,
+                data_hora DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_tie_observado (
+                    mesa_id,
+                    giro_resultado_id,
+                    estrategia_id,
+                    escopo,
+                    robo_id
+                ),
+                INDEX idx_tie_obs_estrategia (
+                    mesa_id,
+                    estrategia_id,
+                    data_hora
+                ),
+                INDEX idx_tie_obs_robo (
+                    mesa_id,
+                    robo_id,
+                    data_hora
+                )
             )
         `);
 
@@ -1832,12 +1876,66 @@ app.get("/api/estrategias", async (req, res) => {
             'SELECT * FROM estrategias WHERE mesa_id=? ORDER BY id DESC',
             [mesaId]
         );
+
+        const [tiesObservados] = await dbPool.query(
+            `SELECT
+                estrategia_id,
+                nivel,
+                multiplicador,
+                proteger_empate_snapshot,
+                data_hora
+             FROM historico_tie_observado
+             WHERE mesa_id=?
+               AND escopo='ESTRATEGIA'
+             ORDER BY estrategia_id ASC, data_hora ASC, id ASC`,
+            [mesaId]
+        );
+
+        const tiesPorEstrategia = new Map();
+
+        for (const row of tiesObservados) {
+            const estrategiaId = String(row.estrategia_id);
+
+            if (!tiesPorEstrategia.has(estrategiaId)) {
+                tiesPorEstrategia.set(estrategiaId, []);
+            }
+
+            tiesPorEstrategia
+                .get(estrategiaId)
+                .push(row);
+        }
+
         const agoraMs = Date.now();
 
-        res.json(linhas.map(est => ({
-            ...est,
-            detalhes: calcularDetalhesPadraoNoHistorico(est, historicoGirosAnalitico, agoraMs)
-        })));
+        res.json(linhas.map(est => {
+            const detalhesLegados =
+                calcularDetalhesPadraoNoHistorico(
+                    est,
+                    historicoGirosAnalitico,
+                    agoraMs
+                );
+
+            const telemetriaPorPeriodo =
+                agregarLinhasTiePorPeriodo(
+                    tiesPorEstrategia.get(String(est.id)) || [],
+                    agoraMs
+                );
+
+            const detalhes = {};
+
+            for (const periodo of ['24h', 'hoje', 'semana', 'mes', 'geral']) {
+                detalhes[periodo] = {
+                    ...detalhesLegados[periodo],
+                    tie_telemetry:
+                        telemetriaPorPeriodo[periodo]
+                };
+            }
+
+            return {
+                ...est,
+                detalhes
+            };
+        }));
     } catch (erro) {
         console.error('❌ GET /api/estrategias falhou:', erro.message);
         res.status(500).json({ erro: "Erro ao buscar estratégias" });
@@ -2291,6 +2389,11 @@ async function apagarEstrategiaEDados(id, mesaId) {
 
     await dbPool.query(
         'DELETE FROM historico_resultados WHERE estrategia_id=? AND mesa_id=?',
+        [id, mesaId]
+    );
+
+    await dbPool.query(
+        'DELETE FROM historico_tie_observado WHERE estrategia_id=? AND mesa_id=?',
         [id, mesaId]
     );
 }
@@ -2754,6 +2857,34 @@ app.get("/api/robos", async (req, res) => {
             ORDER BY robo_id ASC, data_hora ASC, id ASC
         `, [mesaId]);
 
+        const [tiesObservadosRobos] = await dbPool.query(`
+            SELECT
+                robo_id,
+                nivel,
+                multiplicador,
+                proteger_empate_snapshot,
+                data_hora
+            FROM historico_tie_observado
+            WHERE mesa_id=?
+              AND escopo='ROBO'
+            ORDER BY robo_id ASC, data_hora ASC, id ASC
+        `, [mesaId]);
+
+        const tiesPorRobo = new Map();
+
+        for (const row of tiesObservadosRobos) {
+            const roboId = String(row.robo_id);
+
+            if (!tiesPorRobo.has(roboId)) {
+                tiesPorRobo.set(roboId, []);
+            }
+
+            tiesPorRobo
+                .get(roboId)
+                .push(row);
+        }
+
+        const agoraTieRobosMs = Date.now();
         let mapRobos = {};
         let sequenciasRobos = {};
         const createEmptyPeriod = () => ({
@@ -2836,6 +2967,21 @@ app.get("/api/robos", async (req, res) => {
             let contagemIA = countDinamicos.find(d => d.robo_dono_id === r.id);
             let cState = estadoStandbyRobos[r.id];
             const { telegram_token: telegramTokenPrivado, ...roboPublico } = r;
+            const telemetriaPorPeriodo =
+                agregarLinhasTiePorPeriodo(
+                    tiesPorRobo.get(String(r.id)) || [],
+                    agoraTieRobosMs
+                );
+
+            const detalhesComTieTelemetry = {};
+
+            for (const periodo of ['24h', 'hoje', 'semana', 'mes', 'geral']) {
+                detalhesComTieTelemetry[periodo] = {
+                    ...mapRobos[r.id][periodo],
+                    tie_telemetry:
+                        telemetriaPorPeriodo[periodo]
+                };
+            }
             return {
                 ...roboPublico,
                 telegram_configurado: Boolean(String(telegramTokenPrivado || '').trim()),
@@ -2848,7 +2994,7 @@ app.get("/api/robos", async (req, res) => {
                 qtd_padroes_ia_shadow_historico: contagemIA ? Number(contagemIA.qtd_shadow_historico || 0) : 0,
                 qtd_padroes_ia_shadow_live: contagemIA ? Number(contagemIA.qtd_shadow_live || 0) : 0,
                 qtd_padroes_ia_total: contagemIA ? Number(contagemIA.qtd_total || 0) : 0,
-                detalhes: mapRobos[r.id],
+                detalhes: detalhesComTieTelemetry,
                 em_standby_ate: cState ? cState.em_standby_ate : 0
             };
         });
@@ -3168,6 +3314,12 @@ app.delete("/api/robo/:id", async (req, res) => {
                 [mesaId, ...idsPadroes]
             );
             await conexao.query(
+                `DELETE FROM historico_tie_observado
+                 WHERE mesa_id=?
+                   AND estrategia_id IN (${placeholders})`,
+                [mesaId, ...idsPadroes]
+            );
+            await conexao.query(
                 `DELETE FROM historico_disparos_robos
                  WHERE mesa_id=?
                    AND estrategia_id IN (${placeholders})`,
@@ -3193,6 +3345,13 @@ app.delete("/api/robo/:id", async (req, res) => {
             [mesaId, prefixoHistoricoIa.length, prefixoHistoricoIa]
         );
 
+        await conexao.query(
+            `DELETE FROM historico_tie_observado
+             WHERE mesa_id=?
+               AND LEFT(estrategia_id, ?) = ?`,
+            [mesaId, prefixoHistoricoIa.length, prefixoHistoricoIa]
+        );
+
         // Ao excluir o Robô/Canal, seu histórico de distribuição também deixa de ter proprietário.
         await conexao.query(
             'DELETE FROM historico_shadow_ia WHERE mesa_id=? AND robo_id=?',
@@ -3200,6 +3359,13 @@ app.delete("/api/robo/:id", async (req, res) => {
         );
         await conexao.query(
             'DELETE FROM historico_disparos_robos WHERE mesa_id=? AND robo_id=?',
+            [mesaId, roboId]
+        );
+        await conexao.query(
+            `DELETE FROM historico_tie_observado
+             WHERE mesa_id=?
+               AND escopo='ROBO'
+               AND robo_id=?`,
             [mesaId, roboId]
         );
         await conexao.query('DELETE FROM destinatarios_robo WHERE robo_id=?', [roboId]);
@@ -4003,6 +4169,193 @@ function nivelHistoricoResultado(galeAtual) {
     if (galeAtual === 1) return 'GALE1';
     if (galeAtual === 2) return 'GALE2';
     return 'DIRETO';
+}
+
+
+function snapshotProtecaoEmpateTelemetria(est) {
+    return normalizarProtecaoSnapshot(
+        est?.proteger_empate
+        ?? est?.protegerEmpate
+    );
+}
+async function registrarTieObservado({
+    est,
+    estado,
+    giroResultadoId,
+    multiplicador,
+    timestampColeta
+}) {
+    const giroId =
+        Number(
+            giroResultadoId
+        );
+
+    if (
+        !Number.isInteger(giroId)
+        || giroId <= 0
+    ) {
+        return Object.freeze({
+            registrado: false,
+            motivo:
+                'GIRO_CANONICO_AUSENTE'
+        });
+    }
+
+    const mesaRuntime =
+        obterMesaRuntime();
+
+    const timestampMs =
+        Number(
+            timestampColeta
+        );
+
+    const timestampSegundos =
+        Number.isFinite(timestampMs)
+        && timestampMs > 0
+            ? timestampMs / 1000
+            : Date.now() / 1000;
+
+    const snapshotProtecao =
+        snapshotProtecaoEmpateTelemetria(
+            est
+        );
+
+    const evento =
+        classificarTieObservado({
+            resultado:
+                'Tie',
+
+            nivel:
+                estado?.galeAtual,
+
+            multiplicador:
+                multiplicador || '',
+
+            proteger_empate_snapshot:
+                snapshotProtecao
+        });
+
+    if (
+        !evento.observado
+    ) {
+        return Object.freeze({
+            registrado: false,
+            motivo:
+                evento.motivo
+                || 'TIE_NAO_CLASSIFICADO'
+        });
+    }
+
+    const linhas = [
+        {
+            escopo:
+                'ESTRATEGIA',
+
+            robo_id:
+                0
+        }
+    ];
+
+    const idsRobos =
+        new Set();
+
+    for (
+        const robo
+        of (
+            Array.isArray(
+                estado?.robosInscritos
+            )
+                ? estado.robosInscritos
+                : []
+        )
+    ) {
+        const roboId =
+            Number(
+                robo?.id
+            );
+
+        if (
+            !Number.isInteger(roboId)
+            || roboId <= 0
+            || idsRobos.has(roboId)
+        ) {
+            continue;
+        }
+
+        idsRobos.add(
+            roboId
+        );
+
+        linhas.push({
+            escopo:
+                'ROBO',
+
+            robo_id:
+                roboId
+        });
+    }
+
+    let inseridos = 0;
+
+    for (
+        const linha
+        of linhas
+    ) {
+        const [resultado] =
+            await dbPool.query(
+                `INSERT INTO historico_tie_observado
+                    (
+                        mesa_id,
+                        giro_resultado_id,
+                        estrategia_id,
+                        escopo,
+                        robo_id,
+                        nivel,
+                        multiplicador,
+                        proteger_empate_snapshot,
+                        data_hora
+                    )
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, FROM_UNIXTIME(?)) ON DUPLICATE KEY UPDATE id=id`,
+                [
+                    mesaRuntime.id,
+                    giroId,
+                    est.id,
+                    linha.escopo,
+                    linha.robo_id,
+                    nivelHistoricoResultado(
+                        estado?.galeAtual
+                    ),
+                    evento.multiplicador,
+                    evento.proteger_empate_snapshot,
+                    timestampSegundos
+                ]
+            );
+
+        inseridos +=
+            Number(
+                resultado.affectedRows
+            ) || 0;
+    }
+
+    return Object.freeze({
+        registrado:
+            true,
+
+        inseridos,
+
+        classificacao:
+            evento.classificacao,
+
+        nivel:
+            evento.nivel,
+
+        multiplicador:
+            evento.multiplicador,
+
+        proteger_empate_snapshot:
+            evento
+                .proteger_empate_snapshot
+    });
 }
 
 async function registrarHistoricoResultadoEstrategia(est, tipoResultado, galeAtual, multiplicador, timestampColeta) {
@@ -6570,6 +6923,26 @@ app.post("/receber-sinal", async (req, res) => {
 
                 let finalizar = false;
                 let isTie = (vencedor==='Tie');
+
+                if (isTie) {
+                    try {
+                        await registrarTieObservado({
+                            est,
+                            estado: st,
+                            giroResultadoId:
+                                giroIdPersistidoParaIA,
+                            multiplicador:
+                                mult,
+                            timestampColeta:
+                                dados.timestamp_coleta
+                        });
+                    } catch (e) {
+                        console.error(
+                            `Falha ao persistir telemetria TIE da estratégia ${est.id}:`,
+                            e.message
+                        );
+                    }
+                }
 
                 if (vencedor === est.entrada || (isTie && est.protegerEmpate)) {
                     if (!isTie) {
