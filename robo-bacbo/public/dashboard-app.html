@@ -951,8 +951,8 @@
                     </div>
 
                     <div style="display: flex; gap: 4px; background: #111; padding: 2px; border-radius: 5px; border: 1px solid #333;">
-                        <button id="btn-dash-24h" class="btn-dash" style="background: #007bff; color: white; border: none; padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: bold;" onclick="mudarDashGeral('24h')">24H</button>
-                        <button id="btn-dash-hoje" class="btn-dash" style="background: transparent; color: #888; border: none; padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: bold;" onclick="mudarDashGeral('hoje')">Hoje</button>
+                        <button id="btn-dash-hoje" class="btn-dash" style="background: #007bff; color: white; border: none; padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: bold;" onclick="mudarDashGeral('hoje')">Hoje</button>
+                        <button id="btn-dash-24h" class="btn-dash" style="background: transparent; color: #888; border: none; padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: bold;" onclick="mudarDashGeral('24h')">24H</button>
                         <button id="btn-dash-semana" class="btn-dash" style="background: transparent; color: #888; border: none; padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: bold;" onclick="mudarDashGeral('semana')">Semana</button>
                         <button id="btn-dash-mes" class="btn-dash" style="background: transparent; color: #888; border: none; padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: bold;" onclick="mudarDashGeral('mes')">Mês</button>
                         <button id="btn-dash-geral" class="btn-dash" style="background: transparent; color: #888; border: none; padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: bold;" onclick="mudarDashGeral('geral')">Geral</button>
@@ -1261,9 +1261,9 @@
                             <div class="form-group" style="flex:1;">
                                 <label>Período de Análise:</label>
                                 <select id="sim-periodo">
+                                    <option value="hoje" selected>Hoje</option>
                                     <option value="24h">Últimas 24h</option>
-                                    <option value="hoje">Hoje</option>
-                                    <option value="semana" selected>Esta Semana</option>
+                                    <option value="semana">Esta Semana</option>
                                     <option value="mes">Este Mês</option>
                                     <option value="geral">Geral (Tudo)</option>
                                 </select>
@@ -1801,7 +1801,7 @@
         let estrategiasGlobais = []; let origensGlobais = []; let robosGlobais = []; let autoTradersGlobais = [];
         let girosInMemoria = []; let bkPadraoAtual = []; let modalPadraoAtual = [];
         let estrategiaEditandoId = null; let roboEditandoId = null; let autoTraderEditandoId = null;
-        let dashPeriodoAtual = '24h'; let padroesPeriodoAtual = '24h'; let alertaTimeout; let estrategiaAtivaAtualId = null;
+        let dashPeriodoAtual = 'hoje'; let padroesPeriodoAtual = 'hoje'; let alertaTimeout; let estrategiaAtivaAtualId = null;
 
         function mudarAbaPrincipal(aba) {
             document.querySelectorAll('.aba-conteudo').forEach(el => el.classList.remove('visivel'));
@@ -3153,7 +3153,7 @@
 
             let bolinhasHtml = ''; try { bolinhasHtml = JSON.parse(est.padrao).map(j => { let bk = j === 'Player' ? '#007bff' : (j === 'Banker' ? '#ff7777' : '#ffc107'); let cl = j === 'Tie' ? '#000' : '#fff'; return `<span style="background:${bk}; color:${cl}; padding: 4px 8px; font-size: 11px; border-radius:4px; font-weight:bold;">${j.charAt(0)}</span>`; }).join(' <span style="color:#555; font-size:10px;">➡️</span> '); } catch(e) {}
             let periodoSelecionado = isAtivo ? dashPeriodoAtual : periodoGlobal;
-            let menusTabs = `<div class="grid-performance"><div class="box-tempo ${periodoSelecionado==='24h'?'ativo':''}" onclick="mudarPeriodoCardEstrategia('${idPrefixo}', '24h')"><span>24H</span><strong style="color:${getCor(d24h.perc)}">${d24h.perc}</strong></div><div class="box-tempo ${periodoSelecionado==='hoje'?'ativo':''}" onclick="mudarPeriodoCardEstrategia('${idPrefixo}', 'hoje')"><span>Hoje</span><strong style="color:${getCor(dHoje.perc)}">${dHoje.perc}</strong></div><div class="box-tempo ${periodoSelecionado==='semana'?'ativo':''}" onclick="mudarPeriodoCardEstrategia('${idPrefixo}', 'semana')"><span>Semana</span><strong style="color:${getCor(dSemana.perc)}">${dSemana.perc}</strong></div><div class="box-tempo ${periodoSelecionado==='mes'?'ativo':''}" onclick="mudarPeriodoCardEstrategia('${idPrefixo}', 'mes')"><span>Mês</span><strong style="color:${getCor(dMes.perc)}">${dMes.perc}</strong></div><div class="box-tempo ${periodoSelecionado==='geral'?'ativo':''}" onclick="mudarPeriodoCardEstrategia('${idPrefixo}', 'geral')"><span>Geral</span><strong style="color:${getCor(dGeral.perc)}">${dGeral.perc}</strong></div></div>`;
+            let menusTabs = `<div class="grid-performance"><div class="box-tempo ${periodoSelecionado==='hoje'?'ativo':''}" onclick="mudarPeriodoCardEstrategia('${idPrefixo}', 'hoje')"><span>Hoje</span><strong style="color:${getCor(dHoje.perc)}">${dHoje.perc}</strong></div><div class="box-tempo ${periodoSelecionado==='24h'?'ativo':''}" onclick="mudarPeriodoCardEstrategia('${idPrefixo}', '24h')"><span>24H</span><strong style="color:${getCor(d24h.perc)}">${d24h.perc}</strong></div><div class="box-tempo ${periodoSelecionado==='semana'?'ativo':''}" onclick="mudarPeriodoCardEstrategia('${idPrefixo}', 'semana')"><span>Semana</span><strong style="color:${getCor(dSemana.perc)}">${dSemana.perc}</strong></div><div class="box-tempo ${periodoSelecionado==='mes'?'ativo':''}" onclick="mudarPeriodoCardEstrategia('${idPrefixo}', 'mes')"><span>Mês</span><strong style="color:${getCor(dMes.perc)}">${dMes.perc}</strong></div><div class="box-tempo ${periodoSelecionado==='geral'?'ativo':''}" onclick="mudarPeriodoCardEstrategia('${idPrefixo}', 'geral')"><span>Geral</span><strong style="color:${getCor(dGeral.perc)}">${dGeral.perc}</strong></div></div>`;
             let detailsToRender = isAtivo ? (d24h.html + dHoje.html + dSemana.html + dMes.html + dGeral.html) : (periodoGlobal === '24h' ? d24h.html : (periodoGlobal === 'hoje' ? dHoje.html : (periodoGlobal === 'semana' ? dSemana.html : (periodoGlobal === 'mes' ? dMes.html : dGeral.html))));
             let iaBadge = est.is_dinamico ? `<span style="background: #17a2b8; color: white; padding: 2px 5px; font-size: 10px; border-radius: 4px; margin-left: 8px;">🤖 IA Dinâmica</span>` : '';
             let lockMsg = ''; if (est.is_dinamico && !isAtivo) { if (est.quarentena_restante > 0) lockMsg = `<div style="text-align:center; margin-top:10px; padding:4px; background:#222; border-radius:4px; font-size:10px; color:#ffc107; border:1px dashed #ffc107;">⏱️ EM QUARENTENA: Restam ${est.quarentena_restante} giros.</div>`; else lockMsg = `<div style="text-align:center; margin-top:10px; padding:4px; background:#222; border-radius:4px; font-size:10px; color:#28a745; border:1px dashed #28a745;">✅ Padrão Aprovado e Gerenciado pela IA</div>`; }

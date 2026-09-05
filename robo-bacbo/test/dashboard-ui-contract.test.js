@@ -216,7 +216,7 @@ test('UX-002/003: aprimoramentos carregam depois do JavaScript principal sem alt
     assert.match(enhancementsJs, /window\.mudarPeriodoCardRobo\s*=\s*mudarPeriodoCardRobo/);
     assert.match(enhancementsJs, /Maior sequência Green/);
     assert.match(enhancementsJs, /Maior sequência Red/);
-    assert.match(enhancementsJs, /const PERIODOS_ROBO = \['24h', 'hoje', 'semana', 'mes', 'geral'\]/);
+    assert.match(enhancementsJs, /const PERIODOS_ROBO = \['hoje', '24h', 'semana', 'mes', 'geral'\]/);
 });
 
 test('BUG-016: filtros do dashboard chamam funções globais implementadas', () => {

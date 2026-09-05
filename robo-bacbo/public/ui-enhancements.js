@@ -1,7 +1,7 @@
 (() => {
     'use strict';
 
-    const PERIODOS_ROBO = ['24h', 'hoje', 'semana', 'mes', 'geral'];
+    const PERIODOS_ROBO = ['hoje', '24h', 'semana', 'mes', 'geral'];
     const ORDENACOES_ROBO = Object.freeze([
         { value: 'status', label: 'Ativos primeiro' },
         { value: 'nome', label: 'Nome (A–Z)' },
@@ -12,7 +12,7 @@
         { value: 'recentes', label: 'Mais recentes' },
         { value: 'antigos', label: 'Mais antigos' }
     ]);
-    let roboPeriodoAtual = '24h';
+    let roboPeriodoAtual = 'hoje';
     let roboOrdenacaoAtual = 'status';
 
     function numeroSeguro(valor) {
@@ -253,6 +253,38 @@
         return typeof window.getCor === 'function' ? window.getCor(valor) : '#007bff';
     }
 
+    function htmlEmpatesRoboTIE3D(resumo) {
+        if ((Number(resumo?.ties) || 0) > 0) {
+            return `
+                <span>🟡 Empates: <strong style="color:#ffc107;">${resumo.ties}</strong> <small style="color:#aaa;">(${resumo.pctTies}%)</small></span>
+                <div class="tie-box">${resumo.htmlTies || '<span style="font-size:10px; color:#666;">Sem empates</span>'}</div>
+            `;
+        }
+
+        const t = resumo?.tieTelemetry || {};
+        const total = numeroSeguro(t?.semProtecao);
+        const niveis = t?.semProtecaoNivel || {};
+        const direto = numeroSeguro(niveis?.direto);
+        const gale1 = numeroSeguro(niveis?.gale1);
+        const gale2 = numeroSeguro(niveis?.gale2);
+
+        if (total <= 0) {
+            return `
+                <span>🟡 Empates: <strong style="color:#ffc107;">0</strong> <small style="color:#aaa;">(0.0%)</small></span>
+                <div class="tie-box"><span style="font-size:10px; color:#666;">Sem empates</span></div>
+            `;
+        }
+
+        return `
+            <span>🟡 Empates sem proteção: <strong style="color:#ffc107;">${total}</strong></span>
+            <div class="tie-box" data-tie3d-sem-protecao="1">
+                <div style="font-size:10px;">DIRETO: <strong>${direto}</strong></div>
+                <div style="font-size:10px;">GALE1: <strong>${gale1}</strong></div>
+                <div style="font-size:10px;">GALE2: <strong>${gale2}</strong></div>
+            </div>
+        `;
+    }
+
     function htmlPeriodoRobo(robo, periodo) {
         const s = resumoPeriodoRobo(robo, periodo);
 
@@ -273,7 +305,7 @@
                 </div>
 
                 <div class="linha-detalhe" style="flex-direction:column;">
-                    ${s.htmlTieTelemetry}
+                    ${htmlEmpatesRoboTIE3D(s)}
                 </div>
 
                 <div class="linha-detalhe" style="margin-top:5px;">

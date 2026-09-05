@@ -178,11 +178,11 @@
         },
 
         gerarHtmlCardEstrategia: function gerarHtmlCardEstrategia(est, idPrefixo, periodoGlobal) {
-            const periodos = ['24h', 'hoje', 'semana', 'mes', 'geral'];
+            const periodos = ['hoje', '24h', 'semana', 'mes', 'geral'];
             const isAtivo = idPrefixo === 'ativo';
             const periodoSelecionado = periodos.includes(isAtivo ? dashPeriodoAtual : periodoGlobal)
                 ? (isAtivo ? dashPeriodoAtual : periodoGlobal)
-                : '24h';
+                : 'hoje';
 
             const calcularResumo = (periodo) => {
                 const s = est.detalhes?.[periodo];
@@ -344,7 +344,29 @@
                             </div>
                         </div>
                         <div class="linha-detalhe" style="flex-direction:column;">
-                            ${htmlTieTelemetry}
+                            ${est.proteger_empate ? `
+                                <span>🟡 Empates: <strong style="color:#ffc107;">${tiesNum}</strong></span>
+                                <div class="tie-box">${(() => {
+                                    const htmlTies = ['direto', 'gale1', 'gale2'].map(nivel => {
+                                        const itens = Object.entries(s.ties?.[nivel] || {})
+                                            .filter(([, quantidade]) => Number(quantidade) > 0)
+                                            .map(([multiplicador, quantidade]) =>
+                                                `<strong>${Number(quantidade) || 0}</strong> - ${multiplicador}`
+                                            );
+                                        return itens.length
+                                            ? `<div style="font-size:10px; margin-bottom:2px;">${nivel.toUpperCase()}: ${itens.join(' | ')}</div>`
+                                            : '';
+                                    }).join('');
+                                    return htmlTies || '<span style="font-size:10px; color:#666;">Sem empates</span>';
+                                })()}</div>
+                            ` : `
+                                <span>🟡 Empates sem proteção: <strong style="color:#ffc107;">${semProtecao}</strong></span>
+                                <div class="tie-box" data-tie3d-sem-protecao="1">
+                                    <div style="font-size:10px;">DIRETO: <strong>${nSeguro(telemetria?.sem_protecao?.direto)}</strong></div>
+                                    <div style="font-size:10px;">GALE1: <strong>${nSeguro(telemetria?.sem_protecao?.gale1)}</strong></div>
+                                    <div style="font-size:10px;">GALE2: <strong>${nSeguro(telemetria?.sem_protecao?.gale2)}</strong></div>
+                                </div>
+                            `}
                         </div>
                         <div class="linha-detalhe" style="margin-top:5px; border-bottom:none; padding-bottom:0;">
                             <span>❌ Reds: <strong style="color:#ff7777;">${reds}</strong> <small style="color:#aaa;">(${pctRed}%)</small></span>

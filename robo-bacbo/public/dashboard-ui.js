@@ -1,13 +1,13 @@
 (() => {
     'use strict';
 
-    const PERIODOS_DASHBOARD = new Set(['24h', 'hoje', 'semana', 'mes', 'geral']);
-    let dashboardPeriodoAtual = '24h';
+    const PERIODOS_DASHBOARD = new Set(['hoje', '24h', 'semana', 'mes', 'geral']);
+    let dashboardPeriodoAtual = 'hoje';
     let dashboardAtualizacaoSeq = 0;
     let dashboardAbortController = null;
 
     function periodoDashboardSeguro(periodo) {
-        return PERIODOS_DASHBOARD.has(periodo) ? periodo : '24h';
+        return PERIODOS_DASHBOARD.has(periodo) ? periodo : 'hoje';
     }
 
     function inteiroDashboardSeguro(valor) {
