@@ -1,6 +1,6 @@
 import unittest
 
-from evolution_chip_dom_probe import (
+from diagnostics.evolution_chip_dom_probe import (
     Candidate,
     _looks_interactive,
     probe_chip_interactive_locator,
