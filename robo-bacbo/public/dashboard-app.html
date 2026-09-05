@@ -2211,7 +2211,23 @@
                     body: JSON.stringify(payload)
                 });
 
-                if (!res.ok) return alert('Erro ao salvar o robô.');
+                if (!res.ok) {
+                    let detalhe = '';
+                    try {
+                        const erroApi = await res.json();
+                        detalhe = String(
+                            erroApi?.mensagem
+                            || erroApi?.erro
+                            || ''
+                        ).trim();
+                    } catch (_) {}
+
+                    return alert(
+                        detalhe
+                            ? `Erro ao salvar o robô: ${detalhe}`
+                            : `Erro ao salvar o robô (HTTP ${res.status}).`
+                    );
+                }
                 fecharFormularioRobo();
                 await carregarRobos();
             } catch (e) {

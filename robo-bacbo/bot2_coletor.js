@@ -321,8 +321,35 @@ async function prepararBancoDeDados() {
                 historico_reds_json TEXT,
                 ativo BOOLEAN DEFAULT true,
                 config_json TEXT
-            )
+            ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
         `);
+
+        // Bancos legados podem ter nascido em utf8mb3.
+        // CREATE TABLE IF NOT EXISTS não altera charset de tabela existente.
+        const [charsetRoboRows] = await dbPool.query(`
+            SELECT TABLE_COLLATION
+            FROM information_schema.TABLES
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME = 'robos_canais'
+            LIMIT 1
+        `);
+
+        const collationRobos = String(
+            charsetRoboRows?.[0]?.TABLE_COLLATION || ''
+        ).toLowerCase();
+
+        if (!collationRobos.startsWith('utf8mb4_')) {
+            console.log(
+                '🔤 Migrando robos_canais para utf8mb4 '
+                + '(compatibilidade com emoji/Unicode completo)...'
+            );
+
+            await dbPool.query(`
+                ALTER TABLE robos_canais
+                CONVERT TO CHARACTER SET utf8mb4
+                COLLATE utf8mb4_unicode_ci
+            `);
+        }
 
         await dbPool.query(`
             CREATE TABLE IF NOT EXISTS destinatarios_robo (
@@ -3048,7 +3075,14 @@ app.post("/api/robo", async (req, res) => {
         }
         ioServer.emit('atualizar_robos');
         res.json({ sucesso: true });
-    } catch(e) { console.error('❌ POST /api/robo falhou:', e.message); res.status(500).json({ sucesso: false }); }
+    } catch(e) {
+        console.error('❌ POST /api/robo falhou:', e.message);
+        res.status(500).json({
+            sucesso: false,
+            erro: 'ROBO_SALVAR_FALHA_INTERNA',
+            mensagem: String(e?.message || 'Falha interna ao salvar o robô.')
+        });
+    }
 });
 
 app.put("/api/robo/:id", async (req, res) => {
