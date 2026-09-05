@@ -35,6 +35,12 @@ const {
     afirmarMesaFinanceiraAutorizada
 } = require("./mesa_financial_scope");
 const { resolveRiskPolicy } = require("./risk_policy");
+const {
+    validarCriacaoEstrategiaRoute,
+    validarEdicaoEstrategiaRoute,
+    validarCriacaoRoboRoute,
+    validarEdicaoRoboRoute
+} = require("./strategy_profile_route_support");
 require("./env_loader").loadEnvFile(path.join(__dirname, "..", ".env"));
 
 // Erros globais realmente não tratados são fatais: continuar pode deixar estado financeiro incoerente.
@@ -2122,6 +2128,24 @@ app.post("/api/novo-padrao", async (req, res) => {
     try {
         const mesaId = mesaIdRuntimeApi();
         const { nome, origem, padrao, entrada, gales, protegerEmpate, ativo } = req.body;
+
+        const validacaoEstrutural =
+            await validarCriacaoEstrategiaRoute({
+                dbPool,
+                mesaId,
+                estrategia: {
+                    nome,
+                    origem,
+                    gales,
+                    proteger_empate: protegerEmpate
+                }
+            });
+
+        if (!validacaoEstrutural.ok) {
+            return res
+                .status(validacaoEstrutural.status)
+                .json(validacaoEstrutural.body);
+        }
         const padraoJson = JSON.stringify(padrao.split(',').map(s => s.trim()));
         const id = "padrao_" + Date.now();
         const tiesZerado = JSON.stringify({ direto: { '88x': 0, '25x': 0, '10x': 0, '6x': 0, '4x': 0 }, gale1: { '88x': 0, '25x': 0, '10x': 0, '6x': 0, '4x': 0 }, gale2: { '88x': 0, '25x': 0, '10x': 0, '6x': 0, '4x': 0 } });
@@ -2144,6 +2168,26 @@ app.put("/api/estrategia/:id", async (req, res) => {
     try {
         const mesaId = mesaIdRuntimeApi();
         const { nome, origem, padrao, entrada, gales, protegerEmpate, ativo } = req.body;
+
+        const validacaoEstrutural =
+            await validarEdicaoEstrategiaRoute({
+                dbPool,
+                mesaId,
+                estrategiaId: req.params.id,
+                estrategia: {
+                    id: req.params.id,
+                    nome,
+                    origem,
+                    gales,
+                    proteger_empate: protegerEmpate
+                }
+            });
+
+        if (!validacaoEstrutural.ok) {
+            return res
+                .status(validacaoEstrutural.status)
+                .json(validacaoEstrutural.body);
+        }
         const padraoJson = JSON.stringify(padrao.split(',').map(s => s.trim()));
         const [resultadoUpdate] = await dbPool.query(
             'UPDATE estrategias SET nome=?, origem=?, padrao=?, entrada=?, gales=?, proteger_empate=?, ativo=? WHERE id=? AND mesa_id=? AND is_dinamico=false',
@@ -2655,6 +2699,19 @@ app.post("/api/robo", async (req, res) => {
     try {
         const mesaId = mesaIdRuntimeApi();
         const { nome, tag, cor, telegram_token, telegram_chat_id, enviar_telegram, enviar_web, min_assert, stop_reds, ativo, config, destinatarios } = req.body;
+
+        const validacaoEstrutural =
+            await validarCriacaoRoboRoute({
+                dbPool,
+                mesaId,
+                config: config || {}
+            });
+
+        if (!validacaoEstrutural.ok) {
+            return res
+                .status(validacaoEstrutural.status)
+                .json(validacaoEstrutural.body);
+        }
         const configJson = JSON.stringify(config || {});
         const tokenNormalizado = typeof telegram_token === 'string' ? telegram_token.trim() : '';
         const chatPrincipal = typeof telegram_chat_id === 'string' ? telegram_chat_id.trim() : '';
@@ -2709,6 +2766,20 @@ app.put("/api/robo/:id", async (req, res) => {
 
         if (existentes.length === 0) {
             return res.status(404).json({ sucesso: false, erro: 'robo_nao_encontrado' });
+        }
+
+        const validacaoEstrutural =
+            await validarEdicaoRoboRoute({
+                dbPool,
+                mesaId,
+                roboId: id,
+                config: config || {}
+            });
+
+        if (!validacaoEstrutural.ok) {
+            return res
+                .status(validacaoEstrutural.status)
+                .json(validacaoEstrutural.body);
         }
 
         const estavaAtivo = existentes[0].ativo === true || existentes[0].ativo === 1;
