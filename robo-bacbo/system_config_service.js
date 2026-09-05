@@ -37,8 +37,21 @@ function requestedBoolean(value) {
     return null;
 }
 
+function resolveFinancialPolicy(requestedDryRun) {
+    const financialMode = requestedDryRun === false
+        ? 'ARMED_REVIEW'
+        : 'DRY_RUN';
+
+    return Object.freeze({
+        financial_dry_run: true,
+        financial_mode: financialMode,
+        human_confirmation_required: financialMode === 'ARMED_REVIEW',
+        automatic_financial_dispatch: false
+    });
+}
+
 function financialModeFromDryRun(requestedDryRun) {
-    return requestedDryRun === false ? 'ARMED_REVIEW' : 'DRY_RUN';
+    return resolveFinancialPolicy(requestedDryRun).financial_mode;
 }
 
 function normalizeRows(rows) {
@@ -127,12 +140,10 @@ function buildSnapshot(rows, extra = {}) {
     const effectiveGlobal = requestedGlobal;
     const effectiveBridge = requestedBridge;
     const effectiveCapsEnabled = requestedCapsEnabled;
-
-    // A execução automática permanece tecnicamente em dry-run nos dois modos.
-    // financial_dry_run=false é a chave administrativa oficial para ARMED_REVIEW:
-    // prepara/enfileira para revisão, mas nunca despacha place_bet automaticamente.
-    const effectiveDryRun = true;
-    const financialMode = financialModeFromDryRun(requestedDryRun);
+    // Política financeira efetiva resolvida em um único ponto.
+    // ARMED_REVIEW exige confirmação humana e o despacho
+    // financeiro automático permanece bloqueado.
+    const financialPolicy = resolveFinancialPolicy(requestedDryRun);
 
     const invalidStoredValue = discrepancies.some(item => item.reason === 'INVALID_REQUESTED_VALUE');
     const frozenDiscrepancies = Object.freeze(discrepancies.map(item => Object.freeze({ ...item })));
@@ -141,10 +152,7 @@ function buildSnapshot(rows, extra = {}) {
         global_router_cap: effectiveGlobal,
         per_bridge_cap: effectiveBridge,
         technical_risk_caps_enabled: effectiveCapsEnabled,
-        financial_dry_run: effectiveDryRun,
-        financial_mode: financialMode,
-        human_confirmation_required: financialMode === 'ARMED_REVIEW',
-        automatic_financial_dispatch: false,
+        ...financialPolicy,
         requested_financial_dry_run: requestedDryRun,
         dry_run_forced: false,
         requested: Object.freeze({
@@ -152,16 +160,13 @@ function buildSnapshot(rows, extra = {}) {
             per_bridge_cap: requestedBridge,
             technical_risk_caps_enabled: requestedCapsEnabled,
             financial_dry_run: requestedDryRun,
-            financial_mode: financialMode
+            financial_mode: financialPolicy.financial_mode
         }),
         effective: Object.freeze({
             global_router_cap: effectiveGlobal,
             per_bridge_cap: effectiveBridge,
             technical_risk_caps_enabled: effectiveCapsEnabled,
-            financial_dry_run: effectiveDryRun,
-            financial_mode: financialMode,
-            human_confirmation_required: financialMode === 'ARMED_REVIEW',
-            automatic_financial_dispatch: false
+            ...financialPolicy
         }),
         discrepancies: frozenDiscrepancies,
         clamped: frozenDiscrepancies.length > 0,
@@ -290,6 +295,7 @@ module.exports = {
     CONFIG_KEYS,
     requestedMoney,
     requestedBoolean,
+    resolveFinancialPolicy,
     financialModeFromDryRun,
     ensureSystemConfigsTable,
     buildSnapshot,
