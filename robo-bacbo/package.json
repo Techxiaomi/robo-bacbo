@@ -17,5 +17,8 @@
     "redis": "6.2.1",
     "socket.io": "^4.8.3",
     "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "playwright": "^1.63.0"
   }
 }
