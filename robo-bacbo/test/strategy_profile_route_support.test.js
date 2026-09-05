@@ -549,3 +549,61 @@ test('route support realizou somente SELECTs', async () => {
         );
     }
 });
+
+
+test('criação de robô considera auto-tuning ativo antes da mineração', async () => {
+    const dbPool =
+        poolFake({
+            origens: [
+                {
+                    id: 1,
+                    mesa_id: 1,
+                    nome: 'A'
+                }
+            ],
+
+            estrategias: [
+                {
+                    id: 'p1',
+                    mesa_id: 1,
+                    origem: 'A',
+                    gales: 2,
+                    proteger_empate: false,
+                    is_dinamico: false
+                }
+            ]
+        });
+
+    const result =
+        await validarCriacaoRoboRoute({
+            dbPool,
+            mesaId: 1,
+
+            config: {
+                origens: ['A'],
+                avulsos: [],
+                excecoes: [],
+
+                auto_tuning: {
+                    ativo: true,
+                    gales: 1,
+                    proteger_empate: false
+                }
+            }
+        });
+
+    assert.equal(
+        result.ok,
+        false
+    );
+
+    assert.equal(
+        result.status,
+        409
+    );
+
+    assert.equal(
+        result.body.erro,
+        'ROBO_PERFIL_ESTRUTURAL_INCOMPATIVEL'
+    );
+});

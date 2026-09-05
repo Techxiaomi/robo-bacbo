@@ -414,3 +414,265 @@ test('referência de origem inexistente falha com 409', () => {
         ['Fantasma']
     );
 });
+
+
+test('auto-tuning ativo define perfil antes de existirem filhos IA', () => {
+    const result =
+        validarEscritaRobo({
+            roboId: null,
+            mesaId: 1,
+
+            config: {
+                origens: [],
+                avulsos: [],
+                excecoes: [],
+
+                auto_tuning: {
+                    ativo: true,
+                    gales: 1,
+                    proteger_empate: false
+                }
+            },
+
+            origens: [],
+            estrategias: []
+        });
+
+    assert.equal(
+        result.ok,
+        true
+    );
+
+    assert.equal(
+        result.perfil,
+        'G1_SEM_EMPATE'
+    );
+
+    assert.equal(
+        result.estado,
+        'CONSISTENT'
+    );
+
+    assert.equal(
+        result.total_estrategias,
+        0
+    );
+});
+
+test('auto-tuning ativo incompatível com padrões manuais retorna 409 antes da mineração', () => {
+    const result =
+        validarEscritaRobo({
+            roboId: 7,
+            mesaId: 1,
+
+            config: {
+                origens: ['A'],
+                avulsos: [],
+                excecoes: [],
+
+                auto_tuning: {
+                    ativo: true,
+                    gales: 1,
+                    proteger_empate: true
+                }
+            },
+
+            origens: [
+                {
+                    id: 1,
+                    mesa_id: 1,
+                    nome: 'A'
+                }
+            ],
+
+            estrategias: [
+                {
+                    id: 'manual',
+                    mesa_id: 1,
+                    origem: 'A',
+                    gales: 2,
+                    proteger_empate: true,
+                    is_dinamico: false
+                }
+            ]
+        });
+
+    assert.equal(
+        result.ok,
+        false
+    );
+
+    assert.equal(
+        result.status,
+        409
+    );
+
+    assert.equal(
+        result.body.erro,
+        'ROBO_PERFIL_ESTRUTURAL_INCOMPATIVEL'
+    );
+
+    assert.deepEqual(
+        result.body.perfis_encontrados
+            .map(
+                item =>
+                    item.signature
+            )
+            .sort(),
+        [
+            'G1_COM_EMPATE',
+            'G2_COM_EMPATE'
+        ]
+    );
+});
+
+test('auto-tuning ativo compatível preserva o perfil estrutural do robô', () => {
+    const result =
+        validarEscritaRobo({
+            roboId: 7,
+            mesaId: 1,
+
+            config: {
+                origens: ['A'],
+                avulsos: [],
+                excecoes: [],
+
+                auto_tuning: {
+                    ativo: true,
+                    gales: 2,
+                    proteger_empate: true
+                }
+            },
+
+            origens: [
+                {
+                    id: 1,
+                    mesa_id: 1,
+                    nome: 'A'
+                }
+            ],
+
+            estrategias: [
+                {
+                    id: 'manual',
+                    mesa_id: 1,
+                    origem: 'A',
+                    gales: 2,
+                    proteger_empate: true,
+                    is_dinamico: false
+                }
+            ]
+        });
+
+    assert.equal(
+        result.ok,
+        true
+    );
+
+    assert.equal(
+        result.perfil,
+        'G2_COM_EMPATE'
+    );
+
+    assert.equal(
+        result.estado,
+        'CONSISTENT'
+    );
+
+    assert.equal(
+        result.total_estrategias,
+        1
+    );
+});
+
+test('auto-tuning inativo não impõe seu perfil armazenado ao robô', () => {
+    const result =
+        validarEscritaRobo({
+            roboId: 7,
+            mesaId: 1,
+
+            config: {
+                origens: ['A'],
+                avulsos: [],
+                excecoes: [],
+
+                auto_tuning: {
+                    ativo: false,
+                    gales: 1,
+                    proteger_empate: false
+                }
+            },
+
+            origens: [
+                {
+                    id: 1,
+                    mesa_id: 1,
+                    nome: 'A'
+                }
+            ],
+
+            estrategias: [
+                {
+                    id: 'manual',
+                    mesa_id: 1,
+                    origem: 'A',
+                    gales: 2,
+                    proteger_empate: true,
+                    is_dinamico: false
+                }
+            ]
+        });
+
+    assert.equal(
+        result.ok,
+        true
+    );
+
+    assert.equal(
+        result.perfil,
+        'G2_COM_EMPATE'
+    );
+
+    assert.equal(
+        result.total_estrategias,
+        1
+    );
+});
+
+test('auto-tuning ativo com perfil estrutural inválido falha fechado com 400', () => {
+    const result =
+        validarEscritaRobo({
+            roboId: 7,
+            mesaId: 1,
+
+            config: {
+                origens: [],
+                avulsos: [],
+                excecoes: [],
+
+                auto_tuning: {
+                    ativo: true,
+                    gales: 99,
+                    proteger_empate: true
+                }
+            },
+
+            origens: [],
+            estrategias: []
+        });
+
+    assert.equal(
+        result.ok,
+        false
+    );
+
+    assert.equal(
+        result.status,
+        400
+    );
+
+    assert.equal(
+        result.body.erro,
+        'ROBO_AUTO_TUNING_PERFIL_ESTRUTURAL_INVALIDO'
+    );
+});

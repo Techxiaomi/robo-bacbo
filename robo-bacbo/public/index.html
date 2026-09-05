@@ -21,6 +21,7 @@
     <script src="/resources-ui4.js"></script>
     <script src="/telegram-form-ui.js"></script>
     <script src="/oraculo-dinamico.js"></script>
+    <script src="/strategy-profile-ui.js"></script>
 
     <style>
         html, body {
@@ -83,6 +84,10 @@
                     throw new Error('Otimizações de recursos UI-4 não carregadas');
                 }
 
+                if (window.__strategyProfileUiReady !== true || typeof window.__strategyProfileUi?.install !== 'function') {
+                    throw new Error('Controlador de perfil estrutural da UI não carregado');
+                }
+
                 const response = await fetch('/dashboard-app.html?_t=' + Date.now(), {
                     cache: 'no-store',
                     credentials: 'same-origin'
@@ -121,6 +126,10 @@
                 const script = document.createElement('script');
                 script.textContent = scriptPrincipalOtimizado;
                 document.body.appendChild(script);
+
+                if (!window.__strategyProfileUi.install()) {
+                    throw new Error('Controlador de perfil estrutural não encontrou os formulários do painel');
+                }
 
                 if (!window.__mesaSwitcher.mount()) {
                     throw new Error('Switcher de mesa MC25 não encontrou o cabeçalho do painel');

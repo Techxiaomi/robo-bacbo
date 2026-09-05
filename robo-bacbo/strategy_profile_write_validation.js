@@ -335,8 +335,10 @@ function validarEscritaRobo({
     const refs =
         validarReferenciasRobo({
             mesaId,
+
             config:
                 configNormalizada,
+
             origens,
             estrategias
         });
@@ -371,6 +373,44 @@ function validarEscritaRobo({
             selecionadas
         );
 
+    const autoTuning =
+        configNormalizada?.auto_tuning;
+
+    const autoTuningAtivo =
+        Boolean(
+            autoTuning
+            && typeof autoTuning === 'object'
+            && !Array.isArray(autoTuning)
+            && dinamico(
+                autoTuning.ativo
+            )
+        );
+
+    const perfilAutoTuning =
+        autoTuningAtivo
+            ? perfilDaEstrategia({
+                gales:
+                    autoTuning.gales,
+
+                proteger_empate:
+                    autoTuning.proteger_empate
+            })
+            : null;
+
+    if (
+        autoTuningAtivo
+        && !perfilAutoTuning.ok
+    ) {
+        return erroEstruturado(
+            400,
+            'ROBO_AUTO_TUNING_PERFIL_ESTRUTURAL_INVALIDO',
+            {
+                motivo:
+                    perfilAutoTuning.reason
+            }
+        );
+    }
+
     if (
         audit.status === 'INVALID'
         || audit.status ===
@@ -395,12 +435,57 @@ function validarEscritaRobo({
         );
     }
 
+    if (
+        autoTuningAtivo
+        && audit.status === 'CONSISTENT'
+        && audit.canonical_profile
+            !== perfilAutoTuning.signature
+    ) {
+        return erroEstruturado(
+            409,
+            'ROBO_PERFIL_ESTRUTURAL_INCOMPATIVEL',
+            {
+                estado:
+                    'INCONSISTENT',
+
+                perfis_encontrados: [
+                    ...audit.profiles,
+
+                    {
+                        signature:
+                            perfilAutoTuning.signature,
+
+                        count:
+                            1,
+
+                        source:
+                            'AUTO_TUNING'
+                    }
+                ],
+
+                estrategias_invalidas:
+                    audit.invalid_strategies,
+
+                total_estrategias:
+                    audit.total_strategies
+            }
+        );
+    }
+
+    const perfilSomenteAutoTuning =
+        autoTuningAtivo
+        && audit.status === 'EMPTY';
+
     return resultadoOk({
         perfil:
-            audit.canonical_profile,
+            perfilSomenteAutoTuning
+                ? perfilAutoTuning.signature
+                : audit.canonical_profile,
 
         estado:
-            audit.status,
+            perfilSomenteAutoTuning
+                ? 'CONSISTENT'
+                : audit.status,
 
         total_estrategias:
             audit.total_strategies,
