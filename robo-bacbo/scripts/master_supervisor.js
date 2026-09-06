@@ -51,6 +51,27 @@ function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function summarizeSupervisorHealth(supervisor) {
+    const workers = Array.from(supervisor.telemetry.values());
+
+    return {
+        desired: workers.filter(item => item.desired).length,
+        running: workers.filter(
+            item =>
+                item.pid &&
+                ['STARTING', 'READY', 'STOPPING'].includes(item.status)
+        ).length,
+        ready: workers.filter(
+            item => item.status === 'READY'
+        ).length,
+        errors: workers.filter(
+            item =>
+                item.status === 'ERROR' ||
+                Boolean(item.last_error)
+        ).length
+    };
+}
+
 class MasterSupervisor {
     constructor({ runnerPath, cwd, staggerMs, backoffBaseMs, backoffMaxMs, stableWindowMs, reconcileIntervalMs }) {
         this.runnerPath = runnerPath;
@@ -208,7 +229,23 @@ class MasterSupervisor {
         if (!WORKER_STATUSES.has(status)) return;
 
         if (status === 'READY') {
-            this.setTelemetry(entry, 'READY', { last_error: null });
+            const previousStatus =
+                this.telemetryFor(entry.task).status;
+
+            this.setTelemetry(
+                entry,
+                'READY',
+                { last_error: null }
+            );
+
+            if (previousStatus !== 'READY') {
+                console.log(
+                    `\u2705 [MASTER] READY | task=${entry.task.id} | ` +
+                    `pid=${entry.child?.pid || 'unknown'} | ` +
+                    `table=${entry.task.tableName}`
+                );
+            }
+
             return;
         }
         if (status === 'ERROR') {
@@ -239,9 +276,10 @@ class MasterSupervisor {
         });
 
         console.log(
-            `MASTER_SUPERVISOR_CHILD_STARTED=${task.id} pid=${child.pid || 'unknown'} ` +
-            `account=${task.accountName} table=${task.tableName} traders=${task.traderIds.join(',')} ` +
-            `metrics_namespace=${childEnv.OPERATIONS_METRICS_NAMESPACE}`
+            `\u25B6 [MASTER] START | task=${task.id} | ` +
+            `pid=${child.pid || 'unknown'} | ` +
+            `account=${task.accountName} | ` +
+            `table=${task.tableName}`
         );
 
         child.on('message', message => this.handleChildTelemetry(entry, message));
@@ -391,13 +429,17 @@ class MasterSupervisor {
             startEntries.push(existing);
         }
 
-        console.log(
-            `MASTER_SUPERVISOR_RECONCILE desired=${tasks.length} ` +
-            `start=${startEntries.length} stop=${stopCount} keep=${keepCount}`
-        );
+        const summary = {
+            desired: tasks.length,
+            start: startEntries.length,
+            stop: stopCount,
+            keep: keepCount
+        };
 
         await this.startEntries(startEntries);
         this.publishSnapshot();
+
+        return summary;
     }
 
     async shutdown() {
@@ -536,5 +578,6 @@ module.exports = {
     positiveIntEnv,
     optionalTableFilter,
     createDbPool,
+    summarizeSupervisorHealth,
     main
 };
