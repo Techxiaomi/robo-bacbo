@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const path = require('path');
 const mysql = require('mysql2/promise');
 const { createClient } = require('redis');
+const { escreverLinhaJson } = require('../logger');
 
 require('../env_loader').loadEnvFile(path.join(__dirname, '..', '..', '.env'));
 
@@ -29,6 +30,37 @@ const CHANNEL_PATTERN = /^[A-Za-z0-9._:*-]{1,160}$/;
 const SAFE_ACTIONS = new Set(['sync_balance']);
 const FINANCIAL_ACTIONS = new Set(['place_bet']);
 const BET_TARGETS = new Set(['PlayerWon', 'BankerWon', 'Tie']);
+
+const SIGNAL_ROUTER_AUDIT_FILE = path.resolve(
+    __dirname,
+    '..',
+    '..',
+    'logs',
+    'signal-router.audit.jsonl'
+);
+
+function auditRouter(event, payload = {}) {
+    try {
+        escreverLinhaJson(
+            SIGNAL_ROUTER_AUDIT_FILE,
+            {
+                timestamp: new Date().toISOString(),
+                level: 'info',
+                pid: process.pid,
+                event,
+                ...payload
+            },
+            {
+                maxBytes: 5 * 1024 * 1024,
+                maxArquivos: 5
+            }
+        );
+    } catch (error) {
+        console.error(
+            `\u274C [ROUTER] ERROR | audit_write | ${error?.message || error}`
+        );
+    }
+}
 
 function envBoolean(name, fallback = false) {
     const raw = String(process.env[name] ?? '').trim().toLowerCase();
@@ -308,7 +340,14 @@ class TargetCache {
             this.index = buildTargetIndex(houses);
             this.expiresAt = Date.now() + this.ttlMs;
             const total = Array.from(this.index.values()).reduce((sum, items) => sum + items.length, 0);
-            console.log(`SIGNAL_ROUTER_TARGET_CACHE_REFRESH tables=${this.index.size} targets=${total} ttl_ms=${this.ttlMs}`);
+            auditRouter(
+                'SIGNAL_ROUTER_TARGET_CACHE_REFRESH',
+                {
+                    tables: this.index.size,
+                    targets: total,
+                    ttl_ms: this.ttlMs
+                }
+            );
         })().finally(() => { this.refreshPromise = null; });
         return this.refreshPromise;
     }
@@ -357,16 +396,16 @@ function registerFanInExpectation(fanin, signal, targets, resultTimeoutMs) {
         tableKey: signal.table_key,
         targets: expectedTargets
     });
-    console.log(
-        `SIGNAL_FANIN_EXPECTING signal=${signal.signal_id} accounts=${targets.length} ` +
-        `timeout_ms=${resultTimeoutMs}`
+    auditRouter(
+        'SIGNAL_FANIN_EXPECTING',
+        {
+            signal_id: signal.signal_id,
+            table_key: signal.table_key,
+            accounts: targets.length,
+            timeout_ms: resultTimeoutMs,
+            targets: expectedTargets
+        }
     );
-    for (const item of expectedTargets) {
-        console.log(
-            `SIGNAL_FANIN_EXPECTED_TARGET signal=${signal.signal_id} account=${item.account_id} ` +
-            `order_id=${item.order_id} channel=${item.response_channel}`
-        );
-    }
     return expectedTargets;
 }
 
@@ -409,11 +448,21 @@ async function publishTerminalFinancialFailure({
         JSON.stringify(result)
     );
 
-    console.log(
-        `SIGNAL_ROUTER_TERMINAL_REJECTION signal=${signal.signal_id} ` +
-        `table=${signal.table_key} reason=${motivo} ` +
-        `expected_accounts=${expected} dispatch=0 ` +
-        `result_subscribers=${subscribers}`
+    auditRouter(
+        'SIGNAL_ROUTER_TERMINAL_REJECTION',
+        {
+            signal_id: signal.signal_id,
+            table_key: signal.table_key,
+            reason: motivo,
+            expected_accounts: expected,
+            dispatch: 0,
+            result_subscribers: subscribers
+        }
+    );
+
+    console.warn(
+        `\u26A0\uFE0F [ROUTER] DROP | table=${signal.table_key} | ` +
+        `signal=${signal.signal_id} | reason=${motivo}`
     );
 
     return result;
@@ -478,24 +527,61 @@ async function main() {
                 ? { ...consolidated, simulation: true }
                 : consolidated;
             const subscribers = await publisher.publish(consolidatedChannel, JSON.stringify(output));
+            auditRouter(
+                'SIGNAL_FANIN_COMPLETE',
+                {
+                    signal_id: output.signal_id,
+                    table_key: output.table_key,
+                    status: output.status,
+                    success_accounts: output.success_accounts,
+                    expected_accounts: output.expected_accounts,
+                    executor_status: output.executor_status,
+                    simulation: output.simulation === true,
+                    subscribers
+                }
+            );
+
             console.log(
-                `SIGNAL_FANIN_COMPLETE signal=${output.signal_id} status=${output.status} ` +
-                `success=${output.success_accounts}/${output.expected_accounts} ` +
-                `executor_status=${output.executor_status} simulation=${output.simulation === true} ` +
-                `subscribers=${subscribers}`
+                `\u2705 [ROUTER] RESULT | table=${output.table_key} | ` +
+                `signal=${output.signal_id} | status=${output.status} | ` +
+                `success=${output.success_accounts}/${output.expected_accounts}`
             );
         }
     });
     let shuttingDown = false;
 
-    publisher.on('error', error => console.error(`SIGNAL_ROUTER_REDIS_PUBLISHER_ERROR: ${error?.message || error}`));
-    subscriber.on('error', error => console.error(`SIGNAL_ROUTER_REDIS_SUBSCRIBER_ERROR: ${error?.message || error}`));
-    responseSubscriber.on('error', error => console.error(`SIGNAL_ROUTER_REDIS_RESPONSE_ERROR: ${error?.message || error}`));
+    publisher.on(
+        'error',
+        error => console.error(
+            `\u274C [ROUTER] ERROR | redis_publisher | ${error?.message || error}`
+        )
+    );
+
+    subscriber.on(
+        'error',
+        error => console.error(
+            `\u274C [ROUTER] ERROR | redis_subscriber | ${error?.message || error}`
+        )
+    );
+
+    responseSubscriber.on(
+        'error',
+        error => console.error(
+            `\u274C [ROUTER] ERROR | redis_response | ${error?.message || error}`
+        )
+    );
 
     const shutdown = async reason => {
         if (shuttingDown) return;
         shuttingDown = true;
-        console.log(`SIGNAL_ROUTER_SHUTDOWN_REQUESTED reason=${reason}`);
+        console.log(
+            `\u23F9\uFE0F [ROUTER] STOP | reason=${reason}`
+        );
+
+        auditRouter(
+            'SIGNAL_ROUTER_SHUTDOWN_REQUESTED',
+            { reason }
+        );
         fanin.close();
         await Promise.allSettled([
             subscriber.isOpen ? subscriber.quit() : Promise.resolve(),
@@ -503,7 +589,7 @@ async function main() {
             publisher.isOpen ? publisher.quit() : Promise.resolve()
         ]);
         await dbPool.end();
-        console.log('SIGNAL_ROUTER_STOPPED=true');
+        console.log('\u2705 [ROUTER] STOPPED');
     };
 
     process.once('SIGINT', () => void shutdown('SIGINT'));
@@ -520,9 +606,17 @@ async function main() {
             void (async () => {
                 const accepted = await fanin.accept(responseChannelName, payload);
                 if (!accepted) return;
-                console.log(
-                    `SIGNAL_FANIN_RESPONSE_ACCEPTED order_id=${String(payload.order_id || '').trim()} ` +
-                    `status=${String(payload.status || '').trim().toUpperCase()} channel=${responseChannelName}`
+                auditRouter(
+                    'SIGNAL_FANIN_RESPONSE_ACCEPTED',
+                    {
+                        order_id: String(
+                            payload.order_id || ''
+                        ).trim(),
+                        status: String(
+                            payload.status || ''
+                        ).trim().toUpperCase(),
+                        channel: responseChannelName
+                    }
                 );
             })().catch(error => {
                 console.error(`SIGNAL_FANIN_RESPONSE_FAILED channel=${responseChannelName}: ${error?.message || error}`);
@@ -530,21 +624,35 @@ async function main() {
         });
 
         console.log('=== SIGNAL ROUTER ===');
-        console.log(`SIGNAL_ROUTER_GLOBAL_CHANNEL=${channel}`);
-        console.log(`SIGNAL_ROUTER_RESULT_CHANNEL=${consolidatedChannel}`);
-        console.log(`SIGNAL_ROUTER_RESPONSE_PATTERN=${responsesPattern}`);
-        console.log(`SIGNAL_ROUTER_RESULT_TIMEOUT_MS=${resultTimeoutMs}`);
-        console.log(`SIGNAL_ROUTER_TARGET_CACHE_TTL_MS=${cacheTtlMs}`);
-        console.log(`SIGNAL_ROUTER_DEDUP_TTL_MS=${dedupTtlMs}`);
-        console.log(`SIGNAL_ROUTER_DEDUP_BACKEND=redis prefix=${dedupKeyPrefix}`);
-        console.log('SIGNAL_ROUTER_SAFE_ACTIONS=sync_balance');
-        console.log(`SIGNAL_ROUTER_FINANCIAL_FANOUT_ENABLED=${financialEnabled}`);
-        console.log(`SIGNAL_ROUTER_FINANCIAL_DRY_RUN=${dryRun}`);
-        console.log(`SIGNAL_ROUTER_FINANCIAL_FANIN_SIMULATION=${faninSimulation}`);
-        console.log('SIGNAL_ROUTER_TECHNICAL_CAP_SOURCE=technical_risk_caps');
-        console.log(`SIGNAL_ROUTER_GLOBAL_MAX_EXPOSURE=${globalMaxExposure.toFixed(2)}`);
-        console.log(`SIGNAL_ROUTER_PER_BRIDGE_MAX_EXPOSURE=${technicalCaps.per_bridge_cap.toFixed(2)}`);
-        console.log('SIGNAL_ROUTER_FINANCIAL_SCOPE=AUTHORITATIVE_TRADER_BINDINGS');
+
+        console.log(
+            `\uD83D\uDEA6 [ROUTER] START | channel=${channel} | ` +
+            `results=${consolidatedChannel}`
+        );
+
+        auditRouter(
+            'SIGNAL_ROUTER_STARTUP_CONFIG',
+            {
+                global_channel: channel,
+                result_channel: consolidatedChannel,
+                response_pattern: responsesPattern,
+                result_timeout_ms: resultTimeoutMs,
+                target_cache_ttl_ms: cacheTtlMs,
+                dedup_ttl_ms: dedupTtlMs,
+                dedup_backend: 'redis',
+                dedup_prefix: dedupKeyPrefix,
+                safe_actions: ['sync_balance'],
+                financial_fanout_enabled: financialEnabled,
+                financial_dry_run: dryRun,
+                financial_fanin_simulation: faninSimulation,
+                technical_cap_source: 'technical_risk_caps',
+                global_max_exposure: globalMaxExposure,
+                per_bridge_max_exposure:
+                    technicalCaps.per_bridge_cap,
+                financial_scope:
+                    'AUTHORITATIVE_TRADER_BINDINGS'
+            }
+        );
 
         let generatedSequence = 0;
         await subscriber.subscribe(channel, async message => {
@@ -556,22 +664,68 @@ async function main() {
                     nextGeneratedId: () => `router-${process.pid}-${Date.now()}-${++generatedSequence}`
                 });
             } catch (error) {
-                console.error(`SIGNAL_ROUTER_REJECTED reason=${error?.message || error}`);
+                const reason =
+                    String(error?.message || error);
+
+                auditRouter(
+                    'SIGNAL_ROUTER_REJECTED',
+                    { reason }
+                );
+
+                console.warn(
+                    `\u26A0\uFE0F [ROUTER] DROP | reason=${reason}`
+                );
                 return;
             }
 
             let claimed;
             try { claimed = await dedup.claim(signal.signal_id); }
             catch (error) {
-                console.error(`SIGNAL_ROUTER_DEDUP_FAILED signal=${signal.signal_id}: ${error?.message || error}`);
+                auditRouter(
+                    'SIGNAL_ROUTER_DEDUP_FAILED',
+                    {
+                        signal_id: signal.signal_id,
+                        table_key: signal.table_key,
+                        reason: String(error?.message || error)
+                    }
+                );
+
+                console.error(
+                    `\u274C [ROUTER] ERROR | table=${signal.table_key} | ` +
+                    `signal=${signal.signal_id} | dedup | ` +
+                    `${error?.message || error}`
+                );
                 return;
             }
             if (!claimed) {
-                console.warn(`SIGNAL_ROUTER_DUPLICATE signal=${signal.signal_id}`);
+                auditRouter(
+                    'SIGNAL_ROUTER_DUPLICATE',
+                    {
+                        signal_id: signal.signal_id,
+                        table_key: signal.table_key
+                    }
+                );
+
+                console.warn(
+                    `\u26A0\uFE0F [ROUTER] DROP | table=${signal.table_key} | ` +
+                    `signal=${signal.signal_id} | reason=DUPLICATE`
+                );
                 return;
             }
 
-            console.log(`SIGNAL_ROUTER_RECEIVED signal=${signal.signal_id} action=${signal.action} table=${signal.table_key}`);
+            auditRouter(
+                'SIGNAL_ROUTER_RECEIVED',
+                {
+                    signal_id: signal.signal_id,
+                    action: signal.action,
+                    table_key: signal.table_key
+                }
+            );
+
+            console.log(
+                `\uD83D\uDCE5 [ROUTER] RX | table=${signal.table_key} | ` +
+                `signal=${signal.signal_id} | action=${signal.action}`
+            );
 
             let targets;
             try { targets = await cache.targets(signal.table_key); }
@@ -593,10 +747,26 @@ async function main() {
 
                 return;
             }
-            console.log(`SIGNAL_ROUTER_TARGETS signal=${signal.signal_id} count=${targets.length}`);
+            auditRouter(
+                'SIGNAL_ROUTER_TARGETS',
+                {
+                    signal_id: signal.signal_id,
+                    table_key: signal.table_key,
+                    count: targets.length
+                }
+            );
             if (targets.length === 0) {
+                auditRouter(
+                    'SIGNAL_ROUTER_NO_TARGETS',
+                    {
+                        signal_id: signal.signal_id,
+                        table_key: signal.table_key
+                    }
+                );
+
                 console.warn(
-                    `SIGNAL_ROUTER_NO_TARGETS signal=${signal.signal_id} table=${signal.table_key}`
+                    `\u26A0\uFE0F [ROUTER] DROP | table=${signal.table_key} | ` +
+                    `signal=${signal.signal_id} | reason=NO_TARGETS`
                 );
 
                 if (signal.action === 'place_bet') {
@@ -640,11 +810,20 @@ async function main() {
                 const unscopedCount = targets.length;
                 targets = filterTargetsByAccountIds(targets, traderScope.account_ids);
                 const ignoredUnbound = Math.max(0, unscopedCount - targets.length);
-                console.log(
-                    `SIGNAL_ROUTER_TRADER_SCOPE signal=${signal.signal_id} trader=${traderScope.trader_id} ` +
-                    `table=${signal.table_key} linked_accounts=${traderScope.account_ids.join(',')} ` +
-                    `eligible_accounts=${targets.map(item => item.account_id).join(',') || '-'} ` +
-                    `ignored_unbound=${ignoredUnbound}`
+                auditRouter(
+                    'SIGNAL_ROUTER_TRADER_SCOPE',
+                    {
+                        signal_id: signal.signal_id,
+                        trader_id: traderScope.trader_id,
+                        table_key: signal.table_key,
+                        linked_accounts: traderScope.account_ids,
+                        eligible_accounts:
+                            targets.map(
+                                item => item.account_id
+                            ),
+                        ignored_unbound: ignoredUnbound,
+                        detail: `ignored_unbound=${ignoredUnbound}`
+                    }
                 );
                 if (targets.length === 0) {
                     console.warn(
@@ -684,11 +863,22 @@ async function main() {
                 dispatchTargets = availability.filter(item => item.subscribers > 0).map(item => item.target);
                 const online = dispatchTargets.length;
                 const globalExposure = calculateGlobalExposure(signal, online);
-                console.log(
-                    `SIGNAL_ROUTER_FINANCIAL_PRECHECK signal=${signal.signal_id} trader=${traderScope.trader_id} ` +
-                    `per_account=${(signal.exposure_cents / 100).toFixed(2)} online=${online} ` +
-                    `online_accounts=${dispatchTargets.map(item => item.account_id).join(',') || '-'} ` +
-                    `global=${globalExposure.toFixed(2)} limit=${globalMaxExposure.toFixed(2)}`
+                auditRouter(
+                    'SIGNAL_ROUTER_FINANCIAL_PRECHECK',
+                    {
+                        signal_id: signal.signal_id,
+                        trader_id: traderScope.trader_id,
+                        table_key: signal.table_key,
+                        per_account:
+                            signal.exposure_cents / 100,
+                        online,
+                        online_accounts:
+                            dispatchTargets.map(
+                                item => item.account_id
+                            ),
+                        global_exposure: globalExposure,
+                        global_limit: globalMaxExposure
+                    }
                 );
                 if (globalExposure > globalMaxExposure + 1e-9) {
                     console.error(
@@ -735,11 +925,29 @@ async function main() {
 
                     const dryRunResult = buildDryRunConsolidated(signal, dispatchTargets);
                     const subscribers = await publisher.publish(consolidatedChannel, JSON.stringify(dryRunResult));
+                    auditRouter(
+                        'SIGNAL_ROUTER_FINANCIAL_DRY_RUN_COMPLETE',
+                        {
+                            signal_id: signal.signal_id,
+                            trader_id: traderScope.trader_id,
+                            table_key: signal.table_key,
+                            accounts:
+                                dispatchTargets.map(
+                                    item => item.account_id
+                                ),
+                            online,
+                            global_exposure: globalExposure,
+                            dispatch: 0,
+                            executor_status:
+                                dryRunResult.executor_status,
+                            result_subscribers: subscribers
+                        }
+                    );
+
                     console.log(
-                        `SIGNAL_ROUTER_FINANCIAL_DRY_RUN_COMPLETE signal=${signal.signal_id} ` +
-                        `trader=${traderScope.trader_id} accounts=${dispatchTargets.map(item => item.account_id).join(',')} ` +
-                        `online=${online} global=${globalExposure.toFixed(2)} dispatch=0 ` +
-                        `executor_status=${dryRunResult.executor_status} result_subscribers=${subscribers}`
+                        `\u2197\uFE0F [ROUTER] ROUTE | table=${signal.table_key} | ` +
+                        `signal=${signal.signal_id} | mode=DRY_RUN | ` +
+                        `targets=${dispatchTargets.length} | dispatch=0`
                     );
                     return;
                 }
@@ -751,9 +959,22 @@ async function main() {
                 const command = commandForTarget(signal, target);
                 try {
                     const subscribers = await publisher.publish(target.command_channel, JSON.stringify(command));
+                    auditRouter(
+                        'SIGNAL_ROUTER_DISPATCH',
+                        {
+                            signal_id: signal.signal_id,
+                            table_key: signal.table_key,
+                            account_id: target.account_id,
+                            session_id: target.session_id,
+                            channel: target.command_channel,
+                            subscribers
+                        }
+                    );
+
                     console.log(
-                        `SIGNAL_ROUTER_DISPATCH signal=${signal.signal_id} account=${target.account_id} ` +
-                        `session=${target.session_id} channel=${target.command_channel} subscribers=${subscribers}`
+                        `\u2197\uFE0F [ROUTER] ROUTE | table=${signal.table_key} | ` +
+                        `signal=${signal.signal_id} | ` +
+                        `account=${target.account_id} | subscribers=${subscribers}`
                     );
                     if (signal.action === 'place_bet' && Number(subscribers) < 1) {
                         await fanin.markDispatchFailure(command.order_id, 'SIGNAL_ROUTER_DISPATCH_NO_SUBSCRIBER');
@@ -779,13 +1000,37 @@ async function main() {
                 published += 1;
                 if (Number(result.value.subscribers) === 0) offline += 1;
             }
+            auditRouter(
+                'SIGNAL_ROUTER_DISPATCH_COMPLETE',
+                {
+                    signal_id: signal.signal_id,
+                    table_key: signal.table_key,
+                    targets: dispatchTargets.length,
+                    published,
+                    offline,
+                    failed
+                }
+            );
+
             console.log(
-                `SIGNAL_ROUTER_DISPATCH_COMPLETE signal=${signal.signal_id} ` +
-                `targets=${dispatchTargets.length} published=${published} offline=${offline} failed=${failed}`
+                `\u2197\uFE0F [ROUTER] ROUTED | table=${signal.table_key} | ` +
+                `signal=${signal.signal_id} | targets=${dispatchTargets.length} | ` +
+                `ok=${published} | offline=${offline} | failed=${failed}`
             );
         });
 
-        console.log('SIGNAL_ROUTER_READY=true');
+        console.log(
+            `\u2705 [ROUTER] READY | channel=${channel} | ` +
+            `results=${consolidatedChannel}`
+        );
+
+        auditRouter(
+            'SIGNAL_ROUTER_READY',
+            {
+                channel,
+                result_channel: consolidatedChannel
+            }
+        );
     } catch (error) {
         await shutdown('STARTUP_FAILURE').catch(() => {});
         throw error;
