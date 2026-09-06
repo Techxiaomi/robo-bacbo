@@ -9,6 +9,12 @@ const {
     calcularPlanoAposta,
     calcularPnLEtapa
 } = require("./tie_protection");
+const {
+    classificarTieObservado,
+    agregarLinhasTiePorPeriodo,
+    normalizarProtecaoSnapshot
+} = require('./tie_telemetry');
+
 const { Server } = require("socket.io");
 const { criarAutoPilotService } = require("./auto_pilot_ia");
 const { analisarOraculo, extrairMesaAtual, normalizarResultadoOraculo } = require("./oraculo_dinamico");
@@ -35,6 +41,17 @@ const {
     afirmarMesaFinanceiraAutorizada
 } = require("./mesa_financial_scope");
 const { resolveRiskPolicy } = require("./risk_policy");
+const {
+    validarCriacaoEstrategiaRoute,
+    validarEdicaoEstrategiaRoute,
+    validarCriacaoRoboRoute,
+    validarEdicaoRoboRoute,
+
+    carregarMesaEstrutural,
+    listarRobosEstruturais,
+    validarRenameOrigemEstrutural,
+    validarDeleteOrigemEstrutural
+} = require("./strategy_profile_route_support");
 require("./env_loader").loadEnvFile(path.join(__dirname, "..", ".env"));
 
 // Erros globais realmente não tratados são fatais: continuar pode deixar estado financeiro incoerente.
@@ -110,6 +127,12 @@ async function limparPadroesDinamicosOrfaos() {
             );
             await conexao.query(
                 `DELETE FROM historico_shadow_ia
+                 WHERE mesa_id=?
+                   AND estrategia_id IN (${placeholders})`,
+                [mesaId, ...ids]
+            );
+            await conexao.query(
+                `DELETE FROM historico_tie_observado
                  WHERE mesa_id=?
                    AND estrategia_id IN (${placeholders})`,
                 [mesaId, ...ids]
@@ -215,6 +238,38 @@ async function prepararBancoDeDados() {
         `);
 
         await dbPool.query(`
+            CREATE TABLE IF NOT EXISTS historico_tie_observado (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                mesa_id SMALLINT UNSIGNED NOT NULL,
+                giro_resultado_id INT NOT NULL,
+                estrategia_id VARCHAR(100) NOT NULL,
+                escopo VARCHAR(20) NOT NULL,
+                robo_id INT NOT NULL DEFAULT 0,
+                nivel VARCHAR(20) NOT NULL,
+                multiplicador VARCHAR(20) DEFAULT '',
+                proteger_empate_snapshot BOOLEAN DEFAULT NULL,
+                data_hora DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_tie_observado (
+                    mesa_id,
+                    giro_resultado_id,
+                    estrategia_id,
+                    escopo,
+                    robo_id
+                ),
+                INDEX idx_tie_obs_estrategia (
+                    mesa_id,
+                    estrategia_id,
+                    data_hora
+                ),
+                INDEX idx_tie_obs_robo (
+                    mesa_id,
+                    robo_id,
+                    data_hora
+                )
+            )
+        `);
+
+        await dbPool.query(`
             CREATE TABLE IF NOT EXISTS historico_shadow_ia (
                 id BIGINT AUTO_INCREMENT PRIMARY KEY,
                 mesa_id SMALLINT UNSIGNED NOT NULL,
@@ -266,8 +321,35 @@ async function prepararBancoDeDados() {
                 historico_reds_json TEXT,
                 ativo BOOLEAN DEFAULT true,
                 config_json TEXT
-            )
+            ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
         `);
+
+        // Bancos legados podem ter nascido em utf8mb3.
+        // CREATE TABLE IF NOT EXISTS não altera charset de tabela existente.
+        const [charsetRoboRows] = await dbPool.query(`
+            SELECT TABLE_COLLATION
+            FROM information_schema.TABLES
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME = 'robos_canais'
+            LIMIT 1
+        `);
+
+        const collationRobos = String(
+            charsetRoboRows?.[0]?.TABLE_COLLATION || ''
+        ).toLowerCase();
+
+        if (!collationRobos.startsWith('utf8mb4_')) {
+            console.log(
+                '🔤 Migrando robos_canais para utf8mb4 '
+                + '(compatibilidade com emoji/Unicode completo)...'
+            );
+
+            await dbPool.query(`
+                ALTER TABLE robos_canais
+                CONVERT TO CHARACTER SET utf8mb4
+                COLLATE utf8mb4_unicode_ci
+            `);
+        }
 
         await dbPool.query(`
             CREATE TABLE IF NOT EXISTS destinatarios_robo (
@@ -1821,12 +1903,66 @@ app.get("/api/estrategias", async (req, res) => {
             'SELECT * FROM estrategias WHERE mesa_id=? ORDER BY id DESC',
             [mesaId]
         );
+
+        const [tiesObservados] = await dbPool.query(
+            `SELECT
+                estrategia_id,
+                nivel,
+                multiplicador,
+                proteger_empate_snapshot,
+                data_hora
+             FROM historico_tie_observado
+             WHERE mesa_id=?
+               AND escopo='ESTRATEGIA'
+             ORDER BY estrategia_id ASC, data_hora ASC, id ASC`,
+            [mesaId]
+        );
+
+        const tiesPorEstrategia = new Map();
+
+        for (const row of tiesObservados) {
+            const estrategiaId = String(row.estrategia_id);
+
+            if (!tiesPorEstrategia.has(estrategiaId)) {
+                tiesPorEstrategia.set(estrategiaId, []);
+            }
+
+            tiesPorEstrategia
+                .get(estrategiaId)
+                .push(row);
+        }
+
         const agoraMs = Date.now();
 
-        res.json(linhas.map(est => ({
-            ...est,
-            detalhes: calcularDetalhesPadraoNoHistorico(est, historicoGirosAnalitico, agoraMs)
-        })));
+        res.json(linhas.map(est => {
+            const detalhesLegados =
+                calcularDetalhesPadraoNoHistorico(
+                    est,
+                    historicoGirosAnalitico,
+                    agoraMs
+                );
+
+            const telemetriaPorPeriodo =
+                agregarLinhasTiePorPeriodo(
+                    tiesPorEstrategia.get(String(est.id)) || [],
+                    agoraMs
+                );
+
+            const detalhes = {};
+
+            for (const periodo of ['24h', 'hoje', 'semana', 'mes', 'geral']) {
+                detalhes[periodo] = {
+                    ...detalhesLegados[periodo],
+                    tie_telemetry:
+                        telemetriaPorPeriodo[periodo]
+                };
+            }
+
+            return {
+                ...est,
+                detalhes
+            };
+        }));
     } catch (erro) {
         console.error('❌ GET /api/estrategias falhou:', erro.message);
         res.status(500).json({ erro: "Erro ao buscar estratégias" });
@@ -2122,6 +2258,24 @@ app.post("/api/novo-padrao", async (req, res) => {
     try {
         const mesaId = mesaIdRuntimeApi();
         const { nome, origem, padrao, entrada, gales, protegerEmpate, ativo } = req.body;
+
+        const validacaoEstrutural =
+            await validarCriacaoEstrategiaRoute({
+                dbPool,
+                mesaId,
+                estrategia: {
+                    nome,
+                    origem,
+                    gales,
+                    proteger_empate: protegerEmpate
+                }
+            });
+
+        if (!validacaoEstrutural.ok) {
+            return res
+                .status(validacaoEstrutural.status)
+                .json(validacaoEstrutural.body);
+        }
         const padraoJson = JSON.stringify(padrao.split(',').map(s => s.trim()));
         const id = "padrao_" + Date.now();
         const tiesZerado = JSON.stringify({ direto: { '88x': 0, '25x': 0, '10x': 0, '6x': 0, '4x': 0 }, gale1: { '88x': 0, '25x': 0, '10x': 0, '6x': 0, '4x': 0 }, gale2: { '88x': 0, '25x': 0, '10x': 0, '6x': 0, '4x': 0 } });
@@ -2144,6 +2298,26 @@ app.put("/api/estrategia/:id", async (req, res) => {
     try {
         const mesaId = mesaIdRuntimeApi();
         const { nome, origem, padrao, entrada, gales, protegerEmpate, ativo } = req.body;
+
+        const validacaoEstrutural =
+            await validarEdicaoEstrategiaRoute({
+                dbPool,
+                mesaId,
+                estrategiaId: req.params.id,
+                estrategia: {
+                    id: req.params.id,
+                    nome,
+                    origem,
+                    gales,
+                    proteger_empate: protegerEmpate
+                }
+            });
+
+        if (!validacaoEstrutural.ok) {
+            return res
+                .status(validacaoEstrutural.status)
+                .json(validacaoEstrutural.body);
+        }
         const padraoJson = JSON.stringify(padrao.split(',').map(s => s.trim()));
         const [resultadoUpdate] = await dbPool.query(
             'UPDATE estrategias SET nome=?, origem=?, padrao=?, entrada=?, gales=?, proteger_empate=?, ativo=? WHERE id=? AND mesa_id=? AND is_dinamico=false',
@@ -2242,6 +2416,11 @@ async function apagarEstrategiaEDados(id, mesaId) {
 
     await dbPool.query(
         'DELETE FROM historico_resultados WHERE estrategia_id=? AND mesa_id=?',
+        [id, mesaId]
+    );
+
+    await dbPool.query(
+        'DELETE FROM historico_tie_observado WHERE estrategia_id=? AND mesa_id=?',
         [id, mesaId]
     );
 }
@@ -2343,7 +2522,8 @@ app.put("/api/origem/:id", async (req, res) => {
                 .status(400)
                 .json({
                     sucesso: false,
-                    erro: 'nome_origem_invalido'
+                    erro:
+                        'nome_origem_invalido'
                 });
         }
 
@@ -2377,14 +2557,47 @@ app.put("/api/origem/:id", async (req, res) => {
                 .status(404)
                 .json({
                     sucesso: false,
-                    erro: 'origem_nao_encontrada'
+                    erro:
+                        'origem_nao_encontrada'
                 });
         }
 
         const nomeAnterior =
             String(
                 origens[0].nome || ''
-            );
+            ).trim();
+
+        const estado =
+            await carregarMesaEstrutural({
+                dbPool: conexao,
+                mesaId
+            });
+
+        const robos =
+            await listarRobosEstruturais({
+                dbPool: conexao,
+                mesaId
+            });
+
+        const validacao =
+            validarRenameOrigemEstrutural({
+                mesaId,
+                origemAnterior:
+                    nomeAnterior,
+                origemNova:
+                    novoNome,
+                estado,
+                robos
+            });
+
+        if (!validacao.ok) {
+            await conexao.rollback();
+            transacaoAberta = false;
+
+            return res
+                .status(validacao.status)
+                .json(validacao.body);
+        }
 
         const [resultadoOrigem] =
             await conexao.query(
@@ -2422,6 +2635,37 @@ app.put("/api/origem/:id", async (req, res) => {
             ]
         );
 
+        for (
+            const robo
+            of validacao.robos
+        ) {
+            const [resultadoRobo] =
+                await conexao.query(
+                    `UPDATE robos_canais
+                     SET config_json=?
+                     WHERE id=?
+                       AND mesa_id=?`,
+                    [
+                        JSON.stringify(
+                            robo.config
+                        ),
+
+                        robo.id,
+                        mesaId
+                    ]
+                );
+
+            if (
+                Number(
+                    resultadoRobo.affectedRows
+                ) !== 1
+            ) {
+                throw new Error(
+                    'ORIGEM_RENAME_ROBO_MUDOU_DURANTE_TRANSACAO'
+                );
+            }
+        }
+
         await conexao.commit();
         transacaoAberta = false;
 
@@ -2434,23 +2678,25 @@ app.put("/api/origem/:id", async (req, res) => {
         return res.json({
             sucesso: true
         });
-    } catch (e) {
+    }
+    catch (e) {
         if (
             conexao
             && transacaoAberta
         ) {
             try {
                 await conexao.rollback();
-            } catch (rollbackError) {
+            }
+            catch (rollbackError) {
                 console.error(
-                    '? MC23-B rollback origem:',
+                    'MC23-B rollback origem:',
                     rollbackError.message
                 );
             }
         }
 
         console.error(
-            `? PUT /api/origem/${req.params.id} falhou:`,
+            `PUT /api/origem/${req.params.id} falhou:`,
             e.message
         );
 
@@ -2459,7 +2705,8 @@ app.put("/api/origem/:id", async (req, res) => {
             .json({
                 sucesso: false
             });
-    } finally {
+    }
+    finally {
         if (conexao) {
             conexao.release();
         }
@@ -2467,12 +2714,85 @@ app.put("/api/origem/:id", async (req, res) => {
 });
 
 app.delete("/api/origem/:id", async (req, res) => {
+    let conexao = null;
+    let transacaoAberta = false;
+
     try {
         const mesaId =
             mesaIdRuntimeApi();
 
+        conexao =
+            await dbPool.getConnection();
+
+        await conexao.beginTransaction();
+        transacaoAberta = true;
+
+        const [origens] =
+            await conexao.query(
+                `SELECT id, nome
+                 FROM origens
+                 WHERE id=?
+                   AND mesa_id=?
+                 LIMIT 1
+                 FOR UPDATE`,
+                [
+                    req.params.id,
+                    mesaId
+                ]
+            );
+
+        if (
+            origens.length === 0
+        ) {
+            await conexao.rollback();
+            transacaoAberta = false;
+
+            return res
+                .status(404)
+                .json({
+                    sucesso: false,
+                    erro:
+                        'origem_nao_encontrada'
+                });
+        }
+
+        const nomeOrigem =
+            String(
+                origens[0].nome || ''
+            ).trim();
+
+        const estado =
+            await carregarMesaEstrutural({
+                dbPool: conexao,
+                mesaId
+            });
+
+        const robos =
+            await listarRobosEstruturais({
+                dbPool: conexao,
+                mesaId
+            });
+
+        const validacao =
+            validarDeleteOrigemEstrutural({
+                mesaId,
+                origem:
+                    nomeOrigem,
+                estado,
+                robos
+            });
+
+        if (!validacao.ok) {
+            await conexao.rollback();
+            transacaoAberta = false;
+
+            return res
+                .status(validacao.status)
+                .json(validacao.body);
+        }
+
         const [resultado] =
-            await dbPool.query(
+            await conexao.query(
                 `DELETE FROM origens
                  WHERE id=?
                    AND mesa_id=?`,
@@ -2487,13 +2807,13 @@ app.delete("/api/origem/:id", async (req, res) => {
                 resultado.affectedRows
             ) !== 1
         ) {
-            return res
-                .status(404)
-                .json({
-                    sucesso: false,
-                    erro: 'origem_nao_encontrada'
-                });
+            throw new Error(
+                'ORIGEM_DELETE_MUDOU_DURANTE_TRANSACAO'
+            );
         }
+
+        await conexao.commit();
+        transacaoAberta = false;
 
         ioServer.emit(
             'atualizar_interface'
@@ -2502,9 +2822,20 @@ app.delete("/api/origem/:id", async (req, res) => {
         return res.json({
             sucesso: true
         });
-    } catch (e) {
+    }
+    catch (e) {
+        if (
+            conexao
+            && transacaoAberta
+        ) {
+            try {
+                await conexao.rollback();
+            }
+            catch (_) {}
+        }
+
         console.error(
-            `? DELETE /api/origem/${req.params.id} falhou:`,
+            `DELETE /api/origem/${req.params.id} falhou:`,
             e.message
         );
 
@@ -2513,6 +2844,11 @@ app.delete("/api/origem/:id", async (req, res) => {
             .json({
                 sucesso: false
             });
+    }
+    finally {
+        if (conexao) {
+            conexao.release();
+        }
     }
 });
 
@@ -2548,6 +2884,34 @@ app.get("/api/robos", async (req, res) => {
             ORDER BY robo_id ASC, data_hora ASC, id ASC
         `, [mesaId]);
 
+        const [tiesObservadosRobos] = await dbPool.query(`
+            SELECT
+                robo_id,
+                nivel,
+                multiplicador,
+                proteger_empate_snapshot,
+                data_hora
+            FROM historico_tie_observado
+            WHERE mesa_id=?
+              AND escopo='ROBO'
+            ORDER BY robo_id ASC, data_hora ASC, id ASC
+        `, [mesaId]);
+
+        const tiesPorRobo = new Map();
+
+        for (const row of tiesObservadosRobos) {
+            const roboId = String(row.robo_id);
+
+            if (!tiesPorRobo.has(roboId)) {
+                tiesPorRobo.set(roboId, []);
+            }
+
+            tiesPorRobo
+                .get(roboId)
+                .push(row);
+        }
+
+        const agoraTieRobosMs = Date.now();
         let mapRobos = {};
         let sequenciasRobos = {};
         const createEmptyPeriod = () => ({
@@ -2630,6 +2994,21 @@ app.get("/api/robos", async (req, res) => {
             let contagemIA = countDinamicos.find(d => d.robo_dono_id === r.id);
             let cState = estadoStandbyRobos[r.id];
             const { telegram_token: telegramTokenPrivado, ...roboPublico } = r;
+            const telemetriaPorPeriodo =
+                agregarLinhasTiePorPeriodo(
+                    tiesPorRobo.get(String(r.id)) || [],
+                    agoraTieRobosMs
+                );
+
+            const detalhesComTieTelemetry = {};
+
+            for (const periodo of ['24h', 'hoje', 'semana', 'mes', 'geral']) {
+                detalhesComTieTelemetry[periodo] = {
+                    ...mapRobos[r.id][periodo],
+                    tie_telemetry:
+                        telemetriaPorPeriodo[periodo]
+                };
+            }
             return {
                 ...roboPublico,
                 telegram_configurado: Boolean(String(telegramTokenPrivado || '').trim()),
@@ -2642,7 +3021,7 @@ app.get("/api/robos", async (req, res) => {
                 qtd_padroes_ia_shadow_historico: contagemIA ? Number(contagemIA.qtd_shadow_historico || 0) : 0,
                 qtd_padroes_ia_shadow_live: contagemIA ? Number(contagemIA.qtd_shadow_live || 0) : 0,
                 qtd_padroes_ia_total: contagemIA ? Number(contagemIA.qtd_total || 0) : 0,
-                detalhes: mapRobos[r.id],
+                detalhes: detalhesComTieTelemetry,
                 em_standby_ate: cState ? cState.em_standby_ate : 0
             };
         });
@@ -2655,6 +3034,19 @@ app.post("/api/robo", async (req, res) => {
     try {
         const mesaId = mesaIdRuntimeApi();
         const { nome, tag, cor, telegram_token, telegram_chat_id, enviar_telegram, enviar_web, min_assert, stop_reds, ativo, config, destinatarios } = req.body;
+
+        const validacaoEstrutural =
+            await validarCriacaoRoboRoute({
+                dbPool,
+                mesaId,
+                config: config || {}
+            });
+
+        if (!validacaoEstrutural.ok) {
+            return res
+                .status(validacaoEstrutural.status)
+                .json(validacaoEstrutural.body);
+        }
         const configJson = JSON.stringify(config || {});
         const tokenNormalizado = typeof telegram_token === 'string' ? telegram_token.trim() : '';
         const chatPrincipal = typeof telegram_chat_id === 'string' ? telegram_chat_id.trim() : '';
@@ -2683,7 +3075,14 @@ app.post("/api/robo", async (req, res) => {
         }
         ioServer.emit('atualizar_robos');
         res.json({ sucesso: true });
-    } catch(e) { console.error('❌ POST /api/robo falhou:', e.message); res.status(500).json({ sucesso: false }); }
+    } catch(e) {
+        console.error('❌ POST /api/robo falhou:', e.message);
+        res.status(500).json({
+            sucesso: false,
+            erro: 'ROBO_SALVAR_FALHA_INTERNA',
+            mensagem: String(e?.message || 'Falha interna ao salvar o robô.')
+        });
+    }
 });
 
 app.put("/api/robo/:id", async (req, res) => {
@@ -2709,6 +3108,20 @@ app.put("/api/robo/:id", async (req, res) => {
 
         if (existentes.length === 0) {
             return res.status(404).json({ sucesso: false, erro: 'robo_nao_encontrado' });
+        }
+
+        const validacaoEstrutural =
+            await validarEdicaoRoboRoute({
+                dbPool,
+                mesaId,
+                roboId: id,
+                config: config || {}
+            });
+
+        if (!validacaoEstrutural.ok) {
+            return res
+                .status(validacaoEstrutural.status)
+                .json(validacaoEstrutural.body);
         }
 
         const estavaAtivo = existentes[0].ativo === true || existentes[0].ativo === 1;
@@ -2935,6 +3348,12 @@ app.delete("/api/robo/:id", async (req, res) => {
                 [mesaId, ...idsPadroes]
             );
             await conexao.query(
+                `DELETE FROM historico_tie_observado
+                 WHERE mesa_id=?
+                   AND estrategia_id IN (${placeholders})`,
+                [mesaId, ...idsPadroes]
+            );
+            await conexao.query(
                 `DELETE FROM historico_disparos_robos
                  WHERE mesa_id=?
                    AND estrategia_id IN (${placeholders})`,
@@ -2960,6 +3379,13 @@ app.delete("/api/robo/:id", async (req, res) => {
             [mesaId, prefixoHistoricoIa.length, prefixoHistoricoIa]
         );
 
+        await conexao.query(
+            `DELETE FROM historico_tie_observado
+             WHERE mesa_id=?
+               AND LEFT(estrategia_id, ?) = ?`,
+            [mesaId, prefixoHistoricoIa.length, prefixoHistoricoIa]
+        );
+
         // Ao excluir o Robô/Canal, seu histórico de distribuição também deixa de ter proprietário.
         await conexao.query(
             'DELETE FROM historico_shadow_ia WHERE mesa_id=? AND robo_id=?',
@@ -2967,6 +3393,13 @@ app.delete("/api/robo/:id", async (req, res) => {
         );
         await conexao.query(
             'DELETE FROM historico_disparos_robos WHERE mesa_id=? AND robo_id=?',
+            [mesaId, roboId]
+        );
+        await conexao.query(
+            `DELETE FROM historico_tie_observado
+             WHERE mesa_id=?
+               AND escopo='ROBO'
+               AND robo_id=?`,
             [mesaId, roboId]
         );
         await conexao.query('DELETE FROM destinatarios_robo WHERE robo_id=?', [roboId]);
@@ -3770,6 +4203,193 @@ function nivelHistoricoResultado(galeAtual) {
     if (galeAtual === 1) return 'GALE1';
     if (galeAtual === 2) return 'GALE2';
     return 'DIRETO';
+}
+
+
+function snapshotProtecaoEmpateTelemetria(est) {
+    return normalizarProtecaoSnapshot(
+        est?.proteger_empate
+        ?? est?.protegerEmpate
+    );
+}
+async function registrarTieObservado({
+    est,
+    estado,
+    giroResultadoId,
+    multiplicador,
+    timestampColeta
+}) {
+    const giroId =
+        Number(
+            giroResultadoId
+        );
+
+    if (
+        !Number.isInteger(giroId)
+        || giroId <= 0
+    ) {
+        return Object.freeze({
+            registrado: false,
+            motivo:
+                'GIRO_CANONICO_AUSENTE'
+        });
+    }
+
+    const mesaRuntime =
+        obterMesaRuntime();
+
+    const timestampMs =
+        Number(
+            timestampColeta
+        );
+
+    const timestampSegundos =
+        Number.isFinite(timestampMs)
+        && timestampMs > 0
+            ? timestampMs / 1000
+            : Date.now() / 1000;
+
+    const snapshotProtecao =
+        snapshotProtecaoEmpateTelemetria(
+            est
+        );
+
+    const evento =
+        classificarTieObservado({
+            resultado:
+                'Tie',
+
+            nivel:
+                estado?.galeAtual,
+
+            multiplicador:
+                multiplicador || '',
+
+            proteger_empate_snapshot:
+                snapshotProtecao
+        });
+
+    if (
+        !evento.observado
+    ) {
+        return Object.freeze({
+            registrado: false,
+            motivo:
+                evento.motivo
+                || 'TIE_NAO_CLASSIFICADO'
+        });
+    }
+
+    const linhas = [
+        {
+            escopo:
+                'ESTRATEGIA',
+
+            robo_id:
+                0
+        }
+    ];
+
+    const idsRobos =
+        new Set();
+
+    for (
+        const robo
+        of (
+            Array.isArray(
+                estado?.robosInscritos
+            )
+                ? estado.robosInscritos
+                : []
+        )
+    ) {
+        const roboId =
+            Number(
+                robo?.id
+            );
+
+        if (
+            !Number.isInteger(roboId)
+            || roboId <= 0
+            || idsRobos.has(roboId)
+        ) {
+            continue;
+        }
+
+        idsRobos.add(
+            roboId
+        );
+
+        linhas.push({
+            escopo:
+                'ROBO',
+
+            robo_id:
+                roboId
+        });
+    }
+
+    let inseridos = 0;
+
+    for (
+        const linha
+        of linhas
+    ) {
+        const [resultado] =
+            await dbPool.query(
+                `INSERT INTO historico_tie_observado
+                    (
+                        mesa_id,
+                        giro_resultado_id,
+                        estrategia_id,
+                        escopo,
+                        robo_id,
+                        nivel,
+                        multiplicador,
+                        proteger_empate_snapshot,
+                        data_hora
+                    )
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, FROM_UNIXTIME(?)) ON DUPLICATE KEY UPDATE id=id`,
+                [
+                    mesaRuntime.id,
+                    giroId,
+                    est.id,
+                    linha.escopo,
+                    linha.robo_id,
+                    nivelHistoricoResultado(
+                        estado?.galeAtual
+                    ),
+                    evento.multiplicador,
+                    evento.proteger_empate_snapshot,
+                    timestampSegundos
+                ]
+            );
+
+        inseridos +=
+            Number(
+                resultado.affectedRows
+            ) || 0;
+    }
+
+    return Object.freeze({
+        registrado:
+            true,
+
+        inseridos,
+
+        classificacao:
+            evento.classificacao,
+
+        nivel:
+            evento.nivel,
+
+        multiplicador:
+            evento.multiplicador,
+
+        proteger_empate_snapshot:
+            evento
+                .proteger_empate_snapshot
+    });
 }
 
 async function registrarHistoricoResultadoEstrategia(est, tipoResultado, galeAtual, multiplicador, timestampColeta) {
@@ -6337,6 +6957,26 @@ app.post("/receber-sinal", async (req, res) => {
 
                 let finalizar = false;
                 let isTie = (vencedor==='Tie');
+
+                if (isTie) {
+                    try {
+                        await registrarTieObservado({
+                            est,
+                            estado: st,
+                            giroResultadoId:
+                                giroIdPersistidoParaIA,
+                            multiplicador:
+                                mult,
+                            timestampColeta:
+                                dados.timestamp_coleta
+                        });
+                    } catch (e) {
+                        console.error(
+                            `Falha ao persistir telemetria TIE da estratégia ${est.id}:`,
+                            e.message
+                        );
+                    }
+                }
 
                 if (vencedor === est.entrada || (isTie && est.protegerEmpate)) {
                     if (!isTie) {

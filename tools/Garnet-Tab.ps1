@@ -15,44 +15,38 @@ $supervisorLog = Join-Path $logRoot 'supervisor.log'
 $instanceRoot = Join-Path $logRoot 'instances'
 
 Write-Host ''
-Write-Host '============================================================' -ForegroundColor Cyan
-Write-Host 'BAC BO | GARNET' -ForegroundColor Cyan
-Write-Host '============================================================' -ForegroundColor Cyan
-Write-Host 'Runtime................... Garnet 2.1.5'
-Write-Host 'RESP...................... 127.0.0.1:6379'
-Write-Host 'Persistencia.............. AOF + Recover'
-Write-Host ("Dados..................... {0}" -f (Join-Path $Root 'garnet\data'))
-Write-Host ("Logs...................... {0}" -f $instanceRoot)
-Write-Host ''
-Write-Host 'Esta aba acompanha o Supervisor; o processo Garnet fica oculto.' -ForegroundColor DarkGray
+Write-Host '[GARNET] MONITOR | bind=127.0.0.1 | port=6379 | persistence=AOF+Recover' -ForegroundColor Cyan
 Write-Host ''
 
-$lastLineCount = 0
-$lastOnline = $null
+$existingLines = @()
+
+if (Test-Path -LiteralPath $supervisorLog) {
+    $existingLines = @(
+        Get-Content `
+            -LiteralPath $supervisorLog `
+            -ErrorAction SilentlyContinue
+    )
+}
+
+$lastStartIndex = -1
+
+for ($i = 0; $i -lt $existingLines.Count; $i++) {
+    if (
+        [string]$existingLines[$i] -match
+        '^\[GARNET\] START \|'
+    ) {
+        $lastStartIndex = $i
+    }
+}
+
+if ($lastStartIndex -ge 0) {
+    $lastLineCount = $lastStartIndex
+}
+else {
+    $lastLineCount = $existingLines.Count
+}
 
 while (-not (Test-Path -LiteralPath $systemStopFile)) {
-    $online = Test-RespPing -Port 6379
-
-    if ($null -eq $lastOnline -or $online -ne $lastOnline) {
-        if ($online) {
-            $owner = Get-PortOwner 6379
-
-            Write-Host (
-                '{0} | GARNET ONLINE | PONG | PID={1}' -f
-                (Get-Date -Format 'HH:mm:ss'),
-                $owner
-            ) -ForegroundColor Green
-        }
-        else {
-            Write-Host (
-                '{0} | GARNET OFFLINE / REINICIANDO' -f
-                (Get-Date -Format 'HH:mm:ss')
-            ) -ForegroundColor Yellow
-        }
-
-        $lastOnline = $online
-    }
-
     if (Test-Path -LiteralPath $supervisorLog) {
         $lines = @(
             Get-Content `
@@ -68,11 +62,20 @@ while (-not (Test-Path -LiteralPath $systemStopFile)) {
             for ($i = $lastLineCount; $i -lt $lines.Count; $i++) {
                 $line = [string]$lines[$i]
 
-                if ($line -match 'GARNET_EXITED_UNEXPECTEDLY|GARNET_START_FAILED') {
+                if ($line -match 'START_FAILED') {
                     Write-Host $line -ForegroundColor Red
                 }
-                elseif ($line -match 'GARNET_READY|SUPERVISOR_V2_START') {
+                elseif ($line -match 'RESTART') {
+                    Write-Host $line -ForegroundColor Yellow
+                }
+                elseif ($line -match 'READY') {
                     Write-Host $line -ForegroundColor Green
+                }
+                elseif ($line -match 'START') {
+                    Write-Host $line -ForegroundColor Cyan
+                }
+                elseif ($line -match 'STOPPED') {
+                    Write-Host $line -ForegroundColor Yellow
                 }
                 else {
                     Write-Host $line
@@ -87,4 +90,4 @@ while (-not (Test-Path -LiteralPath $systemStopFile)) {
 }
 
 Write-Host ''
-Write-Host 'Encerramento solicitado pelo PARAR SISTEMA.' -ForegroundColor Yellow
+Write-Host '[GARNET] STOPPED | reason=system_stop' -ForegroundColor Yellow

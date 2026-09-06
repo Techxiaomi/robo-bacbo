@@ -36,6 +36,18 @@ if (
         f"{MESA_CODIGO or '<vazio>'}"
     )
 
+MESA_DISPLAY = (
+    MESA_CODIGO.replace("BACBO_", "BAC BO ", 1)
+    if MESA_CODIGO.startswith("BACBO_")
+    else MESA_CODIGO
+)
+
+COLETOR_DISPLAY = (
+    MESA_CODIGO.replace("BACBO_", "COLETOR ", 1)
+    if MESA_CODIGO.startswith("BACBO_")
+    else f"COLETOR {MESA_CODIGO}"
+)
+
 TIPMINER_ROUND_ID = (
     resolver_tipminer_round_id(
         MESA_CODIGO,
@@ -336,16 +348,16 @@ class TipMinerCollector:
                 continue
             signal.signal(signal_value, self._handle_shutdown_signal)
             handled.append(signal_name)
-        print(f"🧯 BAC BO | shutdown controlado ativo | sinais={','.join(handled)}.")
+        print(f"🧯 {MESA_DISPLAY} | SHUTDOWN_CONTROL | sinais={','.join(handled)}.")
 
     def _handle_shutdown_signal(self, signum, _frame):
         self._shutdown_signal_count += 1
         if self._shutdown_signal_count >= 2:
-            print("\n🛑 BAC BO | segundo sinal recebido; encerramento forçado imediato.")
+            print(f"\n🛑 {MESA_DISPLAY} | ENCERRAMENTO_FORCADO | segundo sinal recebido.")
             os._exit(130)
 
         if not self._shutdown_event.is_set():
-            print("\n🛑 BAC BO | encerramento solicitado; fechando fluxo live e continuidade.")
+            print(f"\n🛑 {MESA_DISPLAY} | ENCERRAMENTO | fechando fluxo live e continuidade.")
         self._shutdown_event.set()
 
         response = self._active_live_response
@@ -385,7 +397,7 @@ class TipMinerCollector:
             self._notify_interruption_best_effort("MANUTENCAO_COLETOR", force=True)
         finally:
             self._close_resources()
-        print("👋 Coletor Bac Bo encerrado pelo operador.")
+        print(f"👋 {MESA_DISPLAY} | ENCERRADO | operador.")
 
     def _queue_interruption(self, reason, force=False):
         if self._pending_interruption is not None and not force:
@@ -432,7 +444,7 @@ class TipMinerCollector:
                 self._pending_interruption = None
                 if emit_success:
                     print(
-                        "🛡️ BAC BO | continuidade confirmada pelo Node | "
+                        f"✅ {MESA_DISPLAY} | CONTINUIDADE_OK | "
                         f"motivo={motivo} | sinais={sinais} | traders={traders}."
                     )
                 return True, "confirmada"
@@ -456,7 +468,7 @@ class TipMinerCollector:
 
             if attempt == 1 or status != last_status or attempt % 10 == 0:
                 print(
-                    "⏳ BAC BO | continuidade | aguardando confirmação do Node; "
+                    f"⏳ {MESA_DISPLAY} | CONTINUIDADE | aguardando confirmacao do Node; "
                     f"live bloqueado | estado={status}."
                 )
             last_status = status
@@ -474,7 +486,7 @@ class TipMinerCollector:
         ok, status = self._try_notify_pending_interruption(emit_success=True)
         if not ok:
             print(
-                "⚠️ BAC BO | continuidade | notificação pendente; "
+                f"⚠️ {MESA_DISPLAY} | CONTINUIDADE_PENDENTE | "
                 f"será reenviada com o mesmo ID | estado={status}."
             )
         return ok
@@ -549,14 +561,14 @@ class TipMinerCollector:
         if changed or force_publish:
             self._publish_history_sync(new_signature, barrier_id=barrier_id)
             if changed:
-                print(f"♻️ BAC BO | HISTÓRICO | {len(self.history)} giro(s) sincronizados.")
+                print(f"♻️ {MESA_DISPLAY} | HISTORICO | {len(self.history)} giro(s) sincronizados.")
             elif not quiet_if_unchanged:
                 print(
-                    f"♻️ BAC BO | HISTÓRICO | {len(self.history)} giro(s) reconfirmados para barreira final."
+                    f"♻️ {MESA_DISPLAY} | HISTORICO | {len(self.history)} giro(s) reconfirmados para barreira final."
                 )
         elif not quiet_if_unchanged:
             print(
-                f"♻️ BAC BO | HISTÓRICO | {len(self.history)} giro(s) confirmados; "
+                f"♻️ {MESA_DISPLAY} | HISTORICO | {len(self.history)} giro(s) confirmados; "
                 "sem alterações."
             )
 
@@ -601,7 +613,7 @@ class TipMinerCollector:
             ):
                 process_epoch = str((ack or {}).get("process_epoch") or "n/a")
                 print(
-                    "✅ BAC BO | histórico final confirmado pelo Node | "
+                    f"✅ {MESA_DISPLAY} | HISTORICO_OK | "
                     f"janela={len(self.history)} | epoch={process_epoch}."
                 )
                 return ack
@@ -615,7 +627,7 @@ class TipMinerCollector:
 
             if now - last_log >= HISTORY_ACK_LOG_INTERVAL_SECONDS:
                 print(
-                    "⏳ BAC BO | histórico final | aguardando aplicação integral no Node; live bloqueado."
+                    f"⏳ {MESA_DISPLAY} | HISTORICO_FINAL | aguardando Node; live bloqueado."
                 )
                 last_log = now
             self._wait_or_shutdown(HISTORY_ACK_POLL_SECONDS)
@@ -646,7 +658,7 @@ class TipMinerCollector:
         return response
 
     def listen_live(self, response):
-        print(f"🎧 BAC BO | LIVE | conectado e liberado | Redis={REDIS_EVENTS_CHANNEL}.")
+        print(f"✅ {MESA_DISPLAY} | LIVE_READY | Redis={REDIS_EVENTS_CHANNEL}.")
 
         client = SSEClient(response)
         try:
@@ -669,7 +681,7 @@ class TipMinerCollector:
                     continue
 
                 print(
-                    f"🎲 BAC BO | {self._winner_label(round_data['type'])} | "
+                    f"🎲 {MESA_DISPLAY} | {self._winner_label(round_data['type'])} | "
                     f"Soma: {round_data['result']}"
                 )
         finally:
@@ -682,12 +694,21 @@ class TipMinerCollector:
 
     def run_forever(self):
         print("============================================================")
+        print(f"🚦 {COLETOR_DISPLAY}")
+        print(f"Processo....: {COLETOR_DISPLAY}")
+        print(f"Mesa........: {MESA_CODIGO}")
+        print("Fonte.......: TIPMINER BAC BO / SSE")
+        print("Status......: INICIANDO")
         print(
-            f"?? COLETOR BAC BO | {MESA_CODIGO} | API -> REDIS"
+            "Conexao.....: "
+            f"TipMiner SSE -> Redis/Garnet ({REDIS_URL}) -> "
+            f"Node ({NODE_HOST}:{NODE_PORT})"
         )
-        print(f"🧠 Histórico Redis: {REDIS_HISTORY_KEY}")
-        print(f"📣 Canal Redis: {REDIS_EVENTS_CHANNEL}")
+        print(f"Historico...: {REDIS_HISTORY_KEY}")
+        print(f"Canal.......: {REDIS_EVENTS_CHANNEL}")
         print("============================================================")
+
+        self.install_shutdown_handlers()
 
         self._queue_interruption("COLETOR_REINICIADO", force=True)
 
@@ -734,7 +755,7 @@ class TipMinerCollector:
                         break
                     self._notify_interruption_best_effort("FLUXO_COLETOR_INTERROMPIDO")
                     print(
-                        "⚠️ BAC BO/REDIS | fluxo interrompido; "
+                        f"⚠️ {MESA_DISPLAY} | RECONEXAO | fluxo interrompido; "
                         f"nova sincronização em {RECONNECT_DELAY_SECONDS}s | "
                         f"{type(exc).__name__}: {exc}"
                     )
@@ -758,7 +779,6 @@ class TipMinerCollector:
 
 def main():
     collector = TipMinerCollector()
-    collector.install_shutdown_handlers()
     collector.run_forever()
 
 

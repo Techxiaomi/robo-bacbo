@@ -1,5 +1,13 @@
 'use strict';
 
+const {
+    carregarMesaEstrutural
+} = require('./strategy_profile_route_support');
+
+const {
+    validarFilhosDinamicosDoRobo
+} = require('./strategy_profile_dynamic_guard');
+
 const crypto = require('crypto');
 const { obterMesaRuntime } = require('./mesa_runtime_context');
 
@@ -832,6 +840,60 @@ function criarAutoPilotService({ dbPool, estaOcupado, recarregarMemoria, notific
         const ttlMs = config.ttl_horas * 60 * 60 * 1000;
         const tiesZerado = JSON.stringify({ direto:{}, gale1:{}, gale2:{} });
         const origem = `AUTO_PILOT_IA:${Number(robo.id)}`;
+
+        /*
+         * ETAPA 5B:
+         * valida o estado estrutural pós-reconciliação
+         * antes da abertura da transação.
+         */
+        const estadoEstrutural =
+            await carregarMesaEstrutural({
+                dbPool,
+                mesaId
+            });
+
+        const validacaoFilhos =
+            validarFilhosDinamicosDoRobo({
+                robo,
+                mesaId,
+
+                configRobo:
+                    robo.config || {},
+
+                configAutoTuning:
+                    config,
+
+                origens:
+                    estadoEstrutural.origens,
+
+                estrategias:
+                    estadoEstrutural.estrategias,
+
+                candidatosRetidos:
+                    reter
+            });
+
+        if (!validacaoFilhos.ok) {
+            const erroEstrutural =
+                new Error(
+                    'AUTO_PILOT_FILHO_PERFIL_ESTRUTURAL_INCOMPATIVEL'
+                );
+
+            erroEstrutural.code =
+                'AUTO_PILOT_FILHO_PERFIL_ESTRUTURAL_INCOMPATIVEL';
+
+            erroEstrutural.detalhe =
+                validacaoFilhos;
+
+            log.error(
+                'Auto Pilot IA: reconciliação estrutural bloqueada para '
+                + `Robô/Canal ${robo.id} — ${robo.nome}: `
+                + validacaoFilhos.erro
+            );
+
+            throw erroEstrutural;
+        }
+
         const conexao = await dbPool.getConnection();
 
         try {

@@ -1,7 +1,7 @@
 (() => {
     'use strict';
 
-    const PERIODOS_ROBO = ['24h', 'hoje', 'semana', 'mes', 'geral'];
+    const PERIODOS_ROBO = ['hoje', '24h', 'semana', 'mes', 'geral'];
     const ORDENACOES_ROBO = Object.freeze([
         { value: 'status', label: 'Ativos primeiro' },
         { value: 'nome', label: 'Nome (A–Z)' },
@@ -12,7 +12,7 @@
         { value: 'recentes', label: 'Mais recentes' },
         { value: 'antigos', label: 'Mais antigos' }
     ]);
-    let roboPeriodoAtual = '24h';
+    let roboPeriodoAtual = 'hoje';
     let roboOrdenacaoAtual = 'status';
 
     function numeroSeguro(valor) {
@@ -35,23 +35,139 @@
         return valor === true || valor === 1 || valor === '1';
     }
 
+    function numeroTieSeguro(valor) {
+        const n = Number(valor);
+        return Number.isFinite(n) && n > 0 ? n : 0;
+    }
+
+    function formatarMoedaTie(valor) {
+        const n = Number(valor);
+        if (!Number.isFinite(n)) return null;
+
+        return n.toLocaleString('pt-BR', {
+            style: 'currency',
+            currency: 'BRL'
+        });
+    }
+
+    function resumoTieTelemetry(stats) {
+        const t = stats?.tie_telemetry || {};
+        const observados = numeroTieSeguro(t?.observados?.total);
+        const protegidos = numeroTieSeguro(t?.protegidos?.total);
+        const semProtecao = numeroTieSeguro(t?.sem_protecao?.total);
+        const desconhecidos = numeroTieSeguro(t?.protecao_desconhecida?.total);
+
+        const impacto =
+            t?.impacto_sem_protecao
+            ?? t?.sem_protecao?.impacto
+            ?? {};
+
+        const impactoConhecido = impacto?.conhecido === true;
+        const valorRetido = impactoConhecido
+            ? formatarMoedaTie(
+                impacto?.valor_retido
+                ?? impacto?.retido
+            )
+            : null;
+
+        const valorEstornado = impactoConhecido
+            ? formatarMoedaTie(
+                impacto?.valor_estornado
+                ?? impacto?.estornado
+            )
+            : null;
+
+        let impactoTexto = 'Sem impacto sem proteção no período';
+
+        if (semProtecao > 0) {
+            if (impactoConhecido && (valorRetido || valorEstornado)) {
+                const partes = [];
+                if (valorEstornado) partes.push(`90% devolvido: ${valorEstornado}`);
+                if (valorRetido) partes.push(`10% retido: ${valorRetido}`);
+                impactoTexto = partes.join(' • ');
+            } else {
+                impactoTexto =
+                    'Não calculado: base monetária por evento não está registrada; política 90% devolvido / 10% retido.';
+            }
+        }
+
+        const nivel = chave => ({
+            direto: numeroTieSeguro(t?.[chave]?.direto),
+            gale1: numeroTieSeguro(t?.[chave]?.gale1),
+            gale2: numeroTieSeguro(t?.[chave]?.gale2)
+        });
+
+        return {
+            observados,
+            protegidos,
+            semProtecao,
+            desconhecidos,
+            observadosNivel: nivel('observados'),
+            protegidosNivel: nivel('protegidos'),
+            semProtecaoNivel: nivel('sem_protecao'),
+            desconhecidosNivel: nivel('protecao_desconhecida'),
+            impactoConhecido,
+            impactoTexto
+        };
+    }
+
+    function htmlTieTelemetry(stats) {
+        const t = resumoTieTelemetry(stats);
+
+        const linhaNivel = item =>
+            `Dir ${item.direto} • G1 ${item.gale1} • G2 ${item.gale2}`;
+
+        return `
+            <div class="tie-box" style="display:grid; gap:5px;">
+                <div>
+                    <strong style="color:#ffc107;">Empates observados: ${t.observados}</strong>
+                    <div style="font-size:10px; color:#aaa;">${linhaNivel(t.observadosNivel)}</div>
+                </div>
+                <div>
+                    <span style="color:#28a745;">Protegidos: <strong>${t.protegidos}</strong></span>
+                    <div style="font-size:10px; color:#888;">${linhaNivel(t.protegidosNivel)}</div>
+                </div>
+                <div>
+                    <span style="color:#ff9f43;">Sem proteção: <strong>${t.semProtecao}</strong></span>
+                    <div style="font-size:10px; color:#888;">${linhaNivel(t.semProtecaoNivel)}</div>
+                </div>
+                ${t.desconhecidos > 0 ? `
+                    <div>
+                        <span style="color:#aaa;">Proteção desconhecida: <strong>${t.desconhecidos}</strong></span>
+                        <div style="font-size:10px; color:#777;">${linhaNivel(t.desconhecidosNivel)}</div>
+                    </div>
+                ` : ''}
+                <div style="font-size:10px; color:${t.impactoConhecido ? '#ddd' : '#888'};">
+                    Impacto financeiro: ${t.impactoTexto}
+                </div>
+            </div>
+        `;
+    }
+
     function resumoPeriodoRobo(robo, periodo) {
         const s = robo?.detalhes?.[periodo] || {};
         const direto = numeroSeguro(s.green_direto);
         const gale1 = numeroSeguro(s.gale1);
         const gale2 = numeroSeguro(s.gale2);
         const reds = numeroSeguro(s.red);
+
+        // Compatibilidade: ties legado continua compondo os cálculos
+        // antigos de entrada/assertividade. A telemetria nova é exibida
+        // separadamente e não altera essas métricas.
         let ties = 0;
         let htmlTies = '';
 
         ['direto', 'gale1', 'gale2'].forEach(nivel => {
             const itens = [];
+
             Object.entries(s.ties?.[nivel] || {}).forEach(([multiplicador, quantidade]) => {
                 const qtd = numeroSeguro(quantidade);
                 if (qtd <= 0) return;
+
                 ties += qtd;
                 itens.push(`<strong>${qtd}</strong> - ${escapar(multiplicador)}`);
             });
+
             if (itens.length > 0) {
                 htmlTies += `<div style="font-size:10px; margin-bottom:2px;">${nivel.toUpperCase()}: ${itens.join(' | ')}</div>`;
             }
@@ -64,6 +180,7 @@
         const pctGreens = total > 0 ? ((greensSemTie / total) * 100).toFixed(1) : '0.0';
         const pctTies = total > 0 ? ((ties / total) * 100).toFixed(1) : '0.0';
         const pctReds = total > 0 ? ((reds / total) * 100).toFixed(1) : '0.0';
+        const tieTelemetry = resumoTieTelemetry(s);
 
         return {
             direto,
@@ -79,11 +196,12 @@
             pctTies,
             pctReds,
             htmlTies,
+            tieTelemetry,
+            htmlTieTelemetry: htmlTieTelemetry(s),
             maxGreen: numeroSeguro(s.max_green_seq),
             maxRed: numeroSeguro(s.max_red_seq)
         };
     }
-
     function nomeRobo(robo) {
         return String(robo?.nome || '').trim();
     }
@@ -135,14 +253,48 @@
         return typeof window.getCor === 'function' ? window.getCor(valor) : '#007bff';
     }
 
+    function htmlEmpatesRoboTIE3D(resumo) {
+        if ((Number(resumo?.ties) || 0) > 0) {
+            return `
+                <span>🟡 Empates: <strong style="color:#ffc107;">${resumo.ties}</strong> <small style="color:#aaa;">(${resumo.pctTies}%)</small></span>
+                <div class="tie-box">${resumo.htmlTies || '<span style="font-size:10px; color:#666;">Sem empates</span>'}</div>
+            `;
+        }
+
+        const t = resumo?.tieTelemetry || {};
+        const total = numeroSeguro(t?.semProtecao);
+        const niveis = t?.semProtecaoNivel || {};
+        const direto = numeroSeguro(niveis?.direto);
+        const gale1 = numeroSeguro(niveis?.gale1);
+        const gale2 = numeroSeguro(niveis?.gale2);
+
+        if (total <= 0) {
+            return `
+                <span>🟡 Empates: <strong style="color:#ffc107;">0</strong> <small style="color:#aaa;">(0.0%)</small></span>
+                <div class="tie-box"><span style="font-size:10px; color:#666;">Sem empates</span></div>
+            `;
+        }
+
+        return `
+            <span>🟡 Empates sem proteção: <strong style="color:#ffc107;">${total}</strong></span>
+            <div class="tie-box" data-tie3d-sem-protecao="1">
+                <div style="font-size:10px;">DIRETO: <strong>${direto}</strong></div>
+                <div style="font-size:10px;">GALE1: <strong>${gale1}</strong></div>
+                <div style="font-size:10px;">GALE2: <strong>${gale2}</strong></div>
+            </div>
+        `;
+    }
+
     function htmlPeriodoRobo(robo, periodo) {
         const s = resumoPeriodoRobo(robo, periodo);
+
         return `
             <div class="detalhes-tecnicos" style="margin-top:auto;">
                 <div style="display:flex; justify-content:space-between; border-bottom:1px solid #444; margin-bottom:5px; padding-bottom:4px;">
                     <span>Entradas: <strong>${s.total}</strong></span>
                     <span>Assertividade: <strong style="color:${corAssertividade(s.assertividade)};">${s.assertividade}%</strong></span>
                 </div>
+
                 <div class="linha-detalhe" style="align-items:center;">
                     <span>✅ Greens: <strong style="color:#28a745;">${s.greensSemTie}</strong> <small style="color:#aaa;">(${s.pctGreens}%)</small></span>
                     <div style="display:flex; gap:10px; font-size:11px; color:#ccc;">
@@ -151,26 +303,28 @@
                         <span>G2: <strong>${s.gale2}</strong></span>
                     </div>
                 </div>
+
                 <div class="linha-detalhe" style="flex-direction:column;">
-                    <span>🟡 Empates: <strong style="color:#ffc107;">${s.ties}</strong> <small style="color:#aaa;">(${s.pctTies}%)</small></span>
-                    <div class="tie-box">${s.htmlTies || '<span style="font-size:10px; color:#666;">Sem empates</span>'}</div>
+                    ${htmlEmpatesRoboTIE3D(s)}
                 </div>
+
                 <div class="linha-detalhe" style="margin-top:5px;">
                     <span>❌ Reds: <strong style="color:#ff7777;">${s.reds}</strong> <small style="color:#aaa;">(${s.pctReds}%)</small></span>
                 </div>
+
                 <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:8px;">
                     <div style="background:#102016; border:1px solid #285b36; border-radius:5px; padding:7px; text-align:center;">
                         <span style="display:block; color:#888; font-size:9px; text-transform:uppercase;">Maior sequência Green</span>
-                        <strong style="color:#28a745; font-size:17px;">🔥 ${s.maxGreen}</strong>
+                        <strong style="color:#28a745; font-size:17px;">${s.maxGreen}</strong>
                     </div>
-                    <div style="background:#241314; border:1px solid #683034; border-radius:5px; padding:7px; text-align:center;">
+                    <div style="background:#211010; border:1px solid #673333; border-radius:5px; padding:7px; text-align:center;">
                         <span style="display:block; color:#888; font-size:9px; text-transform:uppercase;">Maior sequência Red</span>
                         <strong style="color:#ff7777; font-size:17px;">${s.maxRed}</strong>
                     </div>
                 </div>
-            </div>`;
+            </div>
+        `;
     }
-
     function htmlTabsRobo(robo) {
         const labels = { '24h': '24H', hoje: 'Hoje', semana: 'Semana', mes: 'Mês', geral: 'Geral' };
         return `<div class="grid-performance">${PERIODOS_ROBO.map(periodo => {

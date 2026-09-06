@@ -146,7 +146,7 @@ async function main() {
     const tableKey = resolveTableKey();
     const projectRoot = path.resolve(__dirname, '..', '..');
     const pythonRoot = path.join(projectRoot, 'robo-sync-pilot');
-    const pythonScript = path.join(pythonRoot, 'dry_run_discovery.py');
+    const pythonScript = path.join(pythonRoot, 'diagnostics', 'dry_run_discovery.py');
     const dbPool = createDbPool();
 
     try {

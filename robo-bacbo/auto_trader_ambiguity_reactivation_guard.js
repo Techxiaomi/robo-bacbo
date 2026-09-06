@@ -55,9 +55,12 @@ function ambiguityHasExecutionEvidence(order = {}) {
         || order.saldo_pos_confirmado_em !== null && order.saldo_pos_confirmado_em !== undefined;
 }
 
+function traderIsInactive(trader = {}) {
+    return !(trader.ativo === true || trader.ativo === 1);
+}
+
 function traderIsAmbiguityBlocked(trader = {}) {
-    const ativo = trader.ativo === true || trader.ativo === 1;
-    return !ativo
+    return traderIsInactive(trader)
         && String(trader.status_operacao || '').toUpperCase() === 'BLOQUEADO_AMBIGUIDADE';
 }
 
@@ -146,7 +149,10 @@ async function inspectActivationState(req) {
         const trader = { ...traders[0] };
         let reconciledOrderIds = [];
 
-        if (traderIsAmbiguityBlocked(trader)) {
+        // A reconciliacao depende do estado real da ordem, nao do rotulo
+        // administrativo do trader. Um trader DESLIGADO pode ter ficado com
+        // ENVIO_AMBIGUO sem evidencia apos falha/timeout anterior.
+        if (traderIsInactive(trader)) {
             reconciledOrderIds = await reconcileEmptyAmbiguities(
                 connection,
                 traderId,
@@ -272,6 +278,7 @@ module.exports = Object.freeze({
     wantsActivation,
     positiveTraderId,
     ambiguityHasExecutionEvidence,
+    traderIsInactive,
     traderIsAmbiguityBlocked,
     installAutoTraderAmbiguityReactivationGuard
 });

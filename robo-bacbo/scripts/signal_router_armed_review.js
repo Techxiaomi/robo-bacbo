@@ -3,6 +3,7 @@
 const path = require('path');
 const mysql = require('mysql2/promise');
 const { createClient } = require('redis');
+const { escreverLinhaJson } = require('../logger');
 
 require('../env_loader').loadEnvFile(path.join(__dirname, '..', '..', '.env'));
 
@@ -28,6 +29,38 @@ const DEFAULT_TARGET_CACHE_TTL_MS = 5000;
 const DEFAULT_DEDUP_TTL_MS = 60000;
 const DEFAULT_DEDUP_PREFIX = 'signal_router:armed_review:dedup';
 const CHANNEL_PATTERN = /^[A-Za-z0-9._:-]{1,160}$/;
+
+const SIGNAL_ROUTER_AUDIT_FILE = path.resolve(
+    __dirname,
+    '..',
+    '..',
+    'logs',
+    'signal-router.audit.jsonl'
+);
+
+function auditArmedReview(event, payload = {}) {
+    try {
+        escreverLinhaJson(
+            SIGNAL_ROUTER_AUDIT_FILE,
+            {
+                timestamp: new Date().toISOString(),
+                level: 'info',
+                pid: process.pid,
+                mode: 'ARMED_REVIEW',
+                event,
+                ...payload
+            },
+            {
+                maxBytes: 5 * 1024 * 1024,
+                maxArquivos: 5
+            }
+        );
+    } catch (error) {
+        console.error(
+            `\u274C [ROUTER] ERROR | audit_write | ${error?.message || error}`
+        );
+    }
+}
 
 function validatedChannel(value, fallback, errorCode) {
     const channel = String(value || fallback).trim();
@@ -170,19 +203,39 @@ async function main() {
     let shuttingDown = false;
     let generatedSequence = 0;
 
-    publisher.on('error', error => console.error(`ARMED_REVIEW_REDIS_PUBLISHER_ERROR: ${error?.message || error}`));
-    subscriber.on('error', error => console.error(`ARMED_REVIEW_REDIS_SUBSCRIBER_ERROR: ${error?.message || error}`));
+    publisher.on(
+        'error',
+        error => console.error(
+            `\u274C [ROUTER] ERROR | redis_publisher | ${error?.message || error}`
+        )
+    );
+
+    subscriber.on(
+        'error',
+        error => console.error(
+            `\u274C [ROUTER] ERROR | redis_subscriber | ${error?.message || error}`
+        )
+    );
 
     const shutdown = async reason => {
         if (shuttingDown) return;
         shuttingDown = true;
-        console.log(`ARMED_REVIEW_ROUTER_SHUTDOWN_REQUESTED reason=${reason}`);
+        auditArmedReview(
+            'ARMED_REVIEW_ROUTER_SHUTDOWN_REQUESTED',
+            { reason }
+        );
+
+        console.log(
+            `\u23F9\uFE0F [ROUTER] STOP | mode=ARMED_REVIEW | reason=${reason}`
+        );
         await Promise.allSettled([
             subscriber.isOpen ? subscriber.quit() : Promise.resolve(),
             publisher.isOpen ? publisher.quit() : Promise.resolve()
         ]);
         await dbPool.end();
-        console.log('ARMED_REVIEW_ROUTER_STOPPED=true');
+        console.log(
+            '\u2705 [ROUTER] STOPPED | mode=ARMED_REVIEW'
+        );
     };
 
     process.once('SIGINT', () => void shutdown('SIGINT'));
@@ -192,12 +245,25 @@ async function main() {
         await Promise.all([publisher.connect(), subscriber.connect()]);
         await cache.refresh();
 
-        console.log('=== SIGNAL ROUTER ARMED REVIEW ===');
-        console.log('SIGNAL_ROUTER_FINANCIAL_MODE=ARMED_REVIEW');
-        console.log('SIGNAL_ROUTER_FINANCIAL_DRY_RUN=true');
-        console.log('SIGNAL_ROUTER_AUTOMATIC_FINANCIAL_DISPATCH=false');
-        console.log('SIGNAL_ROUTER_HUMAN_CONFIRMATION_REQUIRED=true');
-        console.log(`SIGNAL_ROUTER_REVIEW_QUEUE_CHANNEL=${reviewQueueChannel}`);
+        console.log('=== SIGNAL ROUTER ===');
+
+        console.log(
+            `\uD83D\uDEA6 [ROUTER] START | mode=ARMED_REVIEW | ` +
+            `channel=${globalChannel} | review_queue=${reviewQueueChannel}`
+        );
+
+        auditArmedReview(
+            'ARMED_REVIEW_STARTUP',
+            {
+                financial_mode: 'ARMED_REVIEW',
+                financial_dry_run: true,
+                automatic_financial_dispatch: false,
+                human_confirmation_required: true,
+                global_channel: globalChannel,
+                result_channel: resultChannel,
+                review_queue_channel: reviewQueueChannel
+            }
+        );
 
         await subscriber.subscribe(globalChannel, async message => {
             if (shuttingDown) return;
@@ -209,7 +275,17 @@ async function main() {
                     nextGeneratedId: () => `armed-review-${process.pid}-${Date.now()}-${++generatedSequence}`
                 });
             } catch (error) {
-                console.error(`ARMED_REVIEW_SIGNAL_REJECTED reason=${error?.message || error}`);
+                const reason =
+                    String(error?.message || error);
+
+                auditArmedReview(
+                    'ARMED_REVIEW_SIGNAL_REJECTED',
+                    { reason }
+                );
+
+                console.warn(
+                    `\u26A0\uFE0F [ROUTER] DROP | mode=ARMED_REVIEW | reason=${reason}`
+                );
                 return;
             }
 
@@ -217,24 +293,86 @@ async function main() {
             try {
                 claimed = await dedup.claim(signal.signal_id);
             } catch (error) {
-                console.error(`ARMED_REVIEW_DEDUP_FAILED signal=${signal.signal_id}: ${error?.message || error}`);
+                auditArmedReview(
+                    'ARMED_REVIEW_DEDUP_FAILED',
+                    {
+                        signal_id: signal.signal_id,
+                        table_key: signal.table_key,
+                        reason: String(error?.message || error)
+                    }
+                );
+
+                console.error(
+                    `\u274C [ROUTER] ERROR | table=${signal.table_key} | ` +
+                    `signal=${signal.signal_id} | dedup | ${error?.message || error}`
+                );
                 return;
             }
             if (!claimed) {
-                console.warn(`ARMED_REVIEW_DUPLICATE signal=${signal.signal_id}`);
+                auditArmedReview(
+                    'ARMED_REVIEW_DUPLICATE',
+                    {
+                        signal_id: signal.signal_id,
+                        table_key: signal.table_key
+                    }
+                );
+
+                console.warn(
+                    `\u26A0\uFE0F [ROUTER] DROP | table=${signal.table_key} | ` +
+                    `signal=${signal.signal_id} | reason=DUPLICATE`
+                );
                 return;
             }
+
+            auditArmedReview(
+                'ARMED_REVIEW_RECEIVED',
+                {
+                    signal_id: signal.signal_id,
+                    action: signal.action,
+                    table_key: signal.table_key
+                }
+            );
+
+            console.log(
+                `\uD83D\uDCE5 [ROUTER] RX | table=${signal.table_key} | ` +
+                `signal=${signal.signal_id} | action=${signal.action} | ` +
+                `mode=ARMED_REVIEW`
+            );
 
             let targets;
             try {
                 targets = await cache.targets(signal.table_key);
             } catch (error) {
-                console.error(`ARMED_REVIEW_TARGET_DISCOVERY_FAILED signal=${signal.signal_id}: ${error?.message || error}`);
+                auditArmedReview(
+                    'ARMED_REVIEW_TARGET_DISCOVERY_FAILED',
+                    {
+                        signal_id: signal.signal_id,
+                        table_key: signal.table_key,
+                        reason: String(error?.message || error)
+                    }
+                );
+
+                console.error(
+                    `\u274C [ROUTER] ERROR | table=${signal.table_key} | ` +
+                    `signal=${signal.signal_id} | target_discovery | ` +
+                    `${error?.message || error}`
+                );
                 return;
             }
 
             if (!Array.isArray(targets) || targets.length === 0) {
-                console.warn(`ARMED_REVIEW_NO_TARGETS signal=${signal.signal_id} table=${signal.table_key}`);
+                auditArmedReview(
+                    'ARMED_REVIEW_NO_TARGETS',
+                    {
+                        signal_id: signal.signal_id,
+                        table_key: signal.table_key
+                    }
+                );
+
+                console.warn(
+                    `\u26A0\uFE0F [ROUTER] DROP | table=${signal.table_key} | ` +
+                    `signal=${signal.signal_id} | reason=NO_TARGETS`
+                );
                 return;
             }
 
@@ -248,9 +386,21 @@ async function main() {
                     return { target, subscribers };
                 }));
                 const published = results.filter(item => item.status === 'fulfilled').length;
+                auditArmedReview(
+                    'ARMED_REVIEW_SAFE_ACTION_DISPATCH_COMPLETE',
+                    {
+                        signal_id: signal.signal_id,
+                        action: signal.action,
+                        table_key: signal.table_key,
+                        targets: targets.length,
+                        published
+                    }
+                );
+
                 console.log(
-                    `ARMED_REVIEW_SAFE_ACTION_DISPATCH_COMPLETE signal=${signal.signal_id} ` +
-                    `action=${signal.action} targets=${targets.length} published=${published}`
+                    `\u2705 [ROUTER] ROUTED | table=${signal.table_key} | ` +
+                    `signal=${signal.signal_id} | action=${signal.action} | ` +
+                    `targets=${targets.length} | ok=${published}`
                 );
                 return;
             }
@@ -259,18 +409,43 @@ async function main() {
             try {
                 traderScope = await traderScopeResolver.resolve(signal);
             } catch (error) {
-                console.error(
-                    `ARMED_REVIEW_TRADER_SCOPE_REJECTED signal=${signal.signal_id} ` +
-                    `table=${signal.table_key} reason=${error?.message || error} dispatch=0`
+                const reason =
+                    String(error?.message || error);
+
+                auditArmedReview(
+                    'ARMED_REVIEW_TRADER_SCOPE_REJECTED',
+                    {
+                        signal_id: signal.signal_id,
+                        table_key: signal.table_key,
+                        reason,
+                        dispatch: 0
+                    }
+                );
+
+                console.warn(
+                    `\u26A0\uFE0F [ROUTER] DROP | table=${signal.table_key} | ` +
+                    `signal=${signal.signal_id} | reason=TRADER_SCOPE_REJECTED | ` +
+                    `${reason}`
                 );
                 return;
             }
 
             targets = filterTargetsByAccountIds(targets, traderScope.account_ids);
             if (targets.length === 0) {
+                auditArmedReview(
+                    'ARMED_REVIEW_NO_BOUND_TARGETS',
+                    {
+                        signal_id: signal.signal_id,
+                        trader_id: traderScope.trader_id,
+                        table_key: signal.table_key,
+                        dispatch: 0
+                    }
+                );
+
                 console.warn(
-                    `ARMED_REVIEW_NO_BOUND_TARGETS signal=${signal.signal_id} trader=${traderScope.trader_id} ` +
-                    `table=${signal.table_key} dispatch=0`
+                    `\u26A0\uFE0F [ROUTER] DROP | table=${signal.table_key} | ` +
+                    `signal=${signal.signal_id} | trader=${traderScope.trader_id} | ` +
+                    `reason=NO_BOUND_TARGETS`
                 );
                 return;
             }
@@ -279,7 +454,20 @@ async function main() {
             try {
                 availability = await resolveOnlineTargets(publisher, targets);
             } catch (error) {
-                console.error(`ARMED_REVIEW_ONLINE_DISCOVERY_FAILED signal=${signal.signal_id}: ${error?.message || error}`);
+                auditArmedReview(
+                    'ARMED_REVIEW_ONLINE_DISCOVERY_FAILED',
+                    {
+                        signal_id: signal.signal_id,
+                        table_key: signal.table_key,
+                        reason: String(error?.message || error)
+                    }
+                );
+
+                console.error(
+                    `\u274C [ROUTER] ERROR | table=${signal.table_key} | ` +
+                    `signal=${signal.signal_id} | online_discovery | ` +
+                    `${error?.message || error}`
+                );
                 return;
             }
 
@@ -288,15 +476,38 @@ async function main() {
                 .map(item => item.target);
             const online = reviewTargets.length;
             if (online === 0) {
-                console.warn(`ARMED_REVIEW_NO_ONLINE_TARGETS signal=${signal.signal_id} dispatch=0`);
+                auditArmedReview(
+                    'ARMED_REVIEW_NO_ONLINE_TARGETS',
+                    {
+                        signal_id: signal.signal_id,
+                        table_key: signal.table_key,
+                        dispatch: 0
+                    }
+                );
+
+                console.warn(
+                    `\u26A0\uFE0F [ROUTER] DROP | table=${signal.table_key} | ` +
+                    `signal=${signal.signal_id} | reason=NO_ONLINE_TARGETS`
+                );
                 return;
             }
 
             const globalExposure = calculateGlobalExposure(signal, online);
             if (globalExposure > technicalCaps.global_router_cap + 1e-9) {
-                console.error(
-                    `ARMED_REVIEW_GLOBAL_EXPOSURE_REJECTED signal=${signal.signal_id} ` +
-                    `global=${globalExposure.toFixed(2)} limit=${technicalCaps.global_router_cap.toFixed(2)} dispatch=0`
+                auditArmedReview(
+                    'ARMED_REVIEW_GLOBAL_EXPOSURE_REJECTED',
+                    {
+                        signal_id: signal.signal_id,
+                        table_key: signal.table_key,
+                        global_exposure: globalExposure,
+                        limit: technicalCaps.global_router_cap,
+                        dispatch: 0
+                    }
+                );
+
+                console.warn(
+                    `\u26A0\uFE0F [ROUTER] DROP | table=${signal.table_key} | ` +
+                    `signal=${signal.signal_id} | reason=GLOBAL_EXPOSURE_REJECTED`
                 );
                 return;
             }
@@ -317,16 +528,45 @@ async function main() {
                 JSON.stringify(consolidated)
             );
 
+            auditArmedReview(
+                'SIGNAL_ROUTER_FINANCIAL_ARMED_REVIEW_QUEUED',
+                {
+                    signal_id: signal.signal_id,
+                    trader_id: traderScope.trader_id,
+                    table_key: signal.table_key,
+                    accounts:
+                        reviewTargets.map(
+                            item => item.account_id
+                        ),
+                    online,
+                    global_exposure: globalExposure,
+                    review_queue_subscribers: queueSubscribers,
+                    result_subscribers: resultSubscribers,
+                    dispatch: 0,
+                    human_confirmation_required: true
+                }
+            );
+
             console.warn(
-                `SIGNAL_ROUTER_FINANCIAL_ARMED_REVIEW_QUEUED signal=${signal.signal_id} ` +
-                `trader=${traderScope.trader_id} table=${signal.table_key} ` +
-                `accounts=${reviewTargets.map(item => item.account_id).join(',')} online=${online} ` +
-                `global=${globalExposure.toFixed(2)} review_queue_subscribers=${queueSubscribers} ` +
-                `result_subscribers=${resultSubscribers} dispatch=0 human_confirmation_required=true`
+                `\uD83D\uDCCB [ROUTER] REVIEW | table=${signal.table_key} | ` +
+                `signal=${signal.signal_id} | trader=${traderScope.trader_id} | ` +
+                `accounts=${reviewTargets.length} | confirmation=REQUIRED`
             );
         });
 
-        console.log('SIGNAL_ROUTER_ARMED_REVIEW_READY=true');
+        console.log(
+            `\u2705 [ROUTER] READY | mode=ARMED_REVIEW | ` +
+            `channel=${globalChannel} | review_queue=${reviewQueueChannel}`
+        );
+
+        auditArmedReview(
+            'ARMED_REVIEW_READY',
+            {
+                global_channel: globalChannel,
+                result_channel: resultChannel,
+                review_queue_channel: reviewQueueChannel
+            }
+        );
     } catch (error) {
         await shutdown('STARTUP_FAILURE').catch(() => {});
         throw error;

@@ -1,6 +1,7 @@
 'use strict';
 
 const path = require('path');
+const { escreverLinhaJson } = require('../logger');
 
 require('../env_loader').loadEnvFile(path.join(__dirname, '..', '..', '.env'));
 
@@ -8,7 +9,8 @@ const {
     MasterSupervisor,
     positiveIntEnv,
     optionalTableFilter,
-    createDbPool
+    createDbPool,
+    summarizeSupervisorHealth
 } = require('./master_supervisor');
 const { discoverBoundTasks } = require('../trader_bound_tasks');
 const { writeSupervisorSnapshot } = require('../supervisor_telemetry_store');
@@ -19,6 +21,38 @@ const DEFAULT_FAST_RECONCILE_INTERVAL_MS = 2000;
 const DEFAULT_BACKOFF_BASE_MS = 2000;
 const DEFAULT_BACKOFF_MAX_MS = 60000;
 const DEFAULT_STABLE_WINDOW_MS = 60000;
+const DEFAULT_HEALTH_INTERVAL_MS = 60000;
+
+const MASTER_SUPERVISOR_AUDIT_FILE = path.resolve(
+    __dirname,
+    '..',
+    '..',
+    'logs',
+    'master-supervisor.audit.jsonl'
+);
+
+function writeMasterSupervisorAudit(event, payload = {}) {
+    try {
+        escreverLinhaJson(
+            MASTER_SUPERVISOR_AUDIT_FILE,
+            {
+                timestamp: new Date().toISOString(),
+                level: 'info',
+                pid: process.pid,
+                event,
+                ...payload
+            },
+            {
+                maxBytes: 5 * 1024 * 1024,
+                maxArquivos: 5
+            }
+        );
+    } catch (error) {
+        console.error(
+            `MASTER_SUPERVISOR_AUDIT_WRITE_FAILED: ${error?.message || error}`
+        );
+    }
+}
 
 async function main() {
     const tableFilter = optionalTableFilter();
@@ -63,7 +97,9 @@ async function main() {
     let reconcilePromise = null;
     let stopping = false;
     let pollTimer = null;
+    let healthTimer = null;
     let stopWatcher = null;
+    let lastStableSignature = null;
     let resolveShutdown = null;
     const shutdownGate = new Promise(resolve => { resolveShutdown = resolve; });
 
@@ -78,12 +114,48 @@ async function main() {
                 pendingReason = null;
                 const startedAt = Date.now();
                 try {
-                    const tasks = await discoverBoundTasks(dbPool, tableFilter);
-                    await supervisor.reconcile(tasks);
-                    console.log(
-                        `MASTER_SUPERVISOR_RECONCILE_COMPLETE reason=${currentReason} ` +
-                        `desired=${tasks.length} elapsed_ms=${Date.now() - startedAt}`
+                    const tasks =
+                        await discoverBoundTasks(
+                            dbPool,
+                            tableFilter
+                        );
+
+                    const summary =
+                        await supervisor.reconcile(tasks);
+
+                    const elapsedMs =
+                        Date.now() - startedAt;
+
+                    writeMasterSupervisorAudit(
+                        'MASTER_SUPERVISOR_RECONCILE_COMPLETE',
+                        {
+                            reason: currentReason,
+                            ...summary,
+                            elapsed_ms: elapsedMs
+                        }
                     );
+
+                    const health =
+                        summarizeSupervisorHealth(supervisor);
+
+                    const stableSignature =
+                        JSON.stringify(health);
+
+                    if (
+                        currentReason !== 'STARTUP' &&
+                        stableSignature !== lastStableSignature
+                    ) {
+                        lastStableSignature =
+                            stableSignature;
+
+                        console.log(
+                            `\u2705 [MASTER] STABLE | ` +
+                            `desired=${health.desired} | ` +
+                            `running=${health.running} | ` +
+                            `ready=${health.ready} | ` +
+                            `errors=${health.errors}`
+                        );
+                    }
                 } catch (error) {
                     console.error(
                         `MASTER_SUPERVISOR_RECONCILE_FAILED reason=${currentReason}: ${error?.message || error}`
@@ -105,6 +177,10 @@ async function main() {
         stopping = true;
         if (pollTimer) clearInterval(pollTimer);
         pollTimer = null;
+
+        if (healthTimer) clearInterval(healthTimer);
+        healthTimer = null;
+
         if (stopWatcher) stopWatcher();
         stopWatcher = null;
         await supervisor.shutdown();
@@ -128,7 +204,28 @@ async function main() {
 
         supervisor.publishSnapshot();
         await requestReconcile('STARTUP');
-        console.log('MASTER_SUPERVISOR_READY=true');
+
+        console.log(
+            `\u2705 [MASTER] READY | ` +
+            `mode=EVENT_PLUS_POLL | ` +
+            `poll=${reconcileIntervalMs}ms`
+        );
+
+        {
+            const health =
+                summarizeSupervisorHealth(supervisor);
+
+            lastStableSignature =
+                JSON.stringify(health);
+
+            console.log(
+                `\u2705 [MASTER] STABLE | ` +
+                `desired=${health.desired} | ` +
+                `running=${health.running} | ` +
+                `ready=${health.ready} | ` +
+                `errors=${health.errors}`
+            );
+        }
 
         stopWatcher = watchSupervisorReconcileSignal(payload => {
             const reason = String(payload?.reason || 'WAKE_SIGNAL').trim().toUpperCase() || 'WAKE_SIGNAL';
@@ -145,9 +242,23 @@ async function main() {
             void requestReconcile('POLL_FALLBACK');
         }, reconcileIntervalMs);
 
+        healthTimer = setInterval(() => {
+            const health =
+                summarizeSupervisorHealth(supervisor);
+
+            console.log(
+                `\u2665 [MASTER] HEALTH | ` +
+                `desired=${health.desired} | ` +
+                `running=${health.running} | ` +
+                `ready=${health.ready} | ` +
+                `errors=${health.errors}`
+            );
+        }, DEFAULT_HEALTH_INTERVAL_MS);
+
         await shutdownGate;
     } finally {
         if (pollTimer) clearInterval(pollTimer);
+        if (healthTimer) clearInterval(healthTimer);
         if (stopWatcher) stopWatcher();
         try { await supervisor.shutdown(); } catch (_) {}
         await dbPool.end();
