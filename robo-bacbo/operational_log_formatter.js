@@ -1,8 +1,412 @@
 'use strict';
 
+const path = require('path');
+
+const { escreverLinhaJson } = require('./logger');
 const { onHistoricoRecuperado } = require('./bacbo_live_bus');
 
 let instalado = false;
+
+const MESA_CODIGO =
+    String(
+        process.env.BACBO_MESA_CODIGO || 'BACBO'
+    )
+        .trim()
+        .toUpperCase();
+
+const NODE_DISPLAY =
+    MESA_CODIGO === 'BACBO_BR'
+        ? 'NODE BR'
+        : MESA_CODIGO === 'BACBO_INT'
+            ? 'NODE INT'
+            : `NODE ${MESA_CODIGO}`;
+
+const MESA_DISPLAY =
+    MESA_CODIGO === 'BACBO_BR'
+        ? 'BAC BO BR'
+        : MESA_CODIGO === 'BACBO_INT'
+            ? 'BAC BO INT'
+            : MESA_CODIGO.replace(/_/g, ' ');
+
+const NODE_AUDIT_FILE =
+    path.resolve(
+        __dirname,
+        '..',
+        'logs',
+        `node-console.audit.${MESA_CODIGO}.jsonl`
+    );
+
+function auditarConsoleOriginal(
+    nivel,
+    args
+) {
+    try {
+        escreverLinhaJson(
+            NODE_AUDIT_FILE,
+            {
+                timestamp:
+                    new Date().toISOString(),
+                level:
+                    String(nivel || 'log'),
+                pid:
+                    Number(process.pid),
+                mesa:
+                    MESA_CODIGO,
+                source:
+                    'node_console_raw',
+                args:
+                    Array.from(args || [])
+            },
+            {
+                maxBytes:
+                    5 * 1024 * 1024,
+                maxArquivos:
+                    5
+            }
+        );
+    } catch (_) {
+        /*
+         * Observabilidade nao pode
+         * interromper o runtime.
+         */
+    }
+}
+
+function normalizarAsciiOperacional(
+    valor
+) {
+    return String(valor || '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '');
+}
+
+
+function suprimirInicializacaoTecnica(
+    nivel,
+    args
+) {
+    /*
+     * Somente bootstrap explicitamente
+     * confirmado como sucesso.
+     *
+     * warn/error/false/falhas permanecem
+     * sempre visiveis.
+     */
+    if (
+        nivel === 'warn'
+        || nivel === 'error'
+    ) {
+        return false;
+    }
+
+    if (
+        !Array.isArray(args)
+        || args.length !== 1
+        || typeof args[0] !== 'string'
+    ) {
+        return false;
+    }
+
+    const linha =
+        args[0].trim();
+
+    if (!linha) {
+        return false;
+    }
+
+    const ascii =
+        normalizarAsciiOperacional(
+            linha
+        );
+
+    if (
+        /(?:^|[=:\s])false(?:\s|$)/i.test(
+            ascii
+        )
+    ) {
+        return false;
+    }
+
+    if (
+        /\b(?:error|erro|exception|fatal|critical|critico|warning|warn|fail|failed|falha)\b/i.test(
+            ascii
+        )
+    ) {
+        return false;
+    }
+
+    return (
+        /^[A-Z0-9_]+_(?:READY|INSTALLED)=true(?:\s|$)/
+            .test(ascii)
+    );
+}
+
+
+let ultimaMemoriaVisual = null;
+
+
+function deduplicarMemoriaVisual(
+    saida
+) {
+    if (!Array.isArray(saida)) {
+        return saida;
+    }
+
+    const resultado = [];
+
+    for (const item of saida) {
+        if (typeof item !== 'string') {
+            ultimaMemoriaVisual = null;
+            resultado.push(item);
+            continue;
+        }
+
+        const linha =
+            item.replace(/^\n+/, '');
+
+        const ascii =
+            normalizarAsciiOperacional(
+                linha
+            );
+
+        const ehMemoria =
+            /^\u{1F9E9} BAC BO (?:BR|INT) \| MEMORIA \|/u
+                .test(ascii);
+
+        if (!ehMemoria) {
+            /*
+             * Outro evento visivel quebra
+             * a consecutividade.
+             */
+            ultimaMemoriaVisual = null;
+            resultado.push(item);
+            continue;
+        }
+
+        if (
+            ultimaMemoriaVisual === linha
+        ) {
+            continue;
+        }
+
+        ultimaMemoriaVisual =
+            linha;
+
+        resultado.push(item);
+    }
+
+    return resultado;
+}
+
+
+function prefixarIdentidadeNode(
+    valor
+) {
+    if (
+        typeof valor !== 'string'
+        || !valor
+    ) {
+        return valor;
+    }
+
+    let limpo =
+        valor.replace(/^\n+/, '');
+
+    limpo =
+        limpo.replace(
+            /^\[NODE (?:BR|INT)\]\s*/,
+            ''
+        );
+
+    limpo =
+        limpo.trimStart();
+
+    const quebra =
+        valor.startsWith('\n')
+            ? '\n'
+            : '';
+
+    const ascii =
+        normalizarAsciiOperacional(
+            limpo
+        );
+
+
+    // --------------------------------------------------------
+    // CONTINUIDADE CRITICA
+    // --------------------------------------------------------
+
+    if (
+        /^\u{1F6A8} CRITICO \| CONTINUIDADE/u
+            .test(ascii)
+    ) {
+        const linhas =
+            limpo.split('\n');
+
+        /*
+         * Preserva integralmente as linhas
+         * de Motivo/Sinais/Traders.
+         */
+        linhas[0] =
+            '\u{1F6A8} '
+            + MESA_DISPLAY
+            + ' | CONTINUIDADE';
+
+        return (
+            quebra
+            + linhas.join('\n')
+        );
+    }
+
+
+    // --------------------------------------------------------
+    // PAINEL
+    // --------------------------------------------------------
+
+    const painelMatch =
+        ascii.match(
+            /Painel Web rodando em\s+(.+)$/i
+        );
+
+    if (painelMatch) {
+        return (
+            quebra
+            + '\u{1F310} '
+            + MESA_DISPLAY
+            + ' | PAINEL | '
+            + painelMatch[1].trim()
+        );
+    }
+
+
+    // --------------------------------------------------------
+    // WEBHOOK
+    // --------------------------------------------------------
+
+    const webhookMatch =
+        ascii.match(
+            /Webhook aguardando sinais em:\s*(.+)$/i
+        );
+
+    if (webhookMatch) {
+        return (
+            quebra
+            + '\u{1F3A7} '
+            + MESA_DISPLAY
+            + ' | WEBHOOK | aguardando sinais | '
+            + webhookMatch[1].trim()
+        );
+    }
+
+
+    // --------------------------------------------------------
+    // HISTORICO ANALITICO
+    // --------------------------------------------------------
+
+    const historicoMatch =
+        ascii.match(
+            /Historico analitico carregado:\s*([0-9]+)\s+giros?\.?/i
+        );
+
+    if (historicoMatch) {
+        return (
+            quebra
+            + '\u{1F4CA} '
+            + MESA_DISPLAY
+            + ' | HIST\u00D3RICO | '
+            + historicoMatch[1]
+            + ' giros carregados'
+        );
+    }
+
+
+    // --------------------------------------------------------
+    // EVENTOS JA COMPACTADOS
+    // --------------------------------------------------------
+
+    const icones = [
+        '\u{1F3B2}',
+        '\u{1F3AF}',
+        '\u{1F9E9}',
+        '\u{1F9E0}',
+        '\u{1F4E8}',
+        '\u{1F5D1}\uFE0F',
+        '\u{1F512}',
+        '\u{1F47B}',
+        '\u267B\uFE0F',
+        '\u267B',
+        '\u23F3',
+        '\u2705',
+        '\u274C',
+        '\u26A0\uFE0F',
+        '\u26A0'
+    ];
+
+    for (const icone of icones) {
+        const inicio =
+            icone + ' ';
+
+        if (
+            !limpo.startsWith(inicio)
+        ) {
+            continue;
+        }
+
+        if (
+            limpo.startsWith(
+                icone
+                + ' '
+                + MESA_DISPLAY
+                + ' |'
+            )
+        ) {
+            return (
+                quebra
+                + limpo
+            );
+        }
+
+        const restante =
+            limpo.slice(
+                inicio.length
+            );
+
+        return (
+            quebra
+            + icone
+            + ' '
+            + MESA_DISPLAY
+            + ' | '
+            + restante
+        );
+    }
+
+
+    // --------------------------------------------------------
+    // MC27
+    // --------------------------------------------------------
+
+    if (
+        limpo.startsWith('MC27 |')
+    ) {
+        return (
+            quebra
+            + '\u{1F9E9} '
+            + MESA_DISPLAY
+            + ' | '
+            + limpo
+        );
+    }
+
+
+    /*
+     * Fail-open:
+     * qualquer formato desconhecido permanece
+     * exatamente como chegou.
+     */
+    return valor;
+}
+
 let sequenciaRodadas = 0;
 let ultimaSequenciaRodada = 0;
 let separarAntesProximaRodada = false;
@@ -200,7 +604,7 @@ function formatarTexto(valor) {
 
     if (/^✅ Backend inicializado e pronto para atender APIs\.$/i.test(texto)) {
         marcarSeparacaoProximaRodada();
-        return '✅ BACKEND | Inicializado e pronto para atender APIs';
+        return '\u2705 BACKEND | READY | Inicializado e pronto para atender APIs';
     }
 
     match = texto.match(
@@ -661,12 +1065,6 @@ function formatarChamadaIaConhecida(
      * mineração, Wilson, ranking,
      * shadow e composição inicial.
      */
-    if (
-        motivo === 'STARTUP'
-    ) {
-        return entrada;
-    }
-
     const pool =
         linhas.find(
             linha =>
@@ -904,6 +1302,24 @@ function instalarLogOperacional() {
 
         console[nivel] =
             (...args) => {
+                /*
+                 * RAW primeiro. Nenhum evento
+                 * e perdido por limpeza visual.
+                 */
+                auditarConsoleOriginal(
+                    nivel,
+                    args
+                );
+
+                if (
+                    suprimirInicializacaoTecnica(
+                        nivel,
+                        args
+                    )
+                ) {
+                    return;
+                }
+
                 const saida =
                     formatarChamadaConsole(
                         nivel,
@@ -914,7 +1330,24 @@ function instalarLogOperacional() {
                     return;
                 }
 
-                original(...saida);
+                const visual =
+                    saida.map(
+                        prefixarIdentidadeNode
+                    );
+
+                const final =
+                    deduplicarMemoriaVisual(
+                        visual
+                    );
+
+                if (
+                    !final
+                    || final.length === 0
+                ) {
+                    return;
+                }
+
+                original(...final);
             };
     }
 
@@ -931,5 +1364,14 @@ module.exports = {
     registrarSinalOperacional,
     registrarRecoveryOperacional,
     formatarChamadaConsole,
-    detalheSql
+    detalheSql,
+    prefixarIdentidadeNode,
+    suprimirInicializacaoTecnica,
+    deduplicarMemoriaVisual,
+    normalizarAsciiOperacional,
+    auditarConsoleOriginal,
+    NODE_AUDIT_FILE,
+    MESA_CODIGO,
+    NODE_DISPLAY,
+    MESA_DISPLAY
 };

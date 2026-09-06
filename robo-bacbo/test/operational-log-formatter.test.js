@@ -276,15 +276,15 @@ test(
 );
 
 test(
-    'MC13: STARTUP da IA permanece completo',
+    'MC13: STARTUP da IA fica compacto no console',
     () => {
         const bloco = [
             '',
-            '🧠 AUTO PILOT IA 12 — STARTUP',
-            '   Janela: 1000 | treino: 800 | validação histórica: 200',
-            '   Pool: 3/40 ativos | 0 reservas | 18 shadow histórico | 1 shadow live | 1 rejeitados live | 1 fora do pool',
-            '   🏆 ATIVOS',
-            '      #1 P-P-T → P | score=71.7 | assert=91.3% | n=23 | Wilson=73.2%'
+            '\u{1F9E0} AUTO PILOT IA 12 \u2014 STARTUP',
+            '   Janela: 1000 | treino: 800 | valida\u00E7\u00E3o hist\u00F3rica: 200',
+            '   Pool: 3/40 ativos | 0 reservas | 18 shadow hist\u00F3rico | 1 shadow live | 1 rejeitados live | 1 fora do pool',
+            '   \u{1F3C6} ATIVOS',
+            '      #1 P-P-T \u2192 P | score=71.7 | assert=91.3% | n=23 | Wilson=73.2%'
         ].join('\n');
 
         assert.deepEqual(
@@ -292,7 +292,9 @@ test(
                 'log',
                 [bloco]
             ),
-            [bloco]
+            [
+                '\u{1F9E0} IA 12 | STARTUP | Pool 3/40 | Reservas 0 | Shadow H/L 18/1 | Rejeitados 1 | Fora 1'
+            ]
         );
     }
 );
