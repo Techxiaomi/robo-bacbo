@@ -17,6 +17,7 @@ $runtimeRoot = Join-Path $Root 'runtime'
 $stopFile = Join-Path $runtimeRoot 'garnet-supervisor.stop'
 $pidFile = Join-Path $runtimeRoot 'garnet.pid'
 $supervisorLog = Join-Path $logRoot 'supervisor.log'
+$auditLog = Join-Path $logRoot 'supervisor.audit.jsonl'
 
 $exeCandidates = @(
     Get-ChildItem `
@@ -44,16 +45,41 @@ Remove-Item `
     -Force `
     -ErrorAction SilentlyContinue
 
-function Log([string]$Message) {
-    $line = (
-        '{0} | {1}' -f
-        (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'),
-        $Message
-    )
+$IconReady = [char]0x2705
+$IconWarn  = [char]0x26A0
+$IconError = [char]0x274C
+$IconStop  = [char]0x23F9
 
+function Log([string]$Message) {
     Add-Content `
         -LiteralPath $supervisorLog `
-        -Value $line `
+        -Value ('[GARNET] ' + $Message) `
+        -Encoding UTF8
+}
+
+function Audit(
+    [string]$Event,
+    [hashtable]$Data = @{}
+) {
+    $record = [ordered]@{
+        timestamp      = (Get-Date).ToString('o')
+        event          = $Event
+        supervisor_pid = [int]$PID
+        bind           = '127.0.0.1'
+        port           = 6379
+    }
+
+    foreach ($key in $Data.Keys) {
+        $record[$key] = $Data[$key]
+    }
+
+    $json =
+        $record |
+        ConvertTo-Json -Compress -Depth 8
+
+    Add-Content `
+        -LiteralPath $auditLog `
+        -Value $json `
         -Encoding UTF8
 }
 
@@ -97,19 +123,20 @@ $commandLineForLog = (
 
 $attempt = 0
 
-Log 'SUPERVISOR_V2_START'
-Log ('GARNET_EXE=' + $exe)
-Log ('DATA_ROOT=' + $dataRoot)
-Log ('COMMAND=' + $commandLineForLog)
+Audit 'SUPERVISOR_START' @{
+    exe       = $exe
+    data_root = $dataRoot
+    command   = $commandLineForLog
+}
 
 while (-not (Test-Path -LiteralPath $stopFile)) {
     if (Test-PortListening 6379) {
         $owner = Get-PortOwner 6379
 
-        Log (
-            'PORT_6379_OCUPADA | PID={0} | aguardando 2s' -f
-            $owner
-        )
+        Audit 'PORT_BUSY' @{
+            owner_pid  = $owner
+            retry_in_s = 2
+        }
 
         Start-Sleep -Seconds 2
         continue
@@ -127,11 +154,15 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
     $stderr = Join-Path $instanceLogRoot ($baseName + '.stderr.log')
     $startedAt = Get-Date
 
+    Audit 'GARNET_STARTING' @{
+        attempt = $attempt
+        stdout  = $stdout
+        stderr  = $stderr
+    }
+
     Log (
-        'GARNET_STARTING | attempt={0} | stdout={1} | stderr={2}' -f
-        $attempt,
-        $stdout,
-        $stderr
+        'START | attempt={0} | bind=127.0.0.1 | port=6379' -f
+        $attempt
     )
 
     $proc = Start-Process `
@@ -150,13 +181,23 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
     if (-not (Wait-RespPing -Port 6379 -TimeoutSeconds 45)) {
         $exitCode = Get-ExitCodeSafe $proc
 
+        $exitDisplay =
+            $(if ($null -eq $exitCode) { '<running>' } else { $exitCode })
+
+        Audit 'GARNET_START_FAILED' @{
+            attempt    = $attempt
+            garnet_pid = [int]$proc.Id
+            exit_code  = $exitDisplay
+            stdout     = $stdout
+            stderr     = $stderr
+        }
+
         Log (
-            'GARNET_START_FAILED | attempt={0} | PID={1} | ExitCode={2} | stdout={3} | stderr={4}' -f
+            '{0} START_FAILED | attempt={1} | pid={2} | exit={3}' -f
+            $IconError,
             $attempt,
             $proc.Id,
-            $(if ($null -eq $exitCode) { '<running>' } else { $exitCode }),
-            $stdout,
-            $stderr
+            $exitDisplay
         )
 
         if (-not $proc.HasExited) {
@@ -177,12 +218,18 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
         continue
     }
 
+    Audit 'GARNET_READY' @{
+        attempt    = $attempt
+        garnet_pid = [int]$proc.Id
+        stdout     = $stdout
+        stderr     = $stderr
+    }
+
     Log (
-        'GARNET_READY | attempt={0} | PID={1} | stdout={2} | stderr={3}' -f
-        $attempt,
+        '{0} READY | pid={1} | port=6379 | attempt={2}' -f
+        $IconReady,
         $proc.Id,
-        $stdout,
-        $stderr
+        $attempt
     )
 
     while (
@@ -194,9 +241,14 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
     }
 
     if (Test-Path -LiteralPath $stopFile) {
+        Audit 'STOP_REQUESTED' @{
+            attempt    = $attempt
+            garnet_pid = [int]$proc.Id
+        }
+
         Log (
-            'STOP_REQUESTED | attempt={0} | PID={1}' -f
-            $attempt,
+            '{0} STOPPED | pid={1} | reason=requested' -f
+            $IconStop,
             $proc.Id
         )
 
@@ -224,14 +276,25 @@ while (-not (Test-Path -LiteralPath $stopFile)) {
 
     $exitCode = Get-ExitCodeSafe $proc
 
+    $exitDisplay =
+        $(if ($null -eq $exitCode) { '<unknown>' } else { $exitCode })
+
+    Audit 'GARNET_EXITED_UNEXPECTEDLY' @{
+        attempt      = $attempt
+        garnet_pid   = [int]$proc.Id
+        exit_code    = $exitDisplay
+        lifetime_s   = $lifetimeSeconds
+        stdout       = $stdout
+        stderr       = $stderr
+        restart_in_s = 2
+    }
+
     Log (
-        'GARNET_EXITED_UNEXPECTEDLY | attempt={0} | PID={1} | ExitCode={2} | lifetime_s={3} | stdout={4} | stderr={5} | RESTART_IN_2S' -f
+        '{0} RESTART | attempt={1} | pid={2} | exit={3} | reason=process_exit | in=2s' -f
+        $IconWarn,
         $attempt,
         $proc.Id,
-        $(if ($null -eq $exitCode) { '<unknown>' } else { $exitCode }),
-        $lifetimeSeconds,
-        $stdout,
-        $stderr
+        $exitDisplay
     )
 
     Remove-Item `
@@ -247,4 +310,4 @@ Remove-Item `
     -Force `
     -ErrorAction SilentlyContinue
 
-Log 'SUPERVISOR_V2_STOP'
+Audit 'SUPERVISOR_STOP'
